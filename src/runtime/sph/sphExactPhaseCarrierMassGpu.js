@@ -1,5 +1,5 @@
 import { validateSphExactMassFormat } from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { createSphExactPhaseCarrierMassWgsl, createSphExactPhaseCarrierMassSkinWgsl } from './sphExactPhaseCarrierMassWgsl.js';
 
@@ -71,7 +71,7 @@ export async function prepareSphExactPhaseCarrierMass({ device, format, lineageC
       label: `ulg-exact-phase-${entryPoint}`, bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
     if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Phase mass pipeline unavailable: ${entryPoint}`);
     validate();
-    stages.push({ pipeline: pipeline.pipeline, bindGroup: device.createBindGroup({
+    stages.push({ pipeline: pipeline.pipeline, bindGroup: createCachedExplicitBindGroup(device, {
       layout: pipeline.bindGroupLayout,
       entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } }))
     }) });

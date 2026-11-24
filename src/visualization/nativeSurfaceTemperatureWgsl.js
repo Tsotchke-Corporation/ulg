@@ -689,7 +689,10 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
         },
         {
           binding: 2,
-          resource: { buffer: outputBuffer, size: outputByteLength }
+          resource: {
+            buffer: outputBuffer,
+            size: useQueueOrderedTempPool ? pooledOutputByteLength : outputByteLength
+          }
         },
         {
           binding: 3,

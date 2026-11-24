@@ -1,5 +1,15 @@
 # A5 SOL-3: solid–fluid coupling (rigid bodies ↔ SPH/MPM particles)
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 3):** **OPEN**
+> (`0` formal oracle receipts). P0/P2 fixed SOL-4 N-level `mechanicsBuffer`
+> binding, SOL-5 OOB buffer sizing & 17 zero-load dispatches/step, and SOL-6
+> `10³`/`3³` preset eligibility (`padToMultipleOf4`) + live GPU
+> `consume_active_proxy_quadrature` consumer (all verified on Vulkan).
+> **Remaining under Gate 3:** migrate SOL-2/3 solid-fluid hashing off private
+> 4,096-bucket hashes onto canonical SS cells, switch candidate arena to sparse
+> CSR, and enable cross-level coupling. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Track A5. This is the coupling the G2 Iron Ice plume waits
 on: the user chose to keep G2 open until it lands.
 

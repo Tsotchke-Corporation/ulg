@@ -4,6 +4,7 @@ import {
   ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS
 } from '../visualization/residentRenderCandidateMailbox.js';
 import {
+  attachWebGpuUncapturedErrorTelemetry,
   webGpuDeviceDescriptorForResidentSph
 } from '../runtime/webgpuDeviceLimits.js';
 import {
@@ -26,6 +27,7 @@ import {
   ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
   ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED,
   ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+  ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
   ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
   ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
   ULG_WORKER_TIER0_ISOSURFACE_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
@@ -2478,14 +2480,14 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
   // Both scheduler routes consume the same committed display source. These
   // callbacks never read an intermediate solver state or publish authority.
   const presentScheduleSubmissionBoundary = isosurfacePresentationEnabled
-    ? async (boundary, { signal = null } = {}) => {
+    ? async (boundary, { signal = null, maxSubstepsPerSubmission = undefined } = {}) => {
         if (signal?.aborted
           || !residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
           throw new Error('isosurface presentation schedule was superseded');
         }
         const proof = await runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
           boundary,
-          { presenter: workerOwnedIsosurfacePresenterOverride, signal }
+          { presenter: workerOwnedIsosurfacePresenterOverride, signal, maxSubstepsPerSubmission }
         );
         if (signal?.aborted
           || !residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
@@ -2575,6 +2577,12 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
         };
       }
     } catch { /* Missing timing leaves the admitted source's original pace. */ }
+    const isosurfaceSubmitInterleaveEnabled = Boolean(
+      isosurfacePresentationEnabled
+      && !workerOwnedIsosurfacePresenterOverride
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+    );
     let result;
     try {
       result = await timeoutResidentStage(
@@ -2585,9 +2593,22 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
             ...(postLivePreviewProgress || postSourceTimingProgress
               ? { postProgress: postLivePreviewProgress || postSourceTimingProgress }
               : {}),
+            ...(isosurfaceSubmitInterleaveEnabled
+              ? {
+                  getPresentationSubmitSerial: () =>
+                    workerOwnedIsosurfacePresenter?.getPresentationSubmitSerial?.() ?? 0,
+                  waitForPresentationSubmitTurn: (afterSerial, options = {}) =>
+                    workerOwnedIsosurfacePresenter?.waitForPresentationSubmitTurn?.({
+                      afterSerial,
+                      timeoutMs: options?.timeoutMs ?? 24,
+                      force: options?.force === true
+                    }) ?? Promise.resolve(0)
+                }
+              : {}),
             ...(presentScheduleSubmissionBoundary
               ? {
                   onTier0PresentationSubmissionBoundary: presentScheduleSubmissionBoundary,
+                  canPresentTier0SubmissionBoundary: canPresentScheduleSubmissionBoundary,
                   onCanonicalPresentationSubmissionBoundary: presentScheduleSubmissionBoundary,
                   canPresentCanonicalSubmissionBoundary: canPresentScheduleSubmissionBoundary
                 }
@@ -4224,7 +4245,7 @@ export async function runWorkerParticleTemporalPresentationSubmissionBoundary(
 
 export async function runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
   boundary = {},
-  { presenter = workerOwnedIsosurfacePresenter, signal = null } = {}
+  { presenter = workerOwnedIsosurfacePresenter, signal = null, maxSubstepsPerSubmission = undefined } = {}
 ) {
   const activePresenter = presenter ?? workerOwnedIsosurfacePresenter;
   const playbackRevision = workerParticlePlaybackRevision;
@@ -4232,7 +4253,11 @@ export async function runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
     || typeof activePresenter?.presentSubmissionBoundary !== 'function') {
     throw new Error('worker isosurface presentation is unavailable at the fused submission boundary');
   }
-  const frame = await activePresenter.presentSubmissionBoundary(boundary, { signal });
+  const boundaryWithCap = Number.isSafeInteger(maxSubstepsPerSubmission)
+    && maxSubstepsPerSubmission > ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION
+    ? { ...boundary, maxSubstepsPerSubmission }
+    : boundary;
+  const frame = await activePresenter.presentSubmissionBoundary(boundaryWithCap, { signal });
   const receipt = Object.freeze({
     schema: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
     status: ULG_WORKER_TIER0_ISOSURFACE_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
@@ -4257,7 +4282,11 @@ export async function runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
     presentationQosHostQueueFenceCount: frame?.presentationQosHostQueueFenceCount
   });
   if (!workerPresentationPlaying || workerParticlePlaybackRevision !== playbackRevision
-    || signal?.aborted || !isExactWorkerTier0PresentationQosBoundaryProof(receipt, boundary)) {
+    || signal?.aborted || !isExactWorkerTier0PresentationQosBoundaryProof(
+      receipt,
+      boundary,
+      maxSubstepsPerSubmission != null ? { maxSubstepsPerSubmission } : undefined
+    )) {
     // The fused submission seam already catches this presentation-only
     // failure and continues toward its one authoritative terminal result.
     throw new Error('worker isosurface presentation lacked a fresh completed boundary frame');
@@ -5627,6 +5656,7 @@ async function initPresentation(data) {
       timestampProfilingRequested: true
     })
   );
+  attachWebGpuUncapturedErrorTelemetry(device, { label: 'offscreen-render-worker' });
   format = gpu.getPreferredCanvasFormat();
   const initialCanvasConfiguration = desiredCanvasConfiguration || data;
   configureCanvas({

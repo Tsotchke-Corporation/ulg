@@ -206,6 +206,7 @@ function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, 
     stableNumber(conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3),
     stableNumber(phaseDensityKgPerM3(properties, phase)),
     stableNumber(properties?.electronicGapEv),
+    stableNumber(properties?.ior ?? properties?.refractiveIndex),
     stableNumber(properties?.gasElectronicExcitationEv),
     stableNumber(properties?.gasElectronicBandFwhmEv),
     stableNumber(properties?.gasElectronicOscillatorStrength),
@@ -1619,6 +1620,21 @@ function bandGapAbsorptionCoefficientPerM(nm, { properties, phase = 'solid' }) {
   return numberDensity * geometricCrossSectionM2 * oscillatorFraction;
 }
 
+function deriveDielectricRefractiveIndex(properties) {
+  const explicitIor = Number(properties?.ior ?? properties?.refractiveIndex);
+  if (Number.isFinite(explicitIor) && explicitIor > 1.0) {
+    return explicitIor;
+  }
+  const gapEv = Number(properties?.electronicGapEv);
+  if (Number.isFinite(gapEv) && gapEv > 0) {
+    // Universal Herve-Vandamme dielectric relation: n = sqrt(1 + (A / (E_g + B))^2)
+    // with hydrogen ionization energy A = 13.6 eV and B = 3.47 eV.
+    const ratio = 13.6 / (gapEv + 3.47);
+    return Math.max(1.05, Math.min(3.5, Math.sqrt(1 + ratio * ratio)));
+  }
+  return 1.4;
+}
+
 function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.3 }) {
   const sample = bandGapAbsorptionCoefficientPerM(500, { properties, phase });
   if (sample == null) return null;
@@ -1628,20 +1644,22 @@ function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.
   const opacity = opticalDepthToOpacity(opticalDepth);
   const responseColor = spectralResponseToSrgb((nm) => Math.exp(-absorptionAt(nm) * Math.max(0, pathLengthM)));
   const baseColor = properties?.intrinsicColorSrgb ?? [responseColor.r, responseColor.g, responseColor.b];
+  const n = deriveDielectricRefractiveIndex(properties);
+  const fresnelR0 = ((n - 1) / (n + 1)) ** 2;
   const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
     absorptionCoefficientPerM: absorptionAt(nm),
     pathLengthM,
-    reflectance: 0.04,
-    n: 1.4,
+    reflectance: fresnelR0,
+    n,
     k: 0
   }));
   return withPbrMetadata({
     metalness: 0,
-    roughness: 0.4,
-    transmission: Math.exp(-Math.min(80, opticalDepth)),
-    ior: 1.4,
+    roughness: phase === 'liquid' ? 0.1 : 0.4,
+    transmission: Math.min(1, Math.max(0, (1 - fresnelR0) * Math.exp(-Math.min(80, opticalDepth)))),
+    ior: n,
     opacity,
-    attenuationColor: properties?.intrinsicColorSrgb ?? null,
+    attenuationColor: properties?.intrinsicColorSrgb ?? [responseColor.r, responseColor.g, responseColor.b],
     attenuationDistanceM: absorptionCoefficientPerM > 0 ? 1 / absorptionCoefficientPerM : Infinity,
     condensationScatter: 0,
     internalScatter: 0,
@@ -1650,8 +1668,8 @@ function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.
     provenance: {
       status: 'derived',
       source: 'molecular-gap-geometric-absorption',
-      method: 'electronic gap + formula density -> geometric oscillator absorption -> Beer-Lambert opacity',
-      inputs: { electronicGapEv: properties?.electronicGapEv, pathLengthM, phase },
+      method: 'electronic gap + formula density -> Herve-Vandamme dielectric index + geometric oscillator absorption -> Beer-Lambert opacity',
+      inputs: { electronicGapEv: properties?.electronicGapEv, ior: n, pathLengthM, phase },
       validation: false
     }
   }, {

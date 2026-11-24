@@ -1,5 +1,15 @@
 # G4 generalized per-node warm dynamic laws
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 3):** **OPEN**
+> (`0` formal oracle receipts). P1 fixed `radiationEpsilonFluxWPerM2`, propagated
+> packed G6 `uncertaintyBuffer` into reaction & phase dormancy, and wired real
+> `dispatchWorkgroupsIndirect` (`propose_active`) on reaction discovery +
+> optional indirect dispatch on phase transfer (verified on Vulkan). **Remaining
+> under Gate 3:** replace private 3D box grids in thermal/reaction dormancy with
+> canonical SS tree nodes and switch thermal & radiation law steps from dense
+> launches to real `dispatchWorkgroupsIndirect`. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Task: ICC `ulg-g4-dynamic-laws`. Oracle:
 `ulg-g4-dynamic-laws`. The design lineage is
 [scale-adaptive-law-activation-plan.md](scale-adaptive-law-activation-plan.md),

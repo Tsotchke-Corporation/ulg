@@ -29,6 +29,7 @@ import {
   validateSchroederSpatialActiveSourceViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
 import { createWebGpuU32ExclusiveScan } from '../webgpuRadixScanUnique.js';
+import { createCachedExplicitBindGroup, getCachedPipelineBindGroupLayout } from '../webgpuComputeLayout.js';
 import {
   tagWebGpuBufferDevice,
   webGpuBufferMatchesDevice,
@@ -486,9 +487,9 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
     ) {
       return cached.bindGroup;
     }
-    const created = device.createBindGroup({
+    const created = createCachedExplicitBindGroup(device, {
       label: `${label}-arena-${arena.arenaIndex}-bindings`,
-      layout: devicePipeline.getBindGroupLayout(0),
+      layout: getCachedPipelineBindGroupLayout(devicePipeline, 0),
       entries: bindings.map((binding, index) => ({
         binding,
         resource: resolvedResources[index]

@@ -16,6 +16,7 @@ import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuCo
 import {
   RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE,
   residentSphWebGpuLimitsForAdapter,
+  attachWebGpuUncapturedErrorTelemetry,
   residentSphWebGpuFeaturesForAdapter,
   webGpuDeviceDescriptorForResidentSph
 } from '../webgpuDeviceLimits.js';
@@ -885,6 +886,7 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
     timestampProfilingRequested
   });
   const device = await adapter.requestDevice(deviceDescriptor);
+  attachWebGpuUncapturedErrorTelemetry(device, { label: 'optical-resident-sph' });
   if (typeof onDeviceLost === 'function') {
     watchDeviceLost(device, onDeviceLost);
   }

@@ -84,6 +84,39 @@ export function residentSphWebGpuFeaturesForAdapter(adapterOrFeatures = null, {
   };
 }
 
+const attachedUncapturedErrorDevices = new WeakSet();
+const MAX_RECORDED_UNCAPTURED_ERRORS = 32;
+
+/**
+ * Attach a single per-device WebGPU `uncapturederror` telemetry listener so
+ * validation or OOM faults on any resident/demo device are never dropped silently.
+ */
+export function attachWebGpuUncapturedErrorTelemetry(device, { label = 'ulg-webgpu' } = {}) {
+  if (!device || typeof device.addEventListener !== 'function') return false;
+  if (attachedUncapturedErrorDevices.has(device)) return false;
+  attachedUncapturedErrorDevices.add(device);
+  try {
+    device.addEventListener('uncapturederror', (event) => {
+      const message = String(event?.error?.message ?? event?.error ?? event ?? 'unknown-webgpu-error');
+      const ring = (globalThis.__ulgWebGpuUncapturedErrors ??= []);
+      ring.push({
+        label,
+        message: message.slice(0, 500),
+        timestampMs: Date.now()
+      });
+      if (ring.length > MAX_RECORDED_UNCAPTURED_ERRORS) {
+        ring.splice(0, ring.length - MAX_RECORDED_UNCAPTURED_ERRORS);
+      }
+      if (typeof console?.error === 'function') {
+        console.error(`[ULG WebGPU uncapturederror:${label}]`, message);
+      }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function webGpuDeviceDescriptorForResidentSph(adapterOrLimits = null, {
   timestampProfilingRequested = false
 } = {}) {

@@ -853,6 +853,46 @@ function cachedSchroederAggregateTraversalRuntime(device, particleCount) {
   return runtime;
 }
 
+/**
+ * Enumerate GPU allocations owned by device-cached Schroeder hierarchy
+ * runtimes and shared control buffers so resident lane retirement never
+ * raw-destroys cached arenas still shared with subsequent lanes on the same
+ * GPUDevice (e.g. two-level frozen-assignment refresh after Reset).
+ */
+export function schroederHierarchyDeviceRuntimeAllocationOwnership(device) {
+  const buffers = new Set();
+  if (!device || typeof device !== 'object') {
+    return Object.freeze({ buffers: Object.freeze([]) });
+  }
+  for (const runtime of SCHROEDER_FROZEN_ASSIGNMENT_REFRESH_RUNTIME_CACHE.get(device)?.values() ?? []) {
+    for (const entry of runtime?.allocationEntries?.() ?? []) {
+      if (entry?.buffer) buffers.add(entry.buffer);
+    }
+  }
+  for (const runtime of SCHROEDER_AGGREGATE_TRAVERSAL_RUNTIME_CACHE.get(device)?.values() ?? []) {
+    for (const entry of runtime?.allocationEntries?.() ?? []) {
+      if (entry?.buffer) buffers.add(entry.buffer);
+    }
+  }
+  const activeNodeControls = schroederActiveNodeControlBuffersByDevice.get(device);
+  if (activeNodeControls) {
+    for (const value of Object.values(activeNodeControls)) {
+      if (value && typeof value === 'object' && typeof value.destroy === 'function') {
+        buffers.add(value);
+      }
+    }
+  }
+  const levelAssignControls = schroederLevelAssignmentControlBuffersByDevice.get(device);
+  if (levelAssignControls) {
+    for (const value of Object.values(levelAssignControls)) {
+      if (value && typeof value === 'object' && typeof value.destroy === 'function') {
+        buffers.add(value);
+      }
+    }
+  }
+  return Object.freeze({ buffers: Object.freeze([...buffers]) });
+}
+
 const schroederHierarchySubmittedTemporaryCleanupClaimIssuer =
   createQueueOrderedCleanupClaimIssuer({
     producerFamily: 'schroeder-hierarchy-submitted-temporaries'
@@ -8250,12 +8290,20 @@ export async function runSchroederLevelAssignmentWebGpu({
   const assignmentUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
   const assignmentBuffer = tagWebGpuBufferDevice(
     useQueueOrderedAssignmentPool
-      ? acquireQueueOrderedPooledBuffer(device, {
-          bucketKey: 'ulg-schroeder-level-assignments-out',
-          label: 'ulg-schroeder-level-assignments-out',
-          size: plan.assignmentByteLength,
-          usage: assignmentUsage
-        })
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, {
+            bucketKey: 'ulg-schroeder-level-assignments-out',
+            label: 'ulg-schroeder-level-assignments-out',
+            size: plan.assignmentByteLength,
+            usage: assignmentUsage
+          }),
+          device,
+          {
+            bucketKey: 'ulg-schroeder-level-assignments-out',
+            size: plan.assignmentByteLength,
+            usage: assignmentUsage
+          }
+        )
       : device.createBuffer({
           label: 'ulg-schroeder-level-assignments-out',
           size: plan.assignmentByteLength,
@@ -8267,15 +8315,9 @@ export async function runSchroederLevelAssignmentWebGpu({
   const releaseAssignmentBuffer = () => {
     if (assignmentBufferReleased) return;
     assignmentBufferReleased = true;
-    if (useQueueOrderedAssignmentPool && submissionObserved) {
-      releaseQueueOrderedPooledBuffer(device, assignmentBuffer, {
-        bucketKey: 'ulg-schroeder-level-assignments-out',
-        size: plan.assignmentByteLength,
-        usage: assignmentUsage
-      });
-    } else {
-      assignmentBuffer.destroy?.();
-    }
+    releaseOrDestroyQueueOrderedPooledBuffer(assignmentBuffer, {
+      allowPool: useQueueOrderedAssignmentPool && submissionObserved
+    });
   };
   const paramsBuffer = levelAssignmentSharedControlBuffers(device).paramsBuffer;
   const readBuffer = noFullReadback
@@ -8975,7 +9017,7 @@ export async function runSchroederPhaseVolumeAssignmentOverlayIndexWebGpu({
       entryPoint: 'build_index',
       bindings
     });
-    const clearBindGroup = device.createBindGroup({
+    const clearBindGroup = createCachedExplicitBindGroup(device, {
       layout: clearPipeline.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: levelUpdateBuffer } },
@@ -8983,7 +9025,7 @@ export async function runSchroederPhaseVolumeAssignmentOverlayIndexWebGpu({
         { binding: 2, resource: { buffer: paramsBuffer } }
       ]
     });
-    const buildBindGroup = device.createBindGroup({
+    const buildBindGroup = createCachedExplicitBindGroup(device, {
       layout: buildPipeline.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: levelUpdateBuffer } },
@@ -9183,7 +9225,7 @@ export async function runSchroederActiveNodeIndexWebGpu({
       entryPoint: 'assignIndex',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: assignPipeline.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: activeNodeBuffer } },
@@ -9460,7 +9502,7 @@ export async function runSchroederActiveNodeSortedIndexWebGpu({
       entryPoint: 'scatterSortedIndex',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: scatterPipeline.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: activeNodeBuffer } },
@@ -9706,7 +9748,7 @@ export async function runSchroederLawQueueWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: activeNodeBuffer } },
@@ -10023,7 +10065,7 @@ export async function runSchroederLawNeighborCandidateWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: lawQueueBuffer } },
@@ -10339,7 +10381,7 @@ export async function runSchroederCrossLevelCouplingWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: assignmentBuffer } },
@@ -10471,7 +10513,7 @@ export async function runSchroederConservationSummaryWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: crossLevelBuffer } },
@@ -10608,7 +10650,7 @@ export async function runSchroederCrossLevelTransferWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: crossLevelBuffer } },
@@ -10744,7 +10786,7 @@ export async function runSchroederCrossLevelStateDeltaWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: transferBuffer } },
@@ -10908,7 +10950,7 @@ export async function runSchroederCrossLevelStateDeltaMergeWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: stateDeltaBuffer } },
@@ -11038,7 +11080,7 @@ export async function runSchroederHierarchyAggregateWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: mergeBuffer } },
@@ -11248,7 +11290,7 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: assignmentBuffer } },
@@ -11474,7 +11516,7 @@ export async function runSchroederHierarchyAggregateNodeReductionWebGpu({
       entryPoint: 'reduceBuckets',
       bindings: bucketBindings
     }) : null;
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bucketReduction ? bucketReducePipeline.bindGroupLayout : exactPipeline.bindGroupLayout,
       entries: bucketReduction
         ? [
@@ -11700,7 +11742,7 @@ export async function runSchroederFarAggregateCandidateWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: activeNodeBuffer } },
@@ -11863,7 +11905,7 @@ export async function runSchroederFarAggregateForceSummaryWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: farAggregateCandidateBuffer } },
@@ -12011,7 +12053,7 @@ export async function runSchroederFarAggregateDiagnosticSummaryWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: forceSummaryBuffer } },
@@ -12223,7 +12265,7 @@ export async function runSchroederFarAggregateLawConsumerWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: forceSummaryBuffer } },
@@ -12395,7 +12437,7 @@ export async function runSchroederFarAggregateLawConsumerDiagnosticSummaryWebGpu
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: lawConsumerBuffer } },
@@ -12604,7 +12646,7 @@ export async function runSchroederFarAggregateGasStateDeltaWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: lawConsumerBuffer } },
@@ -12828,7 +12870,7 @@ export async function runSchroederFarAggregateGasCellImportWebGpu({
         computeBufferBinding(3, 'uniform')
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: gasStateDeltaBuffer } },
@@ -13053,7 +13095,7 @@ export async function runSchroederFarAggregateForceApplicationWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: forceSummaryBuffer } },
@@ -13270,7 +13312,7 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: assignmentBuffer } },
@@ -13467,7 +13509,7 @@ export async function runSchroederPhaseVolumeSplitMergeProposalWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: migrationBuffer } },
@@ -13659,7 +13701,7 @@ export async function runSchroederPhaseVolumeSplitMergeApplyWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: proposalBuffer } },
@@ -13834,7 +13876,7 @@ export async function runSchroederParticleStorageAllocationWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: applyBuffer } },
@@ -14017,7 +14059,7 @@ export async function runSchroederParticleStorageSlotAssignmentWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: allocationBuffer } },
@@ -14298,7 +14340,7 @@ export async function runSchroederParticleStorageMaterializationWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: slotAssignmentBuffer } },
@@ -14567,7 +14609,7 @@ export async function runSchroederPhaseVolumeLevelUpdateWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: migrationBuffer } },
@@ -14731,7 +14773,7 @@ export async function runSchroederPhaseVolumeDiagnosticSummaryWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: levelUpdateBuffer } },

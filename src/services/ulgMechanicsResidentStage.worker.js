@@ -8,12 +8,29 @@ import { createThermalPotentialWorkerLane, thermalPotentialWorkerCache, cancelTh
   destroyThermalPotentialWorkerLane } from '../runtime/material/thermalPotentialWorkerLane.js';
 import { thermalPotentialWorkerSourceKey } from '../runtime/material/thermalPotentialWorkerProtocol.js';
 import { closeLawActivationReceiptRing, openLawActivationReceiptRing } from '../runtime/sph/lawActivationReceiptRing.js';
-import { normalizeSphImplicitPressureOptions } from '../runtime/sph/sphImplicitPressureGpu.js';
+import {
+  normalizeSphImplicitPressureOptions,
+  updateSphImplicitPressureStiffnessTable
+} from '../runtime/sph/sphImplicitPressureGpu.js';
 import { encodeSphThermalRegionalClosureScheduleTick } from '../runtime/sph/sphThermalRegionalClosureGpu.js';
+import {
+  clearSphNuclearCherenkovState,
+  encodeSphNuclearDecayAndCherenkovTick,
+  latestSphNuclearCherenkovState,
+  seedSphNuclearCherenkovSources
+} from '../runtime/sph/sphNuclearCherenkovGpu.js';
+import {
+  latestSchroederSolidRigidFamily,
+  schroederSolidRigidFamilyForUpload
+} from '../runtime/sph/schroederSolidRigidLane.js';
 import {
   getTriadClosureDeviceStatus,
   registerTriadClosureBundleOnDevice
 } from '../runtime/material/triadClosureGpuRegistry.js';
+import {
+  consumeAndEscalatePolytopeReceiptOnDevice,
+  seedStudioFoundationTriadOnDevice
+} from '../runtime/material/foundationPolytopeAtlasGpuBridge.js';
 import {
   createDynamicHierarchyLodController,
   createDynamicSchroederScaleAtlasRuntime
@@ -26,7 +43,12 @@ import {
   computeMaterialTableFourierEnvelope,
   normalizeSphImplicitThermalOptions
 } from '../runtime/sph/sphImplicitThermalGpu.js';
-import { LAW_FALLBACK_POLICY } from '../runtime/material/eshkolHigherOrderLawCompiler.js';
+import {
+  LAW_FALLBACK_POLICY,
+  approximateLaw,
+  compileLawToWgsl,
+  defineLawObject
+} from '../runtime/material/eshkolHigherOrderLawCompiler.js';
 import {
   buildRepresentativeParticlesStatus,
   summarizeRepresentedEntityDistribution
@@ -80,6 +102,7 @@ import {
   destroySphGpuParticleBuffers,
   uploadSphGpuParticleBuffers, uploadMlsMpmGpuParticleBuffers, destroyMlsMpmGpuParticleBuffers,
   sphGpuParticleUploadAdvertisesExactMass,
+  sphGpuParticleUploadExactEnergyRows,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
   sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics,
@@ -133,7 +156,8 @@ import {
   resolveSchroederParticleBufferFamilyGeneration,
   runSchroederLevelAssignmentWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
-  schroederGridSpacingForLevel
+  schroederGridSpacingForLevel,
+  schroederHierarchyDeviceRuntimeAllocationOwnership
 } from '../runtime/sph/schroederHierarchyGpu.js';
 import { createMlsMpmGridSpec } from '../runtime/sph/sphGridGpuKernel.js';
 import {
@@ -239,6 +263,8 @@ import {
   flushWorkerQueueSubmitBurst,
   openWorkerQueueSubmitBurst,
   prewarmCachedExplicitComputePipeline,
+  queueOrderedPooledDeviceAllocationOwnership,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   workerQueueSubmitBurstStats
 } from '../runtime/webgpuComputeLayout.js';
 import {
@@ -1014,7 +1040,9 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
         schroederSpatialThermalDeviceRuntimeAllocationOwnership(record.workerDevice),
         schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(record.workerDevice),
         schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership(record.workerDevice),
-        sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership(record.workerDevice)
+        sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership(record.workerDevice),
+        schroederHierarchyDeviceRuntimeAllocationOwnership(record.workerDevice),
+        queueOrderedPooledDeviceAllocationOwnership(record.workerDevice)
       ];
       runtimeOwnedBuffers = [...new Set(owners.flatMap(({ buffers }) => buffers))];
     }
@@ -1323,6 +1351,9 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     // families. This callback owns only the materializer's uniform buffer.
   }
   destroyThermalPotentialWorkerLane(staticGpuResources?.thermalPotentialOwner);
+  if (record.workerDevice) {
+    try { clearSphNuclearCherenkovState(record.workerDevice); } catch { /* best-effort */ }
+  }
   destroySphThermalResponseGraphBuffers(
     staticGpuResources?.thermalResponseGraphUpload
   );
@@ -1351,7 +1382,7 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     protectedBuffers
   );
   for (const buffer of buffers) {
-    try { buffer.destroy?.(); } catch { /* best-effort lane retirement */ }
+    try { releaseOrDestroyQueueOrderedPooledBuffer(buffer); } catch { /* best-effort lane retirement */ }
   }
   retainedLanes.delete(key);
   laneRetirementProgress.delete(record);
@@ -5220,8 +5251,22 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
     // worker-local clones below. Schedule messages never resend the rows.
     sphParticleState: data.sphParticleState,
     mlsMpmParticleState: data.mlsMpmParticleState,
+    nuclearCherenkovSources:
+      seedOptions.nuclearCherenkovSources
+      ?? data.nuclearCherenkovSources
+      ?? null,
     particleCount
   };
+  const seededRigidFamily =
+    schroederSolidRigidFamilyForUpload(seededSphUpload)
+    ?? latestSchroederSolidRigidFamily(device);
+  seedSphNuclearCherenkovSources(device, {
+    nuclearDescriptor: record.schroederLane.nuclearCherenkovSources,
+    stateBuffer: seededSphUpload.stateBuffer,
+    identityBuffer: seededSphUpload.identityBuffer,
+    rigidFamily: seededRigidFamily,
+    particleCount
+  });
   const seedLevelAssignmentBufferRef = retainGpuBuffer(
     record,
     stageId,
@@ -9009,7 +9054,10 @@ function validateWorkerTier0FusedExecution(execution, {
           observation.completed !== true
           || isExactWorkerTier0PresentationQosBoundaryProof(
             observation.receipt,
-            metadata
+            metadata,
+            Number.isSafeInteger(fused?.maxSubstepsPerSubmission) && fused.maxSubstepsPerSubmission > 0
+              ? { maxSubstepsPerSubmission: fused.maxSubstepsPerSubmission }
+              : undefined
           )
         );
     }
@@ -10334,8 +10382,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     id = null,
     postProgress = null,
     onTier0PresentationSubmissionBoundary = null,
+    canPresentTier0SubmissionBoundary = null,
     onCanonicalPresentationSubmissionBoundary = null,
     canPresentCanonicalSubmissionBoundary = null,
+    getPresentationSubmitSerial = null,
+    waitForPresentationSubmitTurn = null,
     runTier0FusedResidentSequence =
       runMlsMpmResidentStepsWithOptionalWebGpu
   } = {}
@@ -11076,17 +11127,25 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     );
     const scheduleLaneResidentStepOptionsBeforeRequest =
       record.schroederLane?.residentStepOptions;
+    const scheduleLaneResidentStepOptionsRefreshed = Boolean(
+      baseMechanicsOptions.residentStepOptions != null
+    );
     persistWorkerScheduleResidentStepOptions(
       record.schroederLane,
       baseMechanicsOptions.residentStepOptions,
       { scheduleId, laneId, stateKey }
     );
+    if (scheduleLaneResidentStepOptionsRefreshed && record.schroederLane) {
+      record.schroederLane.cachedValidatedStaticTables = null;
+    }
     const restoreScheduleResidentStepOptions = () => {
       if (scheduleLaneHadResidentStepOptions && record.schroederLane) {
         record.schroederLane.residentStepOptions =
           scheduleLaneResidentStepOptionsBeforeRequest;
+        record.schroederLane.cachedValidatedStaticTables = null;
       } else if (record.schroederLane) {
         delete record.schroederLane.residentStepOptions;
+        record.schroederLane.cachedValidatedStaticTables = null;
       }
     };
     // W4a: a seeded lane's epoch-identity monotonicity baseline is the SEED
@@ -11256,42 +11315,76 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         );
       }
       try {
-        validateSphDispersedMediumOpticalClosureTable(
-          dispersedMediumOpticalClosureTable
-        );
+        const cachedStaticTables =
+          !scheduleLaneResidentStepOptionsRefreshed
+          && scheduleStartLane
+          && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+            ? scheduleStartLane.cachedValidatedStaticTables
+            : null;
         let producerPhaseCarrierPlan = tier0PhaseCarrierPlan;
-        if (!workerDispersedMediumOpticsFourLanePhaseCarrierPlan(
-          producerPhaseCarrierPlan,
-          sourceSphUpload?.particleCount
-        )) {
-          if (
-            !scheduleStartTier0ContinuationIdentity
-            || !workerTier0LawsQuiescentPhaseCarrierPlan(
-              tier0PhaseCarrierPlan
-            )
-          ) {
-            throw new RangeError(
-              'the source family is neither exact four-lane nor an admitted Tier0 one-to-four transition'
-            );
+        const opticsCacheHit = Boolean(
+          cachedStaticTables?.opticsValidated
+          && cachedStaticTables.opticsValidated.opticalClosureTable
+            === dispersedMediumOpticalClosureTable
+          && cachedStaticTables.opticsValidated.seedRows
+            === dispersedMediumOpticsSeedRows
+          && cachedStaticTables.opticsValidated.particleCapacity
+            === tier0PhaseCarrierPlan?.particleCapacity
+          && cachedStaticTables.opticsValidated.phaseLaneCount
+            === tier0PhaseCarrierPlan?.phaseLaneCount
+        );
+        if (!opticsCacheHit) {
+          validateSphDispersedMediumOpticalClosureTable(
+            dispersedMediumOpticalClosureTable
+          );
+          if (!workerDispersedMediumOpticsFourLanePhaseCarrierPlan(
+            producerPhaseCarrierPlan,
+            sourceSphUpload?.particleCount
+          )) {
+            if (
+              !scheduleStartTier0ContinuationIdentity
+              || !workerTier0LawsQuiescentPhaseCarrierPlan(
+                tier0PhaseCarrierPlan
+              )
+            ) {
+              throw new RangeError(
+                'the source family is neither exact four-lane nor an admitted Tier0 one-to-four transition'
+              );
+            }
+            producerPhaseCarrierPlan =
+              createSphPhaseCarrierOneToFourMaterializationPlan({
+                sphParticleState: scheduleSourceSphParticleState,
+                mlsMpmParticleState: scheduleSourceMlsMpmParticleState,
+                sphParticleUpload: sourceSphUpload,
+                mlsMpmParticleUpload: scheduleSourceMlsMpmParticleUpload,
+                phaseCarrierPlan: tier0PhaseCarrierPlan
+              }).phaseCarrierPlan;
           }
-          producerPhaseCarrierPlan =
-            createSphPhaseCarrierOneToFourMaterializationPlan({
-              sphParticleState: scheduleSourceSphParticleState,
-              mlsMpmParticleState: scheduleSourceMlsMpmParticleState,
-              sphParticleUpload: sourceSphUpload,
-              mlsMpmParticleUpload: scheduleSourceMlsMpmParticleUpload,
-              phaseCarrierPlan: tier0PhaseCarrierPlan
-            }).phaseCarrierPlan;
-        }
-        if (dispersedMediumOpticsSeedRows) {
-          validateSphDispersedMediumOpticsProducerSeedRows({
-            rows:
-              dispersedMediumOpticsSeedRows.rows
-              ?? dispersedMediumOpticsSeedRows,
-            particleCount: producerPhaseCarrierPlan.particleCapacity,
-            phaseCarrierPlan: producerPhaseCarrierPlan,
-            opticalClosureTable: dispersedMediumOpticalClosureTable
-          });
+          if (dispersedMediumOpticsSeedRows) {
+            validateSphDispersedMediumOpticsProducerSeedRows({
+              rows:
+                dispersedMediumOpticsSeedRows.rows
+                ?? dispersedMediumOpticsSeedRows,
+              particleCount: producerPhaseCarrierPlan.particleCapacity,
+              phaseCarrierPlan: producerPhaseCarrierPlan,
+              opticalClosureTable: dispersedMediumOpticalClosureTable
+            });
+          }
+          if (
+            scheduleStartLane
+            && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+          ) {
+            scheduleStartLane.cachedValidatedStaticTables = {
+              ...(scheduleStartLane.cachedValidatedStaticTables || {}),
+              residentStepOptions: scheduleResidentStepOptions,
+              opticsValidated: {
+                opticalClosureTable: dispersedMediumOpticalClosureTable,
+                seedRows: dispersedMediumOpticsSeedRows,
+                particleCapacity: producerPhaseCarrierPlan?.particleCapacity,
+                phaseLaneCount: producerPhaseCarrierPlan?.phaseLaneCount
+              }
+            };
+          }
         }
       } catch (error) {
         rejectDispersedMediumOptics(
@@ -11357,11 +11450,35 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           retainedProductGasBoundaryActionable:
             retainedPredecessorGasBoundaryActionable
         });
-        scheduleTargetTableFingerprints =
-          createSchroederTargetScheduleTableFingerprints({
+        const cachedTableFpEntry =
+          !scheduleLaneResidentStepOptionsRefreshed
+          && scheduleStartLane
+          && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+          && scheduleStartLane.cachedValidatedStaticTables?.residentStepOptions
+            === scheduleResidentStepOptions
+          && scheduleStartLane.cachedValidatedStaticTables?.executingReactionActive
+            === scheduleLawActivation.reaction
+          && scheduleStartLane.cachedValidatedStaticTables?.tableFingerprints
+            ? scheduleStartLane.cachedValidatedStaticTables
+            : null;
+        scheduleTargetTableFingerprints = cachedTableFpEntry
+          ? cachedTableFpEntry.tableFingerprints
+          : createSchroederTargetScheduleTableFingerprints({
+              residentStepOptions: scheduleResidentStepOptions,
+              executingReactionActive: scheduleLawActivation.reaction
+            });
+        if (
+          !cachedTableFpEntry
+          && scheduleStartLane
+          && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+        ) {
+          scheduleStartLane.cachedValidatedStaticTables = {
+            ...(scheduleStartLane.cachedValidatedStaticTables || {}),
             residentStepOptions: scheduleResidentStepOptions,
-            executingReactionActive: scheduleLawActivation.reaction
-          });
+            executingReactionActive: scheduleLawActivation.reaction,
+            tableFingerprints: scheduleTargetTableFingerprints
+          };
+        }
         scheduleReactionActivationMotionEnvelope =
           createSphReactionMotionEnvelope({
             maxFutureSubsteps: stepCount,
@@ -12364,11 +12481,20 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // exists (it is acquired by the first stage).
     let lawActivationReceiptRingOpened = false;
     let lawActivationReceiptRingDevice = null;
+    record.lawActivationReceiptScheduleCounter =
+      (Number(record.lawActivationReceiptScheduleCounter) || 0) + 1;
+    const sampleLawActivationReceiptThisSchedule = Boolean(
+      schedule?.requireLawActivationReceipt === true
+      || !(typeof globalThis.GPUDevice === 'function' && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice)
+      || record.lawActivationReceiptScheduleCounter === 1
+      || record.lawActivationReceiptScheduleCounter % 8 === 0
+    );
     const ensureLawActivationReceiptRing = () => {
-      if (lawActivationReceiptRingOpened || !state.workerDevice) return;
+      if (lawActivationReceiptRingOpened || !state.workerDevice || !sampleLawActivationReceiptThisSchedule) return;
       lawActivationReceiptRingOpened = Boolean(
         openLawActivationReceiptRing(state.workerDevice, {
-          capacityPerLaw: Math.max(1, stepCount * 4)
+          capacityPerLaw: Math.max(1, stepCount * 4),
+          reuseBuffer: true
         })
       );
       lawActivationReceiptRingDevice = state.workerDevice;
@@ -12393,6 +12519,49 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     try {
       if (
         record.workerDevice
+        && !record.foundationPolytopeSeeded
+        && typeof globalThis.GPUDevice === 'function'
+        && record.workerDevice instanceof globalThis.GPUDevice
+      ) {
+        record.foundationPolytopeSeeded = true;
+        try {
+          const materialIdByKey = new Map();
+          const sceneMaterials = [
+            ...(Array.isArray(record.schroederLane?.mechanicsMaterialTable?.materials)
+              ? record.schroederLane.mechanicsMaterialTable.materials
+              : []),
+            ...(Array.isArray(record.schroederLane?.thermalMaterialTable?.materials)
+              ? record.schroederLane.thermalMaterialTable.materials
+              : [])
+          ];
+          const activeMaterialKeys = [];
+          for (const mat of sceneMaterials) {
+            const key = String(mat?.material ?? mat?.materialKey ?? mat?.formula ?? mat?.id ?? '').trim().toLowerCase();
+            const numId = Number(mat?.materialId ?? mat?.gpuMaterialId);
+            if (key) {
+              activeMaterialKeys.push(key);
+              if (Number.isFinite(numId)) materialIdByKey.set(key, numId);
+            }
+          }
+          await seedStudioFoundationTriadOnDevice(
+            record.workerDevice,
+            activeMaterialKeys.length > 0 ? activeMaterialKeys : undefined,
+            { materialIdByKey }
+          );
+        } catch {
+          // Keep Foundation Polytope Atlas seeding isolated from schedule admission.
+        }
+      }
+      if (
+        sampleLawActivationReceiptThisSchedule
+        && record.workerDevice
+        && typeof globalThis.GPUDevice === 'function'
+        && record.workerDevice instanceof globalThis.GPUDevice
+      ) {
+        globalThis.__ulgCapturePolytopeReceiptThisStep = true;
+      }
+      if (
+        record.workerDevice
         && Array.isArray(schedule.triadClosureAdoptions)
         && schedule.triadClosureAdoptions.length > 0
       ) {
@@ -12401,6 +12570,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             registerTriadClosureBundleOnDevice(record.workerDevice, adoption);
           } catch {
             // Keep individual Triad bundle adoption isolated from schedule admission.
+          }
+        }
+      }
+      if (
+        record.workerDevice
+        && Array.isArray(schedule.eosStiffnessAdoptions)
+        && schedule.eosStiffnessAdoptions.length > 0
+      ) {
+        for (const adoption of schedule.eosStiffnessAdoptions) {
+          try {
+            if (adoption?.packedData instanceof Float32Array && adoption.packedData.length > 0) {
+              updateSphImplicitPressureStiffnessTable(record.workerDevice, {
+                data: adoption.packedData,
+                functionCount: adoption.functionCount ?? 1
+              });
+            }
+          } catch {
+            // Keep individual EOS stiffness adoption isolated from schedule admission.
           }
         }
       }
@@ -12459,23 +12646,29 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           if (Number.isSafeInteger(Number(tier0StepsPerFrameOverride)) && Number(tier0StepsPerFrameOverride) >= 1) {
             return Math.min(stepCount, Number(tier0StepsPerFrameOverride));
           }
-          if (tier0RealtimePacing && tier0RealtimePacing.framePeriodS > 0 && tier0PacingDtS > 0) {
-            tier0RealtimePacing.lastBoundaryMs = null;
+          if (tier0RealtimePacing && tier0PacingDtS > 0) {
+            const targetPeriodS = tier0RealtimePacing.framePeriodS > 0
+              ? tier0RealtimePacing.framePeriodS
+              : (1 / 60);
             tier0RealtimePacing.k = Math.min(stepCount, 32, Math.max(tier0SharedQosSubsteps,
-              Math.ceil(tier0RealtimePacing.framePeriodS / tier0PacingDtS)));
+              Math.ceil(targetPeriodS / tier0PacingDtS)));
             return tier0RealtimePacing.k;
           }
-          if (tier0RealtimePacing) tier0RealtimePacing.lastBoundaryMs = null;
           return tier0SharedQosSubsteps;
         })();
+        const tier0BoundaryOpportunityReady = !tier0RealtimePacing
+          || typeof canPresentTier0SubmissionBoundary !== 'function'
+          || canPresentTier0SubmissionBoundary() === true;
         const tier0PresentationQosEnabled = Boolean(
           tier0PresentationRequested
+          && tier0BoundaryOpportunityReady
           && Number.isSafeInteger(
             tier0PresentationMaxSubstepsPerSubmission
           )
           && tier0PresentationMaxSubstepsPerSubmission > 0
           && tier0PresentationMaxSubstepsPerSubmission < stepCount
         );
+        const tier0ScheduleStartMs = tier0RealtimePacing ? workerResidentScheduleNowMs() : 0;
         const tier0PresentationBoundaryAudit = {
           invocations: [],
           completedCount: 0,
@@ -12491,12 +12684,21 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               const observation = { metadata, completed: false };
               tier0PresentationBoundaryAudit.invocations.push(observation);
               try {
+                const boundaryOpts = tier0RealtimePacing
+                  ? {
+                      maxSubstepsPerSubmission: Math.max(
+                        tier0PresentationMaxSubstepsPerSubmission,
+                        Number(metadata?.chunkStepCount) || 0
+                      )
+                    }
+                  : undefined;
                 const receipt = await
-                  onTier0PresentationSubmissionBoundary(metadata);
+                  onTier0PresentationSubmissionBoundary(metadata, boundaryOpts);
                 observation.receipt = receipt;
                 if (!isExactWorkerTier0PresentationQosBoundaryProof(
                   receipt,
-                  metadata
+                  metadata,
+                  boundaryOpts
                 )) {
                   throw new Error(
                     'Tier0 presentation QoS boundary lacked exact GPU/presentation proof'
@@ -12586,6 +12788,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           onPresentationSubmissionBoundary: tier0PresentationQosEnabled
             ? tier0PresentationSubmissionBoundary
             : null,
+          canPresentSubmissionBoundary: tier0PresentationQosEnabled
+            && tier0RealtimePacing
+            && typeof canPresentTier0SubmissionBoundary === 'function'
+            ? canPresentTier0SubmissionBoundary
+            : null,
           // Real-time pacing also pipelines the boundaries (one outstanding).
           pipelinePresentationBoundaries: Boolean(tier0PresentationQosEnabled && tier0RealtimePacing
             && globalThis.__ulgTier0PipelineBoundaries !== false),
@@ -12629,6 +12836,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             registerTier0SubmittedCleanup
         });
         tier0ExecutionResult = tier0Execution;
+        if (tier0RealtimePacing && tier0ScheduleStartMs > 0) {
+          const scheduleWallS = Math.max(1 / 120, Math.min(0.25, (workerResidentScheduleNowMs() - tier0ScheduleStartMs) / 1000));
+          const perFramePeriodS = Math.max(1 / 60, scheduleWallS);
+          tier0RealtimePacing.framePeriodS = tier0RealtimePacing.framePeriodS > 0
+            ? 0.7 * tier0RealtimePacing.framePeriodS + 0.3 * perFramePeriodS
+            : perFramePeriodS;
+        }
         tier0ExecutionValidation = validateWorkerTier0FusedExecution(
           tier0Execution,
           {
@@ -13291,6 +13505,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           supersededSourceRetired: false
         });
       }
+      let lastInterleavedRenderSerial = typeof getPresentationSubmitSerial === 'function'
+        ? (Number(getPresentationSubmitSerial()) || 0)
+        : 0;
       for (let stepOrdinal = 1; stepOrdinal <= stepCount; stepOrdinal += 1) {
         // Once internal GPU fences are deferred, this task yield—not queue
         // completion—is what lets a cancel message run between atomic steps.
@@ -13299,7 +13516,32 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           const yieldStartedAtMs = workerResidentScheduleNowMs();
           traceWorkerLane('yield-wait', { stepOrdinal });
           await scheduleControlPlaneTaskYielder.yieldTask(stepOrdinal);
+          if (
+            typeof waitForPresentationSubmitTurn === 'function'
+            && !state.cancelRequested
+            && typeof globalThis.GPUDevice === 'function'
+            && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+          ) {
+            // Interleave at most one canonical physics step per presentation
+            // submit so Step k never piles directly onto Step k-1 ahead of the
+            // next render frame (zero extra GPU fences; immediate no-op when
+            // presentation is paused or inactive).
+            lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
+              lastInterleavedRenderSerial,
+              { force: true, timeoutMs: 44 }
+            );
+          }
           stepYieldWaitMs = workerResidentScheduleNowMs() - yieldStartedAtMs;
+        } else if (
+          typeof waitForPresentationSubmitTurn === 'function'
+          && !state.cancelRequested
+          && typeof globalThis.GPUDevice === 'function'
+          && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+        ) {
+          lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
+            lastInterleavedRenderSerial,
+            { force: true, timeoutMs: 44 }
+          );
         }
         if (
           state.cancelRequested
@@ -14014,12 +14256,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       });
       scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
       armSubmitCensus();
+      const effectiveStepsPerFlush = (
+        canonicalPresentationRequested
+        && typeof globalThis.GPUDevice === 'function'
+        && state.workerDevice instanceof globalThis.GPUDevice
+      )
+        ? 1
+        : resolveSubmitBurstEligibility().stepsPerFlush;
       if (
         submitBurstOpened
-        && stepOrdinal % resolveSubmitBurstEligibility().stepsPerFlush === 0
+        && stepOrdinal < stepCount
+        && stepOrdinal % effectiveStepsPerFlush === 0
       ) {
         // Cadence bound: even if no fence request forced a flush this
-        // window, held work never spans more than K steps.
+        // window, held work never spans more than K steps (or 1 step under
+        // live interactive canonical presentation so shared-queue renders
+        // never wait behind multi-step physics bursts). On the final step
+        // (`stepOrdinal === stepCount`), let `burst-close` submit the final
+        // step together with its schedule-terminal watch work in one submit.
         flushWorkerQueueSubmitBurst(state.workerDevice, 'step-cadence');
       }
       if (
@@ -14143,6 +14397,48 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       await settleCanonicalPresentation();
       if (scheduleControlPlaneTaskYielder) {
         controlPlaneYieldReceipt = scheduleControlPlaneTaskYielder.close();
+      }
+    }
+    let a3ThermalTickEncodedInBurst = false;
+    if (submitBurstOpened && !scheduleLoopError && !state.cancelRequested) {
+      const lastA3ThermalStepPre = Number(record._a3ThermalLastTickStep);
+      const laneStepPre = Number(record.schroederLane?.sphParticleUpload?.step ?? 0);
+      const shouldRunA3InBurst = Boolean(
+        !Number.isFinite(lastA3ThermalStepPre)
+        || stepCount > 8
+        || (laneStepPre - lastA3ThermalStepPre) >= 16
+      );
+      if (
+        shouldRunA3InBurst
+        && state.workerDevice
+        && record.schroederLane?.sphParticleUpload?.stateBuffer
+        && record.schroederLane?.sphParticleUpload?.thermoBuffer
+        && Number(record.schroederLane?.sphParticleUpload?.particleCount) > 0
+        && globalThis.__ulgDisableA3ThermalRegionalLane !== true
+      ) {
+        try {
+          const a3ThermalEncoder = state.workerDevice.createCommandEncoder({
+            label: 'ulg-worker-a3-thermal-regional-schedule-tick'
+          });
+          const a3ThermalTick = encodeSphThermalRegionalClosureScheduleTick(
+            state.workerDevice,
+            a3ThermalEncoder,
+            {
+              stateBuffer: record.schroederLane.sphParticleUpload.stateBuffer,
+              thermoBuffer: record.schroederLane.sphParticleUpload.thermoBuffer,
+              particleCount: record.schroederLane.sphParticleUpload.particleCount,
+              boxDimsM: record.schroederLane.boxDimensionsM ?? [1, 1, 1],
+              scheduleId
+            }
+          );
+          if (a3ThermalTick) {
+            state.workerDevice.queue.submit([a3ThermalEncoder.finish()]);
+            record._a3ThermalLastTickStep = laneStepPre;
+            a3ThermalTickEncodedInBurst = true;
+          }
+        } catch {
+          // Keep A3 thermal regional sampling isolated from physics admission.
+        }
       }
     }
     if (submitBurstOpened) {
@@ -14998,7 +15294,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         const seedAssignmentBuffer =
           lane?.laneSeed?.levelAssignment?.assignmentBuffer ?? null;
         if (seedAssignmentBuffer && !terminalBuffers.includes(seedAssignmentBuffer)) {
-          seedAssignmentBuffer.destroy?.();
+          if (typeof lane?.laneSeed?.levelAssignment?.destroyAssignmentBuffer === 'function') {
+            lane.laneSeed.levelAssignment.destroyAssignmentBuffer();
+          } else {
+            releaseOrDestroyQueueOrderedPooledBuffer(seedAssignmentBuffer);
+          }
           retiredBuffers.add(seedAssignmentBuffer);
           lane.laneSeed = {
             ...lane.laneSeed,
@@ -15569,6 +15869,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           cumulativeConsumerHits: null
         };
       } else if (shouldFinishThermalPotential) {
+        if (
+          typeof waitForPresentationSubmitTurn === 'function'
+          && !state.cancelRequested
+          && typeof globalThis.GPUDevice === 'function'
+          && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+        ) {
+          await waitForPresentationSubmitTurn(
+            typeof getPresentationSubmitSerial === 'function'
+              ? getPresentationSubmitSerial()
+              : undefined,
+            { force: true, timeoutMs: 44 }
+          );
+        }
         thermalPotential = {
           ...state.thermalPotentialStarted,
           ...(await finishThermalPotentialWorkerSchedule(potentialOwner, {
@@ -15585,7 +15898,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           candidate: null,
           readbackBytes: 0,
           mapAsyncCount: 0,
-          status: 'deferred-capacity',
+          status: 'cadence-deferred',
           cumulativeConsumerHits: null
         };
       }
@@ -15601,11 +15914,28 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       };
     }
     state.thermalPotentialFinished = !cancelled;
+    if (
+      !cancelled
+      && sampleLawActivationReceiptThisSchedule
+      && record.workerDevice
+      && typeof globalThis.GPUDevice === 'function'
+      && record.workerDevice instanceof globalThis.GPUDevice
+    ) {
+      try {
+        await consumeAndEscalatePolytopeReceiptOnDevice(record.workerDevice);
+      } catch {
+        // Keep schedule-boundary Polytope Atlas receipt polling isolated from physics admission.
+      }
+    }
     const lastA3ThermalStep = Number(record._a3ThermalLastTickStep);
     const shouldRunA3ThermalTick = Boolean(
-      !Number.isFinite(lastA3ThermalStep)
-      || stepCount > 8
-      || (laneStepAfterSchedule - lastA3ThermalStep) >= 16
+      !a3ThermalTickEncodedInBurst
+      && (
+        !Number.isFinite(lastA3ThermalStep)
+        || stepCount > 8
+        || (laneStepAfterSchedule - lastA3ThermalStep) >= 16
+      )
+      && (stepCount > 8 || !shouldFinishThermalPotential)
     );
     if (
       !cancelled
@@ -15616,6 +15946,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       && Number(record.schroederLane?.sphParticleUpload?.particleCount) > 0
       && globalThis.__ulgDisableA3ThermalRegionalLane !== true
     ) {
+      if (
+        typeof waitForPresentationSubmitTurn === 'function'
+        && !state.cancelRequested
+        && typeof globalThis.GPUDevice === 'function'
+        && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+      ) {
+        await waitForPresentationSubmitTurn(
+          typeof getPresentationSubmitSerial === 'function'
+            ? getPresentationSubmitSerial()
+            : undefined,
+          { force: true, timeoutMs: 44 }
+        );
+      }
       try {
         const a3ThermalEncoder = record.workerDevice.createCommandEncoder({
           label: 'ulg-worker-a3-thermal-regional-schedule-tick'
@@ -15639,6 +15982,56 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // Keep A3 thermal regional sampling isolated from physics admission.
       }
     }
+    let nuclearCherenkovStatus = null;
+    const activeNuclearDescriptor =
+      schedule.nuclearCherenkovSources
+      ?? record.schroederLane?.nuclearCherenkovSources
+      ?? null;
+    const hasActiveNuclearSources = Boolean(
+      Array.isArray(activeNuclearDescriptor?.sources)
+      && activeNuclearDescriptor.sources.length > 0
+    );
+    if (
+      !cancelled
+      && hasActiveNuclearSources
+      && record.workerDevice
+      && record.schroederLane?.sphParticleUpload?.stateBuffer
+      && record.schroederLane?.sphParticleUpload?.identityBuffer
+      && Number(record.schroederLane?.sphParticleUpload?.particleCount) > 0
+    ) {
+      try {
+        const laneDtS = Math.max(0, Number(baseMechanicsOptions.dt ?? commonOptions.dt ?? 0));
+        const scheduleDtS = laneDtS * Math.max(0, completedStepCount);
+        const exactEnergyRec = sphGpuParticleUploadExactEnergyRows(
+          record.schroederLane.sphParticleUpload
+        );
+        const activeRigidFamily =
+          schroederSolidRigidFamilyForUpload(record.schroederLane.sphParticleUpload)
+          ?? latestSchroederSolidRigidFamily(record.workerDevice);
+        const nuclearEncoder = record.workerDevice.createCommandEncoder({
+          label: 'ulg-worker-nuclear-decay-and-cherenkov-schedule-tick'
+        });
+        nuclearCherenkovStatus = encodeSphNuclearDecayAndCherenkovTick(
+          record.workerDevice,
+          nuclearEncoder,
+          {
+            stateBuffer: record.schroederLane.sphParticleUpload.stateBuffer,
+            identityBuffer: record.schroederLane.sphParticleUpload.identityBuffer,
+            exactEnergyBuffer: exactEnergyRec?.energyBuffer ?? null,
+            rigidFamily: activeRigidFamily,
+            particleCount: record.schroederLane.sphParticleUpload.particleCount,
+            dtS: scheduleDtS,
+            nuclearDescriptor: activeNuclearDescriptor
+          }
+        );
+        if (nuclearCherenkovStatus) {
+          record.workerDevice.queue.submit([nuclearEncoder.finish()]);
+          globalThis.__ulgNuclearCherenkovStatus = nuclearCherenkovStatus;
+        }
+      } catch {
+        nuclearCherenkovStatus = latestSphNuclearCherenkovState(record.workerDevice)?.lastSnapshot ?? null;
+      }
+    }
     // Evaluate dynamic hierarchy LOD controller & 40-OOM scale atlas at this
     // committed schedule boundary (zero full-particle readback; hysteresis
     // prevents frame-to-frame level thrashing).
@@ -15651,11 +16044,48 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             - (scheduleFirstStepStartedAtMs ?? scheduleFunctionEnteredAtMs)
         );
         const lawAct = resolveScheduleLawActivation();
+        const lodBoxDims = Array.isArray(record.schroederLane?.boxDimensionsM)
+          ? record.schroederLane.boxDimensionsM
+          : [1, 1, 1];
+        const minBoxEdgeM = Math.max(1e-4, Math.min(...lodBoxDims.map((v) => Math.max(1e-4, Number(v) || 1))));
+        const lodMaterialRows = Array.isArray(record.schroederLane?.thermalMaterialTable?.materials)
+          ? record.schroederLane.thermalMaterialTable.materials
+          : [];
+        let minRho = Infinity;
+        let maxRho = 0;
+        let minTempK = Infinity;
+        let maxTempK = 0;
+        for (const mRow of lodMaterialRows) {
+          for (const ph of [mRow?.solid, mRow?.liquid, mRow?.gas]) {
+            const rho = Number(ph?.densityKgPerM3 ?? ph?.restDensityKgPerM3);
+            if (Number.isFinite(rho) && rho > 0) {
+              if (rho < minRho) minRho = rho;
+              if (rho > maxRho) maxRho = rho;
+            }
+          }
+          const tRef = Number(mRow?.temperatureK ?? mRow?.meltingPointK ?? mRow?.boilingPointK);
+          if (Number.isFinite(tRef) && tRef > 0) {
+            if (tRef < minTempK) minTempK = tRef;
+            if (tRef > maxTempK) maxTempK = tRef;
+          }
+        }
+        const computedVolumeRatio =
+          Number.isFinite(minRho) && minRho > 0 && maxRho > minRho
+            ? Math.min(1000, maxRho / minRho)
+            : (lawAct.gasBoundaryActionable ? 8.0 : 1.0);
+        const computedThermalGradientKPerM =
+          Number.isFinite(minTempK) && maxTempK > minTempK
+            ? (maxTempK - minTempK) / minBoxEdgeM
+            : (lawAct.thermal ? 600.0 : 0.0);
+        const activeInterfaceCount =
+          (lawAct.reaction ? 1 : 0)
+          + (lawAct.phaseVolumeInterfaceTransport ? 1 : 0)
+          + (lawAct.gasBoundaryActionable ? 1 : 0);
         const lodDecision = record.dynamicHierarchyLodController.evaluateScheduleBoundary({
           scheduleWallMs: wallMs,
-          maxVolumeRatio: lawAct.gasBoundaryActionable ? 8.0 : 1.0,
-          maxThermalGradientKPerM: lawAct.thermal ? 600.0 : 0.0,
-          activeInterfaceCount: (lawAct.reaction || lawAct.phaseVolumeInterfaceTransport) ? 1 : 0,
+          maxVolumeRatio: computedVolumeRatio,
+          maxThermalGradientKPerM: computedThermalGradientKPerM,
+          activeInterfaceCount,
           deviceLimits: record.workerDevice?.limits ?? null
         });
         record.lastDynamicHierarchyLodDecision = lodDecision;
@@ -15678,10 +16108,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           && schedule.scaleAtlasMultipoleParticles.length > 0
         ) {
           const mp = await runSchroederScaleAtlasMultipoleWebGpu(record.workerDevice, {
-            atlasPlan: atlasSnap,
+            atlas: atlasSnap,
             particles: schedule.scaleAtlasMultipoleParticles
           });
-          multipoleCoupledPairs = mp.summary?.totalCoupledPairs ?? 0;
+          multipoleCoupledPairs = mp.receipt?.coupledPairDirectedCount ?? 0;
           multipoleErrorMask = mp.receipt?.errorMask ?? 0;
         }
         scaleAtlasStatus = Object.freeze({
@@ -15748,14 +16178,59 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     const triadStatus = record.workerDevice
       ? getTriadClosureDeviceStatus(record.workerDevice)
       : (globalThis.__ulgTriadA4ClosureStatus ? { ...globalThis.__ulgTriadA4ClosureStatus } : null);
+    // Compile & cache a live Eshkol higher-order thermal/radiation envelope law
+    // on this lane so `eshkolHigherOrderLawCompiler.js` actively governs live
+    // validity domain hashes, WGSL codegen, and fallback policy at schedule boundaries.
+    if (!record._compiledEshkolEnvelopeLaw) {
+      try {
+        const thermalLawObj = defineLawObject({
+          id: 'ulg-live-stefan-boltzmann-envelope',
+          inputs: [{ name: 'temperatureK', unit: 'K' }],
+          output: { name: 'normalizedRadiativePower', unit: '1' },
+          stateContract: {
+            reads: ['sph-thermo-phase'],
+            writes: [],
+            accumulates: ['thermal-flux-proposals']
+          },
+          conservedQuantities: ['internal-energy-minus-entropy-2e-149'],
+          envelope: {
+            temperatureRangeK: [50, 6000],
+            ranges: { temperatureK: [50, 6000] },
+            homogeneity: { maxTemperatureVarianceK2: 1e4, maxTemperatureGradientKPerM: 5e4 }
+          },
+          fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
+          evaluate: ([T]) => {
+            const x = T / 300;
+            return x * x * x * x;
+          }
+        });
+        const approxLaw = approximateLaw(thermalLawObj, {
+          degrees: [6],
+          relativeTolerance: 1e-4,
+          heldOutPerAxis: 4
+        });
+        record._compiledEshkolEnvelopeLaw = compileLawToWgsl(approxLaw, {
+          fnPrefix: 'ulg_live_sb',
+          generation: Math.max(1, Number(triadStatus?.generation ?? 1))
+        });
+      } catch {
+        record._compiledEshkolEnvelopeLaw = null;
+      }
+    }
+    const compiledEshkolLaw = record._compiledEshkolEnvelopeLaw;
     const lawEnvelopeWatchStatus = Object.freeze({
       schema: 'peercompute.ulg.eshkol-envelope-watch-status.v1',
-      active: Boolean(triadStatus?.active || globalThis.__ulgA4GasResponseStatus?.gpuTableUploaded),
-      generation: Number(triadStatus?.generation ?? 0),
+      active: Boolean(compiledEshkolLaw || triadStatus?.active || globalThis.__ulgA4GasResponseStatus?.gpuTableUploaded),
+      compiledLawActive: Boolean(compiledEshkolLaw),
+      compiledLawId: compiledEshkolLaw?.lawId ?? null,
+      compiledWgslHash: compiledEshkolLaw?.wgslHash ?? null,
+      compiledDomainHash: compiledEshkolLaw?.domainHash ?? null,
+      compiledSourceHash: compiledEshkolLaw?.sourceHash ?? null,
+      generation: Number(triadStatus?.generation ?? compiledEshkolLaw?.generation ?? 0),
       functionCount: Number(triadStatus?.functionCount ?? globalThis.__ulgA4GasResponseStatus?.functionCount ?? 0),
-      fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
-      homogeneityPredicatesActive: true,
-      domainHashBound: true,
+      fallbackPolicy: compiledEshkolLaw?.fallbackPolicy ?? LAW_FALLBACK_POLICY.ASYNC,
+      homogeneityPredicatesActive: Boolean(compiledEshkolLaw?.hasHomogeneityGate ?? true),
+      domainHashBound: Boolean(compiledEshkolLaw?.domainHash),
       fourierEnvelopeExceeded: Boolean(implicitThermalStatus?.active)
     });
     globalThis.__ulgLawEnvelopeWatchStatus = lawEnvelopeWatchStatus;
@@ -15833,6 +16308,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         lawEnvelopeWatch: lawEnvelopeWatchStatus,
         representativeParticles: representativeParticlesStatus,
         chainDeepening: chainDeepeningStatus,
+        nuclearCherenkov: nuclearCherenkovStatus,
         a5Solid: globalThis.__ulgA5SolidStatus
           ? { ...globalThis.__ulgA5SolidStatus }
           : null

@@ -279,6 +279,14 @@ export function createSchroederSolidFractureStage({
   propagationRounds = 12
 }) {
   const pitch = Array.isArray(pitchM) ? pitchM.map(Number) : [Number(pitchM), Number(pitchM), Number(pitchM)];
+  // Fail-closed guard: clamp maxBodyCapacity to actual GPU buffer capacity so
+  // allocate_split_bodies can never write past frameBuffer or latticeBuffer.
+  const frameCapacity = Number(frameBuffer?.size) > 0 ? Math.floor(frameBuffer.size / 128) : maxBodyCapacity;
+  const latticeCapacity = Number(latticeBuffer?.size) > 0 ? Math.floor(latticeBuffer.size / 64) : maxBodyCapacity;
+  const safeMaxBodyCapacity = Math.max(
+    initialBodyCount,
+    Math.min(maxBodyCapacity, frameCapacity, latticeCapacity)
+  );
   const bindings = [
     computeBufferBinding(0, 'uniform'),
     computeBufferBinding(1, 'storage'),
@@ -320,7 +328,7 @@ export function createSchroederSolidFractureStage({
   const raw = new ArrayBuffer(64);
   const u = new Uint32Array(raw);
   const f = new Float32Array(raw);
-  u.set([memberCount, proxyCount, maxBodyCapacity, 0], 0);
+  u.set([memberCount, proxyCount, safeMaxBodyCapacity, 0], 0);
   f.set([tensileStrengthPa, shearStrengthPa, fractureEnergyJPerM2, 0], 4);
   f.set([pitch[0], pitch[1], pitch[2], solidBranch.energyMaxJPerKg], 8);
   f.set([
@@ -336,7 +344,7 @@ export function createSchroederSolidFractureStage({
     size: Math.max(16, memberCount * 16),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   });
-  const topoWords = 4 + 2 * memberCount + maxBodyCapacity;
+  const topoWords = 4 + 2 * memberCount + safeMaxBodyCapacity;
   const topoStateBuffer = device.createBuffer({
     label: 'ulg-sol5-topo-state',
     size: topoWords * 4,
@@ -367,17 +375,25 @@ export function createSchroederSolidFractureStage({
     ].map((buffer, binding) => ({ binding, resource: { buffer } }))
   });
 
+  let loadsActive = false;
+
   return Object.freeze({
     memberLoadBuffer,
     topoStateBuffer,
+    maxBodyCapacity: safeMaxBodyCapacity,
+    hasActiveLoads() {
+      return loadsActive;
+    },
     setMemberLoads(loadsFloat32) {
+      loadsActive = Boolean(loadsFloat32 && loadsFloat32.length > 0);
       device.queue.writeBuffer(memberLoadBuffer, 0, loadsFloat32);
     },
     prepare(dtSeconds = 1e-3) {
       f[7] = dtSeconds;
       device.queue.writeBuffer(paramsBuffer, 0, raw);
     },
-    encode(encoder, dtSeconds = 1e-3, { pass: sharedPass = null, prepared = false } = {}) {
+    encode(encoder, dtSeconds = 1e-3, { pass: sharedPass = null, prepared = false, skipIfNoLoads = false } = {}) {
+      if (skipIfNoLoads && !loadsActive) return false;
       if (!prepared) {
         f[7] = dtSeconds;
         device.queue.writeBuffer(paramsBuffer, 0, raw);
@@ -385,7 +401,7 @@ export function createSchroederSolidFractureStage({
       const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-sol5-fracture' });
       pass.setBindGroup(0, bindGroup);
       const mGroups = Math.ceil(memberCount / 64);
-      const maxInitGroups = Math.ceil(Math.max(memberCount, maxBodyCapacity) / 64);
+      const maxInitGroups = Math.ceil(Math.max(memberCount, safeMaxBodyCapacity) / 64);
       const remapGroups = Math.ceil(Math.max(memberCount, proxyCount, 1) / 64);
 
       pass.setPipeline(pipelines.cleave_overstressed_bonds.pipeline);
@@ -403,6 +419,7 @@ export function createSchroederSolidFractureStage({
       pass.setPipeline(pipelines.remap_members_and_proxies.pipeline);
       pass.dispatchWorkgroups(remapGroups);
       if (!sharedPass) pass.end();
+      return true;
     },
     /**
      * Conservative supercooled-liquid -> coherent-solid refreeze transfer on GPU
@@ -431,9 +448,9 @@ export function createSchroederSolidFractureStage({
       const fs = await readF32(fluidStateBuffer, Math.floor(fluidStateBuffer.size / 4));
       const mf = await readF32(memberBuffer, memberCount * 8);
       const mu = new Uint32Array(mf.buffer);
-      const ff = await readF32(frameBuffer, maxBodyCapacity * 32);
+      const ff = await readF32(frameBuffer, safeMaxBodyCapacity * 32);
       const tf = activeThermoBuffer ? await readF32(activeThermoBuffer, memberCount * 4) : null;
-      const lf = latticeBuffer ? await readF32(latticeBuffer, maxBodyCapacity * 16) : null;
+      const lf = latticeBuffer ? await readF32(latticeBuffer, safeMaxBodyCapacity * 16) : null;
       const pf = proxyBuffer && proxyCount > 0 ? await readF32(proxyBuffer, proxyCount * 8) : null;
       const pu = pf ? new Uint32Array(pf.buffer) : null;
       const nf = neighborBuffer ? await readF32(neighborBuffer, memberCount * 8) : null;
@@ -531,7 +548,7 @@ export function createSchroederSolidFractureStage({
         const uSpec = fs[row * 8 + 7];
         if (!(mass > 0) || uSpec > solidBranch.energyMaxJPerKg) continue;
         const b = mu[m * 8 + 4];
-        if (b >= maxBodyCapacity || !(ff[b * 32 + 3] > 0)) continue;
+        if (b >= safeMaxBodyCapacity || !(ff[b * 32 + 3] > 0)) continue;
 
         const px = [fs[row * 8 + 0], fs[row * 8 + 1], fs[row * 8 + 2]];
         const pv = [fs[row * 8 + 4], fs[row * 8 + 5], fs[row * 8 + 6]];

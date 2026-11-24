@@ -1,19 +1,19 @@
-# User-approved campaign, 2026-09-06, re-sequenced architecture-first on 2026-11-19.
-# Active routing and slice budgets: plan/CURRENT-PLAN.md.
+# ULG Unified 40-OOM Foundation-First Scale-Ladder Campaign (Restructured 2026-11-22).
+# Active routing, honest live-code scorecard, and slice budgets: plan/CURRENT-PLAN.md.
 # Native quality-campaign currently reports oracle states unknown; run the actual
-# completion-oracle targets separately.
-# 2026-09-13: G1 failed acceptance and is deferred to reassessment after the
-# architecture tracks. 2026-11-18: G5 and G7 accepted.
-# 2026-11-19: Phase 1 leads with A1/A2/G6/A3/A4 (substrate + fast N-level SS +
-# live closure loop); Phase 2 lands G2/G3/A5/G4/A6; Phase 3 reassesses decoupled G1
-# (latest committed physics state at >=54 Hz).
+# completion-oracle targets separately on reviewed ulg.campaign.receipt.v1 bundles.
+#
+# FORMAL ACCEPTANCE (2/8): ONLY g5-reservation and g7-release-audit have
+# accepted ulg.campaign.receipt.v1 bundles (2026-11-18). Gates 0-5 consolidate
+# the 11 open legacy milestones plus the full bottom-up 10^-15 m -> 10^+25 m
+# foundation and astrophysics ladder.
 campaigns:
-  - id: ulg-seven-goals-and-architecture
-    objective: Architecture-first delivery of A1/A2/G6/A3/A4 substrate and closure loop, then G2/G3/A5/G4/A6 on that canonical lane, then decoupled G1 reassessment (G5 and G7 accepted)
+  - id: ulg-scale-ladder-foundation-first
+    objective: "Build ULG bottom-up across 40 orders of magnitude (10^-15 m Nuclear -> 10^+25 m Supergalactic): Gate 0 Architecture & gpuMath -> Gate 1 Complete Z=1..118 Periodic Table Engine + Live Quantum Visuals -> Gate 2 Reactions + Compound Feedback + Convex Polytope Atlas -> Gate 3 Unified SS Continuum Engine -> Gate 4 >=54 Hz Studio Presentation -> Gate 5 Planetary, Stellar, Galactic & Supergalactic TreePM Cosmology"
     node: ulg
     acceptance:
-      metric: reviewed_required_milestones
-      threshold: 13
+      metric: reviewed_required_gates
+      threshold: 8
       direction: '>='
     stages:
       - id: g5-reservation
@@ -24,47 +24,27 @@ campaigns:
         title: "ACCEPTED (2026-11-18): External advisory scientific release audit"
         node: ulg
         oracle: ulg-g7-release-audit
-      - id: a1-realtime-substrate
-        title: "Phase 1: Real-time bulk substrate, decoupled presentation, parallel Jacobi contact, fused K-step lane"
+      - id: gate0-foundation-arch
+        title: "OPEN (Priority 0 — NEXT): peercompute-core slim split, shared gpuMath (eigensolver/3D FFT/MD/Chebyshev), canonical Material-Bundle & Polytope-Atlas ABIs, Continuum Zero-Churn Step Loop"
         node: ulg
-        oracle: ulg-a1-realtime-substrate
-      - id: a2-incremental-spatial
-        title: "Phase 1: GPU-advanced multi-step SS epoch slots and fast N-level SS chain"
+        oracle: ulg-gate0-foundation-arch
+      - id: gate1-periodic-table-engine
+        title: "OPEN (Priority 1 — Flagship Demo): Complete Z=1..118 Periodic Table Engine (Nuclear + Relativistic Atomic + EM/Magnetic/Optical/Conductive + Bulk DFT + WebGPU MD) + real live GPU visualizations (elements-lab.html)"
         node: ulg
-        oracle: ulg-a2-incremental-spatial
-      - id: g6-local-fit
-        title: "Phase 1: Live local provenance-bound online closure fit and cache"
+        oracle: ulg-gate1-periodic-table-engine
+      - id: gate2-reactions-and-polytope-atlas
+        title: "OPEN (Priority 2): GPU Molecular QM & Chemical Reactions -> Recursive Compound Feedback Loop -> Per-Material/Compound Convex Polytope Atlas (A x <= b + GPU Chebyshev)"
         node: ulg
-        oracle: ulg-g6-local-fit
-      - id: a3-representative-sampling
-        title: "Phase 1: Representative homogeneous-region GPU sampling and envelope expansion"
+        oracle: ulg-gate2-reactions-and-polytope-atlas
+      - id: gate3-continuum-substrate-and-physics
+        title: "OPEN (Priority 3): Macroscopic Continuum Engine & Unified SS consuming Gate 2 Polytope Atlas under Section 3 GPU budgets (consolidates A1-A6, G2-G4, G6)"
         node: ulg
-        oracle: ulg-a3-representative-sampling
-      - id: a4-material-functions
-        title: "Phase 1: Eshkol-derived multidimensional material-property response functions"
+        oracle: ulg-gate3-continuum-substrate-and-physics
+      - id: gate4-studio-presentation
+        title: "OPEN (Priority 4): Decoupled >=54 Hz latest-committed-state presentation (visibleMotionCadenceVerified=true) across all 5 active Studio presets (consolidates G1)"
         node: ulg
-        oracle: ulg-a4-material-functions
-      - id: g2-plumes
-        title: "Phase 2: Conserved steam and aerosol transport on the exact-ledger canonical lane"
+        oracle: ulg-gate4-studio-presentation
+      - id: gate5-planetary-to-supergalactic
+        title: "OPEN (Priority 5): Planetary interiors/N-body -> Stellar hydro/nucleosynthesis -> Galactic N-body+ISM -> Supergalactic FLRW GPU 3D-FFT TreePM + multi-host PeerCompute domain partitioning"
         node: ulg
-        oracle: ulg-g2-plumes
-      - id: g3-solids
-        title: "Phase 2: Coherent solids SOL-0 and SOL-1 integrated into SS spatial cells"
-        node: ulg
-        oracle: ulg-g3-solids
-      - id: a5-solids-and-levels
-        title: "Phase 2: Dependency-gated solid mechanics coupling, deformation, topology, and multilevel solids"
-        node: ulg
-        oracle: ulg-a5-solids-and-levels
-      - id: g4-dynamic-laws
-        title: "Phase 2: Compacted per-node warm dynamic law activation with closure uncertainty"
-        node: ulg
-        oracle: ulg-g4-dynamic-laws
-      - id: a6-remote-derivation
-        title: "Phase 2: Warm browser WASM/WebGPU Eshkol/MoonLab derivation wired to live misses"
-        node: ulg
-        oracle: ulg-a6-remote-derivation
-      - id: g1-presentation
-        title: "Phase 3 reassessment: decoupled presentation of latest committed state at >=54 Hz (prior 2026-09-13 attempt FAILED/deferred)"
-        node: ulg
-        oracle: ulg-g1-presentation
+        oracle: ulg-gate5-planetary-to-supergalactic

@@ -3,7 +3,7 @@ import { prepareSphExactPhaseCarrierQuantities } from './sphExactPhaseCarrierQua
 import { createSphExactPhaseCarrierPhysicalWgsl } from './sphExactPhaseCarrierPhysicalWgsl.js';
 import { prepareSphExactPhaseInitialQuantities } from './sphExactPhaseInitialQuantityGpu.js';
 import { sphExactPlacementQuantityLayout } from './sphExactPlacementQuantityWgsl.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline, deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline, deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { markSphExactMassDerivedBuffers, markSphExactMassPlacementDerivedBuffers } from './sphGpuBuffers.js';
 import {
@@ -147,7 +147,7 @@ export async function prepareSphExactPhaseCarrierStage(args) {
         label: entryPoint, cacheKey: `ulg-exact-${entryPoint}-v3:${format.wordCount}`,
         bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
       if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Phase physical pipeline unavailable: ${entryPoint}`);
-      pipelines.push({ pipeline, group: device.createBindGroup({ layout: pipeline.bindGroupLayout,
+      pipelines.push({ pipeline, group: createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
         entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } })) }) }); validateInputs();
     }
     const gatherCode = `@group(0) @binding(0) var<storage, read> q: array<u32>;
@@ -158,7 +158,7 @@ export async function prepareSphExactPhaseCarrierStage(args) {
       cacheKey: `ulg-phase-source-mass-v1:${format.wordCount}:${layout.recordWords}`,
       bindings: ['read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type)) });
     if (!gather.pipeline) throw gather.error ?? new Error('Phase source mass gather unavailable');
-    const gatherGroup = device.createBindGroup({ layout: gather.bindGroupLayout,
+    const gatherGroup = createCachedExplicitBindGroup(device, { layout: gather.bindGroupLayout,
       entries: [sourceQuantityBuffer, sourceMassBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
     const run = (encoder, pipeline, group, groups) => { const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline);
       pass.setBindGroup(0, group); pass.dispatchWorkgroups(groups); pass.end(); };

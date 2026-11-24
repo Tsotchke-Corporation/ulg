@@ -1,5 +1,14 @@
 # First-class air on the SS hierarchy
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 3):** **OPEN.**
+> Slice 4 first-principles Chapman–Enskog `μ(T)` & Modified Eucken `k(T)` landed
+> in `pairPotential.js` + `referenceBankAnchoring.js` (P2), mixture parcels are
+> default when `environmentMode='air'`, and Slice 5 gas–condensed conduction is
+> live in WGSL. **Remaining under Gate 3 (after Gate 0D restores Section 3
+> budget headroom):** enable multi-level room air & Slice 1c worker split/merge
+> on default presets and retire the Slice 6 single-level implicit-atmosphere
+> stand-in. See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 User direction (2026-11-16):
 
 - "treat air as a first class sim object in the sph sim like everything else."

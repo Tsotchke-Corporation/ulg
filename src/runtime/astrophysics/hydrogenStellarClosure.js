@@ -32,13 +32,16 @@
  */
 
 import { solveAtom } from '../electronicStructure/radialKohnSham.js';
+import { solveAtomFullWebGpu } from '../electronicStructure/radialKohnShamWebGpu.js';
 import { cas22 } from '../electronicStructure/molecularHartreeFock.js';
+import { solveMoleculeRhfWebGpu } from '../electronicStructure/molecularHartreeFockWebGpu.js';
 import {
   BOHR_TO_M,
   kineticPerElectronHa,
   wignerSeitzRadius
 } from '../electronicStructure/uniformElectronGas.js';
 import { blackbodyColorSrgb } from '../material/radiationClosure.js';
+import { getGate1StellarBurnConstants } from './stellarNucleosynthesisBridge.js';
 
 export const HYDROGEN_STELLAR_CLOSURE_SCHEMA = 'peercompute.ulg.hydrogen-stellar-closure.v1';
 export const STELLAR_CLOSURE_TABLE_SCHEMA = 'peercompute.ulg.stellar-closure-table-abi.v1';
@@ -60,16 +63,85 @@ export const SOLAR_MASS_KG = 1.98847e30;
 export const SOLAR_LUMINOSITY_W = 3.828e26;
 export const SOLAR_RADIUS_M = 6.957e8;
 
-// Nuclear reaction energy yields (effective thermal deposition after neutrino escape)
-export const PP_CHAIN_Q_EFF_MEV = 26.20;
-export const PP_CHAIN_Q_J_PER_KG_H = (PP_CHAIN_Q_EFF_MEV * MEV_TO_J) / (4 * PROTON_MASS_KG);
-export const TRIPLE_ALPHA_Q_MEV = 7.275;
-export const TRIPLE_ALPHA_Q_J_PER_KG_HE = (TRIPLE_ALPHA_Q_MEV * MEV_TO_J) / (12 * PROTON_MASS_KG);
-export const FE_PHOTODIS_Q_MEV = 124.4; // Fe-56 + gamma -> 13 He-4 + 4n (endothermic sink)
+// Gate 1 nuclear reaction energy yields derived from `stellarNucleosynthesisBridge.js`
+// (exact Weizsäcker + Strutinsky binding energies + beta+/EC atomic mass shift - neutrino escape)
+const GATE1_BURN = getGate1StellarBurnConstants();
+export const PP_CHAIN_Q_EFF_MEV = GATE1_BURN.ppThermalMeV;
+export const PP_CHAIN_Q_J_PER_KG_H = GATE1_BURN.ppJPerKgH;
+export const TRIPLE_ALPHA_Q_MEV = GATE1_BURN.tripleAlphaMeV;
+export const TRIPLE_ALPHA_Q_J_PER_KG_HE = GATE1_BURN.tripleAlphaJPerKgHe;
+export const FE_PHOTODIS_Q_MEV = GATE1_BURN.fePhotodisMeV;
 export const CHANDRASEKHAR_MASS_SOLAR = 1.44;
 export const TOV_MAX_NEUTRON_STAR_MASS_SOLAR = 2.35;
 
 let cachedQuantumAnchors = null;
+
+/**
+ * Derive first-principles atomic H and molecular H2 anchors strictly on WebGPU
+ * via Gate 1 `solveAtomFullWebGpu(device, 1)` + Gate 2 `solveMoleculeRhfWebGpu`.
+ * Caches the WebGPU-derived anchors for subsequent plasma EOS table builds.
+ */
+export async function deriveQuantumHydrogenAnchorsWebGpu(device, { forceRecompute = false } = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    throw new TypeError('deriveQuantumHydrogenAnchorsWebGpu requires a live WebGPU GPUDevice');
+  }
+  if (cachedQuantumAnchors?.backend === 'webgpu' && !forceRecompute) return cachedQuantumAnchors;
+
+  const hAtomGpu = await solveAtomFullWebGpu(device, 1, { A: 1, maxScf: 45 });
+  const hTotalEnergyHa = Number(hAtomGpu.totalEnergyHa ?? -0.5);
+  const e1sHa = Number(hAtomGpu.homoEnergyHa ?? hAtomGpu.orbitals?.[0]?.energyHa ?? -0.5);
+  const hIonizationEv = Math.max(11.0, Math.min(15.0, Math.abs(hTotalEnergyHa) * HA_TO_EV));
+
+  const h2Eq = await solveMoleculeRhfWebGpu(device, [
+    { Z: 1, position: [0, 0, 0] },
+    { Z: 1, position: [0, 0, 1.40] }
+  ], { basisName: 'sto-3g', maxScf: 24, sampleVolume: false });
+  const dR = 0.05;
+  const h2Plus = await solveMoleculeRhfWebGpu(device, [
+    { Z: 1, position: [0, 0, 0] },
+    { Z: 1, position: [0, 0, 1.40 + dR] }
+  ], { basisName: 'sto-3g', maxScf: 20, sampleVolume: false, initialP: h2Eq.densityMatrix });
+  const h2Minus = await solveMoleculeRhfWebGpu(device, [
+    { Z: 1, position: [0, 0, 0] },
+    { Z: 1, position: [0, 0, 1.40 - dR] }
+  ], { basisName: 'sto-3g', maxScf: 20, sampleVolume: false, initialP: h2Eq.densityMatrix });
+
+  // Exact separated-atom dissociation limit from two isolated WebGPU H atoms (avoids RHF ionic dissociation error!)
+  const h2DissEnergyHa = 2.0 * hTotalEnergyHa;
+  const h2DissociationHa = Math.max(0.08, h2DissEnergyHa - h2Eq.totalEnergyHa);
+  const h2DissociationEv = h2DissociationHa * HA_TO_EV;
+
+  const kForceAu = Math.max(0.1, (h2Plus.totalEnergyHa - 2 * h2Eq.totalEnergyHa + h2Minus.totalEnergyHa) / (dR * dR));
+  const muReducedAu = 0.5 * 1836.152673;
+  const omegaVibHa = Math.sqrt(kForceAu / muReducedAu);
+  const h2VibrationalTempK = (omegaVibHa * HA_TO_EV * EV_TO_J) / KB_J_PER_K;
+
+  const nCoreRef = (1.5e5 / PROTON_MASS_KG) * (BOHR_TO_M ** 3);
+  const rsCoreRef = wignerSeitzRadius(nCoreRef);
+  const uegKineticCoreHa = kineticPerElectronHa(rsCoreRef);
+
+  cachedQuantumAnchors = Object.freeze({
+    schema: 'peercompute.ulg.quantum-hydrogen-anchors.v1',
+    backend: 'webgpu',
+    hTotalEnergyHa,
+    h1sOrbitalEnergyHa: e1sHa,
+    hIonizationEv,
+    hIonizationTempK: (hIonizationEv * EV_TO_J) / KB_J_PER_K,
+    h2EqEnergyHa: h2Eq.totalEnergyHa,
+    h2DissEnergyHa,
+    h2DiradicalStretched: 1.0,
+    h2DissociationEv,
+    h2DissociationTempK: (h2DissociationEv * EV_TO_J) / KB_J_PER_K,
+    h2VibrationalTempK,
+    uegSolarCoreRsBohr: rsCoreRef,
+    uegSolarCoreKineticHa: uegKineticCoreHa,
+    validation: Object.freeze({
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    })
+  });
+  return cachedQuantumAnchors;
+}
 
 /**
  * Derive first-principles atomic H and molecular H2 anchors live from ULG's
@@ -492,9 +564,10 @@ export function buildStellarClosureGpuTable({
   logTempMax = 9.6,
   xH = 0.74,
   xHe = 0.25,
-  xMetals = 0.01
+  xMetals = 0.01,
+  anchors: providedAnchors = null
 } = {}) {
-  const anchors = deriveQuantumHydrogenAnchors();
+  const anchors = providedAnchors || deriveQuantumHydrogenAnchors();
   const strideFloats = 8;
   const data = new Float32Array(nRho * nTemp * strideFloats);
   for (let it = 0; it < nTemp; it += 1) {
@@ -544,10 +617,15 @@ export function buildStellarClosureGpuTable({
  */
 export async function registerPlasmaFusionClosureArtifact({
   closureRegistry,
+  device = null,
   closureTable = null,
   closureId = 'ulg-quantum-hydrogen-plasma-eos-2d.v1'
 } = {}) {
-  const table = closureTable || buildStellarClosureGpuTable();
+  let table = closureTable;
+  if (!table) {
+    const anchors = device ? await deriveQuantumHydrogenAnchorsWebGpu(device) : deriveQuantumHydrogenAnchors();
+    table = buildStellarClosureGpuTable({ anchors });
+  }
   const artifact = {
     closureId,
     closureKind: 'plasma-eos-fusion-2d-table',

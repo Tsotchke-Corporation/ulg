@@ -1,6 +1,7 @@
 import { hashPayload } from '../../../ulg-gpu-abi/src/index.js';
 import { ULG_SERVICE_IDS } from '../../../ulg-gpu-abi/src/serviceContract.js';
 import { BOHR_TO_M } from './uniformElectronGas.js';
+import { atomicMassKg } from './periodicTable.js';
 import { solveAtom } from './radialKohnSham.js';
 import {
   atomizationEnergyMp2Ha,
@@ -164,12 +165,13 @@ export function buildAtomicRadialDensityArtifact(atomicNumberZ, {
     scalarRelativistic,
     spinOrbit,
     gridPointsN,
-    returnRadialDensity: true
+    returnRadialDensity: true,
+    returnOrbitalWavefunctions: true
   });
-  const { r: rGrid, rho: rhoGrid, dx } = atom.radialGrid;
+  const { r: rGrid, rho: rhoGrid, dx, orbitalWavefunctions: rawOrbWfs = [] } = atom.radialGrid;
   const containment = computeContainmentRadiiBohr(rGrid, rhoGrid, dx, atom.integratedElectrons);
 
-  // Uniformly sample 4π r² ρ(r) out to r99 * 1.25 for compact line-plot / UI replay.
+  // Uniformly sample ρ(r) and 4π r² ρ(r) out to r99 * 1.25 for 3D volume & line-plot replay.
   const rMaxSampleBohr = Math.max(2.0, containment.r99Bohr * 1.25);
   const nSamples = clampInt(sampleCount, 16, 1024);
   const radialSamples = [];
@@ -184,6 +186,43 @@ export function buildAtomicRadialDensityArtifact(atomicNumberZ, {
       peakRadiusBohr = r;
     }
     radialSamples.push({ rBohr: r, rhoPerBohr3: rho, radialProbabilityPerBohr: radialProb });
+  }
+
+  // Resample highest-occupied Kohn-Sham radial wavefunctions R_{nl}(r) = u_{nl}(r) / r
+  // for each angular momentum l so volumetric orbital raymarching preserves genuine radial nodes!
+  const orbitalWavefunctions = {};
+  if (Array.isArray(rawOrbWfs) && rawOrbWfs.length > 0) {
+    const highestByL = new Map();
+    for (const wf of rawOrbWfs) {
+      const prev = highestByL.get(wf.l);
+      if (!prev || wf.n > prev.n) highestByL.set(wf.l, wf);
+    }
+    for (const [l, wf] of highestByL.entries()) {
+      const uArr = wf.u;
+      const samples = new Array(nSamples);
+      for (let i = 0; i < nSamples; i += 1) {
+        const rVal = Math.max(rGrid[0], (i / (nSamples - 1)) * rMaxSampleBohr);
+        let lo = 0;
+        let hi = rGrid.length - 1;
+        while (lo + 1 < hi) {
+          const mid = (lo + hi) >> 1;
+          if (rGrid[mid] <= rVal) lo = mid;
+          else hi = mid;
+        }
+        const span = Math.max(1e-12, rGrid[hi] - rGrid[lo]);
+        const t = Math.max(0, Math.min(1, (rVal - rGrid[lo]) / span));
+        const uInterp = uArr[lo] + t * (uArr[hi] - uArr[lo]);
+        samples[i] = uInterp / Math.max(1e-4, rVal);
+      }
+      orbitalWavefunctions[String(l)] = {
+        n: wf.n,
+        l: wf.l,
+        occupancy: wf.occupancy,
+        energyHa: wf.energyHa,
+        rValuesBohr: radialSamples.map((s) => s.rBohr),
+        radialAmplitude: samples
+      };
+    }
   }
 
   const solverFamily = scalarRelativistic
@@ -290,7 +329,8 @@ export function buildAtomicRadialDensityArtifact(atomicNumberZ, {
     radialProfile: {
       rMaxBohr: rMaxSampleBohr,
       sampleCount: nSamples,
-      samples: radialSamples
+      samples: radialSamples,
+      orbitalWavefunctions
     },
     orbitalCloudGrid,
     validity: {
@@ -899,18 +939,32 @@ export function buildMaterialDerivationVisualizationBundle({
 
   let responseFitReplay = null;
   if (includeTriadA4Replay) {
+    const AVOGADRO = 6.02214076e23;
+    const R_GAS = 8.314462618;
+    const derivedMolarMassKgPerMol = qhaBulkClosure?.molarMassKgPerMol
+      ?? (Array.isArray(atoms) && atoms.length > 0
+        ? atoms.reduce((s, a) => s + atomicMassKg(a.Z) * AVOGADRO, 0)
+        : (resolvedZ ? atomicMassKg(resolvedZ) * AVOGADRO : 0.028));
+    const rSpecific = R_GAS / Math.max(1e-4, derivedMolarMassKgPerMol);
+    const derivedDensityKgM3 = qhaBulkClosure?.estimatedDensityKgPerM3
+      ?? (atomicArtifact?.summary?.containmentRadii?.r95Bohr
+        ? (derivedMolarMassKgPerMol / AVOGADRO) / Math.max(1e-30, (4 / 3) * Math.PI * ((atomicArtifact.summary.containmentRadii.r95Bohr * 0.75 * BOHR_TO_M) ** 3))
+        : 1200);
+    const refV = 1 / Math.max(10, Math.min(30000, derivedDensityKgM3));
+    const derivedBulkPa = qhaBulkClosure?.bulkModulusPa
+      ?? Math.max(1e8, ((qhaBulkClosure?.cohesiveEnergyJPerMol ?? 25000) / Math.max(1e-6, derivedMolarMassKgPerMol)) * Math.max(10, derivedDensityKgM3) * 0.8);
     const tMelt = qhaBulkClosure?.meltingPointK ?? 300;
     const tBoil = qhaBulkClosure?.boilingPointK ?? 600;
-    const cp = qhaBulkClosure?.cpLiquidJPerKgK ?? qhaBulkClosure?.cpSolidJPerKgK ?? 2000;
+    const cp = qhaBulkClosure?.cpLiquidJPerKgK ?? qhaBulkClosure?.cpSolidJPerKgK ?? Math.max(300, 3.5 * rSpecific);
     const tRange = [Math.max(120, tMelt * 0.7), Math.max(500, tBoil * 1.4)];
-    const vRange = [0.9e-3, 1.15e-3];
+    const vRange = [refV * 0.90, refV * 1.15];
     const program = eshkolHelmholtzProgram({
       material: key,
-      cvJPerKgK: Math.max(200, cp * 0.75),
-      rSpecificJPerKgK: 461.5,
-      bulkModulusPa: 2.2e9,
+      cvJPerKgK: Math.max(120, cp * 0.75),
+      rSpecificJPerKgK: rSpecific,
+      bulkModulusPa: Math.max(1e7, derivedBulkPa),
       refTemperatureK: Math.max(150, tMelt),
-      refSpecificVolumeM3PerKg: 1e-3
+      refSpecificVolumeM3PerKg: refV
     });
     const fit = fitResponseFunction({
       box: [tRange, vRange],
@@ -1092,9 +1146,20 @@ export function createQuantumDerivationSimulationModule() {
     async stepCapsule(capsule, { createSimulationArtifact, device, leaseSession }) {
       const input = capsule.input || {};
       const params = input.parameters || {};
+      const hasExplicitMaterial = Boolean(
+        input.materialKey
+        || input.formula
+        || Number.isInteger(Number(input.atomicNumberZ))
+        || (Array.isArray(input.atoms) && input.atoms.length > 0)
+      );
+      if (!hasExplicitMaterial) {
+        throw new RangeError(
+          'quantum-material-derivation@1 requires explicit atomicNumberZ, atoms, or formula/materialKey (no silent H2O fallback).'
+        );
+      }
       const { bundle, densePayloads } = buildMaterialDerivationVisualizationBundle({
-        materialKey: input.materialKey || input.formula || 'H2O',
-        formula: input.formula || input.materialKey || 'H2O',
+        materialKey: input.materialKey || input.formula || (input.atomicNumberZ ? `Z${input.atomicNumberZ}` : 'molecule'),
+        formula: input.formula || input.materialKey || null,
         atomicNumberZ: input.atomicNumberZ ?? null,
         atoms: input.atoms ?? null,
         basis: params.basis || input.basis || 'sto-3g',
@@ -1111,9 +1176,33 @@ export function createQuantumDerivationSimulationModule() {
       }
 
       stepCounter += 1;
-      const primaryKey = Object.keys(densePayloads)[0] || 'quantum-density-volume';
-      const primaryValues = densePayloads[primaryKey] || new Float32Array(0);
+      let primaryKey = Object.keys(densePayloads)[0] || 'quantum-density-volume';
+      let primaryValues = densePayloads[primaryKey] || new Float32Array(0);
       let gpuBuffer = null;
+      let executedWebGpuKernel = false;
+
+      if (
+        device
+        && typeof device.createComputePipeline === 'function'
+        && Array.isArray(input.atoms)
+        && input.atoms.length > 0
+        && bundle.molecularChargeDensity?.grid
+      ) {
+        const molGrid = bundle.molecularChargeDensity.grid;
+        const hf = rhf(input.atoms, { basis: params.basis || input.basis || 'sto-3g' });
+        const gpuRes = await sampleMolecularChargeDensityWebGpu(device, {
+          basis: hf.basis,
+          densityMatrix: hf.P,
+          boundsMinBohr: molGrid.boundsMinBohr,
+          boundsMaxBohr: molGrid.boundsMaxBohr,
+          dimensions: molGrid.dimensions
+        });
+        primaryKey = molGrid.payloadHandles.chargeDensity.key;
+        primaryValues = gpuRes.density;
+        densePayloads[primaryKey] = primaryValues;
+        executedWebGpuKernel = true;
+      }
+
       if (device && typeof device.createBuffer === 'function' && primaryValues.byteLength > 0) {
         gpuBuffer = device.createBuffer({
           label: `ulg-quantum-density-${primaryKey}`,
@@ -1137,6 +1226,12 @@ export function createQuantumDerivationSimulationModule() {
         reason: 'density-volume-read-lease'
       });
 
+      const honestBackend = executedWebGpuKernel
+        ? 'webgpu-resident-volume'
+        : gpuBuffer
+          ? 'cpu-staged-gpu-buffer'
+          : 'worker-cpu-derived';
+
       const artifact = createSimulationArtifact({
         artifactId: `${capsule.taskId}:quantum-derivation:${stepCounter}`,
         taskKind: capsule.taskKind,
@@ -1150,7 +1245,7 @@ export function createQuantumDerivationSimulationModule() {
           bundle
         },
         execution: {
-          backend: gpuBuffer ? 'webgpu-resident-volume' : 'worker-cpu-derived',
+          backend: honestBackend,
           stage: 'quantum.material.derivation',
           placement: 'local'
         },

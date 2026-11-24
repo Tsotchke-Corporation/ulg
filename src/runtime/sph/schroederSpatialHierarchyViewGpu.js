@@ -395,15 +395,22 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
 
   function createBindings(arena, cacheKey, pipelineObject, resources, bindings, bindLabel) {
     const resolvedResources = bindings.map((binding) => resources.get(binding));
-    const cached = arena.bindGroupCache.get(cacheKey);
-    if (
-      cached?.pipeline === pipelineObject
-      && cached.bindings.length === bindings.length
-      && cached.bindings.every((binding, index) => binding === bindings[index])
-      && cached.resources.length === resolvedResources.length
-      && cached.resources.every((resource, index) => resource === resolvedResources[index])
-    ) {
-      return cached.bindGroup;
+    let bucket = arena.bindGroupCache.get(cacheKey);
+    if (!bucket) {
+      bucket = [];
+      arena.bindGroupCache.set(cacheKey, bucket);
+    }
+    for (let i = 0; i < bucket.length; i += 1) {
+      const cached = bucket[i];
+      if (
+        cached.pipeline === pipelineObject
+        && cached.bindings.length === bindings.length
+        && cached.bindings.every((binding, index) => binding === bindings[index])
+        && cached.resources.length === resolvedResources.length
+        && cached.resources.every((resource, index) => resource === resolvedResources[index])
+      ) {
+        return cached.bindGroup;
+      }
     }
     const created = device.createBindGroup({
       label: bindLabel,
@@ -413,7 +420,8 @@ export function createSchroederSpatialHierarchyViewGpu(device, {
         resource: { buffer: resolvedResources[index] }
       }))
     });
-    arena.bindGroupCache.set(cacheKey, {
+    if (bucket.length >= 8) bucket.shift();
+    bucket.push({
       pipeline: pipelineObject,
       bindings: [...bindings],
       resources: resolvedResources,

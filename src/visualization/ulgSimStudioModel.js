@@ -16,6 +16,7 @@ import {
   normalizeSphInitialBodies,
   parseSphInitialBodies,
   preflightSphInitialBodiesForSimulation,
+  separateOverlappingSphInitialBodies,
   serializeSphInitialBodies,
   sphInitialBodiesFromLegacyPhaseControls,
   validateSphInitialBodiesInContainer
@@ -445,6 +446,77 @@ export function validateStagedSimulationConfig(config) {
     normalizedBodies,
     preflight
   };
+}
+
+/**
+ * Automatically resolve out-of-bounds or overlapping bodies in a staged Studio
+ * configuration by shifting/separating bodies and expanding `boxDimensionsM`
+ * when bodies exceed the container rather than hard-blocking launch.
+ */
+export function autoResolveStagedConfigLayout(config) {
+  if (!config || !Array.isArray(config.bodies) || config.bodies.length === 0) {
+    return { resolved: false, expandedBox: false, config };
+  }
+  const next = structuredClone(config);
+  const box = next.boxDimensionsM.map((v) => Math.max(1e-4, Number(v) || 1));
+  let expandedBox = false;
+  // First ensure the box is large enough along every axis to enclose each body
+  // plus stacked vertical height if bodies would otherwise collide in-box.
+  let maxHalfX = box[0] * 0.5;
+  let maxHalfZ = box[2] * 0.5;
+  let maxTopY = box[1];
+  let totalHeightY = 0;
+  for (const b of next.bodies) {
+    const sx = Number(b.sizeM?.[0]) || 0.1;
+    const sy = Number(b.sizeM?.[1]) || 0.1;
+    const sz = Number(b.sizeM?.[2]) || 0.1;
+    const cx = Number(b.centerM?.[0]) || 0;
+    const cy = Number(b.centerM?.[1]) || sy * 0.5;
+    const cz = Number(b.centerM?.[2]) || 0;
+    if (cy - sy * 0.5 < 0) b.centerM[1] = roundNice(sy * 0.5, 6);
+    maxHalfX = Math.max(maxHalfX, Math.abs(cx) + sx * 0.5);
+    maxHalfZ = Math.max(maxHalfZ, Math.abs(cz) + sz * 0.5);
+    maxTopY = Math.max(maxTopY, b.centerM[1] + sy * 0.5);
+    totalHeightY += sy * 1.1;
+  }
+  const neededBox = [
+    roundNice(Math.max(box[0], maxHalfX * 2), 6),
+    roundNice(Math.max(box[1], maxTopY), 6),
+    roundNice(Math.max(box[2], maxHalfZ * 2), 6)
+  ];
+  if (neededBox[0] > box[0] || neededBox[1] > box[1] || neededBox[2] > box[2]) {
+    next.boxDimensionsM = neededBox;
+    expandedBox = true;
+  }
+  let separated = separateOverlappingSphInitialBodies(next.bodies, next.boxDimensionsM, {
+    coordinateFrame: 'floor-centered'
+  });
+  let check = findOverlappingSphInitialBodies(normalizeSphInitialBodies(separated));
+  if (check.length > 0 && totalHeightY > next.boxDimensionsM[1]) {
+    next.boxDimensionsM = [
+      next.boxDimensionsM[0],
+      roundNice(Math.max(next.boxDimensionsM[1], totalHeightY * 1.15), 6),
+      next.boxDimensionsM[2]
+    ];
+    expandedBox = true;
+    // Stack bodies cleanly along Y above floor origin
+    let cursorY = 0;
+    separated = next.bodies.map((b) => {
+      const sy = Number(b.sizeM?.[1]) || 0.1;
+      const pitchY = sy / Math.max(1, Number(b.particlesPerEdge?.[1]) || 1);
+      const centerY = cursorY + sy * 0.5;
+      cursorY += sy + pitchY * 0.25;
+      return { ...b, centerM: [0, roundNice(centerY, 6), 0] };
+    });
+  }
+  next.bodies = separated.map((body) => ({
+    ...body,
+    centerM: Array.from(body.centerM).map((v) => roundNice(v, 6)),
+    sizeM: Array.from(body.sizeM).map((v) => roundNice(v, 6)),
+    particlesPerEdge: [...body.particlesPerEdge],
+    velocityMPerS: [...body.velocityMPerS]
+  }));
+  return { resolved: true, expandedBox, config: next };
 }
 
 /**

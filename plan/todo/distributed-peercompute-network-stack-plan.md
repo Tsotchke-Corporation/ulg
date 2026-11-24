@@ -2,6 +2,16 @@
 
 Date: 2026-06-14 AKDT
 
+> **2026-11-23 Live-Code Status (`c09644f8`, Gate 5D / Multi-Host):**
+> **2-Browser-Context WebRTC Proofs PASS (`priority3GpuAndWebRtc.native.test.mjs`
+> + `priority5ScaleAtlasAndWebRtcTreePm.native.test.mjs`):** direct browser-to-browser
+> `RTCPeerConnection` + `RTCDataChannel` with signaling WebSocket closed, G5
+> `ReservationLedger` CAS tile leases (`distributedSpatialPartitioner.js`), real
+> GPU-computed supergalactic TreePM tile multipole summaries, exact global mass
+> conservation, and fail-closed peer-loss tile reassignment. External PeerCompute
+> extension spec handed off to `agy` at `/home/cos/projects/peercompute/plan/todo/ulg-scale-ladder-peercompute-extensions.md`.
+> Open: physical 2-machine WAN/STUN/TURN validation once `agy` ships extensions.
+
 ## Purpose
 
 Stand up a full local PeerCompute networking environment on this machine once

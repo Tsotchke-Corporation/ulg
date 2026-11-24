@@ -2255,6 +2255,7 @@ function createMechanicalParamsArray({
   gridSpacingM,
   boxDimsM,
   identityEnabled,
+  unilateralVelocityImpulseHandledByMechanicsField = false,
   selectedLevel,
   phaseLineageCapacity,
   phaseLaneCount,
@@ -2276,7 +2277,15 @@ function createMechanicalParamsArray({
   view.setFloat32(16, finiteNumber(dims[0], 5), true);
   view.setFloat32(20, finiteNumber(dims[1], 5), true);
   view.setFloat32(24, finiteNumber(dims[2], 5), true);
-  view.setUint32(28, identityEnabled ? 1 : 0, true);
+  // Bit 0: particle identity buffer enabled. Bit 1: unilateral velocity impulse
+  // is already owned by canonical mechanics-field `contact_fields` on this step
+  // (suppresses duplicate `barrier_dv` while preserving `barrier_dx`).
+  view.setUint32(
+    28,
+    (identityEnabled ? 1 : 0)
+      | (unilateralVelocityImpulseHandledByMechanicsField ? 2 : 0),
+    true
+  );
   view.setUint32(32, SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1, true);
   view.setUint32(36, SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1, true);
   view.setUint32(40, SCHROEDER_SPATIAL_SUPPORT_PROFILE_MATERIAL_INTERFACE_LOCAL_V1, true);
@@ -3468,7 +3477,7 @@ fn mechanical_graph_load_self_endpoint_metadata(
   var domain_id = 0u;
   if (
     (endpoint.descriptor & 1u) != 0u
-    && mechanical_params.identity_enabled != 0u
+    && (mechanical_params.identity_enabled & 1u) != 0u
   ) {
     domain_id = source_identity[index];
   }
@@ -3641,7 +3650,7 @@ fn mechanical_graph_pair_policy(
   if (
     same_material
     && both_solid
-    && mechanical_params.identity_enabled != 0u
+    && (mechanical_params.identity_enabled & 1u) != 0u
   ) {
     // Liquid/liquid and solid/liquid pairs never need peer identity.  Keep the
     // read on the only branch whose ownership law depends on body domains.
@@ -3653,7 +3662,7 @@ fn mechanical_graph_pair_policy(
   let same_body_solid = same_material
     && both_solid
     && (
-      mechanical_params.identity_enabled == 0u
+      (mechanical_params.identity_enabled & 1u) == 0u
       || self_domain == 0u
       || other_domain == 0u
       || self_domain == other_domain
@@ -4785,7 +4794,7 @@ fn materialize_contact_graph(
         && homogeneous_material_id == self_material_id
         && homogeneous_phase_id == 1u
         && (
-          mechanical_params.identity_enabled == 0u
+          (mechanical_params.identity_enabled & 1u) == 0u
           || self_domain_id == 0u
           || homogeneous_domain_id == 0u
           || (
@@ -6334,7 +6343,7 @@ fn mechanical_solver_same_body_solid_pair(
   let self_material = source_thermo[self_index * 3u].x;
   let other_material = source_thermo[other_index * 3u].x;
   if (abs(self_material - other_material) >= 0.5) { return false; }
-  if (mechanical_params.identity_enabled == 0u) { return true; }
+  if ((mechanical_params.identity_enabled & 1u) == 0u) { return true; }
   let self_domain = source_identity[self_index];
   let other_domain = source_identity[other_index];
   return self_domain == 0u
@@ -6358,7 +6367,7 @@ fn mechanical_solver_unilateral_pair(
   if (
     self_class != 2u
     || other_class != 2u
-    || mechanical_params.identity_enabled == 0u
+    || (mechanical_params.identity_enabled & 1u) == 0u
   ) { return false; }
   let self_domain = source_identity[self_index];
   let other_domain = source_identity[other_index];
@@ -6705,8 +6714,14 @@ fn mechanical_solver_pair_response(
     self_velocity - other_velocity,
     constraint_normal
   );
+  // Deduplication with canonical mechanics-field contact_fields: when bit 1
+  // is set, the continuum mechanics-field solve already owns unilateral normal
+  // velocity impulses for this step, so this stage applies positional
+  // non-penetration (barrier_dx) without doubling velocity impulses.
+  let velocity_handled_by_mechanics_field =
+    (mechanical_params.identity_enabled & 2u) != 0u;
   var relative_dv = vec3<f32>(0.0);
-  if (unilateral && approach < 0.0) {
+  if (unilateral && approach < 0.0 && !velocity_handled_by_mechanics_field) {
     let proposed_relative_dv = -approach
       / max(response_projection, 1.0e-6)
       * response_normal;
@@ -6752,7 +6767,7 @@ fn mechanical_solver_pair_response(
   result.velocity_residual = select(
     0.0,
     max(-approach, 0.0),
-    unilateral
+    unilateral && !velocity_handled_by_mechanics_field
   );
   if (unilateral) {
     result.barrier_dx = inverse_mass_share
@@ -16498,7 +16513,7 @@ fn materialize_terminal_residual_trace() {
     u32(round(source_thermo[high_index * 3u].x));
   var low_domain = 0u;
   var high_domain = 0u;
-  if (mechanical_params.identity_enabled != 0u) {
+  if ((mechanical_params.identity_enabled & 1u) != 0u) {
     low_domain = source_identity[low_index];
     high_domain = source_identity[high_index];
   }
@@ -18866,7 +18881,7 @@ fn interface_receipt_same_body_solid(
   let self_material = source_thermo[self_index * 3u].x;
   let other_material = source_thermo[other_index * 3u].x;
   if (abs(self_material - other_material) >= 0.5) { return false; }
-  if (mechanical_params.identity_enabled == 0u) { return true; }
+  if ((mechanical_params.identity_enabled & 1u) == 0u) { return true; }
   let self_domain = source_identity[self_index];
   let other_domain = source_identity[other_index];
   return self_domain == 0u
@@ -18891,7 +18906,7 @@ fn interface_receipt_unilateral_pair(
   if (
     self_class != 2u
     || other_class != 2u
-    || mechanical_params.identity_enabled == 0u
+    || (mechanical_params.identity_enabled & 1u) == 0u
   ) { return false; }
   let self_domain = source_identity[self_index];
   let other_domain = source_identity[other_index];
@@ -21202,7 +21217,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   jacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
   cleanupPassBudget,
   contactInnerRounds = 1,
-  parallelJacobiCleanupRounds = SCHROEDER_SPATIAL_MECHANICAL_PARALLEL_JACOBI_CLEANUP_ROUNDS_DEFAULT
+  parallelJacobiCleanupRounds = SCHROEDER_SPATIAL_MECHANICAL_PARALLEL_JACOBI_CLEANUP_ROUNDS_DEFAULT,
+  unilateralVelocityImpulseHandledByMechanicsField = false
 } = {}) {
   const solverBudget = resolveSchroederSpatialMechanicalSolverBudget({
     jacobiIterations,
@@ -21477,6 +21493,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     gridSpacingM,
     boxDimsM,
     identityEnabled: Boolean(authority.identityBuffer),
+    unilateralVelocityImpulseHandledByMechanicsField: Boolean(unilateralVelocityImpulseHandledByMechanicsField),
     selectedLevel: immutableSelectedLevel,
     phaseLineageCapacity: phaseCarrierPlan.lineageCapacity,
     phaseLaneCount: phaseCarrierPlan.phaseLaneCount,

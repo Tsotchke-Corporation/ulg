@@ -45,7 +45,7 @@ struct ThermalParams {
   walls0: vec4<f32>,
   // wall temperatures: z min, z max; box x, y
   walls1: vec4<f32>,
-  // box z, member radius, unused, unused
+  // box z, member radius, ambient_temperature_k (0 = off), emissivity (0 = off)
   box: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> params: ThermalParams;
@@ -98,15 +98,37 @@ fn conduct_members(@builtin(global_invocation_id) id: vec3<u32>) {
   var heat = 0.0;
   let n0 = neighbors[i * 2u]; let n1 = neighbors[i * 2u + 1u];
   let ids = array<u32, 6>(n0.x, n0.y, n0.z, n0.w, n1.x, n1.y);
+  var exposed_area_m2 = 0.0;
   for (var face = 0u; face < 6u; face++) {
     let j = ids[face];
-    if (j == NONE) { continue; }
-    let other = thermo_in[j];
-    if (other.w == 0.0) { continue; }
     let axis = face / 2u;
+    if (j == NONE) {
+      exposed_area_m2 += axis_area(axis);
+      continue;
+    }
+    let other = thermo_in[j];
+    if (other.w == 0.0) {
+      exposed_area_m2 += axis_area(axis);
+      continue;
+    }
     // Series conductance of the two half cells (harmonic mean), symmetric in i, j.
     let k = 2.0 * k_i * conductivity(other.z) / max(k_i + conductivity(other.z), 1.0e-30);
     heat += k * axis_area(axis) * (other.y - state.y) / params.pitch[axis];
+  }
+  // Surface-only gray-body ambient thermal radiation: strictly gated on
+  // exposed lattice faces (interior solid members have exposed_area_m2 == 0
+  // and emit zero ambient radiation).
+  var rad_heat = 0.0;
+  let amb_t = params.box.z;
+  let emiss = params.box.w;
+  if (exposed_area_m2 > 0.0 && amb_t > 0.0 && emiss > 0.0) {
+    let t_s = max(state.y, 1.0);
+    let t_s2 = t_s * t_s;
+    let t_a2 = amb_t * amb_t;
+    let raw_rad = emiss * 5.670374419e-8 * (t_a2 * t_a2 - t_s2 * t_s2) * exposed_area_m2;
+    let cv_eff = select(params.solid.z, params.liquid.z, state.z >= 1.0);
+    let max_eq_power = mass * max(cv_eff, 1.0) * abs(amb_t - t_s) / max(params.melt.w, 1.0e-9);
+    rad_heat = clamp(raw_rad, -max_eq_power, max_eq_power);
   }
   // Walls: the member's nearest face of the box, if it touches it.
   let p = member_world[i * 2u].xyz; let r = params.box.y;
@@ -123,7 +145,8 @@ fn conduct_members(@builtin(global_invocation_id) id: vec3<u32>) {
     finite_wall_energy_add(w, -params.melt.w * face_heat);
   }
   let dt = params.melt.w;
-  let u = state.x + dt * (heat + wall_heat) / mass;
+  let boundary_heat = wall_heat + rad_heat;
+  let u = state.x + dt * (heat + boundary_heat) / mass;
   let c = caloric(u);
   // A fully melted member leaves the body: ownership passes to the fluid
   // lane (schroederSolidReleaseGpu.js) with its mass, u, position and rigid
@@ -140,9 +163,9 @@ fn conduct_members(@builtin(global_invocation_id) id: vec3<u32>) {
   } else {
     thermo_out[i] = vec4<f32>(u, c.x, c.y, state.w);
   }
-  // Exact wall-heat ledger: the f32 energy the walls delivered to this member.
-  if (wall_heat != 0.0) {
-    let error = wh_scatter_f32(body, bitcast<u32>(dt * wall_heat));
+  // Exact boundary-heat ledger: the f32 energy the walls + ambient radiation delivered to this member.
+  if (boundary_heat != 0.0) {
+    let error = wh_scatter_f32(body, bitcast<u32>(dt * boundary_heat));
     if (error != 0u) { atomicOr(&heat_counters[params.counts.y * ${4 * FORMAT.wordCount}u], error); }
   }
 }
@@ -197,11 +220,11 @@ export function seedSchroederSolidMemberThermal({ seeds, pitchByAxisM, temperatu
 export function createSchroederSolidThermalStage({ device, memberCount, bodyCount, memberBuffer, memberWorldBuffer,
   thermo, neighbors, solidBranch, liquidBranch, meltTemperatureK, solidConductivity, liquidConductivity,
   pitchM, memberRadiusM, slopM = 5e-4, wallTemperaturesK, boxM, neighborBuffer: sharedNeighbors = null,
-  finiteWallState = null } = {}) {
+  finiteWallState = null, ambientTemperatureK = 0, emissivity = 0 } = {}) {
   const bindings = ['uniform', 'storage', 'read-only-storage', 'read-only-storage', 'storage',
     'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
   const pipelines = Object.fromEntries(['conduct_members', 'drain_wall_heat'].map(entryPoint => [entryPoint,
-    createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-thermal-${entryPoint}.v3`,
+    createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-thermal-${entryPoint}.v4`,
       label: `ulg-solid-thermal-${entryPoint}`, code: schroederSolidThermalWgsl, entryPoint, bindings })]));
   const storage = (label, data) => { const b = device.createBuffer({ label, size: Math.max(16, data.byteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST });
@@ -228,7 +251,8 @@ export function createSchroederSolidThermalStage({ device, memberCount, bodyCoun
   f.set([...pitchM, slopM], 16);
   f.set([wallTemperaturesK[0], wallTemperaturesK[1], wallTemperaturesK[2], wallTemperaturesK[3]], 20);
   f.set([wallTemperaturesK[4], wallTemperaturesK[5], boxM[0], boxM[1]], 24);
-  f.set([boxM[2], memberRadiusM, 0, 0], 28);
+  f.set([boxM[2], memberRadiusM, Number(ambientTemperatureK) > 0 ? Number(ambientTemperatureK) : 0,
+    Number(emissivity) > 0 ? Math.min(1, Number(emissivity)) : 0], 28);
   const wallPlaceholder = finiteWallState ? null : device.createBuffer({ label: 'ulg-solid-finite-wall-placeholder',
     size: 16, usage: GPU_BUFFER_USAGE.STORAGE });
   const groupFor = (input, output) => device.createBindGroup({ layout: pipelines.conduct_members.bindGroupLayout,

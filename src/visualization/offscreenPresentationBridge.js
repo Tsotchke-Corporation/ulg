@@ -3040,9 +3040,32 @@ export function createUlgWorkerOffscreenPresentationBridge({
           bridge.committedResidentSchedulePresentationStatus,
           contentReceipt
         );
+      const isosurfaceTemporalReceipt = isosurfaceRenderedReceiptReady
+        ? readIsosurfaceTemporalInput(contentReceipt)
+        : null;
+      const priorFramebufferTemporalReceipt = bridge.workerCanvasLastRenderedContent
+        ? readIsosurfaceTemporalInput(bridge.workerCanvasLastRenderedContent)
+        : null;
+      // While schedule N+1 has only emitted `-enqueued` (its marching-cubes
+      // build is still running and has not drawn a single pixel), schedule N
+      // still owns the visible framebuffer. Do not drop schedule N's live
+      // temporal motion frames while keeping committedResidentSchedulePresentationStatus
+      // monotonically pinned at N+1.
+      const activeFramebufferTemporalContinuation = Boolean(
+        !committedPresentationReceiptCurrent
+        && bridge.committedResidentSchedulePresentationStatus?.status
+          === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+        && isosurfaceRenderedReceiptReady
+        && isosurfaceTemporalReceipt?.valid === true
+        && isosurfaceTemporalReceipt.ageS > 0
+        && priorFramebufferTemporalReceipt?.valid === true
+        && priorFramebufferTemporalReceipt.sourceIdentity
+          === isosurfaceTemporalReceipt.sourceIdentity
+        && isosurfaceTemporalReceipt.ageS > priorFramebufferTemporalReceipt.ageS
+      );
       const committedPresentationFramebufferCurrent = Boolean(
         candidateReceiptReady
-        && committedPresentationReceiptCurrent
+        && (committedPresentationReceiptCurrent || activeFramebufferTemporalContinuation)
         && committedPresentationFramebufferCanAdvance(
           bridge.workerCanvasLastRenderedContent,
           contentReceipt,
@@ -3323,7 +3346,14 @@ export function createUlgWorkerOffscreenPresentationBridge({
                           totalSubstepCount:
                             contentReceipt.motionPresentationQosBoundary.totalSubstepCount,
                           chunkStepCount:
-                            contentReceipt.motionPresentationQosBoundary.chunkStepCount
+                            contentReceipt.motionPresentationQosBoundary.chunkStepCount,
+                          ...(Number.isSafeInteger(contentReceipt.motionPresentationQosBoundary.maxSubstepsPerSubmission)
+                            && contentReceipt.motionPresentationQosBoundary.maxSubstepsPerSubmission > 0
+                            ? {
+                                maxSubstepsPerSubmission:
+                                  contentReceipt.motionPresentationQosBoundary.maxSubstepsPerSubmission
+                              }
+                            : {})
                         })
                       }
                     : {}),

@@ -1,5 +1,5 @@
 import { mlsMpmG2pReconstructWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { prepareSphExactHistoryMechanicsViews } from './sphExactHistoryP2gGpu.js';
 import { prepareSphExactG2pNumericQuantities } from './sphExactG2pQuantityGpu.js';
 import { createSphExactRationalQuantityWgsl, sphExactRationalQuantityLayout } from './sphExactRationalQuantityWgsl.js';
@@ -116,7 +116,7 @@ fn select_history_g2p(@builtin(global_invocation_id) id:vec3<u32>){
   }
 }`, 'select_history_g2p', [ro, ro, rw, ro]);
   const countResource = { buffer: count.controlBuffer, offset: count.controlOffsetBytes, size: 64 };
-  const group = (pipeline, resources) => device.createBindGroup({ layout: pipeline.bindGroupLayout,
+  const group = (pipeline, resources) => createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
     entries: resources.map((buffer, binding) => ({ binding, resource: buffer === countResource ? buffer : { buffer } })) });
   const splitGroup = group(split, [views.outputBuffer, stateBuffer, thermoBuffer, mechanicsBuffer, countResource, views.validationBuffer]);
   const reconstructGroup = group(reconstruct, [stateBuffer, thermoBuffer, mechanicsBuffer, gridBuffer, outStateBuffer,

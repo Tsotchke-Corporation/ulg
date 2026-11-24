@@ -94,24 +94,31 @@ test('native Vulkan integer energy ledger closes sum(U - S) bit-exactly through 
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     runs = await page.evaluate(async () => {
-      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      let adapter = null;
+      for (let i = 0; i < 8 && !adapter; i++) {
+        adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) await new Promise(r => setTimeout(r, 250));
+      }
       const limits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter));
+      const gpuErrors = [];
+      device.addEventListener('uncapturederror', (e) => gpuErrors.push(String(e.error?.message ?? e).slice(0, 400)));
       const abi = await import('/ulg-gpu-abi/src/sphExactMassInventory.js');
       const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
       const format = abi.createSphExactMassFormat();
       const particles = [];
       for (let i = 0; i < 8; i++) {
         const [x, y, z] = [i & 1, (i >> 1) & 1, (i >> 2) & 1];
-        particles.push({ id: `ledger-${i}`, massKg: 0.001, x: [0.3 + 0.005 * x, 1 + 0.005 * y, 1 + 0.005 * z],
+        // Honest Walls (distance < parcel_edge ~ 5.03 mm for 1 g Fe): place
+        // the x=0 face of the 2x2x2 cube touching the 350 K xMin wall at 2 mm.
+        particles.push({ id: `ledger-${i}`, massKg: 0.001, x: [0.002 + 0.005 * x, 1 + 0.005 * y, 1 + 0.005 * z],
           temperatureK: (x + y + z) % 2 ? 600 : 300 });
       }
       const pick = run => ({ initialEnergy: run.initialEnergy, masses: run.masses,
         cycles: run.runs.map(cycle => ({ energy: cycle.energy, state: cycle.state })) });
       // G4: the same cluster plus a far Fe cluster whose temperatures span
       // 0.35 K, run ungated and at epsilon 0.5 K. It sits 0.8 m from every
-      // wall: unspecified faces are 0 K reservoirs within the 0.5 m layer,
-      // and wall heat is not gated.
+      // wall, well outside Honest Walls parcel contact distance.
       const far = Array.from({ length: 8 }, (_, i) => {
         const [x, y, z] = [i & 1, (i >> 1) & 1, (i >> 2) & 1];
         return { id: `ledger-far-${i}`, massKg: 0.001, x: [1.2 + 0.005 * x, 1 + 0.005 * y, 1 + 0.005 * z],
@@ -126,9 +133,12 @@ test('native Vulkan integer energy ledger closes sum(U - S) bit-exactly through 
         return {
           cluster: pick(await fixture.runExactMassContinuationNative(device, format, true, false, false, null, {
             particles, cycles: 6, thermalConductivityWPerMK: { solid: 80, liquid: 40 } })),
-          single: pick(await fixture.runExactMassContinuationNative(device, format, true)),
+          single: pick(await fixture.runExactMassContinuationNative(device, format, true, false, false, null, {
+            particles: [{ id: 'exact-carrier', massKg: 0.001, x: [0.002, 1, 1], temperatureK: 300 }],
+            thermalConductivityWPerMK: { solid: 80, liquid: 40 } })),
           farUngated: pick(await dormancyRun(null)),
-          farGated: pick(await dormancyRun(0.5))
+          farGated: pick(await dormancyRun(0.5)),
+          gpuErrors
         };
       } finally { device.destroy(); }
     });
@@ -140,6 +150,8 @@ test('native Vulkan integer energy ledger closes sum(U - S) bit-exactly through 
       control: words.slice(2 * rows * W) };
   };
   const sum = values => values.reduce((a, b) => a + b, 0n);
+  assert.deepEqual(runs.gpuErrors, [], `WebGPU uncaptured errors: ${JSON.stringify(runs.gpuErrors)}`);
+  delete runs.gpuErrors;
   for (const [name, run] of Object.entries(runs)) {
     const rows = run.masses.length;
     assert.ok(run.initialEnergy, `${name}: the cold record exists`);
@@ -156,7 +168,8 @@ test('native Vulkan integer energy ledger closes sum(U - S) bit-exactly through 
       assert.equal(now.control[0], 0, `${name} cycle ${index + 1}: no ledger errors`);
       assert.equal(now.control[1] & ~2, 0, `${name} cycle ${index + 1}: only the mechanics-heat status`);
       assert.equal(now.control[2], 0, `${name} cycle ${index + 1}: every step had its pair exchange`);
-      assert.equal(now.control[3], rows * (index + 1), `${name} cycle ${index + 1}: ledger particle-steps`);
+      assert.equal(now.control[3], rows * (index + 1),
+        `${name} cycle ${index + 1}: ledger particle-steps (cold=${JSON.stringify(cold.control)}, now=${JSON.stringify(now.control)}, all=${JSON.stringify(run.cycles.map(c => record(c.energy, rows).control))})`);
       assert.equal(sum(now.U) - sum(now.S), budget, `${name} cycle ${index + 1}: sum(U - S) is exact`);
       pairExchange ||= now.U.some((u, i) => u - now.S[i] !== cold.U[i]);
       // Every pair packet is applied to both rows with opposite sign.
@@ -218,7 +231,11 @@ test('native Vulkan phase ledger keeps mass and energy bit-exact through melting
     page.on('console', message => { if (message.type() === 'error') console.log('page:', message.text().slice(0, 300)); });
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     run = await page.evaluate(async () => {
-      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      let adapter = null;
+      for (let i = 0; i < 8 && !adapter; i++) {
+        adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) await new Promise(r => setTimeout(r, 250));
+      }
       const limits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter));
       const fixture = await import('/tests/fixtures/sphExactPhaseLedgerNative.js');
@@ -302,9 +319,15 @@ test('native Vulkan energy ledger books contact heat as a recorded mechanics sou
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     run = await page.evaluate(async () => {
-      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      let adapter = null;
+      for (let i = 0; i < 8 && !adapter; i++) {
+        adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) await new Promise(r => setTimeout(r, 250));
+      }
       const limits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter));
+      const gpuErrors = [];
+      device.addEventListener('uncapturederror', (e) => gpuErrors.push(String(e.error?.message ?? e).slice(0, 400)));
       const abi = await import('/ulg-gpu-abi/src/sphExactMassInventory.js');
       const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
       const particles = [

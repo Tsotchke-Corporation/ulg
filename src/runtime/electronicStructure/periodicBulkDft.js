@@ -275,9 +275,8 @@ function getAtomicBulkDescriptors(Z, functional = 'pbe') {
   const sOcc = sSub ? sSub.occupancy : 0;
   const dEnergyHa = dOrb ? dOrb.energyHa : -2.0;
   const sEnergyHa = sOrb ? sOrb.energyHa : -0.25;
-  // Transition & coinage d-block metals: (n-1)d electrons are valence, so the frozen
-  // Ashcroft ion core is the closed noble-gas core (Z - dOcc - sOcc), NOT Z - 1!
-  const isTransition = dOcc > 0 && dOcc <= 10 && Z >= 21 && (cfg.every((sh) => !(sh.n === maxN && sh.l === 1)));
+  // Transition & coinage d-block metals: open (n-1)d OR coinage d10 s1 (Cu/Ag/Au) — NOT closed d10 s2 (Zn/Cd/Hg)!
+  const isTransition = dOcc > 0 && (dOcc < 10 || (dOcc === 10 && sOcc === 1)) && Z >= 21 && (cfg.every((sh) => !(sh.n === maxN && sh.l === 1)));
   const spValence = isTransition ? Math.max(1, Math.min(2, sOcc || 1)) : zv;
   const totalValence = isTransition ? spValence + dOcc : zv;
   const rc = coreRadiusBohr(Z, totalValence, { functional, scalarRelativistic: true, spinOrbit: true, gridPointsN: 360 });
@@ -698,6 +697,7 @@ export function solvePeriodicBulkCrystalDft({
 
   return {
     schema: PERIODIC_BULK_DFT_SCHEMA,
+    method: 'plane-wave-pseudopotential-kinetic-gradient-pbe-approx',
     generatorFingerprint: PERIODIC_BULK_DFT_GENERATOR_FINGERPRINT,
     element: {
       Z,

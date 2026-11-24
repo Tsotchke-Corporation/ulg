@@ -408,24 +408,49 @@ function generationReservationLive(r,gen) {
 function requireGenerationReservation(r,gen) {
   if(!generationReservationLive(r,gen))throw new Error('G6 reservation revoked');
 }
+function isRealWebGpuDevice(device) {
+  return typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice;
+}
 function allocation(r) {
   if (r.generations.size >= THERMAL_POTENTIAL_LIMITS.maxGenerations) throw new Error('G6 generation capacity exhausted');
-  const buffer = (label, size) => r.device.createBuffer({ label, size, usage: 0x80|0x08|0x04 });
   const slot = [0,1,2].find(i=>![...r.generations].some(g=>g.slot===i));
-  const gen = {slot,refs:0,retired:false,destroyed:false};
+  if (isRealWebGpuDevice(r.device) && r.recycledGenerations?.length > 0) {
+    const gen = r.recycledGenerations.pop();
+    gen.slot = slot;
+    gen.refs = 0;
+    gen.retired = false;
+    gen.destroyed = false;
+    gen.receiptCopied = false;
+    gen.reservation = null;
+    r.device.queue.writeBuffer(gen.table, 0, new Float32Array([r.count, 4 + r.count * 16, 0, 0]));
+    r.generations.add(gen);
+    return gen;
+  }
+  const buffer = (label, size) => r.device.createBuffer({ label, size, usage: 0x80|0x08|0x04 });
+  const gen = {slot,refs:0,retired:false,destroyed:false,bindGroup:null,receiptRead:null,receiptCopied:false};
   try {
     gen.table=buffer('g6-potential-table',(4+r.count*24)*4);
     gen.metadata=buffer('g6-potential-metadata',r.count*64);
     gen.receipt=buffer('g6-potential-receipt',32);
+    if (isRealWebGpuDevice(r.device)) {
+      gen.receiptRead=r.device.createBuffer({ label:'g6-potential-receipt-read', size:32, usage:1|8 });
+    }
     r.device.queue.writeBuffer(gen.table,0,new Float32Array([r.count,4+r.count*16,0,0]));
     r.generations.add(gen);return gen;
-  }catch(error){gen.table?.destroy();gen.metadata?.destroy();gen.receipt?.destroy();throw error;}
+  }catch(error){gen.table?.destroy();gen.metadata?.destroy();gen.receipt?.destroy();gen.receiptRead?.destroy();throw error;}
 }
 function collect(r, gen) {
   if (!gen.retired || gen.refs || gen.destroyed) return;
+  r.generations.delete(gen);
+  if(gen.reservation){releaseReservation(r,{token:gen.reservation});gen.reservation=null;}
+  if (!r.closed && isRealWebGpuDevice(r.device) && r.recycledGenerations.length < THERMAL_POTENTIAL_LIMITS.maxGenerations) {
+    gen.receiptCopied = false;
+    r.recycledGenerations.push(gen);
+    return;
+  }
   gen.destroyed=true;
-  gen.table.destroy(); gen.metadata.destroy(); gen.receipt.destroy(); r.generations.delete(gen);
-  if(gen.reservation)releaseReservation(r,{token:gen.reservation});
+  gen.bindGroup=null;
+  gen.table.destroy(); gen.metadata.destroy(); gen.receipt.destroy(); gen.receiptRead?.destroy();
   if (r.closed && r.generations.size === 0) r.requests.destroy();
 }
 function releaseReservation(r, c) {
@@ -445,7 +470,7 @@ export function createThermalPotentialGpu(device, { thermalResponseGraphUpload: 
   }
   const r = { device, upload, source: Object.fromEntries(sourceFields.map(k=>[k,upload[k]])),
     count: upload.graphCount, ledger: reservationLedger, owner:`ulg-g6-thermal-${nextOwner++}`,
-    generations:new Set(), ordinal:0, closed:false, pending:null };
+    generations:new Set(), recycledGenerations:[], ordinal:0, closed:false, pending:null };
   try {
   r.requests=device.createBuffer({ label:'g6-potential-requests',size:(16+r.count*4)*4,usage:0x80|0x08|0x04 });
   const module=device.createShaderModule({label:'g6-thermal-potential-fit',code:thermalPotentialFitWgsl});
@@ -461,9 +486,11 @@ export function createThermalPotentialGpu(device, { thermalResponseGraphUpload: 
   }catch(error){r.closed=true;for(const g of r.generations){g.retired=true;collect(r,g);}r.requests?.destroy();throw error;}
 }
 function dispatch(r,encoder,gen,entry) {
-  const buffers=[r.source.graphNodeBuffer,r.source.graphSampleBuffer,r.requests,gen.table,gen.metadata,gen.receipt];
-  const group=r.device.createBindGroup({layout:r.layout,entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
-  const pass=encoder.beginComputePass({label:`g6-potential-${entry}`});pass.setPipeline(r.pipelines[entry]);pass.setBindGroup(0,group);
+  if (!gen.bindGroup) {
+    const buffers=[r.source.graphNodeBuffer,r.source.graphSampleBuffer,r.requests,gen.table,gen.metadata,gen.receipt];
+    gen.bindGroup=r.device.createBindGroup({layout:r.layout,entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
+  }
+  const pass=encoder.beginComputePass({label:`g6-potential-${entry}`});pass.setPipeline(r.pipelines[entry]);pass.setBindGroup(0,gen.bindGroup);
   pass.dispatchWorkgroups(entry==='fit'?r.count:Math.ceil(Math.max(16,r.count)/64));pass.end();
 }
 function encodeReset(r,encoder,gen) { dispatch(r,encoder,gen,'reset'); }
@@ -497,6 +524,10 @@ export function encodeThermalPotentialCandidateGpu(cache, encoder) {
     encoder.copyBufferToBuffer(r.current.metadata,0,gen.metadata,0,r.count*64);
     dispatch(r,encoder,gen,'fit');
     dispatch(r,encoder,gen,'clear_misses');
+    if (gen.receiptRead) {
+      encoder.copyBufferToBuffer(gen.receipt,0,gen.receiptRead,0,32);
+      gen.receiptCopied=true;
+    }
   } catch(error) { if(gen){gen.retired=true;collect(r,gen);}r.ledger.cancel(reserved.token);throw error; }
   const candidate=Object.freeze({schema:THERMAL_POTENTIAL_SCHEMA});
   const c={r,cache,gen,encoder,parent:r.current,token:reserved.token,ready:false,submitted:false,settled:false,attached:false};
@@ -520,12 +551,20 @@ export async function completeThermalPotentialCandidateGpu(candidate) {
 }
 async function completeCandidateReceipt(c) {
   c.gen.refs++;
-  let read;
+  let read = null;
+  let ownedRead = false;
   try{
-    read=c.r.device.createBuffer({size:32,usage:1|8});
-    const encoder=c.r.device.createCommandEncoder();encoder.copyBufferToBuffer(c.gen.receipt,0,read,0,32);
-    c.r.device.queue.submit([encoder.finish()]);await read.mapAsync(1);
-    const words=new Uint32Array(read.getMappedRange());
+    if (c.gen.receiptRead && c.gen.receiptCopied) {
+      read = c.gen.receiptRead;
+    } else {
+      read=c.r.device.createBuffer({size:32,usage:1|8});
+      ownedRead = true;
+      const encoder=c.r.device.createCommandEncoder();encoder.copyBufferToBuffer(c.gen.receipt,0,read,0,32);
+      c.r.device.queue.submit([encoder.finish()]);
+    }
+    await read.mapAsync(1);
+    const words=new Uint32Array(read.getMappedRange().slice(0, 32));
+    read.unmap?.();
     if(words[0]!==0x47365031||words[1]===0||words[2]===0){
       const error=new Error(`G6 GPU candidate validation refused: ${Array.from(words)}`);
       if(words[0]===0x47365031){error.code='ERR_G6_NO_VALID_FIT';error.cumulativeConsumerHits=words[7];}
@@ -536,7 +575,7 @@ async function completeCandidateReceipt(c) {
     if(c.settled)throw new Error('G6 candidate cancelled');c.ready=true;
     return Object.freeze({cumulativeConsumerHits:words[7]});
   }catch(error){settle(c,false);throw error;}
-  finally{read?.destroy();c.gen.refs--;collect(c.r,c.gen);}
+  finally{if(ownedRead)read?.destroy();c.gen.refs--;collect(c.r,c.gen);}
 }
 export function attachThermalPotentialCandidateToDelta(candidate,delta) {
   const c=candidates.get(candidate);
@@ -589,5 +628,7 @@ export function cancelThermalPotentialCandidateGpu(candidate) {const c=candidate
 export function destroyThermalPotentialGpu(cache) {
   const r=caches.get(cache);if(!r||r.closed)return;r.closed=true;
   if(r.pending)settle(r.pending,false);
-  for(const g of r.generations){g.retired=true;collect(r,g);}
+  for(const g of [...r.recycledGenerations]){g.retired=true;collect(r,g);}
+  r.recycledGenerations.length=0;
+  for(const g of [...r.generations]){g.retired=true;collect(r,g);}
 }

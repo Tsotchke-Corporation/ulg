@@ -2,7 +2,21 @@
 
 Date: 2026-06-11 AKDT
 
-## Current Answer
+> **2026-11-23 Live-Code Status (`f6623b39..c09644f8`, Gate 1 / Gate 2):**
+> - **ALL 5 DOMAINS GPU-RESIDENT & ISOTOPE-NATIVE (`Z=1..118, A`):**
+>   `nuclearStructureGpu.js`, `radialKohnShamWebGpu.js` (finite `R_nuc(A)` +
+>   Koelling–Harmon + QED + two-body reduced-mass shift + Fermi-contact hyperfine
+>   splitting, `0` per-SCF CPU readbacks), `periodicBulkDftWebGpu.js` (GPU Bloch
+>   DFT + 3D FFT density + isotope mass/ZPE/Debye), `electromagneticClosureWebGpu.js`,
+>   `elementMdClosureWebGpu.js` (GPU LJ/EAM/SW MD + isotope mass/ZPE melting shift),
+>   `molecularHartreeFockWebGpu.js` (GPU RHF + 3D density), `recursiveCompoundPipeline.js`
+>   (isotopologue parsing `D2O`/`T2O`/`235UF6`/`14CO2` + ZPE), and Gate 1 arbitrary
+>   `(Z, A)` decay chains in `nuclearCherenkovClosure.js`.
+> - Remaining open: deeper 4-component Dirac–KS / `DFT+U` refinements and formal
+>   reviewed `ulg.campaign.receipt.v1`. Active routing:
+>   [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
+## Current Answer (2026-06-11 Historical Baseline)
 
 The relativistic optical closures are not fully implemented in WebGPU.
 

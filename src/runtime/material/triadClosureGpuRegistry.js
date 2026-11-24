@@ -22,7 +22,8 @@ const GPU_BUFFER_USAGE = {
   STORAGE: 0x0080
 };
 
-const registryByDevice = new WeakMap();
+const TRIAD_REGISTRY_SYM = Symbol.for('ulg.triadClosureRegistryByDevice.v1');
+const registryByDevice = (globalThis[TRIAD_REGISTRY_SYM] ??= new WeakMap());
 
 /**
  * Unpack an already-packed RESPONSE_FUNCTION_GPU_SCHEMA Float32Array into

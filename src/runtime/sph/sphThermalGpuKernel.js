@@ -115,6 +115,41 @@ import {
   appendGpuReadbackTelemetryObservation,
   createGpuReadbackTelemetry
 } from './sphGpuReadbackTelemetry.js';
+
+const A3_THERMAL_REGIONAL_CACHE_SYMBOL = Symbol.for('ulg.a3ThermalRegionalByDevice');
+function getSphThermalRegionalRadiativeFluxBinding(device) {
+  if (!device) return null;
+  const cacheByDevice = globalThis[A3_THERMAL_REGIONAL_CACHE_SYMBOL];
+  const cached = cacheByDevice?.get?.(unwrapWebGpuCacheDevice(device));
+  if (!cached || !cached.radiativeFluxBuffer || cached.consumedSchedules <= 0) return null;
+  return {
+    radiativeFluxBuffer: cached.radiativeFluxBuffer,
+    memberCapacity: cached.memberCapacity,
+    consumedSchedules: cached.consumedSchedules
+  };
+}
+function noteSphThermalRegionalPhysicsConsumption(device) {
+  if (!device) return 0;
+  const cacheByDevice = globalThis[A3_THERMAL_REGIONAL_CACHE_SYMBOL];
+  const cached = cacheByDevice?.get?.(unwrapWebGpuCacheDevice(device));
+  if (!cached) return 0;
+  cached.physicsConsumedSteps += 1;
+  const prev = globalThis.__ulgA3ThermalRegionalClosureStatus;
+  if (prev && typeof prev === 'object') {
+    const next = Object.freeze({
+      ...prev,
+      thermalKernelPhysicsConsumerSteps: cached.physicsConsumedSteps,
+      livePhysicsConsumerActive: cached.physicsConsumedSteps > 0
+    });
+    globalThis.__ulgA3ThermalRegionalClosureStatus = next;
+    globalThis.__ulgA3RegionalClosureStatus = Object.freeze({
+      ...(globalThis.__ulgA3RegionalClosureStatus ?? { active: true }),
+      active: true,
+      thermal: next
+    });
+  }
+  return cached.physicsConsumedSteps;
+}
 import {
   SPH_THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT as THERMAL_AMBIENT_TEMPERATURE_K_DEFAULT,
   ULG_SPH_THERMAL_ENVIRONMENT_AUTHORITY_SCHEMA,
@@ -328,7 +363,7 @@ fn canonical_thermal_open_reservoir_delta(
   let code = replaceThermalWgslSection(
     legacyWgsl,
     `  ambient_temperature_k: f32,\n  _pad_b: f32,\n  ambient_radiation_exchange_enabled: u32,\n};`,
-    `  ambient_temperature_k: f32,\n  canonical_proposal_enabled: u32,\n  canonical_generation_id: u32,\n  canonical_support_epoch: u32,\n  canonical_position_epoch: u32,\n  canonical_topology_epoch: u32,\n  canonical_storage_generation: u32,\n  canonical_physics_tick: u32,\n  canonical_physics_substep: u32,\n  ambient_radiation_exchange_enabled: u32,\n  _pad_d: u32,\n};`,
+    `  ambient_temperature_k: f32,\n  canonical_proposal_enabled: u32,\n  canonical_generation_id: u32,\n  canonical_support_epoch: u32,\n  canonical_position_epoch: u32,\n  canonical_topology_epoch: u32,\n  canonical_storage_generation: u32,\n  canonical_physics_tick: u32,\n  canonical_physics_substep: u32,\n  ambient_radiation_exchange_enabled: u32,\n  a3_thermal_radiation_enabled: u32,\n};`,
     'uniform identity extension'
   );
   code = replaceThermalWgslSection(
@@ -412,6 +447,23 @@ fn canonical_thermal_open_reservoir_delta(
 export const sphThermalStepWgsl = createCanonicalThermalProposalApplyWgsl(
   sphThermalStepLegacyWgsl
 );
+
+function appendSphA3ThermalRadiationWgsl(baseWgsl) {
+  let code = replaceThermalWgslSection(
+    baseWgsl,
+    '@group(0) @binding(10) var<storage, read> thermal_bins: array<u32>;\n',
+    '@group(0) @binding(10) var<storage, read> thermal_bins: array<u32>;\n'
+      + '@group(0) @binding(15) var<storage, read> a3_radiative_flux: array<vec4<f32>>;\n',
+    'a3 thermal radiation binding 15'
+  );
+  code = replaceThermalWgslSection(
+    code,
+    `\t    let raw_ambient_dE = self_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4\n\t      * (pow4(params.ambient_temperature_k) - pow4(current_temperature))\n\t      * surface_area_m2 * params.dt;`,
+    `\t    var a3_emitted_t4 = pow4(current_temperature);\n\t    if (\n\t      params.a3_thermal_radiation_enabled == 1u\n\t      && particle_index < arrayLength(&a3_radiative_flux)\n\t    ) {\n\t      let a3_row = a3_radiative_flux[particle_index];\n\t      if (\n\t        a3_row.z > 0.5\n\t        && a3_row.y > 0.0\n\t        && a3_row.y == a3_row.y\n\t        && abs(current_temperature - a3_row.w) <= 2.0\n\t      ) {\n\t        a3_emitted_t4 = a3_row.y * 8100000000.0;\n\t      }\n\t    }\n\t    let raw_ambient_dE = self_emissivity * STEFAN_BOLTZMANN_W_PER_M2_K4\n\t      * (pow4(params.ambient_temperature_k) - a3_emitted_t4)\n\t      * surface_area_m2 * params.dt;`,
+    'a3 thermal radiation ambient exchange consumer'
+  );
+  return code;
+}
 
 // Honest finite walls: the same kernel, with each parcel's applied wall
 // exchange also added (with opposite sign) into its face's pending energy
@@ -3693,6 +3745,7 @@ function createParamsArray({
   maxPairSupportM = 0,
   ambientTemperatureK,
   ambientRadiationExchangeEnabled,
+  a3ThermalRadiationEnabled = false,
   canonicalThermalProposal = null
 }) {
   const buffer = new ArrayBuffer(THERMAL_PARAMS_BYTES);
@@ -3732,6 +3785,7 @@ function createParamsArray({
   view.setFloat32(96, Math.max(0, finiteNumber(maxPairSupportM, 0)), true);
   view.setFloat32(100, ambientTemperatureK, true);
   view.setUint32(136, ambientRadiationExchangeEnabled ? 1 : 0, true);
+  view.setUint32(140, a3ThermalRadiationEnabled ? 1 : 0, true);
   if (canonicalThermalProposal) {
     const execution = canonicalThermalProposal.execution;
     view.setUint32(
@@ -4071,49 +4125,88 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     && typeof globalThis.GPUDevice === 'function'
     && device instanceof globalThis.GPUDevice
   );
-  const thermalOutUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const thermalOutUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
   const thermalParamsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
   const outStateBuffer = useQueueOrderedThermalPool
-    ? tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
-        bucketKey: 'ulg-sph-thermal-output-state',
-        label: 'ulg-sph-thermal-output-state',
-        size: outStateByteLength,
-        usage: thermalOutUsage
-      }), device)
+    ? registerQueueOrderedPooledBufferReturn(
+        tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-sph-thermal-output-state',
+          label: 'ulg-sph-thermal-output-state',
+          size: outStateByteLength,
+          usage: thermalOutUsage
+        }), device),
+        device,
+        {
+          bucketKey: 'ulg-sph-thermal-output-state',
+          size: outStateByteLength,
+          usage: thermalOutUsage
+        }
+      )
     : createOutputStorageBuffer(
         device,
         'ulg-sph-thermal-output-state',
         outStateByteLength,
         GPU_BUFFER_USAGE.COPY_SRC
       );
-  registerSetupFailureCleanup(() => outStateBuffer.destroy?.());
+  registerSetupFailureCleanup(() => releaseOrDestroyQueueOrderedPooledBuffer(outStateBuffer, { allowPool: false }));
   const outThermoBuffer = useQueueOrderedThermalPool
-    ? tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
-        bucketKey: 'ulg-sph-thermal-output-thermo',
-        label: 'ulg-sph-thermal-output-thermo',
-        size: outThermoByteLength,
-        usage: thermalOutUsage
-      }), device)
+    ? registerQueueOrderedPooledBufferReturn(
+        tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-sph-thermal-output-thermo',
+          label: 'ulg-sph-thermal-output-thermo',
+          size: outThermoByteLength,
+          usage: thermalOutUsage
+        }), device),
+        device,
+        {
+          bucketKey: 'ulg-sph-thermal-output-thermo',
+          size: outThermoByteLength,
+          usage: thermalOutUsage
+        }
+      )
     : createOutputStorageBuffer(
         device,
         'ulg-sph-thermal-output-thermo',
         outThermoByteLength,
         GPU_BUFFER_USAGE.COPY_SRC
       );
-  registerSetupFailureCleanup(() => outThermoBuffer.destroy?.());
+  registerSetupFailureCleanup(() => releaseOrDestroyQueueOrderedPooledBuffer(outThermoBuffer, { allowPool: false }));
   const paramsBuffer = useQueueOrderedThermalPool
-    ? tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
-        bucketKey: 'ulg-sph-thermal-params',
-        label: 'ulg-sph-thermal-params',
-        size: THERMAL_PARAMS_BYTES,
-        usage: thermalParamsUsage
-      }), device)
+    ? registerQueueOrderedPooledBufferReturn(
+        tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-sph-thermal-params',
+          label: 'ulg-sph-thermal-params',
+          size: THERMAL_PARAMS_BYTES,
+          usage: thermalParamsUsage
+        }), device),
+        device,
+        {
+          bucketKey: 'ulg-sph-thermal-params',
+          size: THERMAL_PARAMS_BYTES,
+          usage: thermalParamsUsage
+        }
+      )
     : device.createBuffer({
         label: 'ulg-sph-thermal-params',
         size: THERMAL_PARAMS_BYTES,
         usage: thermalParamsUsage
       });
-  registerSetupFailureCleanup(() => paramsBuffer.destroy?.());
+  registerSetupFailureCleanup(() => releaseOrDestroyQueueOrderedPooledBuffer(paramsBuffer, { allowPool: false }));
+  const proposalLedgerWords = Number(schroederSpatialThermalProposal?.exactEnergyLedgerWords ?? 0);
+  const exactEnergyRows = exactCapture?.sourceRead?.energy ?? null;
+  const exactEnergyLedger = proposalLedgerWords !== 0;
+  const a3RadiativeFluxBinding = !exactQuantities && ambientRadiationExchangeEnabled
+    ? getSphThermalRegionalRadiativeFluxBinding(device)
+    : null;
+  const maxThermalStorageSlots = Number(device?.limits?.maxStorageBuffersPerShaderStage ?? 0);
+  const baseThermalStorageSlots = 11
+    + (exactEnergyLedger ? 1 : 0)
+    + (finiteWallState ? 1 : 0);
+  const a3RadiativeFluxEnabled = Boolean(
+    a3RadiativeFluxBinding?.radiativeFluxBuffer
+    && a3RadiativeFluxBinding.radiativeFluxBuffer.destroyed !== true
+    && (maxThermalStorageSlots === 0 || maxThermalStorageSlots >= baseThermalStorageSlots + 1)
+  );
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     materialCount: resolvedPhaseResponseTable.materialCount,
@@ -4130,15 +4223,13 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
     ambientTemperatureK: resolvedAmbientTemperatureK,
     ambientRadiationExchangeEnabled,
+    a3ThermalRadiationEnabled: a3RadiativeFluxEnabled,
     canonicalThermalProposal
   }));
   // Integer energy ledger (g2-integer-ledger-proposal.md, Phase 1): a ledger
   // proposal carries exact pair packets, and only the exact energy apply may
   // consume it. It adds them and this step's source packets to a successor
   // copy of the carrier energy record and projects u from the result.
-  const proposalLedgerWords = Number(schroederSpatialThermalProposal?.exactEnergyLedgerWords ?? 0);
-  const exactEnergyRows = exactCapture?.sourceRead?.energy ?? null;
-  const exactEnergyLedger = proposalLedgerWords !== 0;
   if (exactEnergyLedger && (proposalLedgerWords !== SPH_EXACT_THERMAL_ENERGY_WORDS
       || !spatialCanonicalThermalProposal || !exactEnergyRows || exactQuantities
       || exactEnergyRows.rowCount !== sphParticleState.particleCount
@@ -4205,16 +4296,26 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   const exactFiniteWall = finiteWallState && exactEnergyLedger
     ? prepareSphExactFiniteWallCandidate({ device, state: finiteWallState, particleCount: sphParticleState.particleCount }) : null;
   if (exactFiniteWall) registerSetupFailureCleanup(exactFiniteWall.destroy);
+  const baseThermalCode = exactQuantities
+    ? appendSphExactThermalQuantityWgsl(sphThermalStepWgsl)
+    : exactEnergyLedger
+      ? appendSphExactThermalEnergyWgsl(
+          exactFiniteWall ? sphThermalStepFiniteWallWgsl : sphThermalStepWgsl,
+          { finiteWalls: Boolean(exactFiniteWall) }
+        )
+      : finiteWallState
+        ? sphThermalStepFiniteWallWgsl
+        : sphThermalStepWgsl;
+  const thermalCode = a3RadiativeFluxEnabled
+    ? appendSphA3ThermalRadiationWgsl(baseThermalCode)
+    : baseThermalCode;
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    // v2/v8: honest conduction-limited walls read binding 13.
-    cacheKey: exactQuantities ? 'ulg-sph-thermal-step-exact-quantity.v2'
+    // v2/v8: honest conduction-limited walls read binding 13; optional A3 radiative flux reads binding 15.
+    cacheKey: `${exactQuantities ? 'ulg-sph-thermal-step-exact-quantity.v2'
       : exactEnergyLedger ? `ulg-sph-thermal-step-exact-energy.v4-wall-${Boolean(exactFiniteWall)}`
-        : finiteWallState ? 'ulg-sph-thermal-step-finite-wall.v3' : 'ulg-sph-thermal-step.v8',
+        : finiteWallState ? 'ulg-sph-thermal-step-finite-wall.v3' : 'ulg-sph-thermal-step.v8'}${a3RadiativeFluxEnabled ? '-a3rad.v1' : ''}`,
     label: 'ulg-sph-thermal-step',
-    code: exactQuantities ? appendSphExactThermalQuantityWgsl(sphThermalStepWgsl)
-      : exactEnergyLedger ? appendSphExactThermalEnergyWgsl(exactFiniteWall ? sphThermalStepFiniteWallWgsl : sphThermalStepWgsl,
-        { finiteWalls: Boolean(exactFiniteWall) })
-        : finiteWallState ? sphThermalStepFiniteWallWgsl : sphThermalStepWgsl,
+    code: thermalCode,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -4231,7 +4332,8 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       ...(exactQuantities ? [computeBufferBinding(11, 'storage'), computeBufferBinding(12, 'storage')] : []),
       ...(exactEnergyLedger ? [computeBufferBinding(11, 'storage')] : []),
       computeBufferBinding(13, 'read-only-storage'),
-      ...(finiteWallState ? [computeBufferBinding(14, 'storage')] : [])
+      ...(finiteWallState ? [computeBufferBinding(14, 'storage')] : []),
+      ...(a3RadiativeFluxEnabled ? [computeBufferBinding(15, 'read-only-storage')] : [])
     ]
   });
   const bindGroup = createCachedExplicitBindGroup(device, {
@@ -4253,9 +4355,13 @@ function createSphThermalStepWebGpuEncoderStageImpl({
         { binding: 12, resource: { buffer: exactQuantities.validationBuffer } }] : []),
       ...(exactEnergyOutput ? [{ binding: 11, resource: { buffer: exactEnergyOutput } }] : []),
       { binding: 13, resource: { buffer: responseGraphUpload.responseThermalConductivityBuffer } },
-      ...(finiteWallState ? [{ binding: 14, resource: { buffer: exactFiniteWall?.packets ?? finiteWallState.buffer } }] : [])
+      ...(finiteWallState ? [{ binding: 14, resource: { buffer: exactFiniteWall?.packets ?? finiteWallState.buffer } }] : []),
+      ...(a3RadiativeFluxEnabled ? [{ binding: 15, resource: { buffer: a3RadiativeFluxBinding.radiativeFluxBuffer } }] : [])
     ]
   });
+  if (a3RadiativeFluxEnabled) {
+    noteSphThermalRegionalPhysicsConsumption(device);
+  }
   const exactFinalizers = exactQuantities ? ['finalize_exact_thermal', 'restore_rejected_exact_thermal'].map(entryPoint => {
     const { pipeline: finalizer } = createCachedExplicitComputePipeline(device, {
       cacheKey: `ulg-${entryPoint}-v2-conductivity-binding`, label: `ulg-${entryPoint}`, entryPoint,

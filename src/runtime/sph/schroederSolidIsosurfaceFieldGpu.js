@@ -1,4 +1,9 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  unwrapWebGpuCacheDevice
+} from '../webgpuComputeLayout.js';
 import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 
 // Splat live coherent rigid-body members directly into each matching
@@ -8,6 +13,26 @@ import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 // of a separate flat-shaded voxel box overlay.
 const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, UNIFORM: 0x40, COPY_DST: 0x08 });
 const dummyThermoBuffers = new WeakMap();
+const cachedParamsByDevice = new WeakMap();
+
+function cachedSplatParamsBufferFor(device, materialId) {
+  const keyDev = unwrapWebGpuCacheDevice(device);
+  let byMat = cachedParamsByDevice.get(keyDev);
+  if (!byMat) {
+    byMat = new Map();
+    cachedParamsByDevice.set(keyDev, byMat);
+  }
+  let buf = byMat.get(materialId);
+  if (!buf) {
+    buf = device.createBuffer({
+      label: `ulg-solid-isosurface-field-splat-params-${materialId}`,
+      size: 80,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    byMat.set(materialId, buf);
+  }
+  return buf;
+}
 
 function dummyThermoBufferFor(device) {
   let buffer = dummyThermoBuffers.get(device);
@@ -274,11 +299,7 @@ export function encodeSchroederSolidIsosurfaceFieldSplatWebGpu({
       }
     }
 
-    const params = device.createBuffer({
-      label: `ulg-solid-isosurface-field-splat-params-${group.materialId}`,
-      size: 80,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    });
+    const params = cachedSplatParamsBufferFor(device, group.materialId);
     const words = new ArrayBuffer(80);
     const u = new Uint32Array(words);
     const f = new Float32Array(words);
@@ -289,7 +310,8 @@ export function encodeSchroederSolidIsosurfaceFieldSplatWebGpu({
     u.set(maskWords, 16);
     device.queue.writeBuffer(params, 0, words);
 
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: `ulg-solid-isosurface-field-splat-bg-${group.materialId}`,
       layout: pipeline.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: params } },
@@ -309,13 +331,9 @@ export function encodeSchroederSolidIsosurfaceFieldSplatWebGpu({
   }
 
   if (paramsBuffers.length === 0) return null;
-  if (paramsBuffers.length === 1) return paramsBuffers[0];
+  // Uniform buffers are cached per (device, materialId) for zero per-frame allocation churn.
   return {
     surfaceCount: paramsBuffers.length,
-    destroy() {
-      for (const buffer of paramsBuffers) {
-        try { buffer.destroy(); } catch { /* Best-effort uniform cleanup. */ }
-      }
-    }
+    destroy() {}
   };
 }

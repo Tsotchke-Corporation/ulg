@@ -1,5 +1,5 @@
 import { createSphExactRationalQuantityWgsl } from './sphExactRationalQuantityWgsl.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 // Numerical initialization for a genuine thermal capture which has no prior
 // extensive-quantity owner. The calling phase producer retains the original
@@ -99,7 +99,7 @@ fn finish_phase_initial_quantities(@builtin(global_invocation_id) id: vec3<u32>)
     pipelines.push(pipeline); validate();
   }
   const dispatch = (encoder, index, operation = 0) => {
-    const pipeline = pipelines[index], group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+    const pipeline = pipelines[index], group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
       entries: resources.map((buffer, binding) => ({ binding, resource: binding === 7
         ? { buffer, offset: operation * alignment, size: 16 } : { buffer } })) });
     const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group);

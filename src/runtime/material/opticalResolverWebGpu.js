@@ -207,13 +207,17 @@ fn resolve_optical_materials(
       abs_val = raw_cherenkov * 5e-9; // photons per meter in this 5 nm bin
       n_re_val = n_ior;
     } else {
-      // Mode 2: Band-gap Beer-Lambert transmission
-      let gap_ev = desc.param0;
+      // Mode 2: Band-gap Beer-Lambert transmission with Herve-Vandamme refractive index & exact Fresnel R0
+      let gap_ev = max(0.0, desc.param0);
       let density_cross = desc.param1;
       let osc_frac = select(0.0, clamp((photon_ev - gap_ev) / max(1.0, photon_ev), 0.0, 1.0), photon_ev > gap_ev);
       abs_val = density_cross * osc_frac;
-      refl_val = 0.04;
-      n_re_val = 1.4;
+      let hv_n = sqrt(1.0 + (13.6 / (gap_ev + 3.47)) * (13.6 / (gap_ev + 3.47)));
+      let n_derived = select(clamp(hv_n, 1.0, 4.5), max(1.0, desc.plasma_energy_ev), desc.plasma_energy_ev > 1.0);
+      let r_num = (n_derived - 1.0) * (n_derived - 1.0);
+      let r_den = max((n_derived + 1.0) * (n_derived + 1.0), 1e-12);
+      n_re_val = n_derived;
+      refl_val = clamp(r_num / r_den, 0.0, 1.0);
       s_resp = exp(-min(80.0, abs_val * max(0.0, desc.path_length_m)));
     }
   }
@@ -379,6 +383,7 @@ export function packOpticalResolverRequests(requests = []) {
   const descData = new Float32Array(Math.max(1, list.length) * OPTICAL_DESCRIPTOR_FLOATS);
   const oscList = [];
 
+  const oscSources = new Array(list.length).fill('none');
   for (let i = 0; i < list.length; i += 1) {
     const req = list[i] || {};
     const mode = Number.isInteger(req.mode) ? req.mode : OPTICAL_RESOLVER_MODE_DRUDE_LORENTZ;
@@ -389,7 +394,8 @@ export function packOpticalResolverRequests(requests = []) {
         : plasmaFrequencyRadPerS(Math.max(1e10, Number(req.conductionElectronDensityPerM3) || 1e28));
       const plasmaEnergyEv = Number.isFinite(req.plasmaEnergyEv) ? req.plasmaEnergyEv : HBAR_EV_S * wp;
       const dampingEv = Number.isFinite(req.dampingEv) ? req.dampingEv : plasmaEnergyEv / 30;
-      const oscillators = Array.isArray(req.interbandOscillators)
+      const callerSuppliedOsc = Array.isArray(req.interbandOscillators);
+      const oscillators = callerSuppliedOsc
         ? req.interbandOscillators
         : req.atomicNumberZ
           ? relativisticInterbandOscillators({
@@ -398,6 +404,11 @@ export function packOpticalResolverRequests(requests = []) {
             options: req.interbandOptions || {}
           })
           : [];
+      oscSources[i] = callerSuppliedOsc
+        ? 'caller-supplied'
+        : req.atomicNumberZ
+          ? 'cpu-radial-ks-interband'
+          : 'drude-only';
       const oscOffset = oscList.length;
       for (const osc of oscillators) {
         oscList.push([
@@ -416,6 +427,10 @@ export function packOpticalResolverRequests(requests = []) {
       descData[base + 6] = 0;
       descData[base + 7] = 0;
     } else if (mode === OPTICAL_RESOLVER_MODE_CHERENKOV) {
+      // Fail closed to vacuum (n = 1.0) when refractiveIndex is omitted (never silently assume H2O 1.333)
+      const nIor = Number.isFinite(Number(req.refractiveIndex)) && Number(req.refractiveIndex) >= 1.0
+        ? Number(req.refractiveIndex)
+        : 1.0;
       descData[base + 0] = Number.isFinite(req.chargeZ) ? req.chargeZ : 1;
       descData[base + 1] = 0;
       descData[base + 2] = 0;
@@ -423,9 +438,13 @@ export function packOpticalResolverRequests(requests = []) {
       descData[base + 4] = 0;
       descData[base + 5] = OPTICAL_RESOLVER_MODE_CHERENKOV;
       descData[base + 6] = Math.max(0, Math.min(0.9999999, Number(req.beta) || 0));
-      descData[base + 7] = Math.max(1.0, Number(req.refractiveIndex) || 1.333);
+      descData[base + 7] = nIor;
+      oscSources[i] = 'frank-tamm-webgpu';
     } else {
-      descData[base + 0] = 0;
+      const explicitIor = Number.isFinite(Number(req.refractiveIndex ?? req.ior)) && Number(req.refractiveIndex ?? req.ior) > 1.0
+        ? Number(req.refractiveIndex ?? req.ior)
+        : 0;
+      descData[base + 0] = explicitIor;
       descData[base + 1] = 0;
       descData[base + 2] = Number.isFinite(req.pathLengthM) ? req.pathLengthM : 0.3;
       descData[base + 3] = 0;
@@ -433,6 +452,7 @@ export function packOpticalResolverRequests(requests = []) {
       descData[base + 5] = OPTICAL_RESOLVER_MODE_BAND_GAP;
       descData[base + 6] = Math.max(0, Number(req.electronicGapEv) || 0);
       descData[base + 7] = Math.max(0, Number(req.densityCrossSectionPerM) || 0);
+      oscSources[i] = explicitIor > 1.0 ? 'band-gap-explicit-ior' : 'band-gap-herve-vandamme-webgpu';
     }
   }
 
@@ -449,6 +469,7 @@ export function packOpticalResolverRequests(requests = []) {
   return {
     materialCount: list.length,
     oscillatorCount: oscList.length,
+    oscSources,
     descData,
     oscData
   };
@@ -461,7 +482,7 @@ export function packOpticalResolverRequests(requests = []) {
  * Returns decoded optical rows + optional GPU-resident output buffer if
  * `keepResident: true` (caller owns `.destroy()` on resident buffers).
  */
-export async function resolveOpticalBatchWebGpu(device, requests = [], { keepResident = false } = {}) {
+export async function resolveOpticalBatchWebGpu(device, requests = [], { keepResident = false, readback = true } = {}) {
   if (!device || typeof device.createComputePipeline !== 'function') {
     throw new TypeError('resolveOpticalBatchWebGpu requires a valid WebGPU GPUDevice.');
   }
@@ -477,6 +498,7 @@ export async function resolveOpticalBatchWebGpu(device, requests = [], { keepRes
     };
   }
 
+  const doReadback = readback !== false || !keepResident;
   const { pipeline, bindGroupLayout } = getOpticalPipeline(device);
 
   const descBuffer = device.createBuffer({
@@ -501,16 +523,16 @@ export async function resolveOpticalBatchWebGpu(device, requests = [], { keepRes
     size: specByteLength,
     usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC
   });
-  const readOutBuffer = device.createBuffer({
+  const readOutBuffer = doReadback ? device.createBuffer({
     label: 'ulg-opt-out-read',
     size: outByteLength,
     usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST
-  });
-  const readSpecBuffer = device.createBuffer({
+  }) : null;
+  const readSpecBuffer = doReadback ? device.createBuffer({
     label: 'ulg-opt-spec-read',
     size: specByteLength,
     usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST
-  });
+  }) : null;
 
   try {
     device.queue.writeBuffer(descBuffer, 0, packed.descData);
@@ -533,69 +555,79 @@ export async function resolveOpticalBatchWebGpu(device, requests = [], { keepRes
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(count, 1, 1);
     pass.end();
-    encoder.copyBufferToBuffer(outBuffer, 0, readOutBuffer, 0, outByteLength);
-    encoder.copyBufferToBuffer(specBuffer, 0, readSpecBuffer, 0, specByteLength);
+    if (doReadback) {
+      encoder.copyBufferToBuffer(outBuffer, 0, readOutBuffer, 0, outByteLength);
+      encoder.copyBufferToBuffer(specBuffer, 0, readSpecBuffer, 0, specByteLength);
+    }
     device.queue.submit([encoder.finish()]);
 
-    await Promise.all([
-      readOutBuffer.mapAsync(GPU_MAP_READ),
-      readSpecBuffer.mapAsync(GPU_MAP_READ)
-    ]);
-    const outFloats = new Float32Array(readOutBuffer.getMappedRange().slice(0));
-    const specFloats = new Float32Array(readSpecBuffer.getMappedRange().slice(0));
-    readOutBuffer.unmap();
-    readSpecBuffer.unmap();
+    let results = null;
+    if (doReadback) {
+      await Promise.all([
+        readOutBuffer.mapAsync(GPU_MAP_READ),
+        readSpecBuffer.mapAsync(GPU_MAP_READ)
+      ]);
+      const outFloats = new Float32Array(readOutBuffer.getMappedRange().slice(0));
+      const specFloats = new Float32Array(readSpecBuffer.getMappedRange().slice(0));
+      readOutBuffer.unmap();
+      readSpecBuffer.unmap();
 
-    const results = [];
-    for (let i = 0; i < count; i += 1) {
-      const b = i * OPTICAL_OUTPUT_ROW_FLOATS;
-      const mode = Math.round(outFloats[b + 15]);
-      const spectralSamples = [];
-      for (let s = 0; s < OPTICAL_SPECTRAL_SAMPLES_PER_MATERIAL; s += 1) {
-        const sb = (i * OPTICAL_SPECTRAL_SAMPLES_PER_MATERIAL + s) * OPTICAL_SPECTRAL_SAMPLE_FLOATS;
-        spectralSamples.push({
-          wavelengthNm: specFloats[sb + 0],
-          reflectance: specFloats[sb + 1],
-          absorptionCoefficientPerM: specFloats[sb + 2],
-          nRe: specFloats[sb + 3]
+      results = [];
+      for (let i = 0; i < count; i += 1) {
+        const b = i * OPTICAL_OUTPUT_ROW_FLOATS;
+        const mode = Math.round(outFloats[b + 15]);
+        const spectralSamples = [];
+        for (let s = 0; s < OPTICAL_SPECTRAL_SAMPLES_PER_MATERIAL; s += 1) {
+          const sb = (i * OPTICAL_SPECTRAL_SAMPLES_PER_MATERIAL + s) * OPTICAL_SPECTRAL_SAMPLE_FLOATS;
+          spectralSamples.push({
+            wavelengthNm: specFloats[sb + 0],
+            reflectance: specFloats[sb + 1],
+            absorptionCoefficientPerM: specFloats[sb + 2],
+            nRe: specFloats[sb + 3]
+          });
+        }
+        const baseColorSrgb = [outFloats[b + 0], outFloats[b + 1], outFloats[b + 2]];
+        results.push({
+          mode,
+          baseColorSrgb,
+          r: baseColorSrgb[0],
+          g: baseColorSrgb[1],
+          b: baseColorSrgb[2],
+          reflectance: outFloats[b + 3],
+          absorptionCoefficientPerM: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? 0 : outFloats[b + 4],
+          photonsPerMeter: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? outFloats[b + 4] : 0,
+          opticalDepth: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? 0 : outFloats[b + 5],
+          cherenkovAngleDeg: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? outFloats[b + 5] : 0,
+          opacity: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? 0 : outFloats[b + 6],
+          active: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? outFloats[b + 6] > 0.5 : true,
+          transmission: outFloats[b + 7],
+          metalness: outFloats[b + 8],
+          roughness: outFloats[b + 9],
+          cieXYZ: [outFloats[b + 10], outFloats[b + 11], outFloats[b + 12]],
+          plasmaEnergyEv: outFloats[b + 13],
+          oscillatorCount: Math.round(outFloats[b + 14]),
+          oscillatorSource: packed.oscSources[i],
+          spectralSamples,
+          resolverStatus: packed.oscSources[i] === 'cpu-radial-ks-interband'
+            ? 'hybrid-webgpu-spectral-cpu-oscillators'
+            : 'webgpu-derived',
+          webgpuProgramHash: OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH,
+          validation: Object.freeze({
+            scientificValidation: false,
+            opticalValidation: false,
+            webgpuParity: false
+          })
         });
       }
-      const baseColorSrgb = [outFloats[b + 0], outFloats[b + 1], outFloats[b + 2]];
-      results.push({
-        mode,
-        baseColorSrgb,
-        r: baseColorSrgb[0],
-        g: baseColorSrgb[1],
-        b: baseColorSrgb[2],
-        reflectance: outFloats[b + 3],
-        absorptionCoefficientPerM: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? 0 : outFloats[b + 4],
-        photonsPerMeter: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? outFloats[b + 4] : 0,
-        opticalDepth: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? 0 : outFloats[b + 5],
-        cherenkovAngleDeg: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? outFloats[b + 5] : 0,
-        opacity: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? 0 : outFloats[b + 6],
-        active: mode === OPTICAL_RESOLVER_MODE_CHERENKOV ? outFloats[b + 6] > 0.5 : true,
-        transmission: outFloats[b + 7],
-        metalness: outFloats[b + 8],
-        roughness: outFloats[b + 9],
-        cieXYZ: [outFloats[b + 10], outFloats[b + 11], outFloats[b + 12]],
-        plasmaEnergyEv: outFloats[b + 13],
-        oscillatorCount: Math.round(outFloats[b + 14]),
-        spectralSamples,
-        resolverStatus: 'webgpu-derived',
-        webgpuProgramHash: OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH,
-        validation: Object.freeze({
-          scientificValidation: false,
-          opticalValidation: false,
-          webgpuParity: false
-        })
-      });
     }
 
+    const hasCpuOsc = packed.oscSources.includes('cpu-radial-ks-interband');
     return {
       schema: OPTICAL_RESOLVER_WEBGPU_SCHEMA,
-      resolverStatus: 'webgpu-derived',
+      resolverStatus: hasCpuOsc ? 'hybrid-webgpu-spectral-cpu-oscillators' : 'webgpu-derived',
       webgpuProgramHash: OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH,
       materialCount: count,
+      readbackSkipped: !doReadback,
       results,
       residentBuffers: keepResident
         ? {
@@ -611,8 +643,8 @@ export async function resolveOpticalBatchWebGpu(device, requests = [], { keepRes
   } finally {
     descBuffer.destroy();
     oscBuffer.destroy();
-    readOutBuffer.destroy();
-    readSpecBuffer.destroy();
+    readOutBuffer?.destroy();
+    readSpecBuffer?.destroy();
     if (!keepResident) {
       outBuffer.destroy();
       specBuffer.destroy();

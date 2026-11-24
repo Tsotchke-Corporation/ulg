@@ -797,24 +797,34 @@ export function createSchroederSpatialExactNearCellTreeGpu(device, {
 
   function bindGroup(pipeline, entries, suffix, arenaIndex) {
     const arena = arenas[arenaIndex];
-    const cached = arena.bindGroupCache.get(suffix);
-    const entriesMatch = cached?.entries.length === entries.length
-      && cached.entries.every((left, index) => {
-        const right = entries[index];
-        return left.binding === right.binding
-          && left.resource?.buffer === right.resource?.buffer
-          && (left.resource?.offset ?? 0) === (right.resource?.offset ?? 0)
-          && (left.resource?.size ?? null) === (right.resource?.size ?? null);
-      });
-    if (cached?.pipeline === pipeline && entriesMatch) {
-      return cached.bindGroup;
+    let bucket = arena.bindGroupCache.get(suffix);
+    if (!bucket) {
+      bucket = [];
+      arena.bindGroupCache.set(suffix, bucket);
+    }
+    for (let i = 0; i < bucket.length; i += 1) {
+      const cached = bucket[i];
+      if (
+        cached.pipeline === pipeline
+        && cached.entries.length === entries.length
+        && cached.entries.every((left, index) => {
+          const right = entries[index];
+          return left.binding === right.binding
+            && left.resource?.buffer === right.resource?.buffer
+            && (left.resource?.offset ?? 0) === (right.resource?.offset ?? 0)
+            && (left.resource?.size ?? null) === (right.resource?.size ?? null);
+        })
+      ) {
+        return cached.bindGroup;
+      }
     }
     const created = device.createBindGroup({
       label: `${label}-arena-${arenaIndex}-${suffix}-bindings`,
       layout: pipeline.getBindGroupLayout(0),
       entries
     });
-    arena.bindGroupCache.set(suffix, {
+    if (bucket.length >= 8) bucket.shift();
+    bucket.push({
       pipeline,
       entries: entries.map(({ binding, resource }) => ({ binding, resource })),
       bindGroup: created

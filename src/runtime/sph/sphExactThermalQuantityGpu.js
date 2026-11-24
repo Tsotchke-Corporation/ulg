@@ -1,4 +1,4 @@
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { createSphExactRationalQuantityWgsl } from './sphExactRationalQuantityWgsl.js';
 import { markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
@@ -137,7 +137,7 @@ fn commit_exact_thermal(@builtin(global_invocation_id) id: vec3<u32>) {
     const resources = [original, quantityBuffer, scratch, updates, validationBuffer, params, instructions];
     const dispatch = (encoder, key, offset = 0) => {
       const pipeline = pipelines.get(key);
-      const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+      const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
         entries: resources.map((buffer, binding) => ({ binding, resource: binding === 6 ? { buffer, offset, size: 16 } : { buffer } })) });
       const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(Math.ceil(count / 32)); pass.end();

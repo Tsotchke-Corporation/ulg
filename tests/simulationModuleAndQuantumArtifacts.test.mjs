@@ -370,6 +370,16 @@ test('material derivation visualization bundle chains quantum->QHA->Triad A4, va
   assert.equal(res.artifact.representation, 'quantum-derivation-bundle');
   assert.equal(res.artifact.validation.scientificValidation, false);
   assert.equal(res.leaseHandle.isCurrent(), true);
+
+  // Missing material input must fail closed (no silent H2O default!)
+  const missingMatCapsule = createUlgTaskCapsule({
+    taskId: 'quantum-bundle-missing',
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    taskKind: ULG_TASK_KINDS.simulationStep,
+    method: { model: 'quantum-material-derivation', version: 1 },
+    input: { parameters: { gridDim: 8 } }
+  });
+  await assert.rejects(() => registry.dispatchSimulationStepCapsule(missingMatCapsule), RangeError);
 });
 
 test('cosmic-to-quantum scale bridge spans 38+ OOM across all 6 regimes with floating-origin stability and comoving headroom', () => {

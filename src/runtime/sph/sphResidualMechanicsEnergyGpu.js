@@ -1,7 +1,7 @@
 import { resolveSchroederResidualMechanicsSourceRead } from './schroederResidualMechanicsSourceGpu.js';
 import { SPH_REACTION_RESIDUAL_HISTORY_LAYOUT as H } from './sphReactionResidualHistoryGpu.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 /** Exact energy companion of the authenticated disjoint mechanics rows.
  * The physical binder owns this allocation; this grants no publication. */
@@ -43,7 +43,7 @@ export function createSphResidualMechanicsEnergyBuffer({device,sourceRead}) {
    }
  }
 }`});
-    const group=device.createBindGroup({layout:p.bindGroupLayout,entries:[source.history.buffer,
+    const group=createCachedExplicitBindGroup(device,{layout:p.bindGroupLayout,entries:[source.history.buffer,
       carrierEnergy.energyBuffer,source.controlBuffer,energy].map((buffer,binding)=>({binding,resource:{buffer}}))});
     const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(p.pipeline);
     pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(count/64));pass.end();held.validate();

@@ -1,5 +1,21 @@
 # A1 real-time substrate: progress record
 
+> **2026-11-23 Live-Code Status (`ca9824d8`, Consolidated into Gate 0D / Gate 3):**
+> **IN PROGRESS** (`0` formal oracle receipts). Slices 1–2 (`13bfda97`, `ca9824d8`)
+> fixed `water-realtime` K-step boundary pacing (`14 → 0` boundary failures, `k=3`,
+> `submits/step 2.99 → 1.72 <= 2`, `computePasses 16.24 <= 25`, `mapAsync 0`,
+> `steps/s 5.04 → 15.45`, **`3.07x` speedup**, GPU stepping mean `24.8% → 7.8%`),
+> upgraded all 7 SS spatial view bindGroup caches to 8-slot LRU + `nativeSurfaceTemperatureWgsl`
+> slab binding, pooled receipt rings, and unified solid-fluid thermal/contact hashes
+> (`iron-ice-quench` `bindGroups/step 40.51 → 30.79`, `submits 4.30 → 3.65`,
+> `steps/s 2.61 → 3.77`, **`+44%` faster**, GPU stepping mean `37.1% → 8.0%`).
+> **Remaining (Gate 0D → Gate 3):** drive `iron-ice-quench` to `<= 25` passes /
+> `<= 2` submits / `0` per-step `workDone` / `0` transient `createBuffer`, push
+> `water-realtime` toward `>= 1.0x` RT (`currently 0.124x` at 50% CPU quota),
+> deduplicate 5 contact laws → 1, retire unused 63-limb `sphExactRational*` (`33`
+> files), and burn down `76` WGSL patches & `@workgroup_size(1)` kernels. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Track A1: real-time physics, including the near-real-time
 G2 plume scenarios moved here on 2026-11-13.
 

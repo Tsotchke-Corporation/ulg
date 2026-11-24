@@ -1,5 +1,14 @@
 # G3 coherent solids: SOL-0 and SOL-1
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 3):** **OPEN**
+> (`0` formal oracle receipts). P2 closed 3 pre-SOL-1 gates (material-derived
+> restitution/friction, exposed-face solid radiation, frame-indifferent
+> co-rotational velocity smear). **Remaining under Gate 3:** migrate rigid
+> solids off **3 private 4,096-bucket hashes onto canonical SS cells**
+> (`schroederSolidRigidGpu.js`, `schroederSolidFluidContactGpu.js`,
+> `schroederSolidFluidThermalGpu.js`), `bodyId`-aware product placement, and
+> multi-level rigid coupling. See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Task: ICC `ulg-g3-solids`. Oracle: `ulg-g3-solids`.
 
 The specification is [sol-critic.md](sol-critic.md): the frame, member, contact

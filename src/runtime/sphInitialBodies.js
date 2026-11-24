@@ -354,6 +354,32 @@ export function deriveSphInitialBodySizeM(body, particlesPerEdge) {
 }
 
 /**
+ * Derive axis-aligned body edge lengths directly from material density (or
+ * molar volume) and the `particlesPerEdge` control (`L_a = N_a * (m_p / rho)^(1/3)`).
+ */
+export function deriveMaterialScaledBodySizeM({
+  particlesPerEdge,
+  densityKgPerM3,
+  targetParticleMassKg = 1.0,
+  referencePitchM = null
+} = {}) {
+  const counts = Array.isArray(particlesPerEdge) && particlesPerEdge.length === 3
+    ? particlesPerEdge.map((n) => Math.max(1, Math.round(Number(n))))
+    : [3, 3, 3];
+  const rho = Number(densityKgPerM3);
+  const mP = Number(targetParticleMassKg);
+  let pitchM;
+  if (Number.isFinite(rho) && rho > 0 && Number.isFinite(mP) && mP > 0) {
+    pitchM = Math.cbrt(mP / rho);
+  } else if (Number.isFinite(Number(referencePitchM)) && Number(referencePitchM) > 0) {
+    pitchM = Number(referencePitchM);
+  } else {
+    throw new RangeError('deriveMaterialScaledBodySizeM requires positive densityKgPerM3 or referencePitchM');
+  }
+  return Object.freeze(counts.map((n) => n * pitchM));
+}
+
+/**
  * Return the next deterministic identity for an appended body.
  *
  * String identities use `<idPrefix>-N`, with N one greater than the largest

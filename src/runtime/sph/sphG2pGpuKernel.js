@@ -66,11 +66,14 @@ import {
   assertQueueOrderedCleanupClaimsRegistered,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
+  unwrapWebGpuCacheDevice,
   createQueueOrderedCleanupClaimIssuer,
   deferSubmittedWorkCleanup,
   deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
   releaseQueueOrderedPooledBuffer,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
@@ -3243,12 +3246,25 @@ export function encodeMlsMpmParticleMotionWatchBins(device, encoder, {
   });
 
   const ownedBuffers = [];
+  const usePooledBuffers = typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice;
+  const acquireOrCreate = (bucketKey, label, size, usage) => {
+    if (!usePooledBuffers) {
+      return tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
+    }
+    const buf = tagWebGpuBufferDevice(
+      acquireQueueOrderedPooledBuffer(device, { bucketKey, label, size, usage }),
+      device
+    );
+    registerQueueOrderedPooledBufferReturn(buf, device, { bucketKey, size, usage });
+    return buf;
+  };
   try {
-    const paramsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: 'ulg-mls-mpm-terminal-motion-watch-bin-params',
-      size: SEPARATION_PARAMS_BYTES,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    }), device);
+    const paramsBuffer = acquireOrCreate(
+      'ulg-mls-mpm-terminal-motion-watch-bin-params',
+      'ulg-mls-mpm-terminal-motion-watch-bin-params',
+      SEPARATION_PARAMS_BYTES,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    );
     ownedBuffers.push(paramsBuffer);
     if (paramsBuffer.size !== SEPARATION_PARAMS_BYTES) {
       throw new RangeError(
@@ -3273,11 +3289,12 @@ export function encodeMlsMpmParticleMotionWatchBins(device, encoder, {
     view.setFloat32(44, minimumCellSizeM, true);
     device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-    const binsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: 'ulg-mls-mpm-terminal-motion-watch-bins',
-      size: devicePlan.binByteLength,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-    }), device);
+    const binsBuffer = acquireOrCreate(
+      'ulg-mls-mpm-terminal-motion-watch-bins',
+      'ulg-mls-mpm-terminal-motion-watch-bins',
+      devicePlan.binByteLength,
+      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    );
     ownedBuffers.push(binsBuffer);
     if (binsBuffer.size !== devicePlan.binByteLength) {
       throw new RangeError(
@@ -3296,7 +3313,7 @@ export function encodeMlsMpmParticleMotionWatchBins(device, encoder, {
         computeBufferBinding(3, 'uniform')
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       label: 'ulg-mls-mpm-terminal-motion-watch-bin-fill-bindings',
       layout: pipelineInfo.bindGroupLayout,
       entries: [
@@ -3457,6 +3474,44 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
     );
   }
   let activeScratch = scratch;
+  const usePooledSeparationScratch = !activeScratch
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice;
+  if (usePooledSeparationScratch) {
+    const keyDevice = unwrapWebGpuCacheDevice(device);
+    const pool = (encodeMlsMpmParticleSeparationPasses._pool ??= new WeakMap());
+    let cached = pool.get(keyDevice);
+    if (
+      cached
+      && cached.particleCount === particleCount
+      && cached.cellCount === binPlan.cellCount
+      && cached.nx === binPlan.nx
+      && cached.ny === binPlan.ny
+      && cached.nz === binPlan.nz
+      && cached.cellSizeM === binPlan.cellSizeM
+    ) {
+      const nextSig = `${alpha}|${dims[0]}|${dims[1]}|${dims[2]}|${beta}|${Math.max(finiteNumber(gridSpacingM, 0), 0)}`;
+      if (cached.paramsSig !== nextSig) {
+        const paramsData = new ArrayBuffer(SEPARATION_PARAMS_BYTES);
+        const view = new DataView(paramsData);
+        view.setUint32(0, particleCount >>> 0, true);
+        view.setFloat32(4, alpha, true);
+        view.setFloat32(8, dims[0], true);
+        view.setFloat32(12, dims[1], true);
+        view.setFloat32(16, dims[2], true);
+        view.setFloat32(20, beta, true);
+        view.setUint32(24, binPlan.nx >>> 0, true);
+        view.setUint32(28, binPlan.ny >>> 0, true);
+        view.setUint32(32, binPlan.nz >>> 0, true);
+        view.setUint32(36, SEPARATION_BIN_CAPACITY >>> 0, true);
+        view.setFloat32(40, binPlan.cellSizeM, true);
+        view.setFloat32(44, Math.max(finiteNumber(gridSpacingM, 0), 0), true);
+        device.queue.writeBuffer(cached.paramsBuffer, 0, paramsData);
+        cached.paramsSig = nextSig;
+      }
+      activeScratch = cached;
+    }
+  }
   if (!activeScratch
     || activeScratch.particleCount !== particleCount
     || activeScratch.cellCount !== binPlan.cellCount
@@ -3506,11 +3561,25 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       ny: binPlan.ny,
       nz: binPlan.nz,
       cellSizeM: binPlan.cellSizeM,
+      paramsSig: `${alpha}|${dims[0]}|${dims[1]}|${dims[2]}|${beta}|${Math.max(finiteNumber(gridSpacingM, 0), 0)}`,
       paramsBuffer,
       correctionsBuffer,
       binsBuffer,
-      transientBuffers: [paramsBuffer, correctionsBuffer, binsBuffer]
+      transientBuffers: usePooledSeparationScratch ? [] : [paramsBuffer, correctionsBuffer, binsBuffer]
     };
+    if (usePooledSeparationScratch) {
+      const keyDevice = unwrapWebGpuCacheDevice(device);
+      const pool = (encodeMlsMpmParticleSeparationPasses._pool ??= new WeakMap());
+      const prev = pool.get(keyDevice);
+      if (prev) {
+        deferSubmittedWorkCleanup(device, () => {
+          prev.paramsBuffer?.destroy?.();
+          prev.correctionsBuffer?.destroy?.();
+          prev.binsBuffer?.destroy?.();
+        });
+      }
+      pool.set(keyDevice, activeScratch);
+    }
   }
   const binFillPipelineInfo = createCachedExplicitComputePipeline(device, {
     cacheKey: canonicalSpatialAuthority
@@ -3582,7 +3651,8 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
       ...(canonicalSpatialAuthority ? [computeBufferBinding(4, 'read-only-storage')] : [])
     ]
   });
-  const binFillBindGroup = device.createBindGroup({
+  const binFillBindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-mls-mpm-separation-bin-fill',
     layout: binFillPipelineInfo.bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: stateBuffer } },
@@ -3598,7 +3668,8 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
         : [])
     ]
   });
-  const computeBindGroup = device.createBindGroup({
+  const computeBindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-mls-mpm-separation-compute',
     layout: computePipelineInfo.bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: stateBuffer } },
@@ -3611,7 +3682,8 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
         : [])
     ]
   });
-  const applyBindGroup = device.createBindGroup({
+  const applyBindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-mls-mpm-separation-apply',
     layout: applyPipelineInfo.bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: activeScratch.correctionsBuffer } },
@@ -4980,22 +5052,25 @@ async function runMlsMpmG2pWebGpuImpl({
       ] : []),
       ...(exactHistory ? [{ binding: 12, resource: { buffer: exactHistory.validationBuffer } }] : [])
     ];
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-mls-mpm-g2p-reconstruct',
       layout: bindGroupLayout,
       entries: g2pEntries
     });
     const canonicalFinalizeBindGroup = canonicalFinalize
       ? (canonicalFinalize.bindGroupLayout === bindGroupLayout
           ? bindGroup
-          : device.createBindGroup({
+          : createCachedExplicitBindGroup(device, {
+              label: 'ulg-mls-mpm-g2p-canonical-finalize',
               layout: canonicalFinalize.bindGroupLayout,
               entries: g2pEntries
             }))
       : null;
     const energyReceiptBindGroups = energyReceiptPipelines.map(
-      (pipelineInfo) => pipelineInfo.bindGroupLayout === bindGroupLayout
+      (pipelineInfo, idx) => pipelineInfo.bindGroupLayout === bindGroupLayout
         ? bindGroup
-        : device.createBindGroup({
+        : createCachedExplicitBindGroup(device, {
+            label: `ulg-mls-mpm-g2p-energy-receipt-${idx}`,
             layout: pipelineInfo.bindGroupLayout,
             entries: g2pEntries
           })

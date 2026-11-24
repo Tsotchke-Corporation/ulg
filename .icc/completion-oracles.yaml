@@ -15,10 +15,18 @@
 # - Vertical slices lock and turn ON by default once GPU invariants and the
 #   hard per-step submit/indirect-dispatch/ms budget gate pass; clean local
 #   commits + ICC source-drift replace manual 574-file source-hash manifests.
-# - All 13 target names and prior failed evidence remain preserved unchanged.
+# 2026-11-22 owner restructuring (plan/CURRENT-PLAN.md — 40-OOM Foundation-First Roadmap):
+# - Active campaign consolidated into 6 Scale-Ladder gates (ulg-gate0..ulg-gate5)
+#   plus accepted ulg-g5-reservation and ulg-g7-release-audit (2/8 accepted).
+# - Deleted bulk-water preset removed from ulg-g1-presentation (5 shipped presets).
+# - All 13 historical granular target names and prior failed evidence remain
+#   preserved unchanged below for audit lineage.
 
 oracles:
-  - name: ulg-g1-presentation
+  # =========================================================================
+  # Active 40-OOM Scale-Ladder Campaign Gates (2026-11-22 Foundation-First)
+  # =========================================================================
+  - name: ulg-gate0-foundation-arch
     criteria:
       - &ulg_campaign_receipt
         kind: runtime_event
@@ -27,6 +35,118 @@ oracles:
         event_schemas: [ulg.campaign.receipt.v1]
         event_statuses: [PASS, FAIL]
         event_lanes: [development-review]
+        id: gate0-foundation-arch-candidate-review
+        label: "Candidate source, peercompute-core bundle audit, gpuMath Vulkan proofs, canonical ABIs and step-loop probes reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.gate0-foundation-arch.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate0-peercompute-core-and-gpumath
+        label: "Slim peercompute-core entrypoint eliminates ort-wasm dist bloat (<45 MB dist); shared gpuMath (eigensolver, 3D FFT, WebGPU MD, polytope Chebyshev) passes native Vulkan invariants with zero hot-loop CPU readbacks"
+        event_names: [peercompute-core-and-gpumath]
+        event_contract_ids: [ulg.gate0-foundation-arch.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate0-canonical-abis-and-zero-churn
+        label: "ulg.material-property-bundle.v1 and ulg.polytope-atlas.v1 locked; continuum Zero-Churn Step Loop eliminates per-step buffer/bindGroup/workDone churn, deduplicates overlapping contact laws, fixes thermalPotential stall, and retires 63-limb rationals & CPU mirrors"
+        event_names: [canonical-abis-and-zero-churn]
+        event_contract_ids: [ulg.gate0-foundation-arch.v1]
+
+  - name: ulg-gate1-periodic-table-engine
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: gate1-periodic-table-candidate-review
+        label: "Exact Z=1..118 GPU solver lineage, live quantum/nuclear/EM/MD visual sequences, and offline G7 advisory NIST/CODATA/AME2020/Materials-Project report reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.gate1-periodic-table-engine.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate1-nuclear-atomic-em-solid-md-z118
+        label: "All 118 elements (including 7 noble gases) derive nuclear, relativistic Dirac/KH atomic, EM/magnetic/optical/conductive, bulk DFT, and WebGPU MD/phonon properties from first principles with zero per-element hacks and zero reference-fallback cheats"
+        event_names: [nuclear-atomic-em-solid-md-z118]
+        event_contract_ids: [ulg.gate1-periodic-table-engine.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate1-real-gpu-quantum-visualizations
+        label: "elements-lab.html renders real GPU-buffer-driven nuclear, 3D volumetric orbital/spin-density, crystal Bloch/Fermi/band, spectral dielectric, and live MD atomic visualizations with zero canned animations"
+        event_names: [real-gpu-quantum-visualizations]
+        event_contract_ids: [ulg.gate1-periodic-table-engine.v1]
+
+  - name: ulg-gate2-reactions-and-polytope-atlas
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: gate2-reactions-polytope-candidate-review
+        label: "GPU molecular QM, reaction kinetics, recursive compound derivation lineage, convex polytope residuals, and 3D Atlas visual sequences reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.gate2-reactions-and-polytope-atlas.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate2-reactions-and-compound-feedback
+        label: "Generalized GPU reaction discovery & CI-NEB barriers feed resultant compounds recursively back through Gate 1 electronic/EM/crystal/MD closures, retiring reference-fallback compounds and additive blend shortcuts"
+        event_names: [reactions-and-compound-feedback]
+        event_contract_ids: [ulg.gate2-reactions-and-polytope-atlas.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate2-convex-polytope-atlas
+        label: "Per-material and per-compound piecewise-convex (T, log10 P) Polytope Atlases (A x <= b) with GPU Chebyshev fits pass held-out residual, conservation, monotonicity, and fail-closed out-of-domain invalidation gates"
+        event_names: [convex-polytope-atlas]
+        event_contract_ids: [ulg.gate2-reactions-and-polytope-atlas.v1]
+
+  - name: ulg-gate3-continuum-substrate-and-physics
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: gate3-continuum-candidate-review
+        label: "Exact continuum source, gpuprobe.sh Section 3 receipts, SS unification, exact-ledger plume traces, coherent solid invariants, and Tier 1-3 closure evidence reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.gate3-continuum-substrate-and-physics.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate3-section3-budgets-and-unified-ss
+        label: "Continuum passes Section 3 GPU budgets (<=2 submits, <=16 indirect, 0 host waits, <=25 compute passes, >=1.0x RT water-realtime) with unified SS cells for solids and all 4 indirect-dispatched law families"
+        event_names: [section3-budgets-and-unified-ss]
+        event_contract_ids: [ulg.gate3-continuum-substrate-and-physics.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate3-polytope-atlas-multiphase-solids
+        label: "Studio continuum consumes Gate 2 Polytope Atlas natively at Tier-1 with Tier-2 A3 / Tier-3 A6 PeerCompute miss derivation, exact 2^-149 ledgers, multi-level first-class air, and unified SS SOL-0..SOL-6 solids"
+        event_names: [polytope-atlas-multiphase-solids]
+        event_contract_ids: [ulg.gate3-continuum-substrate-and-physics.v1]
+
+  - name: ulg-gate4-studio-presentation
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: gate4-presentation-candidate-review
+        label: "Candidate source, exact artifacts, visual sequences and cadence measurements reviewed; raw UI rAF never cited as physics-motion proof"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.gate4-studio-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate4-five-preset-visible-cadence
+        label: "All five shipped Studio presets (water-cycle, iron-ice-quench, sodium-water, cesium-fluorine, water-realtime) sustain >=54 Hz decoupled presentation of latest committed physics state with visibleMotionCadenceVerified=true"
+        event_names: [five-preset-visible-cadence]
+        event_contract_ids: [ulg.gate4-studio-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate4-shared-optics-and-gpu-invariants
+        label: "All five presets share true WebGPU isosurface, refraction, metal, Cherenkov, volumetric plume and lifecycle pipelines with zero visual fakes and passing GPU-native invariants"
+        event_names: [shared-optics-and-gpu-invariants]
+        event_contract_ids: [ulg.gate4-studio-presentation.v1]
+
+  - name: ulg-gate5-planetary-to-supergalactic
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: gate5-astrophysics-candidate-review
+        label: "Planetary, stellar, galactic and supergalactic GPU invariants, Scale Atlas multipole unification, TreePM power-spectrum telemetry and visual sequences reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.gate5-planetary-to-supergalactic.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate5-planetary-stellar-galactic-unified-ss
+        label: "Planetary interiors (Gate 2 Polytope Atlas), stellar hydro/nucleosynthesis (Gate 1 nuclear networks), and galactic N-body+ISM hydro (Gate 1 atomic cooling) run on canonical SS Scale Atlas multipole with zero private octrees"
+        event_names: [planetary-stellar-galactic-unified-ss]
+        event_contract_ids: [ulg.gate5-planetary-to-supergalactic.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate5-supergalactic-treepm-and-peercompute
+        label: "Expanding FLRW comoving GPU 3D-FFT TreePM (fft3dWebGpu + SS multipole) evolves Zel'dovich P(k) primordial perturbations into cosmic-web filaments/halos/voids with distributed multi-host PeerCompute domain partitioning verified"
+        event_names: [supergalactic-treepm-and-peercompute]
+        event_contract_ids: [ulg.gate5-planetary-to-supergalactic.v1]
+
+  # =========================================================================
+  # Retained Legacy Granular Campaign Targets (G5 & G7 Accepted; G1-G4/G6/A1-A6
+  # preserved for historical audit lineage — superseded as active gates above)
+  # =========================================================================
+  - name: ulg-g1-presentation
+    criteria:
+      - <<: *ulg_campaign_receipt
         id: g1-presentation-candidate-review
         label: "Candidate source, exact artifacts, commands and independent review agree; no numerical or visual claim inferred from a receipt label"
         event_names: [candidate-review]
@@ -52,18 +172,13 @@ oracles:
         event_names: [visible-wallclock-cesium-fluorine]
         event_contract_ids: [ulg.g1-presentation.v1]
       - <<: *ulg_campaign_receipt
-        id: g1-presentation-visible-wallclock-bulk-water
-        label: "bulk-water: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
-        event_names: [visible-wallclock-bulk-water]
-        event_contract_ids: [ulg.g1-presentation.v1]
-      - <<: *ulg_campaign_receipt
         id: g1-presentation-visible-wallclock-water-realtime
         label: "water-realtime: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
         event_names: [visible-wallclock-water-realtime]
         event_contract_ids: [ulg.g1-presentation.v1]
       - <<: *ulg_campaign_receipt
         id: g1-presentation-shared-optics-and-lifecycle
-        label: "All six use the shared pipeline; true isosurfaces remain true meshes, water refraction, metal, depth, camera and lifecycle checks pass"
+        label: "All five active Studio presets use the shared pipeline; true isosurfaces remain true meshes, water refraction, metal, depth, camera and lifecycle checks pass"
         event_names: [shared-optics-and-lifecycle]
         event_contract_ids: [ulg.g1-presentation.v1]
       - <<: *ulg_campaign_receipt

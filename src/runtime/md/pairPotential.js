@@ -7,6 +7,63 @@
 // potential lets an ab-initio/closure-derived potential (e.g. fit to MoonLab energies) plug in
 // through the same interface with no engine changes.
 
+const BOLTZMANN_J_PER_K = 1.380649e-23;
+const AVOGADRO_PER_MOL = 6.02214076e23;
+const GAS_CONSTANT_J_PER_MOL_K = BOLTZMANN_J_PER_K * AVOGADRO_PER_MOL;
+
+/**
+ * Neufeld, Janzen & Aziz (1972) reduced collision integral Omega^(2,2)*(T*)
+ * for a Lennard-Jones (12-6) pair potential (valid 0.3 <= T* <= 100, < 0.1% err).
+ */
+export function neufeldOmega22(reducedTemperature) {
+  const tStar = Math.max(0.3, Math.min(1000, Number(reducedTemperature)));
+  return (
+    1.16145 * (tStar ** -0.14874)
+    + 0.52487 * Math.exp(-0.77320 * tStar)
+    + 2.16178 * Math.exp(-2.43787 * tStar)
+  );
+}
+
+/**
+ * First-principles dilute-gas dynamic viscosity (Chapman-Enskog) and thermal
+ * conductivity (Modified Eucken) derived from Lennard-Jones pair potential
+ * parameters (sigmaM, epsilonJ) and molar mass.
+ */
+export function deriveDiluteGasTransportFromPairPotential({
+  molarMassKgPerMol,
+  sigmaM,
+  epsilonJ,
+  temperatureK = 298.15,
+  cvMolarJPerMolK = 1.5 * GAS_CONSTANT_J_PER_MOL_K
+} = {}) {
+  const M = Number(molarMassKgPerMol);
+  const sigma = Number(sigmaM);
+  const eps = Number(epsilonJ);
+  const T = Number(temperatureK);
+  const Cv = Number(cvMolarJPerMolK);
+  if (!(M > 0) || !(sigma > 0) || !(eps > 0) || !(T > 0)) {
+    return null;
+  }
+  const m = M / AVOGADRO_PER_MOL;
+  const tStar = (BOLTZMANN_J_PER_K * T) / eps;
+  const omega22 = neufeldOmega22(tStar);
+  // Chapman-Enskog first-order viscosity: mu = (5/16) sqrt(pi m k_B T) / (pi sigma^2 Omega22)
+  const dynamicViscosityPaS =
+    (5 / 16) * Math.sqrt(Math.PI * m * BOLTZMANN_J_PER_K * T) / (Math.PI * sigma * sigma * omega22);
+  // Modified Eucken relation (reduces to exact monatomic 15/4 R mu / M when Cv = 3/2 R)
+  const effectiveCv = Number.isFinite(Cv) && Cv > 0 ? Cv : 1.5 * GAS_CONSTANT_J_PER_MOL_K;
+  const thermalConductivityWPerMK =
+    (dynamicViscosityPaS / M) * (1.32 * effectiveCv + 1.77 * GAS_CONSTANT_J_PER_MOL_K);
+  return Object.freeze({
+    dynamicViscosityPaS,
+    thermalConductivityWPerMK,
+    reducedTemperature: tStar,
+    omega22,
+    temperatureK: T,
+    method: 'chapman-enskog-modified-eucken-lj'
+  });
+}
+
 /**
  * Lennard-Jones potential U(r) = 4ε[(σ/r)^12 − (σ/r)^6], cut and shifted at rCut.
  * Returns { energyJ, forceScalarN, cutoffM } where forceScalar = -dU/dr (positive = repulsive).

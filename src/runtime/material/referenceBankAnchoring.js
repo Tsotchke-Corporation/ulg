@@ -11,6 +11,7 @@
 // the derived values as residual diagnostics, and stamps the provenance
 // accordingly.
 import compoundMaterialPropertyBank from '../../../data/material-properties/compounds.json' with { type: 'json' };
+import foundationPolytopeAtlasBank from '../../../data/material-properties/foundation-polytope-atlas.json' with { type: 'json' };
 import molecularElectronicBandsBank from '../../../data/material-properties/molecular-electronic-bands.json' with { type: 'json' };
 import {
   CONDUCTOR_OPTICAL_CONSTANTS_BANK,
@@ -22,6 +23,7 @@ import {
   PROPERTY_DERIVATION_STATUS,
   propertyProvenanceEntry
 } from './propertyProvenance.js';
+import { deriveDiluteGasTransportFromPairPotential } from '../md/pairPotential.js';
 
 // Cache fingerprints must include the bank payload, not only the anchoring
 // function source.  Export the immutable input object so browser closure
@@ -49,7 +51,56 @@ function elementRecordFor(materialKey) {
   return (DEFAULT_MATERIAL_PROPERTY_BANK.records || []).find((record) => record.symbol === symbol) || null;
 }
 
-export function referenceBankRecordForMaterial(materialKey) {
+export function foundationPolytopeCompoundRecordFor(materialKey) {
+  const key = String(materialKey || '').trim().toLowerCase();
+  if (!key) return null;
+  const match = (foundationPolytopeAtlasBank.compounds || []).find((c) => (
+    String(c.materialKey || '').toLowerCase() === key
+    || String(c.formula || '').toLowerCase() === key
+  )) || (foundationPolytopeAtlasBank.elements || []).find((e) => (
+    String(e.materialKey || '').toLowerCase() === key
+    || String(e.formula || '').toLowerCase() === key
+  )) || null;
+  if (!match) return null;
+  const tMelt = Number(match.thermodynamic?.meltingPointK ?? 300);
+  const tBoil = Number(match.thermodynamic?.boilingPointK ?? 1000);
+  const rho = Number(match.mechanical?.densityKgPerM3 ?? 1000);
+  const cp = Number(match.thermodynamic?.heatCapacityCpJPerKgK ?? 1000);
+  const k = Number(match.thermodynamic?.thermalConductivityWPerMK ?? 1.0);
+  return Object.freeze({
+    schema: 'ulg.foundation-polytope-compound-record.v1',
+    key: String(match.materialKey).toLowerCase(),
+    formula: match.formula || match.materialKey,
+    accuracyTier: match.accuracyTier,
+    closureHash: match.closureHash,
+    phases: Object.freeze([
+      Object.freeze({ name: 'solid', temperatureRangeK: [0, tMelt], densityKgPerM3: rho, heatCapacityJPerKgK: cp, thermalConductivityWPerMK: k }),
+      Object.freeze({ name: 'liquid', temperatureRangeK: [tMelt, tBoil], densityKgPerM3: rho * 0.92, heatCapacityJPerKgK: cp * 1.15, thermalConductivityWPerMK: k * 0.6 }),
+      Object.freeze({ name: 'gas', temperatureRangeK: [tBoil, 1e6], densityKgPerM3: Math.max(0.08, (match.nuclear?.molarMassU || 28) * 0.04), heatCapacityJPerKgK: cp * 0.9, thermalConductivityWPerMK: 0.03 })
+    ]),
+    transitions: Object.freeze([
+      Object.freeze({ name: 'melting', temperatureK: tMelt, latentHeatJPerKg: Number(match.thermodynamic?.latentHeatFusionJPerKg ?? 1e5) }),
+      Object.freeze({ name: 'boiling', temperatureK: tBoil, latentHeatJPerKg: Number(match.thermodynamic?.latentHeatVaporizationJPerKg ?? 1e6) })
+    ]),
+    provenance: Object.freeze([
+      Object.freeze({
+        family: 'phase-transitions',
+        source: 'ulg-gate2-foundation-polytope-atlas',
+        method: 'recursive-compound-first-principles-derivation',
+        status: 'reduced-estimate',
+        accuracyTier: match.accuracyTier,
+        closureHash: match.closureHash,
+        scientificValidation: false
+      })
+    ])
+  });
+}
+
+export function referenceBankRecordForMaterial(materialKey, { preferFoundationPolytopeAtlas = false } = {}) {
+  if (preferFoundationPolytopeAtlas === true) {
+    const foundation = foundationPolytopeCompoundRecordFor(materialKey);
+    if (foundation) return { record: foundation, bank: 'foundation-polytope-atlas' };
+  }
   const compound = compoundRecordFor(materialKey);
   if (compound && bankTransitionsUsable(compound)) return { record: compound, bank: 'compounds' };
   const element = elementRecordFor(materialKey);
@@ -259,6 +310,35 @@ function anchorConductorOpticalConstants(properties, materialKey) {
 // heat capacity (and every caloric gauge built on them) are unchanged. The
 // record need not carry phase transitions: transport anchoring is independent
 // of the phase-boundary anchoring above.
+function deriveGasTransportChapmanEnskog(properties, gasPhase) {
+  const molarMassKgPerMol = Number(properties?.molarMassKgPerMol);
+  if (!(molarMassKgPerMol > 0)) return null;
+  const phases = Array.isArray(properties?.phases) ? properties.phases : [];
+  const condensed = phases.find((p) => p?.name === 'liquid' && Number(p?.densityKgPerM3) > 0)
+    ?? phases.find((p) => p?.name === 'solid' && Number(p?.densityKgPerM3) > 0);
+  const rhoRef = Number(condensed?.densityKgPerM3);
+  // Estimate hard-sphere / LJ collision diameter sigma from condensed molar volume
+  // (V_m / N_A)^(1/3) * 0.841 (Bird-Stewart-Lightfoot law of corresponding states).
+  const molarVolM3 = rhoRef > 0 ? molarMassKgPerMol / rhoRef : 2.5e-5;
+  const sigmaM = 0.841 * Math.cbrt(molarVolM3 / 6.02214076e23);
+  const pt = properties?.phaseTransitions;
+  const boilT = Number(properties?.boilingPointK)
+    || Number(Array.isArray(pt) ? pt.find((t) => t?.name === 'boiling')?.temperatureK : pt?.boiling?.temperatureK)
+    || 273.15;
+  // Standard LJ well-depth correspondence: epsilon / k_B ~= 1.15 * T_b
+  const epsilonJ = 1.15 * Math.max(4, boilT) * 1.380649e-23;
+  const temperatureK = Math.max(20, Number(gasPhase?.referenceTemperatureK) || Math.max(298.15, boilT * 1.05));
+  const cvSpecific = Number(gasPhase?.specificHeatCapacityJPerKgK);
+  const cvMolarJPerMolK = cvSpecific > 0 ? cvSpecific * molarMassKgPerMol : 1.5 * 8.314462618;
+  return deriveDiluteGasTransportFromPairPotential({
+    molarMassKgPerMol,
+    sigmaM,
+    epsilonJ,
+    temperatureK,
+    cvMolarJPerMolK
+  });
+}
+
 function anchorGasTransport(properties, materialKey) {
   const record = compoundRecordFor(materialKey) ?? elementRecordFor(materialKey);
   const provenance = bankProvenanceForFamily(record || {}, 'gas-transport');
@@ -267,12 +347,72 @@ function anchorGasTransport(properties, materialKey) {
   const gasIndex = Array.isArray(phases) ? phases.findIndex((phase) => phase?.name === 'gas') : -1;
   const conductivity = Number(reference?.thermalConductivityWPerMK);
   const viscosity = Number(reference?.dynamicViscosityPaS);
+  const chapmanEnskog = gasIndex >= 0
+    ? deriveGasTransportChapmanEnskog(properties, phases[gasIndex])
+    : null;
   if (
     !provenance
     || provenance.source !== REFERENCE_ANCHOR_SOURCE
     || gasIndex < 0
     || !(conductivity > 0)
   ) {
+    // First-principles Chapman-Enskog + Modified Eucken derivation for any gas
+    // without a bank transport anchor (Slice 4 generalization across periodic table).
+    if (
+      gasIndex >= 0
+      && chapmanEnskog
+      && !(Number(phases[gasIndex]?.dynamicViscosityPaS) > 0)
+    ) {
+      const derived = phases[gasIndex];
+      const gas = {
+        ...derived,
+        thermalConductivityWPerMK:
+          Number(derived.thermalConductivityWPerMK) > 0
+            ? derived.thermalConductivityWPerMK
+            : chapmanEnskog.thermalConductivityWPerMK,
+        dynamicViscosityPaS: chapmanEnskog.dynamicViscosityPaS,
+        thermalConductivityProvenance: {
+          schema: 'peercompute.ulg.material-thermal-conductivity-provenance.v0',
+          status: PROPERTY_DERIVATION_STATUS.PHYSICAL_LAW,
+          source: 'pair-potential-chapman-enskog',
+          method: chapmanEnskog.method,
+          units: 'W/(m K), Pa s',
+          transportTemperatureK: chapmanEnskog.temperatureK,
+          reducedTemperature: chapmanEnskog.reducedTemperature,
+          omega22: chapmanEnskog.omega22
+        }
+      };
+      const derivedPaths = ['phases.gas.dynamicViscosityPaS'];
+      if (!(Number(derived.thermalConductivityWPerMK) > 0)) {
+        derivedPaths.unshift('phases.gas.thermalConductivityWPerMK');
+      }
+      return {
+        properties: {
+          ...properties,
+          phases: phases.map((phase, index) => (index === gasIndex ? gas : phase)),
+          propertyProvenance: {
+            ...(properties.propertyProvenance || {}),
+            entries: [
+              ...(properties.propertyProvenance?.entries || []),
+              propertyProvenanceEntry({
+                paths: derivedPaths,
+                status: PROPERTY_DERIVATION_STATUS.PHYSICAL_LAW,
+                source: 'pair-potential-chapman-enskog',
+                method: `${chapmanEnskog.method} at ${chapmanEnskog.temperatureK.toFixed(1)} K`,
+                inputs: [String(materialKey)]
+              })
+            ],
+            notes: [
+              ...(properties.propertyProvenance?.notes || []),
+              `Dilute-gas transport (k, mu) derived via Chapman-Enskog / Modified Eucken for ${String(materialKey)}.`
+            ]
+          }
+        },
+        anchored: false,
+        residuals: { gasTransportChapmanEnskog: chapmanEnskog },
+        anchoredPaths: []
+      };
+    }
     return { properties, anchored: false, residuals: null, anchoredPaths: [] };
   }
   const derived = phases[gasIndex];
@@ -303,10 +443,11 @@ function anchorGasTransport(properties, materialKey) {
   if (viscosity > 0) anchoredPaths.push('phases.gas.dynamicViscosityPaS');
   const residuals = {
     gasTransport: {
-      derivedThermalConductivityWPerMK: derived.thermalConductivityWPerMK ?? null,
+      derivedThermalConductivityWPerMK: derived.thermalConductivityWPerMK ?? chapmanEnskog?.thermalConductivityWPerMK ?? null,
       referenceThermalConductivityWPerMK: conductivity,
-      derivedDynamicViscosityPaS: derived.dynamicViscosityPaS ?? null,
-      referenceDynamicViscosityPaS: viscosity > 0 ? viscosity : null
+      derivedDynamicViscosityPaS: derived.dynamicViscosityPaS ?? chapmanEnskog?.dynamicViscosityPaS ?? null,
+      referenceDynamicViscosityPaS: viscosity > 0 ? viscosity : null,
+      chapmanEnskogDerived: chapmanEnskog
     }
   };
   const anchored = {
@@ -351,7 +492,12 @@ export function anchorDerivedMaterialProperties(properties, materialKey) {
   const applied = [phaseAnchoring, bandAnchoring, opticalAnchoring, transportAnchoring]
     .filter((result) => result.anchored);
   if (applied.length === 0) {
-    return { properties, anchored: false, residuals: null, anchoredPaths: [] };
+    return {
+      properties: transportAnchoring.properties,
+      anchored: false,
+      residuals: transportAnchoring.residuals ?? null,
+      anchoredPaths: []
+    };
   }
   return {
     properties: transportAnchoring.properties,

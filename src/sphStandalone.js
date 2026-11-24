@@ -1,22 +1,27 @@
 // Standalone entry for ULG (GitHub Pages build). Drops straight into the
 // empty, unallocated particle simulation studio with zero launch page.
 import './styles.css';
-import { NodeKernel } from '../../peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js';
-import { ComputeManager } from '../../peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js';
-import { StateManager } from '../../peercompute/peercompute/src/peercompute/stateManager/StateManager.js';
 import {
+  NodeKernel,
+  ComputeManager,
+  StateManager,
   GPUHubManager,
-  createResidentStageWorkerBackend
-} from '../../peercompute/peercompute/src/peercompute/gpu/GPUHubManager.js';
-import {
-  createRemoteResultQuorumValidator
-} from '../../peercompute/peercompute/src/peercompute/computeManager/RemoteResultQuorumValidator.js';
+  createResidentStageWorkerBackend,
+  createRemoteResultQuorumValidator,
+  registerDefaultWorkerBootstrapURL
+} from './runtime/peercomputeCore.js';
 import { createDemoRuntime } from './runtime/demoRuntime.js';
 import childWorkerModuleUrl from './services/dummyChild.worker.js?worker&url';
 import serviceWorkerModuleUrl from './services/dummyService.worker.js?worker&url';
 import residentMechanicsStageWorkerModuleUrl from './services/ulgMechanicsResidentStage.worker.js?worker&url';
 import ulgRuntimeWorkerModuleUrl from './services/ulgRuntime.worker.js?worker&url';
 import { mountUlgSimStudioApp } from './visualization/ulgSimStudioApp.js';
+
+if (import.meta.env.PROD) {
+  registerDefaultWorkerBootstrapURL(
+    new URL('./assets/peercomputeCompute.worker.js', document.baseURI).href
+  );
+}
 
 const peercomputeModule = Object.freeze({
   NodeKernel,

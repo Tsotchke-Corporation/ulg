@@ -1214,8 +1214,10 @@ function realPhaseSoundSpeedMPerS(properties, phase) {
     return Math.sqrt(Math.max(gamma * specificGasConstant * representativePhaseTemperatureK(phase), 0));
   }
   const bulk = Number(phase?.bulkModulusPa);
+  const shear = Number(phase?.shearModulusPa);
   const density = Number(phase?.densityKgPerM3);
-  return bulk > 0 && density > 0 ? Math.sqrt(bulk / density) : 0;
+  const effectiveModulus = bulk + (Number.isFinite(shear) && shear > 0 ? (4 / 3) * shear : 0);
+  return bulk > 0 && density > 0 ? Math.sqrt(effectiveModulus / density) : 0;
 }
 
 function isotropicMpmFForJ(volumeRatioJ) {
@@ -3927,14 +3929,6 @@ export function surfaceEmissive(demo) {
   const out = {};
   for (const [material, a] of Object.entries(acc)) {
     out[material] = a.w > 0 ? [a.r / a.w, a.g / a.w, a.b / a.w] : null;
-  }
-  // Phase 8 Frank-Tamm Cherenkov emission: strictly gated on β > 1/n in dielectric medium.
-  const ncSnap = demo?.nuclearCherenkov?.getSnapshot?.() || demo?.nuclearCherenkovSnapshot || null;
-  if (ncSnap?.cherenkovActive && Array.isArray(ncSnap.sources)) {
-    for (const src of ncSnap.sources) {
-      if (!src.active || !Array.isArray(src.srgb)) continue;
-      if (!out[src.material]) out[src.material] = [...src.srgb];
-    }
   }
   return out;
 }

@@ -1,7 +1,8 @@
 import { createSchroederSolidFluidContactStage } from './schroederSolidFluidContactGpu.js';
 import { createSchroederSolidFluidThermalStage, packSchroederSolidFluidTable } from './schroederSolidFluidThermalGpu.js';
 import {
-  SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW, createSchroederSolidRigidStage, packSchroederSolidContactProxies,
+  SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW, SCHROEDER_SOLID_FRAME_WORDS, SCHROEDER_SOLID_LATTICE_FLOATS,
+  createSchroederSolidRigidStage, deriveSchroederSolidContactLaw, packSchroederSolidContactProxies,
   packSchroederSolidLattice, packSchroederSolidRigidBodies
 } from './schroederSolidRigidGpu.js';
 import { createSchroederSolidThermalStage, seedSchroederSolidMemberThermal } from './schroederSolidThermalGpu.js';
@@ -55,12 +56,20 @@ export function createSchroederSolidRigidFamily(device, cold) {
   const counters = (globalThis.__ulgSolidRigidLane ??= { steps: 0, bodies: 0, noFamily: 0, families: 0 });
   counters.families += 1;
   const packed = packSchroederSolidRigidBodies(seeds);
+  const maxBodyCapacity = Math.max(packed.bodyCount, Math.trunc(Number(cold.maxBodyCapacity) || packed.bodyCount));
   const minPitch = Math.min(...cold.bodies.flatMap(body => body.pitchByAxisM));
   const { proxies, proxyCount } = packSchroederSolidContactProxies(seeds, { radiusM: 0.5 * minPitch });
-  const frameBuffer = storage(device, 'ulg-solid-frames', packed.frames);
+  // Size frame & lattice buffers to full maxBodyCapacity so SOL-5 dynamic split
+  // body allocations (`allocate_split_bodies`) never write out of bounds.
+  const paddedFrames = new Uint8Array(maxBodyCapacity * SCHROEDER_SOLID_FRAME_WORDS * 4);
+  paddedFrames.set(new Uint8Array(packed.frames), 0);
+  const packedLattice = packSchroederSolidLattice(seeds, cold.bodies.map(b => b.pitchByAxisM));
+  const paddedLattice = new Float32Array(maxBodyCapacity * SCHROEDER_SOLID_LATTICE_FLOATS);
+  paddedLattice.set(packedLattice, 0);
+  const frameBuffer = storage(device, 'ulg-solid-frames', paddedFrames);
   const memberBuffer = storage(device, 'ulg-solid-members', packed.members);
   const proxyBuffer = storage(device, 'ulg-solid-proxies', proxies);
-  const latticeBuffer = storage(device, 'ulg-solid-lattice', packSchroederSolidLattice(seeds, cold.bodies.map(b => b.pitchByAxisM)));
+  const latticeBuffer = storage(device, 'ulg-solid-lattice', paddedLattice);
   // Thermal state uses the first body's material (one caloric material per
   // family); members of other materials keep their seed u and never release.
   const thermal = cold.bodies[0].thermal ?? null;
@@ -83,11 +92,13 @@ export function createSchroederSolidRigidFamily(device, cold) {
     schema: SCHROEDER_SOLID_BODIES_SCHEMA, device, bodyCount: packed.bodyCount, memberCount: packed.memberCount,
     frameBuffer, memberBuffer, proxyBuffer, latticeBuffer, neighborBuffer, proxyCount,
     materials: cold.bodies.map(body => body.material),
+    sourceBodyIds: cold.bodies.map(body => body.sourceBodyId ?? body.bodyId ?? null),
     bodySizesM: cold.bodies.map(body => Array.isArray(body.sizeM) ? [...body.sizeM] : null),
     fractureOptions: cold.bodies[0].fracture ?? null,
+    mechanicsOptions: cold.bodies[0].mechanics ?? null,
     fractureEnabled: cold.fractureEnabled !== false,
     multilevelEnabled: cold.multilevelEnabled !== false,
-    maxBodyCapacity: Math.max(packed.bodyCount, Math.trunc(Number(cold.maxBodyCapacity) || packed.bodyCount)),
+    maxBodyCapacity,
     bodyTemperaturesK: cold.bodies.map(body => Number(body.temperatureK) || 293.15),
     thermal, seededThermal, releaseRows, pitchByAxisM: cold.bodies[0].pitchByAxisM,
     // A5 SOL-3: the fluid materials' conductivity/heat capacity rows.
@@ -117,10 +128,13 @@ function tryBuildMultilevelCatalogForBody(bodySizeM, pitchByAxisM) {
   if (!(finePitchM > 0)) return null;
   const halfExtentsM = bodySizeM.map((v) => 0.5 * Number(v));
   if (!halfExtentsM.every((v) => Number.isFinite(v) && v > 0)) return null;
-  const counts = halfExtentsM.map((v) => Math.max(4, Math.round((2 * v) / finePitchM)));
-  if (!counts.every((c) => c >= 4 && c % 4 === 0)) return null;
   try {
-    return buildSchroederMultilevelProxyCatalog({ bodyIndex: 0, halfExtentsM, finePitchM });
+    return buildSchroederMultilevelProxyCatalog({
+      bodyIndex: 0,
+      halfExtentsM,
+      finePitchM,
+      padToMultipleOf4: true
+    });
   } catch {
     return null;
   }
@@ -185,10 +199,17 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     family.fractureStage = null;
     family.multilevelStage = null;
     family.multilevelCatalog = null;
+    const derivedContactLaw = deriveSchroederSolidContactLaw({
+      bulkModulusPa: family.mechanicsOptions?.bulkModulusPa,
+      shearModulusPa: family.mechanicsOptions?.shearModulusPa,
+      temperatureK: family.bodyTemperaturesK?.[0],
+      meltTemperatureK: family.thermal?.meltTemperatureK
+    });
+    family.contactLaw = derivedContactLaw;
     family.stage = createSchroederSolidRigidStage({ device, bodyCount: family.bodyCount,
       memberCount: family.memberCount, frameBuffer: family.frameBuffer, memberBuffer: family.memberBuffer,
       proxyBuffer: family.proxyBuffer, proxyCount: family.proxyCount, gravity, boxM,
-      contactLaw: SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW, latticeBuffer: family.latticeBuffer });
+      contactLaw: derivedContactLaw, latticeBuffer: family.latticeBuffer });
     family.thermalStage = null; family.releaseStage = null;
     // A5 SOL-3: two-way member <-> particle contact (fluid particles cannot
     // pass through the body; the reactions move it).
@@ -271,15 +292,36 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
   // burst pooled write-through, which encodes writeBuffer as copyBufferToBuffer).
   family.stage.prepare?.(dtSeconds);
   family.thermalStage?.prepare?.(encoder, dtSeconds, { releaseEnabled });
+  const ssFluidDirectoryArgs = Boolean(
+    fluid?.fluidDirectoryBuffer && Number(fluid?.fluidBaseGridSpacingM) > 0
+  )
+    ? {
+        fluidDirectoryBuffer: fluid.fluidDirectoryBuffer,
+        fluidBaseGridSpacingM: fluid.fluidBaseGridSpacingM,
+        fluidChartId: fluid.fluidChartId ?? 0,
+        fluidMinLevel: fluid.fluidMinLevel ?? 0,
+        fluidMaxLevel: fluid.fluidMaxLevel ?? 0
+      }
+    : {};
+  const useCanonicalSsFluidDir = Boolean(ssFluidDirectoryArgs.fluidDirectoryBuffer);
   if (couplingEligible) {
     family.couplingStage.prepare?.(encoder, dtSeconds, {
       particleCount: fluid.particleCount,
       exactEnergyBuffer: fluid.exactEnergyBuffer ?? null,
-      exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0
+      exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0,
+      ...ssFluidDirectoryArgs
     });
   }
+  const canShareSolidGrid = Boolean(
+    !useCanonicalSsFluidDir && couplingEligible && contactEligible && family.couplingStage?.spatialGrid
+  );
   if (contactEligible) {
-    family.contactStage.prepare?.(dtSeconds, { particleCount: fluid.particleCount });
+    family.contactStage.prepare?.(dtSeconds, {
+      particleCount: fluid.particleCount,
+      sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
+      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0,
+      ...ssFluidDirectoryArgs
+    });
   }
   if (releaseEnabled) {
     family.releaseStage.prepare?.(fluid);
@@ -301,12 +343,17 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     && family.couplingStage.encode(encoder, dtSeconds, { memberThermoBuffer: family.thermalStage.thermoBuffer,
       fluidStateBuffer: fluid.stateBuffer, fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount,
       exactEnergyBuffer: fluid.exactEnergyBuffer ?? null, exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0,
+      ...ssFluidDirectoryArgs,
       pass, prepared: true });
   family.lastContactEnabled = contactEligible
     && family.contactStage.encode(encoder, dtSeconds, { fluidStateBuffer: fluid.stateBuffer,
-      fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount, pass, prepared: true });
+      fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount,
+      sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
+      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0,
+      ...ssFluidDirectoryArgs,
+      pass, prepared: true });
   if (releaseEnabled) family.releaseStage.encode(encoder, { ...fluid, pass, prepared: true });
-  family.fractureStage?.encode(encoder, dtSeconds, { pass, prepared: true });
+  family.fractureStage?.encode(encoder, dtSeconds, { pass, prepared: true, skipIfNoLoads: true });
   if (multilevelEligible) {
     family.multilevelStage.encodeMultilevelProxies(encoder, {
       focusWorldM: boxCenter,
@@ -399,11 +446,13 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
       fluidThermalRows: live.fluidThermalRows.length };
   };
   counters.family = family;
+  counters.canonicalSsFluidDirectoryActive = useCanonicalSsFluidDir;
   globalThis.__ulgA5SolidStatus = Object.freeze({
     active: true,
     rigidBodyCount: family.bodyCount,
     memberCount: family.memberCount,
     steps: family.steps,
+    canonicalSsFluidDirectoryActive: useCanonicalSsFluidDir,
     sol4DeformableSurfaceCount: globalThis.__ulgA5SolidStatus?.sol4DeformableSurfaceCount ?? 0,
     sol4Steps: globalThis.__ulgA5SolidStatus?.sol4Steps ?? 0,
     sol5FractureActive: Boolean(family.fractureStage),

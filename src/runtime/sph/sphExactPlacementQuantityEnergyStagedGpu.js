@@ -2,7 +2,7 @@ import { sphExactPlacementQuantityLayout, encodeSphExactPlacementMolarMetadata }
   from './sphExactPlacementQuantityWgsl.js';
 import { sphExactPlacementQuantityEnergyStagedPipelineDescriptors, sphExactPlacementQuantityEnergyScratchLayout,
   sphExactPlacementQuantityEnergyStageParams } from './sphExactPlacementQuantityEnergyStagedWgsl.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 /** Alternative numeric schedule inside the SAME existing routing owner.
  * Allocation, derived-buffer tracking, source holds, admission/revalidation,
@@ -75,7 +75,9 @@ export async function runSphExactPlacementQuantityEnergyStagedCandidateWebGpu({ 
     if (stages[index].stage === 'energy') entries.push(
       { binding: 9, resource: { buffer: scratchBuffer } },
       { binding: 10, resource: { buffer: stageParamsBuffer, offset: stages[index].step * stageParams.strideBytes, size: 16 } });
-    return device.createBindGroup({ layout: pipeline.bindGroupLayout, entries });
+    return (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice)
+      ? createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout, entries })
+      : device.createBindGroup({ layout: pipeline.bindGroupLayout, entries });
   });
   const encoder = device.createCommandEncoder(); encoder.clearBuffer(outputBuffer); encoder.clearBuffer(scratchBuffer);
   const pass = encoder.beginComputePass();

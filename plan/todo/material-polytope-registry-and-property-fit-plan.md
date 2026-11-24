@@ -2,6 +2,20 @@
 
 Date: 2026-06-18 AKDT
 
+> **2026-11-23 Live-Code Status (`98214a11`, Gate 0C / Gate 2 / Gate 3):**
+> **CORE + GPU TIER-1 BRIDGE LANDED & VULKAN-VERIFIED:**
+> `materialPolytopeRegistry.js` (slanted Clausius–Clapeyron `A x <= b` half-spaces
+> + `canonicalMaterialIsotopeKey` for `(Z/formula, A)` isotopes & isotopologues),
+> `chebyshevPolytopeFitGpu.js` (adaptive curvature-axis GPU Chebyshev fitter),
+> `polytopeAtlasBuilder.js` (Eshkol higher-order AD laws + MoonLab 5-slot Triad
+> synthesis), `foundation-polytope-atlas.json` (`118` elements + `20` compounds
+> covering `15/15` `compounds.json` with `0` `reference-fallback`), AND
+> `foundationPolytopeAtlasGpuBridge.js` (live Vulkan GPU batch `evaluatePolytopeAtlasWgsl`
+> with `hitFlag == 0` miss escalation to Triad GPU adoption + automatic Studio
+> worker seeding). Open: persistent OPFS/IndexedDB Polytope Atlas cache & formal
+> reviewed `ulg.campaign.receipt.v1`. Active routing:
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 ## Purpose
 
 Add a durable roadmap for discovering material/compound state-domain polytopes,

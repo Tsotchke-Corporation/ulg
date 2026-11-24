@@ -7,10 +7,8 @@ import {
   ULG_TASK_KINDS
 } from '../ulg-gpu-abi/src/serviceContract.js';
 import { createResidentModuleBufferSession } from '../src/runtime/residentBufferLease.js';
-import {
-  createGalacticBodies,
-  createResidentTiledNBodyEngine
-} from '../src/demos/cosmicQuantumGpuKernels.js';
+import { stepNBodyInterleavedReference } from '../src/runtime/simulationModuleRegistry.js';
+import { createGalacticBodies } from '../src/demos/cosmicQuantumGpuKernels.js';
 import {
   ESHKOL_TARGET_MAX_BODIES,
   checkEshkol2MBodyMemoryBudget,
@@ -29,10 +27,32 @@ import { StateManager } from '../../peercompute/peercompute/src/peercompute/stat
 import { createRemoteResultQuorumValidator } from '../../peercompute/peercompute/src/peercompute/computeManager/RemoteResultQuorumValidator.js';
 import { runNBodyCapsule as siblingRunNBodyCapsule } from '../../eshkols-in-space/integration/ulg.mjs';
 
+function createTestHarnessNBodySim(initialBodies) {
+  let bodies = Float32Array.from(initialBodies);
+  const count = bodies.length / 8;
+  let stepIndex = 0;
+  return {
+    get count() { return count; },
+    get activeCount() { return count; },
+    get stepIndex() { return stepIndex; },
+    get backend() { return 'test-harness-direct'; },
+    get gravityMode() { return 'direct-pairs-test-harness'; },
+    getBodies: () => bodies,
+    getResidentBuffer: () => null,
+    async step({ dt = 0.01, gravity = 1.0, softening = 0.25 } = {}) {
+      const out = stepNBodyInterleavedReference(bodies, { dt, gravity, softening });
+      bodies = out.bodies;
+      stepIndex += 1;
+      return bodies;
+    },
+    dispose() {}
+  };
+}
+
 test('Phase 9: ULG Eshkols-in-Space adapter matches sibling integration/ulg.mjs ABI verbatim and supports resident leases', async () => {
   const bodies0 = createGalacticBodies({ count: 64, preset: 'disk', seed: 901 });
-  const simUlg = createResidentTiledNBodyEngine({ device: null, initialBodies: bodies0, mode: 0 });
-  const simSibling = createResidentTiledNBodyEngine({ device: null, initialBodies: bodies0, mode: 0 });
+  const simUlg = createTestHarnessNBodySim(bodies0);
+  const simSibling = createTestHarnessNBodySim(bodies0);
 
   const capsule = createUlgTaskCapsule({
     taskId: 'phase9-nbody-parity-0',
@@ -120,6 +140,9 @@ test('Phase 9: PeerCompute service contract, MoonLab reduced complex64 parity en
   assert.equal(ml.parityPass, true);
   assert.equal(ml.validation.scientificValidation, false);
   assert.equal(ml.validation.reducedScopeParityOnly, true);
+  // Omitting parity measurements must fail closed (parityPass: false)!
+  const mlEmpty = createMoonLabReducedParityEnvelope({ qubits: 12 });
+  assert.equal(mlEmpty.parityPass, false);
 
   const eshkol = createEshkolWasmServiceManifest();
   assert.equal(eshkol.serviceId, ULG_SERVICE_IDS.eshkol);
@@ -135,8 +158,13 @@ test('Phase 9: PeerCompute service contract, MoonLab reduced complex64 parity en
   assert.equal(r1.value.standardPhaseAt298K, 'liquid');
   assert.equal(r1.value.scientificValidation, false);
   assert.deepEqual(r1, r2, 'peer task output must be bit-identical for 2-of-2 quorum validation');
+  // Missing atomicNumberZ must fail closed (no silent Hg default)
+  await assert.rejects(() => runCosmicQuantumPeerTask({ kind: 'material.resolve-element', payload: {} }), RangeError);
 
   const ch = await runCosmicQuantumPeerTask({ kind: 'nuclear.cherenkov', payload: { kineticEnergyMeV: 1.0, refractiveIndex: 1.333 } });
   assert.equal(ch.value.active, true);
   assert.equal(ch.value.scientificValidation, false);
+  // Missing refractiveIndex defaults fail-closed to vacuum (n=1.0 -> inactive)
+  const chVac = await runCosmicQuantumPeerTask({ kind: 'nuclear.cherenkov', payload: { kineticEnergyMeV: 1.0 } });
+  assert.equal(chVac.value.active, false);
 });

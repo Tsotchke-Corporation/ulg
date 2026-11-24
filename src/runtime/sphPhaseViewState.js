@@ -215,6 +215,12 @@ export function createSphPhaseViewState(driver) {
         }
       : null,
     reactionNote: demo.reactionNote || null,
+    nuclearCherenkovSources: demo.nuclearCherenkov?.enabled
+      ? demo.nuclearCherenkov.buildGpuSourcesDescriptor()
+      : null,
+    nuclearCherenkovSnapshot: demo.nuclearCherenkov?.enabled
+      ? demo.nuclearCherenkov.getSnapshot()
+      : null,
     dropMaterial: demo.dropMaterial,
     baseMaterial: demo.baseMaterial,
     scientificValidation: false,

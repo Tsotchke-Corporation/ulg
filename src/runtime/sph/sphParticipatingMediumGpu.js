@@ -11,6 +11,35 @@ import { webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
 import {
   COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
 } from './sphOpticalRouteIdentity.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  createCachedExplicitBindGroup,
+  getCachedPipelineBindGroupLayout,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
+
+function acquireMediumPooledBuffer(device, { bucketKey, label, size, usage }) {
+  const normalizedSize = Math.max(4, Math.ceil(Number(size) || 4));
+  if (
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && typeof device.queue?.onSubmittedWorkDone === 'function'
+  ) {
+    const buffer = acquireQueueOrderedPooledBuffer(device, {
+      bucketKey,
+      label,
+      size: normalizedSize,
+      usage
+    });
+    return registerQueueOrderedPooledBufferReturn(buffer, device, {
+      bucketKey,
+      size: normalizedSize,
+      usage
+    });
+  }
+  return device.createBuffer({ label, size: normalizedSize, usage });
+}
 
 export const ULG_SPH_PARTICIPATING_MEDIUM_DESCRIPTOR_SCHEMA =
   'peercompute.ulg.sph-participating-medium-descriptor.v0';
@@ -1185,7 +1214,7 @@ function validateDescriptorRecord(descriptor, runtimeRecord) {
 
 function destroyGpuResource(resource) {
   try {
-    resource?.destroy?.();
+    releaseOrDestroyQueueOrderedPooledBuffer(resource);
   } catch {
     // Cleanup is best effort and remains idempotent through the frame record.
   }
@@ -1279,19 +1308,22 @@ export async function encodeSphParticipatingMediumPack(
     resources.push(scatteringTexture);
     const opticalTextureView = opticalTexture.createView({ dimension: '3d' });
     const scatteringTextureView = scatteringTexture.createView({ dimension: '3d' });
-    const routeRowsBuffer = runtimeRecord.device.createBuffer({
+    const routeRowsBuffer = acquireMediumPooledBuffer(runtimeRecord.device, {
+      bucketKey: 'ulg-sph-participating-medium-route-rows',
       label: 'ulg-sph-participating-medium-route-rows',
       size: descriptorRecord.routeRowsBytes.byteLength,
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
     });
     resources.push(routeRowsBuffer);
-    const packParamsBuffer = runtimeRecord.device.createBuffer({
+    const packParamsBuffer = acquireMediumPooledBuffer(runtimeRecord.device, {
+      bucketKey: 'ulg-sph-participating-medium-pack-params',
       label: 'ulg-sph-participating-medium-pack-params',
       size: PACK_PARAMS_BYTES,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
     });
     resources.push(packParamsBuffer);
-    const drawIndirectBuffer = runtimeRecord.device.createBuffer({
+    const drawIndirectBuffer = acquireMediumPooledBuffer(runtimeRecord.device, {
+      bucketKey: 'ulg-sph-participating-medium-draw-indirect',
       label: 'ulg-sph-participating-medium-draw-indirect',
       size: 4 * Uint32Array.BYTES_PER_ELEMENT,
       usage:
@@ -1300,7 +1332,8 @@ export async function encodeSphParticipatingMediumPack(
         | GPU_BUFFER_USAGE.COPY_DST
     });
     resources.push(drawIndirectBuffer);
-    const renderUniformBuffer = runtimeRecord.device.createBuffer({
+    const renderUniformBuffer = acquireMediumPooledBuffer(runtimeRecord.device, {
+      bucketKey: 'ulg-sph-participating-medium-render-uniforms',
       label: 'ulg-sph-participating-medium-render-uniforms',
       size: RENDER_UNIFORM_BYTES,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
@@ -1325,9 +1358,9 @@ export async function encodeSphParticipatingMediumPack(
       0,
       new Uint8Array(packParamsBytes)
     );
-    const packBindGroup = runtimeRecord.device.createBindGroup({
+    const packBindGroup = createCachedExplicitBindGroup(runtimeRecord.device, {
       label: 'ulg-sph-participating-medium-pack-bind-group',
-      layout: packPipeline.getBindGroupLayout(0),
+      layout: getCachedPipelineBindGroupLayout(packPipeline, 0),
       entries: [
         { binding: 0, resource: { buffer: descriptorRecord.fieldRowsBuffer } },
         { binding: 1, resource: { buffer: routeRowsBuffer } },
@@ -1467,7 +1500,8 @@ export async function encodeSphParticipatingMediumRender(
     stepCount = DEFAULT_STEP_COUNT,
     depthEpsilon = 1e-6,
     motionField = null,
-    motionAgeS = 0
+    motionAgeS = 0,
+    decoupledBurstBypass = false
   } = {}
 ) {
   const runtimeRecord = assertRuntime(runtime);
@@ -1495,18 +1529,25 @@ export async function encodeSphParticipatingMediumRender(
   const motionRowCount = motionBuffer === runtimeRecord.emptyMotionBuffer
     ? 0
     : Math.max(0, Math.floor(Number(motionField?.rowCount) || 0));
-  const uniformReceipt = writeRenderUniforms(frameRecord, {
-    inverseViewProjectionMatrix,
-    cameraPositionM,
-    viewportSize,
-    lightDirection,
-    lightIntensity,
-    ambientIntensity,
-    stepCount,
-    depthEpsilon,
-    motionAgeS,
-    motionRowCount
-  });
+  const prevBypass = globalThis.__ulgDecoupledPresentationBypassBurst;
+  if (decoupledBurstBypass) globalThis.__ulgDecoupledPresentationBypassBurst = true;
+  let uniformReceipt;
+  try {
+    uniformReceipt = writeRenderUniforms(frameRecord, {
+      inverseViewProjectionMatrix,
+      cameraPositionM,
+      viewportSize,
+      lightDirection,
+      lightIntensity,
+      ambientIntensity,
+      stepCount,
+      depthEpsilon,
+      motionAgeS,
+      motionRowCount
+    });
+  } finally {
+    if (decoupledBurstBypass) globalThis.__ulgDecoupledPresentationBypassBurst = prevBypass;
+  }
   let bindGroup = frameRecord.cachedRenderBindGroup;
   if (
     !bindGroup
@@ -1515,7 +1556,7 @@ export async function encodeSphParticipatingMediumRender(
   ) {
     bindGroup = runtimeRecord.device.createBindGroup({
       label: 'ulg-sph-participating-medium-render-bind-group',
-      layout: renderPipeline.getBindGroupLayout(0),
+      layout: getCachedPipelineBindGroupLayout(renderPipeline, 0),
       entries: [
         { binding: 0, resource: { buffer: frameRecord.renderUniformBuffer } },
         { binding: 1, resource: frameRecord.opticalTextureView },

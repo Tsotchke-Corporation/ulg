@@ -48,9 +48,27 @@ export function isExactWorkerPresentationFrameQueueCompletionProof(
 // Raw mesh frames go to the display bridge as well as the solver boundary
 // wrapper. Keep their queue attribution in one place without manufacturing a
 // scheduler receipt from an autonomous render observation.
-export function isExactWorkerIsosurfacePresentationQueueAttributionProof(receipt) {
+export function isExactWorkerIsosurfacePresentationQueueAttributionProof(
+  receipt,
+  {
+    maxSubstepsPerSubmission = null
+  } = {}
+) {
   // These identities reach the mechanics replay audit unchanged. Do not
   // accept numeric strings: relational replay checks must remain numeric.
+  const boundaryCap = receipt?.motionPresentationQosBoundary?.maxSubstepsPerSubmission;
+  const boundaryTotal = receipt?.motionPresentationQosBoundary?.totalSubstepCount;
+  const authorizedBoundaryCap = Number.isSafeInteger(boundaryCap)
+    && boundaryCap > 0
+    && boundaryCap <= 16
+    && Number.isSafeInteger(boundaryTotal)
+    && boundaryCap < boundaryTotal
+    ? boundaryCap
+    : null;
+  const effectiveMaxSubsteps = Number.isSafeInteger(maxSubstepsPerSubmission)
+    && maxSubstepsPerSubmission > 0
+    ? maxSubstepsPerSubmission
+    : (authorizedBoundaryCap ?? ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION);
   if (
     !Number.isSafeInteger(receipt?.presentationQueueCompletionCount)
     || !Number.isSafeInteger(receipt?.presentationQueueCompletionSerial)
@@ -81,8 +99,7 @@ export function isExactWorkerIsosurfacePresentationQueueAttributionProof(receipt
     && Number.isSafeInteger(boundary.chunkStepCount)
     && boundary.chunkStepCount > 0
     && boundary.chunkStepCount <= boundary.completedSubstepCount
-    && boundary.chunkStepCount
-      <= ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION
+    && boundary.chunkStepCount <= effectiveMaxSubsteps
   );
 }
 
@@ -144,7 +161,11 @@ export function createWorkerTier0PresentationQosPlan({
 
 export function isExactWorkerTier0PresentationQosBoundaryProof(
   receipt,
-  boundary
+  boundary,
+  {
+    maxSubstepsPerSubmission =
+      ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION
+  } = {}
 ) {
   if (!receipt || !boundary) return false;
   const isosurface = receipt.status
@@ -174,7 +195,9 @@ export function isExactWorkerTier0PresentationQosBoundaryProof(
           === receipt.presentationOpportunityMethod
         && Number.isSafeInteger(receipt.presentationQueueCompletionCount)
         && Number.isSafeInteger(receipt.presentationQueueCompletionSerial)
-        && isExactWorkerIsosurfacePresentationQueueAttributionProof(frame)
+        && isExactWorkerIsosurfacePresentationQueueAttributionProof(frame, {
+          maxSubstepsPerSubmission
+        })
         && frame.physicsQueuePrefixCoverage
           === ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED
         && frame.presentationQueueCompletionSerial

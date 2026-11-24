@@ -1,7 +1,8 @@
-import { ReservationLedger } from '../../../../peercompute/peercompute/src/peercompute/stateManager/ReservationLedger.js';
+import { ReservationLedger } from '../peercomputeCore.js';
 import { deriveEosStiffnessResponse, ESHKOL_EOS_MODEL } from './eshkolEosStiffness.js';
 import { synthesizeMoonlabFirstPrinciplesClosures } from './moonlabColdMissSynthesis.js';
 import { adoptExternalRegionalResponseTable } from './regionalClosureWorkerLane.js';
+import { packResponseFunctionsForGpu } from './responseFunctionGpu.js';
 import { updateSphImplicitPressureStiffnessTable } from '../sph/sphImplicitPressureGpu.js';
 import {
   getWarmDerivationResidency,
@@ -515,6 +516,7 @@ export function createWarmClosureMissBridge({
     temperatureRangeK = [240, 800],
     qubits = 4,
     runQuantumProbe = true,
+    useEshkolSample = undefined,
     scheduleId = null,
     timeoutMs = 30_000
   } = {}) {
@@ -550,6 +552,7 @@ export function createWarmClosureMissBridge({
       temperatureRangeK,
       qubits,
       runQuantumProbe,
+      useEshkolSample,
       scheduleId,
       timeoutMs
     };
@@ -588,6 +591,27 @@ export function createWarmClosureMissBridge({
             fingerprint: probeOut.provenance?.peerId ?? `moonlab-q${qubits}`
           });
         }
+        const useEshkolWorkerSampling = requestArgs.useEshkolSample === true
+          || (requestArgs.useEshkolSample !== false && taskRunner === runWarmDerivationTask);
+        const eshkolSample = useEshkolWorkerSampling
+          ? async (definition, call, points) => {
+              const out = await executeDerivationPayload('eshkol-triad', {
+                service: 'eshkol',
+                operation: 'sample',
+                scope,
+                timeoutMs,
+                definition,
+                call,
+                points
+              });
+              lastCommitDelta = out.commitDelta ?? lastCommitDelta;
+              lastProvenance = out.provenance ?? lastProvenance;
+              if (out.commitDelta?.payload?.residency) {
+                stats.lastEshkolResidency = out.commitDelta.payload.residency;
+              }
+              return out.value?.samples;
+            }
+          : null;
         const synthesized = await synthesizeMoonlabFirstPrinciplesClosures({
           material,
           molarMassKgPerMol,
@@ -598,6 +622,7 @@ export function createWarmClosureMissBridge({
           refDensityKgPerM3,
           meltTemperatureK,
           temperatureRangeK,
+          eshkolSample,
           quantumProbeReceipt
         });
         if (closed || record.cancelled || reqEpoch !== bridgeEpoch || reqSource !== currentSourceIdentity) {
@@ -755,6 +780,7 @@ export function createWarmClosureMissBridge({
         adoptedCount: 0,
         adoptedKeys: Object.freeze([]),
         adoptedTriadBundles: Object.freeze([]),
+        adoptedEosStiffnessBundles: Object.freeze([]),
         activeOrdinal,
         status: statusSnapshot()
       });
@@ -762,6 +788,7 @@ export function createWarmClosureMissBridge({
     const batch = pendingAdoptions.splice(0, pendingAdoptions.length);
     const adoptedKeys = [];
     const adoptedTriadBundles = [];
+    const adoptedEosStiffnessBundles = [];
     for (const entry of batch) {
       if (entry.sourceIdentity !== currentSourceIdentity || entry.epoch !== bridgeEpoch) {
         stats.staleRejected += 1;
@@ -782,6 +809,18 @@ export function createWarmClosureMissBridge({
         if (device && updateImplicitPressure) {
           updateSphImplicitPressureStiffnessTable(device, entry.responseFunction);
           implicitPressureUpdated = true;
+        }
+        try {
+          const packed = packResponseFunctionsForGpu([entry.responseFunction]);
+          adoptedEosStiffnessBundles.push(Object.freeze({
+            missKey: entry.missKey,
+            packedData: packed.data instanceof Float32Array ? packed.data.slice() : null,
+            functionCount: packed.functionCount ?? 1,
+            sourceFingerprint: entry.sourceFingerprint ?? null,
+            scheduleId
+          }));
+        } catch {
+          // Keep non-packable mock response functions isolated from schedule adoption.
         }
       } else if (entry.kind === 'triad-synthesis' && entry.packedGpuTable) {
         if (lane) {
@@ -832,6 +871,7 @@ export function createWarmClosureMissBridge({
       adoptedCount: adoptedKeys.length,
       adoptedKeys: Object.freeze(adoptedKeys),
       adoptedTriadBundles: Object.freeze(adoptedTriadBundles),
+      adoptedEosStiffnessBundles: Object.freeze(adoptedEosStiffnessBundles),
       activeOrdinal,
       status
     });

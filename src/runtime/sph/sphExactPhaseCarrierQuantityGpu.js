@@ -1,5 +1,5 @@
 import { createSphExactRationalQuantityWgsl } from './sphExactRationalQuantityWgsl.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { SPH_EXACT_MASS_ERROR as E } from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
 
 // Arithmetic only. The physical phase producer authenticates inputs, supplies
@@ -359,7 +359,7 @@ fn commit_phase_quantity(@builtin(global_invocation_id) id: vec3<u32>) {
     validate(); pipelines.set(key, pipeline);
   }
   const dispatch = (encoder, name, parameterRow, operationRow = 0, multiplier = 1) => {
-    const p = pipelines.get(name), bindGroup = device.createBindGroup({ layout: p.bindGroupLayout,
+    const p = pipelines.get(name), bindGroup = createCachedExplicitBindGroup(device, { layout: p.bindGroupLayout,
       entries: resources.map((buffer, binding) => ({ binding, resource: binding === 9 || binding === 10
         ? { buffer, offset: (binding === 9 ? parameterRow : operationRow) * alignment, size: 16 } : { buffer } })) });
     const pass = encoder.beginComputePass({ label: name }); pass.setPipeline(p.pipeline); pass.setBindGroup(0, bindGroup);

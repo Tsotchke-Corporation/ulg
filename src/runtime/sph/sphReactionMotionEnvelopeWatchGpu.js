@@ -2,8 +2,12 @@ import {
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
-  createCachedExplicitComputePipeline
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
 } from '../webgpuComputeLayout.js';
 import {
   tagWebGpuBufferDevice,
@@ -1405,14 +1409,25 @@ function encodeReactionMotionEnvelopeWatchForRoute({
   let paramsBuffer = null;
   let encodingStatus = 'fail-closed-terminal-bins-unavailable';
   let dispatchCount = 0;
+  const usePooledWatchBuffers = typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice;
+  const acquireWatchBuffer = (bucketKey, label, size, usage, { allowMapReadPool = false } = {}) => {
+    if (!usePooledWatchBuffers) return createBuffer(device, { label, size, usage });
+    const buf = tagWebGpuBufferDevice(
+      acquireQueueOrderedPooledBuffer(device, { bucketKey, label, size, usage, allowMapReadPool }),
+      device
+    );
+    registerQueueOrderedPooledBufferReturn(buf, device, { bucketKey, size, usage, allowMapReadPool });
+    return buf;
+  };
   try {
-    controlBuffer = createBuffer(device, {
-      label: `${watchLabelPrefix}-control`,
-      size: CONTROL_BYTES,
-      usage: GPU_BUFFER_USAGE.STORAGE
+    controlBuffer = acquireWatchBuffer(
+      `${watchLabelPrefix}-control`,
+      `${watchLabelPrefix}-control`,
+      CONTROL_BYTES,
+      GPU_BUFFER_USAGE.STORAGE
         | GPU_BUFFER_USAGE.COPY_SRC
         | GPU_BUFFER_USAGE.COPY_DST
-    });
+    );
     controlBuffer = requireStorageBuffer(
       device,
       controlBuffer,
@@ -1420,12 +1435,17 @@ function encodeReactionMotionEnvelopeWatchForRoute({
       CONTROL_BYTES,
       limits
     );
+    if (usePooledWatchBuffers) {
+      encoder.clearBuffer(controlBuffer, 0, CONTROL_BYTES);
+    }
     ownedBuffers.push(controlBuffer);
-    readbackBuffer = createBuffer(device, {
-      label: `${watchLabelPrefix}-readback`,
-      size: OBSERVATION_BYTES,
-      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
-    });
+    readbackBuffer = acquireWatchBuffer(
+      `${watchLabelPrefix}-readback`,
+      `${watchLabelPrefix}-readback`,
+      OBSERVATION_BYTES,
+      GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST,
+      { allowMapReadPool: true }
+    );
     readbackBuffer = requireBuffer(
       device,
       readbackBuffer,
@@ -1441,11 +1461,12 @@ function encodeReactionMotionEnvelopeWatchForRoute({
     // WebGPU allocations begin zeroed. Zero is the compact failure code, so a
     // missing prepare/watch/seal/copy can never manufacture a successful zero.
     if (binsReady) {
-      reactionRecordBuffer = createBuffer(device, {
-        label: `${watchLabelPrefix}-records`,
-        size: reactionRecordByteLength,
-        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-      });
+      reactionRecordBuffer = acquireWatchBuffer(
+        `${watchLabelPrefix}-records`,
+        `${watchLabelPrefix}-records`,
+        reactionRecordByteLength,
+        GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      );
       reactionRecordBuffer = requireStorageBuffer(
         device,
         reactionRecordBuffer,
@@ -1454,11 +1475,12 @@ function encodeReactionMotionEnvelopeWatchForRoute({
         limits
       );
       ownedBuffers.push(reactionRecordBuffer);
-      paramsBuffer = createBuffer(device, {
-        label: `${watchLabelPrefix}-params`,
-        size: PARAMS_BYTES,
-        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      });
+      paramsBuffer = acquireWatchBuffer(
+        `${watchLabelPrefix}-params`,
+        `${watchLabelPrefix}-params`,
+        PARAMS_BYTES,
+        GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      );
       paramsBuffer = requireBuffer(
         device,
         paramsBuffer,
@@ -1551,7 +1573,7 @@ function encodeReactionMotionEnvelopeWatchForRoute({
           resource: { buffer: paramsBuffer, offset: 0, size: PARAMS_BYTES }
         }
       ];
-      const bindGroupFor = (pipeline, label) => device.createBindGroup({
+      const bindGroupFor = (pipeline, label) => createCachedExplicitBindGroup(device, {
         label,
         layout: pipeline.bindGroupLayout,
         entries
@@ -1640,7 +1662,11 @@ function encodeReactionMotionEnvelopeWatchForRoute({
     for (const buffer of ownedBuffers) {
       if (retiredOwnedBuffers.has(buffer)) continue;
       try {
-        buffer.destroy?.();
+        releaseOrDestroyQueueOrderedPooledBuffer(buffer, {
+          allowPool: !record.quarantined
+            && record.deviceLifecycle?.terminalObserved !== true
+            && !(buffer === readbackBuffer && record.inFlight)
+        });
         retiredOwnedBuffers.add(buffer);
       } catch {
         record.releaseFailureCount += 1;

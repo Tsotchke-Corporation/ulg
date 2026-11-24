@@ -106,9 +106,10 @@ export function createEshkolsInSpaceCapsuleAdapter({
     const useZeroCopy = Boolean(zeroCopy && parameters.readback !== true && typeof simulation.getResidentBuffer === 'function');
     const bodies = await simulation.step({ ...parameters, readback: !useZeroCopy });
     const toStep = stepIndex + 1;
-    const finite = bodies.every(Number.isFinite);
+    const hasBodies = Boolean((Array.isArray(bodies) || ArrayBuffer.isView(bodies)) && bodies.length > 0);
+    const finite = hasBodies && bodies.every(Number.isFinite);
     if (!finite) {
-      throw new Error('The simulation produced a non-finite body state.');
+      throw new Error('The simulation produced an empty or non-finite body state.');
     }
 
     let leaseHandle = null;
@@ -266,8 +267,8 @@ export function validatePeerComputeServiceContract({
 export function createMoonLabReducedParityEnvelope({
   qubits = 12,
   circuit = null,
-  probabilitySum = 1.0,
-  complex64ParityRelErr = 0,
+  probabilitySum = null,
+  complex64ParityRelErr = null,
   nativeDispatches = null,
   expectedDispatches = null,
   backend = 'moonlab-wasm-webgpu-worker',
@@ -276,9 +277,11 @@ export function createMoonLabReducedParityEnvelope({
 } = {}) {
   const q = Math.max(1, Math.floor(Number(qubits) || 1));
   const expDisp = expectedDispatches ?? (q + 1);
-  const probErr = Math.abs(Number(probabilitySum) - 1.0);
-  const parityErr = Math.abs(Number(complex64ParityRelErr));
-  const ok = Number.isFinite(probErr) && probErr < 1e-4 && Number.isFinite(parityErr) && parityErr < 1e-4;
+  const hasProb = probabilitySum !== null && probabilitySum !== undefined && Number.isFinite(Number(probabilitySum));
+  const hasParity = complex64ParityRelErr !== null && complex64ParityRelErr !== undefined && Number.isFinite(Number(complex64ParityRelErr));
+  const probErr = hasProb ? Math.abs(Number(probabilitySum) - 1.0) : null;
+  const parityErr = hasParity ? Math.abs(Number(complex64ParityRelErr)) : null;
+  const ok = Boolean(hasProb && probErr < 1e-4 && hasParity && parityErr < 1e-4);
 
   return Object.freeze({
     schema: 'peercompute.ulg.moonlab-reduced-parity-envelope.v1',
@@ -290,7 +293,7 @@ export function createMoonLabReducedParityEnvelope({
     circuit: circuit || `ghz-${q}`,
     qubits: q,
     stateDim: 2 ** Math.min(26, q),
-    probabilitySum: Number(probabilitySum),
+    probabilitySum: hasProb ? Number(probabilitySum) : null,
     probabilityNormalizationError: probErr,
     complex64ParityRelErr: parityErr,
     nativeDispatches,

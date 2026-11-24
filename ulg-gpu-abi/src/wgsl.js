@@ -9027,12 +9027,18 @@ ${motionField ? '    render_motion_field[out_index] = vec4<f32>(0.0);' : ''}
     RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u),
     RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u)
   );
-  // Velocity moments (weights = the same positive metaball values) for the
-  // splash-shard smear correction: cell dispersion sigma_v^2 = E|v|^2-|Ev|^2
-  // is zero for a coherently moving or single-particle cell, so only cells
-  // bridging DIVERGING droplets are corrected.
+  // Frame-indifferent (objective) velocity moments (weights = positive metaball
+  // values) for the splash-shard smear correction: removes BOTH rigid-body
+  // translation AND rigid-body rotation (v = v_cm + omega x r) via local 3x3
+  // inertia-tensor projection, so spinning rigid solids have sigma_v^2 = 0
+  // while genuinely diverging splash shards retain full smear correction.
+  let cell_world_m = (cell - vec3<f32>(params.field_padding)) * (ref_edge / max(span, 1.0e-9));
   var velocity_weighted = vec3<f32>(0.0, 0.0, 0.0);
   var velocity_sq_weighted = 0.0;
+  var rel_pos_weighted = vec3<f32>(0.0, 0.0, 0.0);
+  var rel_pos_cross_v_weighted = vec3<f32>(0.0, 0.0, 0.0);
+  var rel_pos_outer_diag = vec3<f32>(0.0, 0.0, 0.0);
+  var rel_pos_outer_off = vec3<f32>(0.0, 0.0, 0.0);
 	  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
     let row0 = render_row0(particle_index);
     let row1 = render_row1(particle_index);
@@ -9230,8 +9236,17 @@ ${motionField ? '    render_motion_field[out_index] = vec4<f32>(0.0);' : ''}
       temperature_weighted = temperature_weighted + row1.z * value;
       temperature_weight = temperature_weight + value;
       let particle_velocity = row4.yzw;
+      let rel_pos_m = row0.xyz - cell_world_m;
       velocity_weighted = velocity_weighted + particle_velocity * value;
       velocity_sq_weighted = velocity_sq_weighted + dot(particle_velocity, particle_velocity) * value;
+      rel_pos_weighted = rel_pos_weighted + rel_pos_m * value;
+      rel_pos_cross_v_weighted = rel_pos_cross_v_weighted + cross(rel_pos_m, particle_velocity) * value;
+      rel_pos_outer_diag = rel_pos_outer_diag + (rel_pos_m * rel_pos_m) * value;
+      rel_pos_outer_off = rel_pos_outer_off + vec3<f32>(
+        rel_pos_m.x * rel_pos_m.y,
+        rel_pos_m.x * rel_pos_m.z,
+        rel_pos_m.y * rel_pos_m.z
+      ) * value;
     }
   }
 
@@ -9268,8 +9283,47 @@ ${motionField ? `  // Snapshot the matching, pre-smear particle moments. Product
   // solids, resting pools, and single-particle cohorts bit-exact; the guard
   // threshold is fp-noise scale (L < 1e-5 of the field edge), not a tunable.
   if (!dispersed_surface_active && temperature_weight > 0.0 && params.render_smear_dt_s > 0.0) {
-    let mean_velocity = velocity_weighted / temperature_weight;
-    let dispersion_sq_ms = max(0.0, velocity_sq_weighted / temperature_weight - dot(mean_velocity, mean_velocity));
+    let inv_w = 1.0 / temperature_weight;
+    let mean_velocity = velocity_weighted * inv_w;
+    let raw_dispersion_sq = max(0.0, velocity_sq_weighted * inv_w - dot(mean_velocity, mean_velocity));
+    // Project out local rigid-body angular velocity omega solving J * omega = L
+    // so pure rigid rotation produces zero smear (objectivity / frame indifference).
+    let mean_r = rel_pos_weighted * inv_w;
+    let ang_mom = rel_pos_cross_v_weighted * inv_w - cross(mean_r, mean_velocity);
+    let cxx = max(0.0, rel_pos_outer_diag.x * inv_w - mean_r.x * mean_r.x);
+    let cyy = max(0.0, rel_pos_outer_diag.y * inv_w - mean_r.y * mean_r.y);
+    let czz = max(0.0, rel_pos_outer_diag.z * inv_w - mean_r.z * mean_r.z);
+    let cxy = rel_pos_outer_off.x * inv_w - mean_r.x * mean_r.y;
+    let cxz = rel_pos_outer_off.y * inv_w - mean_r.x * mean_r.z;
+    let cyz = rel_pos_outer_off.z * inv_w - mean_r.y * mean_r.z;
+    let trace_c = cxx + cyy + czz;
+    var rigid_rot_sq = 0.0;
+    if (trace_c > 1.0e-12 && dot(ang_mom, ang_mom) > 1.0e-24) {
+      let reg = max(trace_c * 1.0e-6, 1.0e-12);
+      let j00 = cyy + czz + reg;
+      let j11 = cxx + czz + reg;
+      let j22 = cxx + cyy + reg;
+      let j01 = -cxy;
+      let j02 = -cxz;
+      let j12 = -cyz;
+      let c00 = j11 * j22 - j12 * j12;
+      let c01 = j02 * j12 - j01 * j22;
+      let c02 = j01 * j12 - j02 * j11;
+      let c11 = j00 * j22 - j02 * j02;
+      let c12 = j01 * j02 - j00 * j12;
+      let c22 = j00 * j11 - j01 * j01;
+      let det = j00 * c00 + j01 * c01 + j02 * c02;
+      if (abs(det) > 1.0e-24) {
+        let inv_det = 1.0 / det;
+        let omega = vec3<f32>(
+          (c00 * ang_mom.x + c01 * ang_mom.y + c02 * ang_mom.z) * inv_det,
+          (c01 * ang_mom.x + c11 * ang_mom.y + c12 * ang_mom.z) * inv_det,
+          (c02 * ang_mom.x + c12 * ang_mom.y + c22 * ang_mom.z) * inv_det
+        );
+        rigid_rot_sq = max(0.0, dot(omega, ang_mom));
+      }
+    }
+    let dispersion_sq_ms = max(0.0, raw_dispersion_sq - rigid_rot_sq);
     let smear_norm = sqrt(dispersion_sq_ms) * params.render_smear_dt_s * span / ref_edge;
     let smear_sq = smear_norm * smear_norm;
     if (smear_sq > 1.0e-10) {

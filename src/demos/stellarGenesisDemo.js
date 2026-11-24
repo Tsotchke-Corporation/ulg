@@ -5,9 +5,13 @@ import { ArtifactCache } from '../runtime/ArtifactCache.js';
 import { ClosureRegistry } from '../runtime/ClosureRegistry.js';
 import { createSimulationModuleRegistry } from '../runtime/simulationModuleRegistry.js';
 import { createZeroCopyResidentBodyPresenter } from '../runtime/residentGpuPresenter.js';
-import { buildAtomicRadialDensityArtifact } from '../runtime/electronicStructure/quantumDerivationArtifacts.js';
+import {
+  buildAtomicRadialDensityArtifact,
+  buildMolecularChargeDensityArtifact
+} from '../runtime/electronicStructure/quantumDerivationArtifacts.js';
 import { BOHR_TO_M } from '../runtime/electronicStructure/uniformElectronGas.js';
 import { createCosmicQuantumScaleBridge } from '../runtime/sph/cosmicQuantumScaleBridge.js';
+import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
   HYDRO_PARTICLE_STRIDE_FLOATS,
   createSelfGravitatingHydroEngine,
@@ -18,10 +22,13 @@ import {
   NEBULA_INITIAL_CONDITIONS,
   createHydrogenNebulaInitialBodies
 } from '../runtime/astrophysics/nebulaInitialConditions.js';
-import { createVolumetricOrbitalRaymarcher } from './volumetricOrbitalRaymarcher.js';
+import {
+  createVolumetricDensityGridRaymarcher,
+  createVolumetricOrbitalRaymarcher
+} from './volumetricOrbitalRaymarcher.js';
 
 const ZOOM_STOPS = Object.freeze([
-  { id: 'quantum-core', log10: -10.8, label: '10⁻¹¹m Quantum H₂ / Gamow' },
+  { id: 'quantum-core', log10: -10.8, label: '10⁻¹¹m Quantum H₂ / H' },
   { id: 'stellar-core', log10: 9.2, label: '10⁹m Stellar Core' },
   { id: 'protoplanetary-disk', log10: 12.6, label: '10¹²m Disk & Envelope' },
   { id: 'molecular-nebula', log10: 16.4, label: '10¹⁷m Molecular Nebula' }
@@ -158,47 +165,15 @@ function createStarfieldBackdrop() {
   return mesh;
 }
 
-function makeGlowSpriteTexture() {
-  const size = 128;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  const half = size / 2;
-  const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
-  grad.addColorStop(0.0, 'rgba(255,255,255,1.0)');
-  grad.addColorStop(0.16, 'rgba(255,248,236,0.85)');
-  grad.addColorStop(0.42, 'rgba(255,215,155,0.34)');
-  grad.addColorStop(0.75, 'rgba(130,185,255,0.08)');
-  grad.addColorStop(1.0, 'rgba(0,0,0,0.0)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, size, size);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.needsUpdate = true;
-  return tex;
-}
-
-function createGlowSprite(tex, colorHex, scale, opacity = 0.75) {
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: tex,
-    color: colorHex,
-    transparent: true,
-    opacity,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false
-  }));
-  sprite.scale.set(scale, scale, 1);
-  return sprite;
-}
-
 /**
  * Mount the Stellar Genesis Multiscale Demo onto `container`.
- * Strictly composes ULG's general reusable runtime modules — ZERO bespoke physics kernels:
+ * Strictly GPU-native & Star Spec compliant — ZERO scripted props, ZERO origin-pinned
+ * sprites, ZERO preset visual hacks, ZERO CPU mirror solver:
  *   - `ClosureRegistry` + `ArtifactCache` (quantum-derived 2D plasma EOS & opacity table)
  *   - `self-gravitating-hydro@1` (`src/runtime/sph/selfGravitatingHydroGpu.js`)
  *   - `createCosmicQuantumScaleBridge` (`src/runtime/sph/cosmicQuantumScaleBridge.js`)
  *   - `createZeroCopyResidentBodyPresenter` (`src/runtime/residentGpuPresenter.js`)
- *   - `createVolumetricOrbitalRaymarcher` (`src/demos/volumetricOrbitalRaymarcher.js`)
+ *   - `createVolumetricOrbitalRaymarcher` + `createVolumetricDensityGridRaymarcher`
  */
 export async function mountStellarGenesisDemo(container) {
   const root = document.createElement('div');
@@ -230,57 +205,54 @@ export async function mountStellarGenesisDemo(container) {
   if (!Number.isFinite(timeScale) || timeScale < 0.5 || timeScale > 25) timeScale = 4.0;
   let simRunning = urlParams.get('paused') !== '1';
 
-  // Acquire shared WebGPU GPUDevice
+  // Acquire shared WebGPU GPUDevice (fail closed when unavailable — zero CPU fallback)
   let gpuDevice = null;
-  let gpuAdapterName = 'CPU fallback (WebGPU unavailable)';
+  let gpuAdapterName = 'WebGPU unavailable';
   try {
     const adapter = await navigator.gpu?.requestAdapter?.({ powerPreference: 'high-performance' });
     if (adapter) {
       gpuDevice = await adapter.requestDevice();
+      attachWebGpuUncapturedErrorTelemetry(gpuDevice, { label: 'stellar-genesis-demo' });
       gpuAdapterName = adapter.info?.description || adapter.info?.vendor || 'WebGPU GPU';
     }
   } catch {
     gpuDevice = null;
   }
 
-  let renderer = null;
-  let rendererBackend = 'three-webgl';
-  if (gpuDevice && typeof THREE.WebGPURenderer === 'function') {
-    try {
-      const wgRenderer = new THREE.WebGPURenderer({ antialias: true, device: gpuDevice });
-      wgRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-      wgRenderer.setSize(window.innerWidth, window.innerHeight);
-      wgRenderer.setClearColor(0x03060f, 1);
-      wgRenderer.toneMapping = THREE.ACESFilmicToneMapping;
-      wgRenderer.toneMappingExposure = 1.24;
-      await wgRenderer.init();
-      renderer = wgRenderer;
-      rendererBackend = 'three-webgpu';
-    } catch {
-      renderer = null;
-    }
+  if (!gpuDevice) {
+    root.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:center;height:100%;padding:24px;">
+        <div style="max-width:460px;padding:20px 24px;border-radius:12px;background:rgba(12,18,32,0.92);border:1px solid rgba(248,113,113,0.45);color:#fecaca;">
+          <h2 style="margin:0 0 8px 0;font-size:16px;">WebGPU Required</h2>
+          <p style="margin:0;font-size:13px;line-height:1.5;color:#e2e8f0;">
+            Stellar Genesis executes ULG's GPU-native <code>self-gravitating-hydro@1</code> solver with zero-copy WebGPU presentation. Enable WebGPU in a supported browser to run this simulation.
+          </p>
+        </div>
+      </div>`;
+    return null;
   }
-  if (!renderer) {
-    const THREE_GL = await import('three');
-    renderer = new THREE_GL.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setClearColor(0x03060f, 1);
-    renderer.toneMapping = THREE_GL.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.24;
-    rendererBackend = 'three-webgl';
-  }
+
+  const renderer = new THREE.WebGPURenderer({ antialias: true, device: gpuDevice });
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x03060f, 1);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.24;
+  await renderer.init();
+  const rendererBackend = 'three-webgpu';
   canvasHost.appendChild(renderer.domElement);
 
-  const zeroCopyActive = Boolean(gpuDevice && renderer.isWebGPURenderer);
-  const particleCount = gpuDevice ? 8192 : 2048;
+  const zeroCopyActive = Boolean(renderer.isWebGPURenderer);
+  const particleCount = 8192;
 
-  // 1. Register quantum-derived 2D plasma EOS & opacity closure in ULG's ClosureRegistry
+  // 1. Register WebGPU quantum-derived 2D plasma EOS & opacity closure in ULG's ClosureRegistry
   const artifactCache = new ArtifactCache();
   const closureRegistry = new ClosureRegistry({ artifactCache });
-  const registeredClosure = await registerPlasmaFusionClosureArtifact({ closureRegistry });
+  const registeredClosure = await registerPlasmaFusionClosureArtifact({ closureRegistry, device: gpuDevice });
+  const sgUrlParams = new URLSearchParams(window.location.search);
+  const cameraAutoSpin = sgUrlParams.get('cameraAutoSpin') === '1';
 
-  // 2. Instantiate ULG's general self-gravitating hydro runtime module (ZERO preset flags!)
+  // 2. Instantiate ULG's general GPU-native self-gravitating hydro module (ZERO preset flags!)
   const initialBodies0 = createHydrogenNebulaInitialBodies({
     count: particleCount,
     preset: activePresetId,
@@ -300,7 +272,7 @@ export async function mountStellarGenesisDemo(container) {
   }));
   const scaleBridge = createCosmicQuantumScaleBridge({ moduleRegistry });
 
-  // ---- 3D Scene Assembly ----
+  // ---- 3D Scene Assembly (100% live GPU physics + real derived quantum volumes) ----
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.01, 600);
   let camYaw = 0.55;
@@ -312,9 +284,7 @@ export async function mountStellarGenesisDemo(container) {
   scene.add(ambientLight, keyLight);
   scene.add(createStarfieldBackdrop());
 
-  const spriteTex = makeGlowSpriteTexture();
-
-  // Group A: Astrophysical Scale Scene (10^17 m -> 10^8 m) using ULG's general zero-copy presenter!
+  // Group A: Astrophysical Scale Scene (10^17 m -> 10^8 m) — ONLY live GPU particles!
   const astroGroup = new THREE.Group();
   scene.add(astroGroup);
 
@@ -328,82 +298,8 @@ export async function mountStellarGenesisDemo(container) {
     initialBuffer: engine.getResidentBuffer()
   });
   astroGroup.add(presenter.mesh);
-  if (!presenter.zeroCopy) {
-    presenter.syncFromCpuBodies(engine.getBodies());
-  }
 
-  const primaryStarGlow = createGlowSprite(spriteTex, 0xffd58a, 1.2, 0.05);
-  const outerCoronaGlow = createGlowSprite(spriteTex, 0x38bdf8, 2.0, 0.02);
-  const binaryGlowLeft = createGlowSprite(spriteTex, 0xffd58a, 1.0, 0.0);
-  const binaryGlowRight = createGlowSprite(spriteTex, 0x93c5fd, 1.0, 0.0);
-  astroGroup.add(primaryStarGlow, outerCoronaGlow, binaryGlowLeft, binaryGlowRight);
-
-  // Compact Remnant visual indicators (driven purely by observed emergent core collapse!)
-  const remnantGroup = new THREE.Group();
-  remnantGroup.visible = false;
-  const bhHorizonMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.56, 36, 26),
-    new THREE.MeshBasicMaterial({ color: 0x000000 })
-  );
-  const bhPhotonRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.76, 0.07, 18, 72),
-    new THREE.MeshBasicMaterial({ color: 0xfef08a, transparent: true, opacity: 0.96 })
-  );
-  bhPhotonRing.rotation.x = Math.PI * 0.43;
-  const bhAccretionDisk = new THREE.Mesh(
-    new THREE.RingGeometry(0.88, 2.75, 72),
-    new THREE.MeshBasicMaterial({
-      color: 0x38bdf8,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.52,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    })
-  );
-  bhAccretionDisk.rotation.x = Math.PI * 0.43;
-  const snShockShell = createGlowSprite(spriteTex, 0x22d3ee, 6.0, 0.22);
-  const snShockRing = new THREE.Mesh(
-    new THREE.TorusGeometry(1.0, 0.018, 12, 96),
-    new THREE.MeshBasicMaterial({
-      color: 0x67e8f9,
-      transparent: true,
-      opacity: 0.48,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    })
-  );
-  snShockRing.rotation.x = Math.PI * 0.42;
-  const snShockRing2 = new THREE.Mesh(
-    new THREE.TorusGeometry(1.0, 0.014, 12, 96),
-    new THREE.MeshBasicMaterial({
-      color: 0xc084fc,
-      transparent: true,
-      opacity: 0.36,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    })
-  );
-  snShockRing2.rotation.x = Math.PI * 0.22;
-  snShockRing2.rotation.y = Math.PI * 0.28;
-  const jetGeo = new THREE.ConeGeometry(0.16, 6.4, 16, 1, true);
-  const jetMat = new THREE.MeshBasicMaterial({
-    color: 0xa78bfa,
-    transparent: true,
-    opacity: 0.42,
-    side: THREE.DoubleSide,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false
-  });
-  const jetTop = new THREE.Mesh(jetGeo, jetMat);
-  jetTop.position.y = 3.5;
-  jetTop.rotation.x = Math.PI;
-  const jetBot = new THREE.Mesh(jetGeo, jetMat);
-  jetBot.position.y = -3.5;
-  remnantGroup.add(bhHorizonMesh, bhPhotonRing, bhAccretionDisk, snShockShell, snShockRing, snShockRing2, jetTop, jetBot);
-  astroGroup.add(remnantGroup);
-
-  // Group B: Quantum Hydrogen Microscope (10^-11 m) reusing ULG's 3D Volumetric Orbital Raymarcher!
+  // Group B: Quantum Hydrogen Microscope (10^-11 m) — genuine derived RHF H2 & KS H volumes!
   const quantumGroup = new THREE.Group();
   quantumGroup.visible = false;
   scene.add(quantumGroup);
@@ -416,7 +312,6 @@ export async function mountStellarGenesisDemo(container) {
     cloudGridDim: 16,
     maxGridDim: 24
   }).artifact;
-
   const hOrbitalRaymarcher = createVolumetricOrbitalRaymarcher({
     THREE,
     TSL,
@@ -430,25 +325,25 @@ export async function mountStellarGenesisDemo(container) {
   });
   quantumGroup.add(hOrbitalRaymarcher.mesh);
 
-  const protonMat = new THREE.MeshStandardMaterial({
-    color: 0xf43f5e,
-    emissive: 0xe11d48,
-    emissiveIntensity: 0.65,
-    roughness: 0.22
+  const h2Built = buildMolecularChargeDensityArtifact([
+    { Z: 1, position: [-0.70, 0, 0] },
+    { Z: 1, position: [0.70, 0, 0] }
+  ], {
+    formula: 'H2',
+    basis: '6-31g',
+    gridDim: 20
   });
-  const protonA = new THREE.Mesh(new THREE.SphereGeometry(0.32, 24, 18), protonMat);
-  const protonB = new THREE.Mesh(new THREE.SphereGeometry(0.32, 24, 18), protonMat);
-  protonA.add(createGlowSprite(spriteTex, 0xfb7185, 1.9, 0.85));
-  protonB.add(createGlowSprite(spriteTex, 0x38bdf8, 1.9, 0.85));
-
-  const h2BondMat = new THREE.MeshBasicMaterial({ color: 0x5eead4, transparent: true, opacity: 0.72 });
-  const h2BondCyl = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 2.2, 16), h2BondMat);
-  h2BondCyl.rotation.z = Math.PI / 2;
-
-  const coulombBarrierMat = new THREE.MeshBasicMaterial({ color: 0x34d399, wireframe: true, transparent: true, opacity: 0.0 });
-  const coulombBarrierMesh = new THREE.Mesh(new THREE.SphereGeometry(1.55, 24, 16), coulombBarrierMat);
-  const fusionFlashGlow = createGlowSprite(spriteTex, 0xfef08a, 3.8, 0.0);
-  quantumGroup.add(protonA, protonB, h2BondCyl, coulombBarrierMesh, fusionFlashGlow);
+  const h2DensityKey = h2Built.artifact.grid.payloadHandles.chargeDensity.key;
+  const h2VolumeRaymarcher = createVolumetricDensityGridRaymarcher({
+    THREE,
+    TSL,
+    renderer,
+    densityGrid: h2Built.densePayloads[h2DensityKey],
+    dimensions: h2Built.artifact.grid.dimensions,
+    boxHalfExtent: 4.8,
+    provenance: 'molecular-rhf-h2-charge-density'
+  });
+  quantumGroup.add(h2VolumeRaymarcher.mesh);
 
   // ---- HUD & Interactive Controls ----
   const topBar = document.createElement('div');
@@ -483,7 +378,7 @@ export async function mountStellarGenesisDemo(container) {
   bottomBar.style.cssText = 'position:absolute;left:16px;right:16px;bottom:14px;padding:10px 14px;border-radius:12px;background:rgba(5,11,22,0.88);border:1px solid rgba(56,189,248,0.24);backdrop-filter:blur(10px);z-index:10;display:flex;flex-direction:column;gap:8px;';
   bottomBar.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;">
-      <span style="font-size:11px;font-family:monospace;color:#94a3b8;white-space:nowrap;">10⁻¹¹ m (H₂ / Gamow)</span>
+      <span style="font-size:11px;font-family:monospace;color:#94a3b8;white-space:nowrap;">10⁻¹¹ m (H₂ / H)</span>
       <input id="sg-zoom-slider" type="range" min="-11.0" max="16.8" step="0.05" value="${currentLog10Span}" style="flex:1;accent-color:#38bdf8;cursor:pointer;" />
       <span style="font-size:11px;font-family:monospace;color:#94a3b8;white-space:nowrap;">10¹⁷ m (Nebula)</span>
     </div>
@@ -512,8 +407,6 @@ export async function mountStellarGenesisDemo(container) {
   const resetBtn = topBar.querySelector('#sg-reset-btn');
   const zoomSlider = bottomBar.querySelector('#sg-zoom-slider');
 
-  let shockExpandRadius = 1.0;
-
   function highlightPresetButtons() {
     for (const btn of topBar.querySelectorAll('[data-sg-preset]')) {
       const active = btn.dataset.sgPreset === activePresetId;
@@ -531,12 +424,7 @@ export async function mountStellarGenesisDemo(container) {
       seed: 1939
     });
     engine.resetBodies(nextBodies);
-    shockExpandRadius = 1.0;
-    if (presenter.zeroCopy) {
-      presenter.bindResidentBuffer(engine.getResidentBuffer());
-    } else {
-      presenter.syncFromCpuBodies(engine.getBodies());
-    }
+    presenter.bindResidentBuffer(engine.getResidentBuffer());
     highlightPresetButtons();
     renderInspectorPanel();
   }
@@ -633,13 +521,13 @@ export async function mountStellarGenesisDemo(container) {
         Module: <span style="color:#7dd3fc;">self-gravitating-hydro@1</span> (preset-free)<br/>
         ClosureRegistry: <span style="color:#6ee7b7;">${registeredClosure.artifact.closureId}</span><br/>
         Anchors: KS-PBE I_H=${q.hIonizationEv.toFixed(2)} eV · CAS(2,2) D_e=${q.h2DissociationEv.toFixed(2)} eV<br/>
-        Presenter: ${pStats.zeroCopy ? 'zero-copy GPU (0 B/frame)' : 'cpu-instanced'} · ${rendererBackend}<br/>
+        Presenter: ${pStats.zeroCopy ? 'zero-copy GPU (0 B/frame)' : 'fallback'} · ${rendererBackend} (${gpuAdapterName})<br/>
         Governance: <span style="color:#fde68a;">scientificValidation=false</span>
       </div>
     `;
   }
 
-  function updateVisualsFromPhysics(tel, tSec) {
+  function updateVisualsFromPhysics(tel) {
     const quantumBlend = Math.max(0, Math.min(1, (-3.0 - currentLog10Span) / 5.5));
     astroGroup.visible = quantumBlend < 0.96;
     quantumGroup.visible = quantumBlend > 0.04;
@@ -661,101 +549,10 @@ export async function mountStellarGenesisDemo(container) {
         Math.cos(camPitch) * Math.cos(camYaw) * camRad
       );
       camera.lookAt(0, 0, 0);
-    }
-
-    const [pr, pg, pb] = tel.photosphereSrgb;
-    const heatNorm = Math.max(0, Math.min(1, (tel.coreLogT - 2.4) / 4.8));
-    const fuseBoost = tel.fusingCount > 8 ? Math.min(1, Math.log10(1 + tel.fusingCount) / 3.0) : 0;
-    const isBinary = activePresetId === 'binary-nursery';
-
-    if (tel.supernovaTriggered) {
-      primaryStarGlow.visible = false;
-      outerCoronaGlow.visible = true;
-      outerCoronaGlow.material.color.setRGB(0.25, 0.85, 1.0);
-      outerCoronaGlow.material.opacity = 0.65;
-      outerCoronaGlow.scale.setScalar(4.8 + Math.sin(tSec * 4) * 0.25);
-      remnantGroup.visible = true;
-      bhHorizonMesh.visible = tel.remnantClass === 'black-hole';
-      bhPhotonRing.rotation.z = tSec * 1.4;
-      bhAccretionDisk.rotation.z = -tSec * 1.9;
-      shockExpandRadius = Math.min(11.5, shockExpandRadius + (simRunning ? 0.045 : 0));
-      snShockShell.scale.setScalar(shockExpandRadius * 2.1);
-      snShockShell.material.opacity = Math.max(0.06, 0.28 * (1 - shockExpandRadius / 16));
-      snShockRing.scale.setScalar(shockExpandRadius * 0.94);
-      snShockRing.rotation.z = tSec * 0.35;
-      snShockRing.material.opacity = Math.max(0.12, 0.52 * (1 - shockExpandRadius / 16));
-      snShockRing2.scale.setScalar(shockExpandRadius * 0.78);
-      snShockRing2.rotation.z = -tSec * 0.28;
-      snShockRing2.material.opacity = Math.max(0.08, 0.38 * (1 - shockExpandRadius / 16));
-      binaryGlowLeft.visible = false;
-      binaryGlowRight.visible = false;
-    } else if (isBinary) {
-      remnantGroup.visible = false;
-      primaryStarGlow.visible = false;
-      outerCoronaGlow.visible = false;
-      const orbAngle = tSec * 0.42;
-      const sep = 2.4 * Math.max(0.55, 1 - heatNorm * 0.35);
-      binaryGlowLeft.visible = heatNorm > 0.12;
-      binaryGlowRight.visible = heatNorm > 0.12;
-      binaryGlowLeft.position.set(Math.cos(orbAngle) * sep, 0, Math.sin(orbAngle) * sep);
-      binaryGlowRight.position.set(-Math.cos(orbAngle) * sep, 0, -Math.sin(orbAngle) * sep);
-      const bScale = 1.4 + heatNorm * 3.4 + fuseBoost * 2.2;
-      binaryGlowLeft.scale.setScalar(bScale);
-      binaryGlowRight.scale.setScalar(bScale * 0.92);
-      binaryGlowLeft.material.color.setRGB(pr, pg, pb);
-      binaryGlowRight.material.color.setRGB(Math.min(1, pr * 0.85 + 0.15), Math.min(1, pg * 0.92 + 0.08), Math.min(1, pb * 1.1));
-      binaryGlowLeft.material.opacity = Math.min(0.92, heatNorm * 0.65 + fuseBoost * 0.4);
-      binaryGlowRight.material.opacity = Math.min(0.92, heatNorm * 0.62 + fuseBoost * 0.38);
-    } else {
-      remnantGroup.visible = false;
-      binaryGlowLeft.visible = false;
-      binaryGlowRight.visible = false;
-      primaryStarGlow.visible = heatNorm > 0.08;
-      outerCoronaGlow.visible = heatNorm > 0.25;
-      primaryStarGlow.material.color.setRGB(pr, pg, pb);
-      primaryStarGlow.material.opacity = Math.min(0.95, 0.05 + heatNorm * 0.62 + fuseBoost * 0.36);
-      primaryStarGlow.scale.setScalar(1.3 + heatNorm * 3.2 + fuseBoost * 3.8);
-      outerCoronaGlow.material.color.setRGB(pr * 0.8 + 0.2, pg * 0.85 + 0.1, Math.min(1, pb + 0.25));
-      outerCoronaGlow.material.opacity = Math.min(0.55, heatNorm * 0.25 + fuseBoost * 0.35);
-      outerCoronaGlow.scale.setScalar(3.4 + heatNorm * 4.5 + fuseBoost * 4.8);
-    }
-
-    if (quantumGroup.visible) {
-      const fH2 = tel.coreFH2;
-      const fusing = tel.peakEpsNucWPerKg > 1e-6;
-      if (fusing) {
-        const cyc = (tSec * 1.85) % 1.0;
-        const sep = cyc < 0.72 ? (2.6 * (1 - cyc / 0.72) + 0.22) : (0.22 + ((cyc - 0.72) / 0.28) * 2.4);
-        protonA.position.set(-sep, 0, 0);
-        protonB.position.set(sep, 0, 0);
-        h2BondCyl.visible = false;
-        coulombBarrierMat.opacity = 0.28;
-        coulombBarrierMesh.rotation.y = tSec * 0.5;
-        const flash = cyc > 0.62 && cyc < 0.82 ? Math.sin(((cyc - 0.62) / 0.20) * Math.PI) : 0;
-        fusionFlashGlow.material.opacity = flash * 0.95;
-        fusionFlashGlow.scale.setScalar(2.4 + flash * 4.2);
-        hOrbitalRaymarcher.mesh.scale.setScalar(0.55);
-      } else if (fH2 > 0.15) {
-        const vib = Math.sin(tSec * 4.2) * 0.12 * (1.2 - fH2);
-        const sep = 1.12 + (1 - fH2) * 1.2 + vib;
-        protonA.position.set(-sep, 0, 0);
-        protonB.position.set(sep, 0, 0);
-        h2BondCyl.visible = true;
-        h2BondCyl.scale.set(1, sep / 1.1, 1);
-        h2BondMat.opacity = Math.max(0.08, fH2 * 0.75);
-        coulombBarrierMat.opacity = 0.0;
-        fusionFlashGlow.material.opacity = 0.0;
-        hOrbitalRaymarcher.mesh.scale.setScalar(1.0);
-      } else {
-        const drift = 1.8 + Math.sin(tSec * 2.1) * 0.45;
-        protonA.position.set(-drift, Math.cos(tSec * 1.7) * 0.4, 0);
-        protonB.position.set(drift, -Math.cos(tSec * 1.7) * 0.4, 0);
-        h2BondCyl.visible = false;
-        coulombBarrierMat.opacity = 0.14;
-        fusionFlashGlow.material.opacity = 0.0;
-        hOrbitalRaymarcher.mesh.scale.setScalar(0.85);
-      }
-      quantumGroup.rotation.y = tSec * 0.24;
+      // Display genuine quantum volume reflecting live core molecular vs atomic state (zero scripted props!)
+      const showMolecularH2 = tel.coreFH2 >= 0.5;
+      h2VolumeRaymarcher.mesh.visible = showMolecularH2;
+      hOrbitalRaymarcher.mesh.visible = !showMolecularH2;
     }
 
     let nearest = ZOOM_STOPS[0];
@@ -793,11 +590,7 @@ export async function mountStellarGenesisDemo(container) {
         }
       });
       const res = await moduleRegistry.dispatchSimulationStepCapsule(cap, { device: gpuDevice });
-      if (presenter.zeroCopy) {
-        presenter.bindLeaseHandle(res.leaseHandle);
-      } else {
-        presenter.syncFromCpuBodies(engine.getBodies());
-      }
+      presenter.bindLeaseHandle(res.leaseHandle);
       res.leaseHandle?.release?.();
     } finally {
       stepBusy = false;
@@ -807,7 +600,6 @@ export async function mountStellarGenesisDemo(container) {
   let rafId = 0;
   let disposed = false;
   let frameCounter = 0;
-  const startTimeMs = performance.now();
 
   function onResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -818,19 +610,18 @@ export async function mountStellarGenesisDemo(container) {
 
   renderInspectorPanel();
 
-  function animate(nowMs) {
+  function animate() {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
-    const tSec = (nowMs - startTimeMs) * 0.001;
     currentLog10Span += (targetLog10Span - currentLog10Span) * 0.14;
-    if (!dragging) camYaw += 0.0018;
+    if (cameraAutoSpin && !dragging) camYaw += 0.0018;
 
     if (simRunning && !stepBusy) {
       void stepSimulationOnce();
     }
 
     const tel = engine.getTelemetry();
-    updateVisualsFromPhysics(tel, tSec);
+    updateVisualsFromPhysics(tel);
     if (frameCounter % 10 === 0) {
       renderInspectorPanel();
     }
@@ -844,6 +635,8 @@ export async function mountStellarGenesisDemo(container) {
       return {
         presetId: activePresetId,
         moduleModel: 'self-gravitating-hydro@1',
+        gravityMode: engine.gravityMode,
+        cameraAutoSpin,
         closureId: registeredClosure.artifact.closureId,
         backend: engine.backend,
         rendererBackend,
@@ -868,7 +661,7 @@ export async function mountStellarGenesisDemo(container) {
     setLog10Span(v) {
       targetLog10Span = Math.max(-11.0, Math.min(16.8, Number(v)));
       currentLog10Span = targetLog10Span;
-      updateVisualsFromPhysics(engine.getTelemetry(), (performance.now() - startTimeMs) * 0.001);
+      updateVisualsFromPhysics(engine.getTelemetry());
       renderInspectorPanel();
       return api.getState();
     },
@@ -891,8 +684,7 @@ export async function mountStellarGenesisDemo(container) {
       }
       simRunning = prevRun;
       const tel = engine.getTelemetry();
-      if (tel.supernovaTriggered) shockExpandRadius = Math.max(shockExpandRadius, 5.2);
-      updateVisualsFromPhysics(tel, (performance.now() - startTimeMs) * 0.001);
+      updateVisualsFromPhysics(tel);
       renderInspectorPanel();
       renderer.render(scene, camera);
       return api.getState();
@@ -908,8 +700,8 @@ export async function mountStellarGenesisDemo(container) {
       window.removeEventListener('resize', onResize);
       presenter.dispose();
       hOrbitalRaymarcher.dispose();
+      h2VolumeRaymarcher.dispose();
       engine.dispose();
-      spriteTex.dispose();
       renderer.dispose?.();
     }
   };

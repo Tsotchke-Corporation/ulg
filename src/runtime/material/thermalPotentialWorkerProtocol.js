@@ -46,9 +46,10 @@ export function validateThermalPotentialWorkerResult(value, { enabled, scheduleI
     && (!isThermalPotentialWorkerCandidate(acknowledgement?.candidate)
       || value.ordinal !== acknowledgement.candidate.parentOrdinal + 1
       || (value.candidate != null && value.candidate.sourceFingerprint !== acknowledgement.candidate.sourceFingerprint))) fail();
-  const deferred = value.status === 'deferred-capacity' && value.candidate == null;
+  const deferred = (value.status === 'deferred-capacity' || value.status === 'cadence-deferred')
+    && value.candidate == null;
   const observed = !cancelled && !deferred;
-  const status = cancelled ? 'cancelled' : deferred ? 'deferred-capacity' : value.candidate == null ? 'no-valid-fit' : 'pending-state-manager';
+  const status = cancelled ? 'cancelled' : deferred ? value.status : value.candidate == null ? 'no-valid-fit' : 'pending-state-manager';
   if (value.status !== status || value.readbackBytes !== (observed ? 32 : 0)
     || value.mapAsyncCount !== (observed ? 1 : 0)
     || (observed ? !Number.isSafeInteger(value.cumulativeConsumerHits) || value.cumulativeConsumerHits < 0 : value.cumulativeConsumerHits != null)) fail();

@@ -1,5 +1,6 @@
 import { splitSpareReservesEqual } from './schroederSplitSpareReserve.js';
 import { retainedSchroederPhaseSlotRefinementBuffers } from './schroederPhaseSlotRefinementGpu.js';
+import { validateLawAdapterSchedule } from './lawAdapterContract.js';
 
 const phaseSlotOwnershipRollbacks = new WeakMap();
 
@@ -193,7 +194,7 @@ import {
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
 import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
-import { acquireQueueOrderedPooledBuffer, computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup, releaseOrDestroyQueueOrderedPooledBuffer, releaseQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
+import { acquireQueueOrderedPooledBuffer, computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup, registerQueueOrderedPooledBufferReturn, releaseOrDestroyQueueOrderedPooledBuffer, releaseQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
 import {
   createSphGpuTimestampProfiler,
   encodeSphGpuTimestampMarkerPass
@@ -4216,8 +4217,16 @@ export async function runSchroederFarForceDeltaFusionWebGpu({
       { binding: 2, resource: { buffer: outputStateBuffer } },
       { binding: 3, resource: { buffer: paramsBuffer } }
     ];
-    const copyBindGroup = device.createBindGroup({ layout: copyLayout, entries });
-    const applyBindGroup = device.createBindGroup({ layout: applyLayout, entries });
+    const copyBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-schroeder-far-force-delta-copy',
+      layout: copyLayout,
+      entries
+    });
+    const applyBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-schroeder-far-force-delta-apply',
+      layout: applyLayout,
+      entries
+    });
     const encoder = device.createCommandEncoder();
     const copyPass = encoder.beginComputePass();
     copyPass.setPipeline(copyPipeline);
@@ -4479,12 +4488,31 @@ function createActiveGridComputeDispatchArgsBuffer(
     };
   }
   const args = createComputeDispatchIndirectArgs(workgroupCountX);
-  const buffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-active-grid-dispatch-indirect-args',
-    args,
-    GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  );
+  const canPool = typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice;
+  const usage = GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
+  const buffer = canPool
+    ? (() => {
+        const pooled = acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+          label: 'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+          size: Math.max(4, args.byteLength),
+          usage
+        });
+        registerQueueOrderedPooledBufferReturn(pooled, device, {
+          bucketKey: 'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+          size: Math.max(4, args.byteLength),
+          usage
+        });
+        device.queue.writeBuffer(pooled, 0, args);
+        return pooled;
+      })()
+    : writeGpuBuffer(
+        device,
+        'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+        args,
+        usage
+      );
   return {
     schema: 'peercompute.ulg.mls-mpm-active-grid-compute-dispatch-indirect.v0',
     status: 'cpu-seeded-active-grid-indirect-dispatch-ready',
@@ -4520,11 +4548,30 @@ function createCompactMechanicsViewIndirectDispatchArgs(
     schroederSpatialDirectory?.mechanicsViewEnabled !== true
     || !schroederSpatialDirectory.mechanicsViewIndirectDispatchBuffer
   ) return null;
-  const buffer = device.createBuffer({
-    label: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
-    size: COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT,
-    usage: GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_DST
-  });
+  const size = COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT;
+  const usage = GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_DST;
+  const canPool = typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice;
+  const buffer = canPool
+    ? (() => {
+        const pooled = acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+          label: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+          size,
+          usage
+        });
+        registerQueueOrderedPooledBufferReturn(pooled, device, {
+          bucketKey: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+          size,
+          usage
+        });
+        return pooled;
+      })()
+    : device.createBuffer({
+        label: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+        size,
+        usage
+      });
   return {
     schema: 'peercompute.ulg.mls-mpm-compact-mechanics-view-indirect-dispatch.v1',
     status: 'gpu-authored-compact-mechanics-view-indirect-dispatch-ready',
@@ -13323,6 +13370,18 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     // synchronization scope in WebGPU, so later dispatches observe earlier
     // storage writes without paying a begin/end pass transition for every
     // one-workgroup claim or seal.
+    // Pooled `p2gAccumulatorBuffer` may hold prior-step non-zero bytes.
+    // In `mechanicsFieldViewEnabled`, `@binding(5)` is the deterministic
+    // contribution scratch whose untouched rows must carry `published == 0.0`,
+    // and `clear_accumulators` clears only `mechanicsFieldViewBuffer`.
+    if (
+      poolFusedTempBuffers
+      && mechanicsFieldViewEnabled
+      && activeGridDispatch.useActiveGrid
+      && typeof encoder.clearBuffer === 'function'
+    ) {
+      encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gScratchByteLength));
+    }
     let mechanicsFieldProductionPass = null;
     if (activeGridDispatch.useActiveGrid) {
       const accumulatorClearPass = mechanicsFieldViewEnabled
@@ -13354,7 +13413,12 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     const p2gPass = mechanicsFieldProductionPass || encoder.beginComputePass();
     p2gPass.setPipeline(p2gPipeline);
     p2gPass.setBindGroup(0, p2gBindGroup);
-    if (activeSourceV2P2gEnabled) {
+    const p2gParticleCeilingGroups = Math.max(1, Math.ceil(particleCount / 64));
+    const directActiveSourceP2gAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+      && p2gParticleCeilingGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
+    if (activeSourceV2P2gEnabled && !directActiveSourceP2gAllowed) {
       if (typeof p2gPass.dispatchWorkgroupsIndirect !== 'function') {
         throw new Error(
           'ActiveSource-v2 P2G requires GPU-authored indirect dispatch'
@@ -13365,7 +13429,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         schroederActiveNodeFilter.activeSourceActiveDispatchOffsetBytes
       );
     } else {
-      p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+      p2gPass.dispatchWorkgroups(p2gParticleCeilingGroups);
     }
     if (!mechanicsFieldProductionPass) p2gPass.end();
     const p2gFinalizePass = mechanicsFieldProductionPass
@@ -14592,6 +14656,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   registerSubmittedCleanup = null,
   maxSubstepsPerSubmission = null,
   onPresentationSubmissionBoundary = null,
+  canPresentSubmissionBoundary = null,
   // A1 real-time pacing: keep at most one presentation boundary outstanding
   // while the next chunk is encoded and submitted, instead of idling the GPU
   // through each frame's completion round trip. Boundaries are still called
@@ -14607,9 +14672,36 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   if (exactSequence) exactSequence.count = count;
   const own = buffer => { if (exactSequence && buffer) exactSequence.buffers.add(buffer); return buffer; };
-  const createSequenceBuffer = descriptor => own(device.createBuffer(descriptor));
+  const poolSequenceTempBuffers = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && typeof device.queue?.onSubmittedWorkDone === 'function'
+  );
+  const createSequenceBuffer = (descriptor, { pool = true } = {}) => {
+    const size = Math.max(4, descriptor?.size ?? 0);
+    const usage = descriptor?.usage ?? 0;
+    const label = descriptor?.label;
+    if (pool && poolSequenceTempBuffers && label) {
+      const buffer = acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: label,
+        label,
+        size,
+        usage
+      });
+      registerQueueOrderedPooledBufferReturn(buffer, device, {
+        bucketKey: label,
+        size,
+        usage
+      });
+      return own(buffer);
+    }
+    return own(device.createBuffer(descriptor));
+  };
   const writeSequenceBuffer = (ownerDevice, label, data, usage) => {
-    const buffer = own(ownerDevice.createBuffer({ label, size: Math.max(4, data?.byteLength ?? 0), usage }));
+    const size = Math.max(4, data?.byteLength ?? 0);
+    const buffer = ownerDevice === device
+      ? createSequenceBuffer({ label, size, usage }, { pool: true })
+      : own(ownerDevice.createBuffer({ label, size, usage }));
     if (data?.byteLength > 0) ownerDevice.queue.writeBuffer(buffer, 0, data);
     return buffer;
   };
@@ -14915,11 +15007,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     compactSummary: 0
   };
   const sequenceEncodeStartMs = nowMs();
+  const poolSequenceGridBuffers = poolSequenceTempBuffers && !exactSequence;
   const gridBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-out',
     size: Math.max(4, gridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  });
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | ((activeGridDispatch.useActiveGrid || poolSequenceGridBuffers) ? GPU_BUFFER_USAGE.COPY_DST : 0)
+  }, { pool: poolSequenceGridBuffers });
   // Previous-substep finalized grid ([mass, momentum] rows): the spatial
   // density source for the liquid EOS. Zeroed at sequence start, refreshed by
   // a copy after every substep's finalize pass.
@@ -14927,35 +15020,35 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-accumulators',
     size: Math.max(4, p2gAccumulatorByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  });
+  }, { pool: poolSequenceGridBuffers });
   const updatedGridBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-grid-update-out',
     size: Math.max(4, updatedGridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  });
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | ((activeGridDispatch.useActiveGrid || poolSequenceGridBuffers) ? GPU_BUFFER_USAGE.COPY_DST : 0)
+  }, { pool: poolSequenceGridBuffers });
   const statePingBuffers = [
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device),
+    }, { pool: !exactSequence }), device),
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device)
+    }, { pool: !exactSequence }), device)
   ];
   const mechanicsPingBuffers = [
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device),
+    }, { pool: !exactSequence }), device),
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device)
+    }, { pool: !exactSequence }), device)
   ];
   const p2gParamsBuffer = writeSequenceBuffer(
     device,
@@ -15197,6 +15290,16 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
       return nextEncoder;
     };
     let encoder = createSequenceCommandEncoder();
+    if (poolSequenceGridBuffers) {
+      // Pooled grid buffers carry prior-schedule data; clear once at sequence
+      // start so inactive grid nodes remain zero-initialized without allocating
+      // fresh buffers or busting bind-group caches every schedule.
+      encoder.clearBuffer(gridBuffer, 0, Math.max(4, gridByteLength));
+      encoder.clearBuffer(updatedGridBuffer, 0, Math.max(4, updatedGridByteLength));
+      if (activeGridDispatch.useActiveGrid) {
+        encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
+      }
+    }
     let currentSubmissionStepCount = 0;
     const markCurrentSidecarStagesSubmitted = (submittedStepCount) => {
       while (submittedSidecarStageCount < sidecarEncoderStages.length) {
@@ -15299,7 +15402,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     // so this bind group was identical on every iteration. Building it per
     // substep cost `count` driver-validated createBindGroup calls per sequence
     // (256 for a default batch) to produce the same object each time.
-    const gridUpdateBindGroup = device.createBindGroup({
+    const gridUpdateBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-mls-mpm-fused-sequence-grid-update',
       layout: gridUpdateBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: gridBuffer } },
@@ -15308,30 +15412,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
         { binding: 3, resource: { buffer: pressureRowsBuffer } }
       ]
     });
-    // Bind groups below are rebuilt every substep, but their buffer sets take
-    // only a handful of distinct values: the three "current" buffers rotate
-    // through the ping-pong pair, plus the substitutions the thermal and
-    // mechanics-refresh stages make mid-loop. Memoise on the identity of the
-    // referenced buffers, NOT on `pingIndex` -- a parity key would be wrong,
-    // because those stage substitutions do not follow parity.
-    const bindGroupMemo = [];
-    const memoizedBindGroup = (layout, buffers, buildEntries) => {
-      for (const entry of bindGroupMemo) {
-        if (entry.layout !== layout || entry.buffers.length !== buffers.length) continue;
-        let same = true;
-        for (let i = 0; i < buffers.length; i += 1) {
-          if (entry.buffers[i] !== buffers[i]) { same = false; break; }
-        }
-        if (same) return entry.bindGroup;
-      }
-      const bindGroup = device.createBindGroup({ layout, entries: buildEntries() });
-      // Bounded so an unexpected rotation pattern degrades to the old
-      // behaviour rather than growing a cache without limit.
-      if (bindGroupMemo.length < 32) {
-        bindGroupMemo.push({ layout, buffers: buffers.slice(), bindGroup });
-      }
-      return bindGroup;
-    };
+    const memoizedBindGroup = (layout, _buffers, buildEntries) => (
+      createCachedExplicitBindGroup(device, {
+        label: 'ulg-mls-mpm-fused-sequence-step',
+        layout,
+        entries: buildEntries()
+      })
+    );
     for (let index = 0; index < count; index += 1) {
       if (index === count - 1) {
         finalSourceStateBuffer = currentStateBuffer;
@@ -15754,6 +15841,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
         && index < count - 1
         && currentSubmissionStepCount
           >= normalizedMaxSubstepsPerSubmission
+        && (typeof canPresentSubmissionBoundary !== 'function'
+          || canPresentSubmissionBoundary() === true)
       ) {
         submitCurrentSequenceEncoder(currentSubmissionStepCount);
         presentationBoundaryCount += 1;
@@ -15838,7 +15927,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
         label: 'ulg-mls-mpm-fused-sequence-exact-terminal-thermo',
         size: sphParticleUpload.thermoBufferByteLength,
         usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-      }), device);
+      }, { pool: false }), device);
       encoder.copyBufferToBuffer(currentThermoBuffer, 0, exactTerminalThermoCopy, 0,
         sphParticleUpload.thermoBufferByteLength);
       currentThermoBuffer = exactTerminalThermoCopy;
@@ -16398,16 +16487,24 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     finalStep.residentMaxSpeedMPerS = continuationBounds.maxSpeedMPerS;
     finalStep.residentPositionBoundsSource = continuationBounds.source;
     finalStep.residentActiveGridDispatchHint = activeGridDispatch;
+    const actualSubmissionMode = (
+      presentationQueueQosChunkingEnabled
+      && commandSubmissionCount > 1
+    )
+      ? 'queue-ordered-presentation-qos-chunks'
+      : 'single-terminal-submission';
+    const effectiveMaxSubstepsPerSubmission = actualSubmissionMode
+      === 'queue-ordered-presentation-qos-chunks'
+      ? Math.max(normalizedMaxSubstepsPerSubmission, ...submissionStepCounts)
+      : null;
     finalStep.fusedResidentSequence = {
       schema: 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0',
       status: 'fused-resident-sequence-executed',
       stepCount: count,
-      submissionMode,
+      submissionMode: actualSubmissionMode,
       commandSubmissionCount,
       submissionStepCounts: [...submissionStepCounts],
-      maxSubstepsPerSubmission: presentationQueueQosChunkingEnabled
-        ? normalizedMaxSubstepsPerSubmission
-        : null,
+      maxSubstepsPerSubmission: effectiveMaxSubstepsPerSubmission,
       presentationBoundaryCount,
       presentationBoundaryCompletedCount,
       presentationBoundaryFailureCount,
@@ -19106,90 +19203,14 @@ function uniqueStringList(values = []) {
 }
 
 export function validateFusedResidentLawPlan(plan) {
-  const errors = [];
-  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.stages)) {
-    return Object.freeze({
-      valid: false,
-      errors: Object.freeze(['fused-law-plan-invalid-structure']),
-      stageCount: 0,
-      exclusiveWritersByResource: Object.freeze({}),
-      accumulatorsByResource: Object.freeze({})
-    });
-  }
-  const order = Array.isArray(plan.requiredStageOrder) ? plan.requiredStageOrder : [];
-  const orderIndex = new Map(order.map((stageId, idx) => [stageId, idx]));
-  const seenStageIds = new Set();
-  const exclusiveWritersByResource = new Map();
-  const accumulatorsByResource = new Map();
-  const handoffCompatibleResources = new Set([
-    'sph-particle-state',
-    'sph-thermo-phase',
-    'mls-mpm-mechanics',
-    'mls-mpm-grid-velocity'
-  ]);
-
-  for (const stage of plan.stages) {
-    if (!stage || typeof stage !== 'object') {
-      errors.push('stage-entry-not-object');
-      continue;
-    }
-    const id = String(stage.id || '').trim();
-    if (!id) {
-      errors.push('stage-missing-id');
-      continue;
-    }
-    if (seenStageIds.has(id)) {
-      errors.push(`duplicate-stage-id:${id}`);
-    }
-    seenStageIds.add(id);
-    if (!stage.lawNodeId || !stage.orderConstraint) {
-      errors.push(`stage-missing-contract-metadata:${id}`);
-    }
-    const writes = Array.isArray(stage.writes) ? stage.writes : [];
-    const accumulates = Array.isArray(stage.accumulates) ? stage.accumulates : [];
-    const writeSet = new Set(writes);
-    for (const acc of accumulates) {
-      if (writeSet.has(acc)) {
-        errors.push(`stage-writes-and-accumulates-same-resource:${id}:${acc}`);
-      }
-      if (!accumulatorsByResource.has(acc)) accumulatorsByResource.set(acc, []);
-      accumulatorsByResource.get(acc).push(id);
-    }
-    for (const resource of writes) {
-      if (!exclusiveWritersByResource.has(resource)) {
-        exclusiveWritersByResource.set(resource, []);
-      }
-      const priorWriters = exclusiveWritersByResource.get(resource);
-      if (priorWriters.length > 0) {
-        const currentOrder = orderIndex.get(id);
-        const priorOrder = orderIndex.get(priorWriters[priorWriters.length - 1]);
-        const strictlyOrderedHandoff = (
-          handoffCompatibleResources.has(resource)
-          && Number.isInteger(priorOrder)
-          && Number.isInteger(currentOrder)
-          && currentOrder > priorOrder
-          && Array.isArray(stage.reads)
-          && stage.reads.includes(resource)
-        );
-        if (!strictlyOrderedHandoff) {
-          errors.push(
-            `illegal-double-writer:${resource}:${priorWriters[priorWriters.length - 1]}+${id}`
-          );
-        }
-      }
-      priorWriters.push(id);
-    }
-  }
-  return Object.freeze({
-    valid: errors.length === 0,
-    errors: Object.freeze(errors),
-    stageCount: plan.stages.length,
-    exclusiveWritersByResource: Object.freeze(
-      Object.fromEntries([...exclusiveWritersByResource.entries()].map(([k, v]) => [k, Object.freeze([...v])]))
-    ),
-    accumulatorsByResource: Object.freeze(
-      Object.fromEntries([...accumulatorsByResource.entries()].map(([k, v]) => [k, Object.freeze([...v])]))
-    )
+  return validateLawAdapterSchedule(plan, {
+    requireExtendedMetadata: false,
+    handoffCompatibleResources: [
+      'sph-particle-state',
+      'sph-thermo-phase',
+      'mls-mpm-mechanics',
+      'mls-mpm-grid-velocity'
+    ]
   });
 }
 
@@ -23043,7 +23064,7 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
             computeBufferBinding(2, 'uniform')
           ]
         });
-        const bindGroup = device.createBindGroup({
+        const bindGroup = createCachedExplicitBindGroup(device, {
           layout: bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: sourceBuffer } },
@@ -31704,13 +31725,43 @@ export async function observeResidentProductHistoryLiveRowBound(
   ) {
     return null;
   }
+  const prevObserved = residentProductHistoryObservedBoundByDevice.get(device);
+  if (
+    prevObserved
+    && prevObserved.controlBuffer === gpuCountRecord.controlBuffer
+    && prevObserved.offsetBytes === gpuCountRecord.offsetBytes
+    && Number.isInteger(prevObserved.observedLiveRowCount)
+    && Number.isInteger(record.liveRowCountUpperBound)
+    && record.liveRowCountUpperBound <= prevObserved.observedLiveRowCount
+  ) {
+    const exactObserved = prevObserved.observedLiveRowCount;
+    const tightened = Math.min(record.liveRowCountUpperBound, Math.max(1, exactObserved));
+    return {
+      schema: 'peercompute.ulg.sph-product-history-live-bound-observation.v0',
+      observedLiveRowCount: exactObserved,
+      previousUpperBound: record.liveRowCountUpperBound,
+      tightenedUpperBound: tightened,
+      arenaRowCapacity: record.logicalRowCount,
+      readbackByteLength: 4,
+      arenaIdentity
+    };
+  }
   let readBuffer = null;
+  const isRealDevice = typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice;
   try {
-    readBuffer = device.createBuffer({
-      label: 'ulg-product-history-live-count-observation',
-      size: 4,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
+    readBuffer = isRealDevice
+      ? acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-product-history-live-count-observation',
+          label: 'ulg-product-history-live-count-observation',
+          size: 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          allowMapReadPool: true
+        })
+      : device.createBuffer({
+          label: 'ulg-product-history-live-count-observation',
+          size: 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
     const encoder = device.createCommandEncoder({
       label: 'ulg-product-history-live-count-observation'
     });
@@ -31738,7 +31789,9 @@ export async function observeResidentProductHistoryLiveRowBound(
     record.liveRowCountUpperBound = tightened;
     residentProductHistoryObservedBoundByDevice.set(device, {
       bound: Math.max(1, observed),
-      observedLiveRowCount: observed
+      observedLiveRowCount: observed,
+      controlBuffer: gpuCountRecord.controlBuffer,
+      offsetBytes: gpuCountRecord.offsetBytes
     });
     if (
       residentProductMass
@@ -31764,7 +31817,22 @@ export async function observeResidentProductHistoryLiveRowBound(
   } catch {
     return null;
   } finally {
-    try { readBuffer?.destroy(); } catch { /* observation is advisory */ }
+    if (readBuffer) {
+      if (isRealDevice) {
+        try {
+          releaseQueueOrderedPooledBuffer(device, readBuffer, {
+            bucketKey: 'ulg-product-history-live-count-observation',
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            allowMapReadPool: true
+          });
+        } catch {
+          try { readBuffer.destroy(); } catch { /* observation is advisory */ }
+        }
+      } else {
+        try { readBuffer.destroy(); } catch { /* observation is advisory */ }
+      }
+    }
   }
 }
 
@@ -32051,7 +32119,7 @@ async function compactResidentProductHistoryArenaWebGpu({
       0,
       new Uint32Array([rowCount, strideFloats / 4, 0, 0])
     );
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceSlot.buffer } },
@@ -32202,7 +32270,7 @@ export async function compactResidentProductEventBufferWebGpu({
   try {
     device.pushErrorScope?.('validation');
     device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([rowCount, strideFloats / 4, 0, 0]));
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceBuffer } },
@@ -37421,6 +37489,18 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           'Canonical spatial mechanics requires a spatialMechanicalProposalRunner'
         );
       }
+      const canonicalMechanicsFieldWillRun = Boolean(
+        mechanicsMaterialTable?.surfaceTensionEnabled === true
+        || exactGasPressureMechanicsBoundaryRequested
+        || resolvePhaseVolumeAmbientBuoyancyExecution({
+          canonicalSpatialRequired,
+          schroederSpatialEpochGeneration,
+          mechanicsMaterialTable,
+          ambientPressurePa,
+          gravityMPerS2: gravity,
+          residentProductMass
+        }).required === true
+      );
       spatialMechanicalProposal = await timedStage(
         'spatialMechanicalProposal',
         () => spatialMechanicalProposalRunner({
@@ -37440,6 +37520,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           jacobiIterations: contactJacobiIterations,
           cleanupPassBudget: contactCleanupPassBudget,
           contactInnerRounds,
+          unilateralVelocityImpulseHandledByMechanicsField: canonicalMechanicsFieldWillRun,
           gpuPassTimestampProfilingRequested:
             residentGpuTimestampProfilingRequested === true
         })
@@ -38137,7 +38218,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     });
   // G3 coherent rigid bodies: one SE(3) step per resident step, on the same
   // device and queue, after the continuum mechanics.
-  const solidReleaseFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
+  const solidReleaseFluid = solidRigidReleaseFluidBuffers(
+    sphParticleState,
+    sphParticleUpload,
+    g2pReconstruction,
+    schroederSpatialEpochGeneration
+  );
   runSchroederSolidRigidLaneStep(
     ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
     { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: solidReleaseFluid });
@@ -40087,7 +40173,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         : runMlsMpmG2pWithOptionalWebGpu(g2pStageOptions)
     ));
     // G3 coherent rigid bodies on the mechanics-only route as well.
-    const mechanicsOnlySolidFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
+    const mechanicsOnlySolidFluid = solidRigidReleaseFluidBuffers(
+      sphParticleState,
+      sphParticleUpload,
+      g2pReconstruction,
+      schroederSpatialEpochGeneration
+    );
     runSchroederSolidRigidLaneStep(
       ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
       { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: mechanicsOnlySolidFluid });
@@ -42327,6 +42418,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.maxSubstepsPerSubmission ?? null,
       onPresentationSubmissionBoundary:
         args.onPresentationSubmissionBoundary ?? null,
+      canPresentSubmissionBoundary:
+        args.canPresentSubmissionBoundary ?? null,
       pipelinePresentationBoundaries:
         args.pipelinePresentationBoundaries === true,
       // PROF-0. Opt-in per run. The device must also have been created with
@@ -43212,7 +43305,12 @@ export function destroyMlsMpmResidentStepsBuffers(execution, {
 // energy and exact mass buffers travel alongside so thermal exchange and melt
 // release preserve the integer sum(U - S) and exact-mass ledgers; only the
 // retired rational initialQuantities route stays disabled.
-function solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) {
+function solidRigidReleaseFluidBuffers(
+  sphParticleState,
+  sphParticleUpload,
+  g2pReconstruction,
+  spatialEpochGeneration = null
+) {
   if (sphParticleState?.exactMass?.initialQuantities === true) return null;
   const g2p = retainedG2pOutputBuffers(g2pReconstruction);
   const thermoBuffer = sphParticleUpload?.thermoBuffer ?? null;
@@ -43222,11 +43320,23 @@ function solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pR
   if ((sphParticleState?.exactMass || sphParticleState?.coldExactMassInput) && (!exactEnergy || !exactMassBuffer)) {
     return null;
   }
+  const ssExec = spatialEpochGeneration?.execution ?? null;
+  const hasCanonicalSsDir = Boolean(
+    ssExec?.directoryBuffer
+    && Number(ssExec?.queryBaseGridSpacingM) > 0
+  );
   return {
     stateBuffer: g2p.stateBuffer,
     mechanicsBuffer: g2p.mechanicsBuffer,
     thermoBuffer,
     particleCount: sphParticleState?.particleCount ?? 0,
+    ...(hasCanonicalSsDir ? {
+      fluidDirectoryBuffer: ssExec.directoryBuffer,
+      fluidBaseGridSpacingM: Number(ssExec.queryBaseGridSpacingM),
+      fluidChartId: Number(ssExec.queryChartId) || 0,
+      fluidMinLevel: Number(ssExec.queryMinLevel) || 0,
+      fluidMaxLevel: Number(ssExec.queryMaxLevel) || 0
+    } : {}),
     ...(exactEnergy && exactMassBuffer ? {
       exactEnergyBuffer: exactEnergy.energyBuffer,
       exactEnergyRowCount: exactEnergy.rowCount,

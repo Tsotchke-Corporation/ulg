@@ -2,6 +2,17 @@
 
 Date: 2026-06-18 AKDT
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Gate 1 / Gate 2):**
+> `data/material-properties/` holds `elements.json` (`111/118` elements —
+> **missing all 7 noble gases** `Z = 2, 10, 18, 36, 54, 86, 118` and lacking
+> nuclear/EM/magnetic/conductivity closures), `compounds.json` (`15/15`
+> `reference-fallback`), and `element-crystal-structures.json` (`7`
+> `reference-fallback`). First-principles Chapman–Enskog gas `μ(T)` & Modified
+> Eucken `k(T)` landed in P2; retiring all remaining `reference-fallback` rows
+> across all 118 elements and reaction-derived compounds is now **Gate 1 &
+> Gate 2**. Active routing: [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) &
+> [`periodic-table-polytope-atlas-foundation-plan.md`](periodic-table-polytope-atlas-foundation-plan.md).
+
 Status update, 2026-06-18 AKDT: Phase 1 has a first checked-in seed, not a
 complete bank. `data/material-properties/elements.json` now contains
 non-authoritative warm-input records for the currently exercised elements

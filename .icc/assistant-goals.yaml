@@ -1,117 +1,76 @@
 # ULG-side assistant goals. Used by ICC assistant-status/next-action style
-# commands when available, and by human/agent handoff readers today.
-# Active routing and 2026-11-19 owner decisions: plan/CURRENT-PLAN.md.
+# commands and human/agent handoff readers.
+# Active routing, honest 2026-11-22 40-OOM Scale-Ladder Roadmap, and GPU budgets:
+# plan/CURRENT-PLAN.md.
+#
+# HONESTY RULE: Only mark a goal `completed` (`accepted`) after its
+# .icc/completion-oracles.yaml target passes on one reviewed
+# `ulg.campaign.receipt.v1` bundle on disk. All 8/8 active Scale-Ladder &
+# campaign gates are now formally accepted: g5-reservation, g7-release-audit,
+# gate0-foundation-arch, gate1-periodic-table-engine,
+# gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics,
+# gate4-studio-presentation, and gate5-planetary-to-supergalactic.
 
 goals:
-  - id: a1-realtime-substrate
-    task_id: ulg-a1-realtime-substrate
+  - id: gate0-foundation-arch
+    task_id: ulg-gate0-foundation-arch
     priority: high
     status: completed
-    goal: "Phase 1 + Arch M2: Real-time 100k+ bulk substrate, decoupled presentation, parallel Jacobi contact + thermal decoupling, fused K-step GPU epoch slots, and retiring superseded legacy routes"
-    oracle: ulg-a1-realtime-substrate
+    goal: "Priority 0 (Gate 0): Split slim peercompute-core (<45 MB dist, 0 ort-wasm), build reusable WebGPU gpuMath substrate (batched eigensolver, 3D FFT, WebGPU MD, polytope Chebyshev), lock Material-Bundle & Polytope-Atlas ABIs, and complete Continuum Zero-Churn Step Loop hygiene"
+    oracle: ulg-gate0-foundation-arch
     depends_on: []
-    reason: "Completed on feat/ulg-ga-consolidation (849cae7f, 55f22a03, 1b6d8f45, a4100f24): 103,831 live carriers sustain 1.433x real-time physics (127.1 steps/s), 89.2 presented states/s, and 118.17 Hz UI rAF on Wayland desktop (/home/cos/.cache/icc/repos/ulg/arch-m2-a1-100k/)."
-    tags: [ulg-campaign, phase-1, architecture-first, verified]
+    reason: "Accepted 2026-11-23 at commit b46bf134 (dirty: false): ICC completion-oracle ulg-gate0-foundation-arch 3/3 PASS (status: complete) on fresh ICC index after 2-round adversarial independent review (Round 1 FAIL 2d851edd preserved at independent-review-round1-fail.md; Round 2 ACCEPT 1a8eddd4). Verified single peercompute/core.js import (src/runtime/peercomputeCore.js:40), dist/ = 37 MB (<45 MB, 0 AI/ort-wasm assets), shared peercomputeCompute.worker.js + resident stage entrypoints verified live on built dist/index.html?preset=sodium-water&autoplay=1 (24 steps, 0 page/console/HTTP errors), gate0GpuMath.native.test.mjs 1/1 PASS (4.23s), canonical ABIs locked, S0_ATTRIBUTION=1 steady-state physics createBuffer=0.003/step & bindGroups=0.059/step on water-realtime (24.49 steps/s, submits 1.68<=2, passes 15.43<=25, boundaryFailures=1 disclosed) and 0/step createBuffer & 0.000/step physics bindGroups on iron-ice-quench (encoders -80%, passes 19.95<=25, bindGroups -61%, thermalPotential cadence-deferred 18144 hits), iron-ice unilateral contact deduplicated, production dist/ strips finalizeSphReactionStrictGateCpu & 63-limb sphExactRational* (0 refs) while preserving blocksA/blocksB parallel product-history append, 6213/6213 host tests PASS, KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate0-acceptance-20261123/ and plan/done/gate0-foundation-arch.md."
+    tags: [ulg-scale-ladder, gate-0, foundation-first, accepted]
 
-  - id: a2-incremental-spatial
-    task_id: ulg-a2-incremental-spatial
+  - id: gate1-periodic-table-engine
+    task_id: ulg-gate1-periodic-table-engine
     priority: high
     status: completed
-    goal: "Phase 1 + Arch M3: Single-pass GPU incremental spatial CSR migration with displacement certificates, immutable arena rings, and fast N-level SS chain"
-    oracle: ulg-a2-incremental-spatial
-    depends_on: [a1-realtime-substrate]
-    reason: "Completed on feat/ulg-ga-consolidation (85726fe7, 5638d336): bit-for-bit CSR directory equivalence with trusted GPU radix across crossings/capacity/adversarial motion, 9.43x-9.67x speedup at 103,831 carriers, and zero-indirect N-level SS cross-transport."
-    tags: [ulg-campaign, phase-1, architecture-first, verified]
+    goal: "Priority 1 (Gate 1, 10^-15 -> 10^-9 m): Complete First-Principles Periodic Table Material Engine (Z=1..118: nuclear, relativistic Dirac/KH atomic, EM/magnetic/optical/conductive, bulk DFT, WebGPU MD/phonons) with real live WebGPU visualizations (elements-lab.html) and offline G7 advisory scorecards"
+    oracle: ulg-gate1-periodic-table-engine
+    depends_on: [gate0-foundation-arch]
+    reason: "Accepted 2026-11-23 at commit b9e86811 (dirty: false): ICC completion-oracle ulg-gate1-periodic-table-engine 3/3 PASS (status: complete, 0 dropped/truncated) after 3-round independent audit (Round 1 FAIL 52d471fd & Round 2 FAIL 66aa79f5 preserved; Round 3 ACCEPT c3a3bdb7). Verified live WebGPU Z=1..118 (0 SCF readbacks, 0 CPU interband fallbacks, 50/50 exact 4-atom HCP volumes, metallic fcc Pd, 95 distinct element sRGBs, relativistic Au, 0/118 zero-MSD truncations), 10 inspected Wayland Vulkan PNGs (zero-copy 3D MD, cameraAutoSpin=false, 116314 changed px), 6/6 Vulkan proofs, 6209/6209 host tests, 37 MB build (0 AI assets), KERNEL_CLEAN. scientificValidation=false & offline G7 advisory preserved. Evidence: /home/cos/.cache/icc/repos/ulg/gate1-gate2-acceptance-20261123/ and plan/done/gate1-periodic-table.md."
+    tags: [ulg-scale-ladder, gate-1, periodic-table, quantum-visuals, accepted]
 
-  - id: g6-local-fit
-    task_id: ulg-g6-local-fit
+  - id: gate2-reactions-and-polytope-atlas
+    task_id: ulg-gate2-reactions-and-polytope-atlas
     priority: high
     status: completed
-    goal: "Phase 1: Live local provenance-bound online closure fit/cache loop enabled by default with G4 uncertainty bounds"
-    oracle: ulg-g6-local-fit
-    depends_on: [a1-realtime-substrate]
-    reason: "Completed on feat/ulg-ga-consolidation (24bdf0f2): live GPU miss -> sample -> fit -> schedule-boundary adopt -> hit loop enabled by default with per-source G4 uncertainty intervals."
-    tags: [ulg-campaign, phase-1, architecture-first, verified]
+    goal: "Priority 2 (Gate 2, 10^-10 -> 10^-6 m): GPU Molecular QM & Chemical Reactions -> Recursive Compound Feedback Loop back into Gate 1 -> Per-Material & Per-Compound Convex Polytope Atlas (A x <= b + GPU Chebyshev Tier-1 lookup tables + 3D Atlas Visualizer)"
+    oracle: ulg-gate2-reactions-and-polytope-atlas
+    depends_on: [gate1-periodic-table-engine]
+    reason: "Accepted 2026-11-23 at commit b9e86811 (dirty: false): ICC completion-oracle ulg-gate2-reactions-and-polytope-atlas 3/3 PASS (status: complete, 0 dropped/truncated) after 3-round independent audit (Round 1 FAIL 52d471fd & Round 2 FAIL 66aa79f5 preserved; Round 3 ACCEPT c3a3bdb7). Verified 100% WebGPU molecular RHF + climbingImageNEBWebGpu (H2O/D2O Ea=3.91 eV), Slater+Allred-Rochow ionic/covalent crystals (Al2O3 corundum-D51, NaCl cscl-B2), discoverAndDeriveReactionProductsWebGpu (Na+H2O->NaOH+H2), 20/20 compounds covering 15/15 legacy compounds.json (0 reference-fallback, provenance.gpuStagesExecuted), persisted 4-phase GPU Chebyshev fits (valueTransform=exp valid_mode=2, fail-closed hydration & hitFlag==0) across all 138 materials verified over 142457 adversarial interior probes (<0.6% ambient gases, <3.40% structured interior), live WGSL Tab 6 Atlas, 6/6 Vulkan proofs, 6209/6209 host tests, KERNEL_CLEAN. scientificValidation=false preserved. Evidence: /home/cos/.cache/icc/repos/ulg/gate1-gate2-acceptance-20261123/ and plan/done/gate2-reactions-polytope-atlas.md."
+    tags: [ulg-scale-ladder, gate-2, chemistry, polytope-atlas, accepted]
 
-  - id: a3-representative-sampling
-    task_id: ulg-a3-representative-sampling
+  - id: gate3-continuum-substrate-and-physics
+    task_id: ulg-gate3-continuum-substrate-and-physics
     priority: high
     status: completed
-    goal: "Phase 1: Representative homogeneous-region GPU sampling wired into live closure misses and envelope expansion"
-    oracle: ulg-a3-representative-sampling
-    depends_on: [a1-realtime-substrate, g6-local-fit]
-    reason: "Completed on feat/ulg-ga-consolidation (24bdf0f2): regionalClosureSamplerGpu + G5-reserved regionalClosureWorkerLane live on canonical lane."
-    tags: [ulg-campaign, phase-1, architecture-first, verified]
+    goal: "Priority 3 (Gate 3, 10^-6 -> 10^+2 m): Macroscopic Continuum Engine & Unified SS consuming Gate 2 Polytope Atlas at Tier-1 (with Tier-2 A3 / Tier-3 A6 misses), passing Section 3 GPU budgets, unifying 3 private solid hashes & dormancy grids onto canonical SS cells, indirect dispatch on all 4 law families, exact 2^-149 ledgers & multi-level first-class air"
+    oracle: ulg-gate3-continuum-substrate-and-physics
+    depends_on: [gate0-foundation-arch, gate2-reactions-and-polytope-atlas, g5-reservation]
+    reason: "Accepted 2026-11-23 at commit a5c632cb (dirty: false): ICC completion-oracle ulg-gate3-continuum-substrate-and-physics 3/3 PASS (status: complete) on fresh ICC index after 3-round adversarial independent review (Round 1 FAIL d134a84f & Round 2 FAIL 2bcec1b6 preserved verbatim; Round 3 ACCEPT a4a11f08). All 5 live scripts/gpuprobe.sh probes pass hard Section 3 GPU budgets with exact 16-field physics+presentation integer split additivity and 0 page/GPU/Xid errors: water-realtime 1.3065x RT at canonical CPUQuota=50% (submits 0.03, passes 9.24, indirect 0, createBuf 0, bindGrp 0, boundaryFailures 0) and 3.6889x RT at 400% (0 boundaryFailures); iron-ice-quench (submits 1.12, passes 5.71, indirect 2.05, createBuf 0.01, bindGrp 1.02, canonical SS solid-fluid directory + SOL-5/6 active); sodium-water (submits 1.50, passes 8.52, indirect 3.25, Polytope 152/152 applied, live A3 radiative flux physics consumer 74 steps batched in burst, all 4 indirect law families exact); 3-level air3 (submits 0.66, passes 13.67, indirect 14.89<=16 total, createBuf 0, bindGrp 22.76 down from 47.70, phaseVolumeMigration=true 2272 rows, parcelStage.ran=120, parcelOptics=29/29, live A3 radiative flux 117 steps). Private solid proxy hash retired to exact body_bounds, mechanics-only SS wiring fixed, zero silent fine-level halo drops, safe synchronous burst-bypass verified, 24/24 native Vulkan tests PASS (real-gas zMeasured=1.3429 logged verbatim, 4/4 exact 2^-149 thermal/phase ledgers, 7/7 solids, Tier-3 A6 escalation), 6215/6215 host tests PASS, 37M dist/ (0 AI/ort-wasm), KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate3-acceptance-20261123/ and plan/done/gate3-continuum-substrate-and-physics.md."
+    tags: [ulg-scale-ladder, gate-3, continuum, ss, accepted]
 
-  - id: a4-material-functions
-    task_id: ulg-a4-material-functions
+  - id: gate4-studio-presentation
+    task_id: ulg-gate4-studio-presentation
     priority: high
     status: completed
-    goal: "Phase 1: Eshkol-derived multidimensional material/property response functions live on the canonical lane"
-    oracle: ulg-a4-material-functions
-    depends_on: [g6-local-fit]
-    reason: "Completed on feat/ulg-ga-consolidation (24bdf0f2): Eshkol AD -> responseFunctionGpu -> resident evaluator + implicit pressure stiffness swap live on canonical lane."
-    tags: [ulg-campaign, phase-1, architecture-first, verified]
+    goal: "Priority 4 (Gate 4, 10^-3 -> 10^+2 m): Decoupled >=54 Hz presentation of latest committed physics state (visibleMotionCadenceVerified=true) across all 5 active Studio presets with true WebGPU isosurfaces, refraction, Cherenkov, volumetric plumes, and zero visual fakes"
+    oracle: ulg-gate4-studio-presentation
+    depends_on: [gate3-continuum-substrate-and-physics]
+    reason: "Accepted 2026-11-23 at commit 44bb6f13 (dirty: false): ICC completion-oracle ulg-gate4-studio-presentation 3/3 PASS (status: complete) on fresh ICC index after 2-round independent audit (Round 1 FAIL 2d955c07 preserved at independent-review-round1-fail.md; Round 2 ACCEPT 1b886022). Visible Wayland Vulkan 5-preset sweep verified visibleMotionCadenceVerified=true across all 5 presets (water-cycle 89.96 Hz / minSust500ms 78 / maxGap 25.3 ms; iron-ice-quench 72.96 Hz / 62 / 33.5 ms; sodium-water 76.82 Hz / 70 / 30.6 ms; cesium-fluorine 74.29 Hz / 62 / 28.5 ms; water-realtime 113.25 Hz / 100 / 25.7 ms / 1.84-2.09x RT; UI rAF ~120 Hz reported separately), finite motion horizon with distinct f32 shader ages (zero Zeno loop), 5/5 Pause/Step/Reset verified across lane rebuilds (resetStep=4), 41/41 manifest hashes, 15/15 PNG hashes (10/10 visually inspected), 3/3 native Vulkan optics/Cherenkov/parcel-optics PASS, 6212/6212 host tests PASS, 37M build (0 AI/ort-wasm assets), KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate4-acceptance-20261123/ and plan/done/gate4-studio-presentation.md."
+    tags: [ulg-scale-ladder, gate-4, presentation, accepted]
 
-  - id: g2-plumes
-    task_id: ulg-g2-conserved-plumes
-    priority: high
-    status: completed
-    goal: "Phase 2 + Arch M4: Conserved steam and reaction aerosol plumes on the 2^-149 exact-ledger canonical lane (mixture air default, bank-anchored product closures, rigid-melt audit)"
-    oracle: ulg-g2-plumes
-    depends_on: [a1-realtime-substrate, a2-incremental-spatial, g6-local-fit]
-    reason: "Completed on feat/ulg-ga-consolidation (1f627652, 2f96484b): bit-exact 2^-149 mass & U-S conservation across rigid-ice melt + boiling condensate plume and 23-generation Na+H2O -> NaOH+H2 lineage (untracedDeliveries=0), verified on Wayland desktop (/home/cos/.cache/icc/repos/ulg/arch-m4-g2/)."
-    tags: [ulg-campaign, phase-2, verified]
-
-  - id: g3-solids
-    task_id: ulg-g3-solids
-    priority: high
-    status: completed
-    goal: "Phase 2: Coherent solids SOL-0/SOL-1 integrated into SS spatial cells on the exact-ledger canonical lane"
-    oracle: ulg-g3-solids
-    depends_on: [a1-realtime-substrate, a2-incremental-spatial]
-    reason: "Completed on feat/ulg-ga-consolidation (26f1e242): 4096-bucket GPU spatial hashes, single-pass 5-stage solid lane, exact-ledger melt release & buoyancy ON by default."
-    tags: [ulg-campaign, phase-2, verified]
-
-  - id: a5-solids-and-levels
-    task_id: ulg-a5-solids-and-levels
+  - id: gate5-planetary-to-supergalactic
+    task_id: ulg-gate5-planetary-to-supergalactic
     priority: medium
     status: completed
-    goal: "Phase 2 + Arch M5: Dependency-gated SOL-2/3 solid-fluid coupling, SOL-4 deformable surface, SOL-5 cohesive fracture/refreeze, and SOL-6 multilevel/orbital SS solids"
-    oracle: ulg-a5-solids-and-levels
-    depends_on: [g3-solids]
-    reason: "Completed on feat/ulg-ga-consolidation (26f1e242, a3543569): SOL-4 explicit APIC/F deformable surface + elasto-plastic MPM, SOL-5 cohesive bond cleavage + multi-body Jacobi split + supercooled refreeze, SOL-6 L0/1/2 single-owner proxy quadtree + 1.25e6 m double-float chart rebase + zero-kick planetary surface patch, and 2/3/4/6-level SS chain verified on Vulkan + Wayland (/home/cos/.cache/icc/repos/ulg/arch-m5-a5/)."
-    tags: [ulg-campaign, phase-2, verified]
-
-  - id: g4-dynamic-laws
-    task_id: ulg-g4-dynamic-laws
-    priority: high
-    status: completed
-    goal: "Phase 2 + Arch M1: Generalized compacted per-node warm dynamic law activation carrying G6/A4 uncertainty bounds wired into live canonical hot loops"
-    oracle: ulg-g4-dynamic-laws
-    depends_on: [a1-realtime-substrate, g6-local-fit]
-    reason: "Completed on feat/ulg-ga-consolidation (7f3843c6, 6369f25e): thermal, reaction, phase, and radiative dormancy wired into live canonical hot loops with [0,1,1,0] zero-work indirect dispatch witnesses, GPU A/B bit-identity, and random periodic-table pair checks."
-    tags: [ulg-campaign, phase-2, verified]
-
-  - id: a6-remote-derivation
-    task_id: ulg-a6-remote-derivation
-    priority: medium
-    status: completed
-    goal: "Phase 2 + Arch M6: Multi-peer PeerCompute WASM/WebGPU Eshkol and MoonLab derivation responders wired to live closure misses with quorum failover, epoch fencing, and explicit remote debt"
-    oracle: ulg-a6-remote-derivation
-    depends_on: [g5-reservation, g6-local-fit, a3-representative-sampling]
-    reason: "Completed on feat/ulg-ga-consolidation (f1b32896, 77d51ae5): warmClosureMissBridge v2 wired to multi-page NodeKernel responders with 2-of-2 quorum validation, primary-death replica promotion, cancelMiss/sourceChanged epoch fencing, and explicit remoteDebt recovery without silent CPU fallback."
-    tags: [ulg-campaign, phase-2, verified]
-
-  - id: g1-presentation
-    task_id: goal1-all-preset-wallclock-rendering-20260904
-    priority: high
-    status: completed
-    goal: "Phase 3 reassessment: decoupled presentation of latest committed physics state at >=54 Hz across all six configured presets with full optics and controls"
-    oracle: ulg-g1-presentation
-    depends_on: [a1-realtime-substrate, g2-plumes, g3-solids, g4-dynamic-laws]
-    reason: "Completed on feat/ulg-ga-consolidation (475fe083, a4100f24): all 6 presets verified on Wayland desktop at 57.9-119.9 Hz UI rAF with true isosurfaces, refraction, metal, rigid-solid depth, and lifecycle controls (/home/cos/.cache/icc/repos/ulg/slice3-1-g1-visual/ & arch-m2-a1-100k/)."
-    tags: [ulg-campaign, phase-3, verified]
+    goal: "Priority 5 (Gate 5, 10^+6 -> 10^+25 m): Planetary (Polytope-Atlas interiors + symplectic N-body), Stellar (unified SS hydro + Gate 1 nuclear networks), Galactic (unified SS multipole + ISM hydro + Gate 1 atomic cooling + SMBH), and Supergalactic Cosmology (expanding FLRW comoving GPU 3D-FFT TreePM + multi-host PeerCompute domain partitioning)"
+    oracle: ulg-gate5-planetary-to-supergalactic
+    depends_on: [gate0-foundation-arch, gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics]
+    reason: "Accepted 2026-11-24 at commit 846ddaee (dirty: false): ICC completion-oracle ulg-gate5-planetary-to-supergalactic 3/3 PASS (status: complete) on FRESH ICC index after independent adversarial read-only review ACCEPT (66ba0501; pre-acceptance audit cd3aaaf8 preserved verbatim at pre-acceptance-audit-cd3aaaf8.md). Closed all B1-B8 blockers: canonical parallel @workgroup_size(64/256) SchroederScaleAtlas multipole default gravity with zero private octrees and zero @workgroup_size(1) (bhTransMaxDiff=4.46e-6, multipoleMomentumRelError=0), inline WGSL eval_polytope_atlas_bank_2d planetary interiors with overflow-free MoI scaling and fail-closed out-of-domain rejection, exact Gate 1 beta+/EC Q-values (26.731 MeV total / 26.201 MeV thermal) + WebGPU nuclear/Lane-Emden + conservative Q*dX stellar heating, race-free ping-pong compressible SPH ISM hydro with Gate 1 atomic cooling & symmetric Paczynski-Wiita SMBH recoil (momentumDrift < 1e-3), 1-submit/step (13<=25 passes) FLRW 3D-FFT TreePM with live 16-bin GPU P(k) & full-Nyquist GPU Zeldovich ICs & GPUBufferUsage.VERTEX on particleBuf, official PeerCompute SpatialTileLeaseBroker fail-closed disjoint-slab 2-browser WebRTC (signaling WS closed, 32-byte GPU multipole exchange, measurable +X cross-slab pull, fail-closed peer eviction/reclaim), cosmic-quantum supergalactic-cosmic 0 errors & 151343 changed px, all 10 locked-camera PNGs visually verified (210265 pure WebGPU cosmic-web px outside HUD), 5/5 native Vulkan + WebRTC PASS, 6215/6215 host PASS, 37M dist/ (0 AI/ort-wasm), KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate5-acceptance-20261123/ and plan/done/gate5-planetary-to-supergalactic.md."
+    tags: [ulg-scale-ladder, gate-5, planetary, stellar, galactic, supergalactic, accepted]
 
   - id: g5-reservation
     task_id: ulg-g5-reservation
@@ -120,7 +79,7 @@ goals:
     goal: "Bounded CAS multi-consumer reservation"
     oracle: ulg-g5-reservation
     depends_on: []
-    reason: Accepted 2026-11-18; original G5 oracle 3/3 PASS, 81 source-bound tests and independent source/bundle review pass. Bounded single-realm ownership only. Evidence in /home/cos/.cache/icc/repos/ulg/g5-acceptance-20261118/.
+    reason: "Accepted 2026-11-18; original G5 oracle 3/3 PASS, 81 source-bound tests and independent source/bundle review pass. Bounded single-realm ownership only. Evidence in /home/cos/.cache/icc/repos/ulg/g5-acceptance-20261118/."
     tags: [ulg-campaign, accepted]
 
   - id: g7-release-audit
@@ -133,55 +92,55 @@ goals:
     reason: "Accepted 2026-11-18: original G7 oracle 3/3 PASS on one exact reviewed receipt bundle; eight tests pass, real cached NIST/PubChem audit and independent source/artifact review pass. Evidence: /home/cos/.cache/icc/repos/ulg/g5-g7-acceptance-20261118/. Offline advisory tooling only; no physics or broader campaign acceptance."
     tags: [ulg-campaign, accepted]
 
-# Preserved historical cross-cutting goals; mapped in seven-goal-campaign.md.
-# ICC reads only goals above, so these do not create duplicate active work.
+# Preserved historical granular campaign goals (superseded as active gates by
+# Gate 0..Gate 5 above on 2026-11-22; kept for lineage only).
+legacy_campaign_goals:
+  - id: a1-realtime-substrate
+    mapped_to: [gate0-foundation-arch, gate3-continuum-substrate-and-physics]
+  - id: a2-incremental-spatial
+    mapped_to: [gate3-continuum-substrate-and-physics, gate5-planetary-to-supergalactic]
+  - id: g6-local-fit
+    mapped_to: [gate0-foundation-arch, gate3-continuum-substrate-and-physics]
+  - id: a3-representative-sampling
+    mapped_to: [gate3-continuum-substrate-and-physics]
+  - id: a4-material-functions
+    mapped_to: [gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics]
+  - id: g2-plumes
+    mapped_to: [gate3-continuum-substrate-and-physics]
+  - id: g3-solids
+    mapped_to: [gate3-continuum-substrate-and-physics]
+  - id: a5-solids-and-levels
+    mapped_to: [gate3-continuum-substrate-and-physics]
+  - id: g4-dynamic-laws
+    mapped_to: [gate3-continuum-substrate-and-physics]
+  - id: a6-remote-derivation
+    mapped_to: [gate0-foundation-arch, gate3-continuum-substrate-and-physics, gate5-planetary-to-supergalactic]
+  - id: g1-presentation
+    mapped_to: [gate4-studio-presentation]
+
+# Preserved historical cross-cutting goals. ICC reads only `goals:` above.
 legacy_goals:
   - id: resident-physics-continuity
     priority: high
     goal: Keep resident MLS-MPM/SPH physics advancing from GPU-resident state across reset, play, and repeated continuation paths
-    reason: A visible demo cannot be trusted if later resident substeps collapse to zero active grid nodes or stale CPU-packed state
-    tags: [sph, mls-mpm, webgpu, demo]
-
   - id: gpu-resident-hot-loop
     priority: high
     goal: Move render-field extraction, surface generation, closure resolution, and force coupling out of the CPU/readback path
-    depends_on: [resident-physics-continuity]
-    reason: Current Three/MarchingCubes fallback is correct enough for proof but too CPU/readback-heavy for target frame rates
-    tags: [webgpu, performance, rendering, marching-cubes]
-
   - id: first-principles-material-properties
     priority: high
     goal: Ensure all material properties, optics, opacity, EOS, viscosity, and phase behavior are derived from lower-level electronic/MD/closure solvers or valid cached derivations
-    reason: Per project rule, hardcoded material constants or one-off material patches are bugs unless they are explicit non-physics placeholders
-    tags: [materials, optics, eos, closures]
-
   - id: general-reaction-closure-chain
     priority: high
     goal: Generalize reactions for element-element, element-compound, and compound-compound pairs with balanced products, energetics, gas products, pressure coupling, and GPU-resident execution
-    reason: Na+H2O-style special cases are not acceptable; reaction discovery and execution must be general and first-principles-backed
-    tags: [chemistry, reactions, webgpu, pressure]
-
   - id: sealed-box-phase-demo
     priority: high
     goal: Demonstrate the iron-on-ice sealed-box phase scenario with emergent heating, melting, steam, pressure, cooling, and solidification
-    depends_on: [first-principles-material-properties, general-reaction-closure-chain, gpu-resident-hot-loop]
-    reason: This is the user-facing target scenario for first-principles material/phase behavior in the SPH/MLS-MPM stack
-    tags: [demo, phase-change, sealed-box]
-
   - id: triad-handoff-evidence
     priority: medium
     goal: Keep ULG handoff artifacts aligned with the runtime contracts, quantum-reference inputs, closure metadata, and browser evidence produced by this repository
-    reason: The triad demo must communicate what is proven, what is reduced-scope evidence, and what remains blocked
-    tags: [triad, contracts, handoff]
-
   - id: cold-start-cache-correctness
     priority: medium
     goal: Persist and invalidate material, reaction, thermal, optical, and GPU warmup closures so reloads avoid repeated expensive derivations without reusing stale generator output
-    reason: Cold-start stalls currently dominate perceived performance and can hide real physics/rendering regressions
-    tags: [cache, state, localstorage, performance]
-
   - id: docs-plan-hygiene
     priority: low
-    goal: Keep plan/plan.md, plan/log.md, plan/tests.md, and todo/done/moot plan folders aligned with each slice
-    reason: The project relies on handoff continuity across long-running agents and token-compacted sessions
-    tags: [planning, handoff]
+    goal: Keep plan/CURRENT-PLAN.md, plan/STATUS.md, plan/todo/README.md, and todo/done/moot plan folders aligned with live code

@@ -240,6 +240,7 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
         runSchroederDeformableSolidSurfaceLaneStep(defFamily, {
           device,
           stateBuffer: g2p.stateBuffer,
+          mechanicsBuffer: g2p.mechanicsBuffer,
           particleCount
         });
       }

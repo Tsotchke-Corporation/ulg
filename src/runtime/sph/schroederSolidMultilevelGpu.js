@@ -55,14 +55,21 @@ export function splitFloat64ToHiLo(value) {
 export function buildSchroederMultilevelProxyCatalog({
   bodyIndex = 0,
   halfExtentsM,
-  finePitchM
+  finePitchM,
+  padToMultipleOf4 = false
 }) {
   const half = halfExtentsM.map(Number);
   const h0 = Number(finePitchM);
   if (!half.every((v) => v > 0) || !(h0 > 0)) {
     throw new TypeError('Multilevel proxy catalog requires positive halfExtentsM and finePitchM');
   }
-  const counts = half.map((v) => Math.max(4, Math.round((2 * v) / h0)));
+  const counts = half.map((v) => {
+    const raw = Math.max(1, Math.round((2 * v) / h0));
+    if (padToMultipleOf4) {
+      return Math.max(4, Math.ceil(raw / 4) * 4);
+    }
+    return Math.max(4, raw);
+  });
   for (let a = 0; a < 3; a += 1) {
     if (counts[a] % 4 !== 0) {
       throw new RangeError(`Axis ${a} fine tile count (${counts[a]}) must be a multiple of 4 for L=0/1/2 2:1 hierarchy`);
@@ -217,7 +224,7 @@ fn df_sub_to_f32(ahi: vec3<f32>, alo: vec3<f32>, bhi: vec3<f32>, blo: vec3<f32>)
 
 @compute @workgroup_size(64)
 fn clear_lod_stats(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x < 8u) {
+  if (id.x < 12u) {
     atomicStore(&lod_stats[id.x], 0u);
   }
 }
@@ -354,6 +361,28 @@ fn build_multilevel_proxies(@builtin(global_invocation_id) id: vec3<u32>) {
   if (ownership_mask != 0xffffu || overlap_err > 0u) {
     atomicAdd(&lod_stats[5], 1u + overlap_err);
   }
+}
+
+// Live GPU consumer of active_proxies: aggregates emitted multilevel surface
+// proxies into lod_stats[8..11] ([consumed_count, near_focus_count,
+// consumed_area_fixed, consumed_impulse_fixed]) so activeProxiesBuffer drives
+// GPU quadrature verification inside the same single rigid-lane compute pass.
+@compute @workgroup_size(64)
+fn consume_active_proxy_quadrature(@builtin(global_invocation_id) id: vec3<u32>) {
+  let p = id.x;
+  let count = atomicLoad(&lod_stats[0]);
+  if (p >= count) { return; }
+  let p1 = active_proxies[p * 4u + 1u];
+  let p2 = active_proxies[p * 4u + 2u];
+  let area = max(0.0, p1.w);
+  let imp = max(0.0, p2.w);
+  let dist_focus = length(p2.xyz - params.focus_fine.xyz);
+  atomicAdd(&lod_stats[8], 1u);
+  if (dist_focus <= params.focus_fine.w) {
+    atomicAdd(&lod_stats[9], 1u);
+  }
+  atomicAdd(&lod_stats[10], u32(round(area * FIXED_AREA)));
+  atomicAdd(&lod_stats[11], u32(round(imp * FIXED_AREA)));
 }
 
 // Conservatively scatter/reflux active proxy impulses back to leaf tiles (1/count split for coarse proxies)
@@ -563,6 +592,7 @@ export function createSchroederSolidMultilevelStage({
   const entryPoints = [
     'clear_lod_stats',
     'build_multilevel_proxies',
+    'consume_active_proxy_quadrature',
     'reflux_proxy_impulses',
     'rebase_body_chart',
     'orbital_kick_drift',
@@ -573,7 +603,7 @@ export function createSchroederSolidMultilevelStage({
     entryPoints.map((entryPoint) => [
       entryPoint,
       createCachedExplicitComputePipeline(device, {
-        cacheKey: `ulg-sol6-multilevel-${entryPoint}.v1`,
+        cacheKey: `ulg-sol6-multilevel-${entryPoint}.v2`,
         label: `ulg-sol6-multilevel-${entryPoint}`,
         code: schroederSolidMultilevelWgsl,
         entryPoint,
@@ -628,7 +658,7 @@ export function createSchroederSolidMultilevelStage({
     'ulg-sol6-active-proxies',
     Math.max(64, (catalog?.maxActiveProxies ?? 16) * 64)
   );
-  const lodStatsBuffer = makeStorage('ulg-sol6-lod-stats', 32);
+  const lodStatsBuffer = makeStorage('ulg-sol6-lod-stats', 48);
 
   const orbitalInit = new Float32Array(orbitalCount * 16);
   orbitalBodies.forEach((ob, idx) => {
@@ -727,6 +757,8 @@ export function createSchroederSolidMultilevelStage({
       pass.dispatchWorkgroups(1);
       pass.setPipeline(pipelines.build_multilevel_proxies.pipeline);
       pass.dispatchWorkgroups(Math.ceil(macroCount / 64));
+      pass.setPipeline(pipelines.consume_active_proxy_quadrature.pipeline);
+      pass.dispatchWorkgroups(Math.ceil((catalog?.maxActiveProxies ?? 16) / 64));
       if (reflux) {
         pass.setPipeline(pipelines.reflux_proxy_impulses.pipeline);
         pass.dispatchWorkgroups(Math.ceil((catalog?.maxActiveProxies ?? 16) / 64));
@@ -802,7 +834,7 @@ export function createSchroederSolidMultilevelStage({
       pass.end();
     },
     async readLodSummary() {
-      const st = await readBufferF32(lodStatsBuffer, 8);
+      const st = await readBufferF32(lodStatsBuffer, 12);
       const wu = new Uint32Array(st.buffer);
       return {
         activeProxies: wu[0],
@@ -812,7 +844,11 @@ export function createSchroederSolidMultilevelStage({
         coveredLeaves: wu[4],
         overlapViolations: wu[5],
         totalAreaM2: wu[6] / 1048576.0,
-        totalImpulseNs: wu[7] / 1048576.0
+        totalImpulseNs: wu[7] / 1048576.0,
+        consumedProxies: wu[8],
+        nearFocusProxies: wu[9],
+        consumedAreaM2: wu[10] / 1048576.0,
+        consumedImpulseNs: wu[11] / 1048576.0
       };
     },
     async readOrbitalSummary() {

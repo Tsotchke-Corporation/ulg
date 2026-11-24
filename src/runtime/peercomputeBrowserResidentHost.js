@@ -160,12 +160,40 @@ export const ULG_RESIDENT_PASS_DAG_SOLVER_ID = 'ulg-mls-mpm-sph-resident-steps';
 export const ULG_RESIDENT_PASS_DAG_NODE_ID = 'ulg-mls-mpm-sph-resident-pass-dag';
 export const ULG_RESIDENT_LAW_FAMILY_METADATA_SCOPE = 'ulg-sph-law-family-metadata';
 
-export const DEFAULT_PEERCOMPUTE_BROWSER_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/index.js';
-export const DEFAULT_PEERCOMPUTE_NODE_KERNEL_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js';
-export const DEFAULT_PEERCOMPUTE_COMPUTE_MANAGER_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js';
-export const DEFAULT_PEERCOMPUTE_STATE_MANAGER_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/stateManager/StateManager.js';
-export const DEFAULT_PEERCOMPUTE_GPU_HUB_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/gpu/GPUHubManager.js';
-export const DEFAULT_PEERCOMPUTE_REMOTE_RESULT_QUORUM_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/RemoteResultQuorumValidator.js';
+export const DEFAULT_PEERCOMPUTE_BROWSER_MODULE_URL = null;
+export const DEFAULT_PEERCOMPUTE_NODE_KERNEL_MODULE_URL = null;
+export const DEFAULT_PEERCOMPUTE_COMPUTE_MANAGER_MODULE_URL = null;
+export const DEFAULT_PEERCOMPUTE_STATE_MANAGER_MODULE_URL = null;
+export const DEFAULT_PEERCOMPUTE_GPU_HUB_MODULE_URL = null;
+export const DEFAULT_PEERCOMPUTE_REMOTE_RESULT_QUORUM_MODULE_URL = null;
+
+const PEERCOMPUTE_HOT_BUFFER_MAX_KEYS = 64;
+const peercomputeHotBufferKeyRings = new WeakMap();
+
+function setBoundedHotBuffer(stateManager, key, record) {
+  if (!stateManager || typeof stateManager.setHotBuffer !== 'function') return;
+  let ring = peercomputeHotBufferKeyRings.get(stateManager);
+  if (!ring) {
+    ring = new Set();
+    peercomputeHotBufferKeyRings.set(stateManager, ring);
+  }
+  ring.delete(key);
+  ring.add(key);
+  stateManager.setHotBuffer(key, record);
+  while (ring.size > PEERCOMPUTE_HOT_BUFFER_MAX_KEYS) {
+    const oldestKey = ring.values().next().value;
+    ring.delete(oldestKey);
+    try {
+      if (typeof stateManager.deleteHotBuffer === 'function') {
+        stateManager.deleteHotBuffer(oldestKey);
+      } else if (typeof stateManager.dataState?.deleteHotBuffer === 'function') {
+        stateManager.dataState.deleteHotBuffer(oldestKey);
+      }
+    } catch {
+      // Keep eviction isolated from hot-buffer publication.
+    }
+  }
+}
 export const DEFAULT_ULG_RESIDENT_COMPUTE_TASK_MODULE_PATH = '/src/runtime/sph/sphMlsMpmGpuStep.js';
 export const DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH = '/src/services/ulgMechanicsResidentStage.worker.js';
 export const DEFAULT_ULG_MECHANICS_PROMOTION_EVIDENCE_MODULE_PATH = '/src/runtime/mechanicsPromotionEvidence.js';
@@ -2546,7 +2574,7 @@ export function refreshUlgSphMlsMpmHotBuffersFromSameDeviceRetainedBufferImport(
     sphUpload: sourceRecord.sphUpload,
     mlsMpmUpload: sourceRecord.mlsMpmUpload
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   return {
     schema: ULG_REMOTE_TASK_GRAPH_HOT_BUFFER_REFRESH_RESULT_SCHEMA,
     status: 'ulg-sph-mls-mpm-same-device-retained-buffer-imported',
@@ -2676,7 +2704,7 @@ export function publishUlgSphMlsMpmSameDeviceHotBufferSource({
     sphUpload,
     mlsMpmUpload
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const sameDeviceRetainedBufferImport = {
     schema: ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA,
     status: 'same-device-retained-buffer-source-ready',
@@ -3372,7 +3400,7 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     workerRetainedBufferImport,
     workerRetainedAccessContract
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-mechanics-publications');
   const deltaTaskId = normalizeString(
     taskId,
@@ -3999,7 +4027,7 @@ export function admitSchroederPortableSummary({
     schroederPortableSummaryReplayDescriptor: replayDescriptor,
     replayDescriptor
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, ULG_SCHROEDER_PORTABLE_SUMMARY_ADMISSION_SCOPE);
   const deltaTaskId = normalizeString(
     taskId,
@@ -4144,7 +4172,7 @@ export function publishUlgSchroederStateDeltaMergeAdmission({
     copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
     schroederStateDeltaMergeAdmission: cloneSerializableValue(admission)
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, ULG_SCHROEDER_STATE_DELTA_MERGE_ADMISSION_SCOPE);
   const deltaTaskId = normalizeString(
     taskId,
@@ -4285,7 +4313,7 @@ export function publishUlgSchroederPhaseVolumeMigrationAdmission({
     copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
     schroederPhaseVolumeMigrationAdmission: cloneSerializableValue(admission)
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, ULG_SCHROEDER_PHASE_VOLUME_MIGRATION_ADMISSION_SCOPE);
   const deltaTaskId = normalizeString(
     taskId,
@@ -4458,7 +4486,7 @@ function publishUlgSchroederAdmissionDescriptor({
     copyMode: 'descriptor-only-no-raw-gpubuffer-transfer',
     [admissionPropertyName]: cloneSerializableValue(admission)
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, `${statusPrefix}-admissions`);
   const deltaTaskId = normalizeString(
     taskId,
@@ -5368,7 +5396,7 @@ export function publishUlgSchroederAdoptedParticleStorageDescriptor({
     ...publication,
     status: 'schroeder-adopted-particle-storage-hot-buffer-source-stored'
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, ULG_SCHROEDER_ADOPTED_PARTICLE_STORAGE_PUBLICATION_SCOPE);
   const deltaTaskId = normalizeString(
     taskId,
@@ -5762,7 +5790,7 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     workerRetainedBufferImport,
     workerRetainedAccessContract
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-thermal-phase-publications');
   const deltaTaskId = normalizeString(
     taskId,
@@ -6251,7 +6279,7 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     releaseScheduled: false,
     released: false
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-pressure-interface-gas-cell-field-imports');
   const deltaTaskId = normalizeString(
     taskId,
@@ -6591,7 +6619,7 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     pressureInterfaceGasCellFieldAdmission,
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot)
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-pressure-interface-gas-cell-field-admissions');
   const deltaTaskId = normalizeString(
     taskId,
@@ -6961,7 +6989,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     workerRetainedBufferImport,
     workerRetainedAccessContract
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-pressure-interface-publications');
   const deltaTaskId = normalizeString(
     taskId,
@@ -7163,7 +7191,7 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     workerRetainedBufferImport,
     workerRetainedAccessContract
   };
-  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  setBoundedHotBuffer(stateManager, resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-reaction-product-publications');
   const deltaTaskId = normalizeString(
     taskId,
@@ -7550,25 +7578,35 @@ async function importPeerComputeClasses({
         : {});
   const nodeKernelModule = bundled.NodeKernel
     ? bundled
-    : await importPeerComputeModule(nodeKernelModuleUrl);
+    : (nodeKernelModuleUrl
+        ? await importPeerComputeModule(nodeKernelModuleUrl)
+        : await import('./peercomputeCore.js'));
   const computeModule = bundled.ComputeManager
     ? bundled
-    : await importPeerComputeModule(computeManagerModuleUrl);
+    : (computeManagerModuleUrl
+        ? await importPeerComputeModule(computeManagerModuleUrl)
+        : await import('./peercomputeCore.js'));
   const stateModule = bundled.StateManager
     ? bundled
-    : await importPeerComputeModule(stateManagerModuleUrl);
+    : (stateManagerModuleUrl
+        ? await importPeerComputeModule(stateManagerModuleUrl)
+        : await import('./peercomputeCore.js'));
   let gpuModule = bundled.GPUHubManager ? bundled : {};
-  if (!gpuModule.GPUHubManager && gpuHubModuleUrl) {
+  if (!gpuModule.GPUHubManager) {
     try {
-      gpuModule = await importPeerComputeModule(gpuHubModuleUrl);
+      gpuModule = gpuHubModuleUrl
+        ? await importPeerComputeModule(gpuHubModuleUrl)
+        : await import('./peercomputeCore.js');
     } catch (_) {
       gpuModule = {};
     }
   }
   let quorumModule = bundled.createRemoteResultQuorumValidator ? bundled : {};
-  if (!quorumModule.createRemoteResultQuorumValidator && remoteResultQuorumModuleUrl) {
+  if (!quorumModule.createRemoteResultQuorumValidator) {
     try {
-      quorumModule = await importPeerComputeModule(remoteResultQuorumModuleUrl);
+      quorumModule = remoteResultQuorumModuleUrl
+        ? await importPeerComputeModule(remoteResultQuorumModuleUrl)
+        : await import('./peercomputeCore.js');
     } catch (_) {
       quorumModule = {};
     }

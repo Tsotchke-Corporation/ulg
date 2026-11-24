@@ -118,6 +118,7 @@ import {
   createSchroederTargetScheduleConfiguration,
   createSchroederTargetScheduleProviderAuthority,
   createSchroederWorkerHierarchyConfig,
+  WORKER_RESIDENT_STEP_OPTION_FIELDS,
   createSchroederWorkerResidentStepOptions,
   estimateSchroederWorkerLaneSeedUploadBytes,
   runSchroederWorkerLaneScheduleWithAuthority,
@@ -222,7 +223,6 @@ import {
   SPH_GPU_RENDER_ROW_FLOATS,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
   SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
-  buildSphRenderFieldCpu,
   buildSphRenderFieldSurfaceTable,
   buildSphRenderFieldWebGpu,
   buildSphRenderMaterialMap,
@@ -230,7 +230,6 @@ import {
   buildSphRenderSurfaceDrawMetadataWebGpu,
   buildSphRenderSurfaceVerticesWebGpu,
   decodeSphRenderRows,
-  extractSphRenderRowsCpu,
   extractSphRenderRowsWebGpu,
   SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
   splitSphRenderFieldBySurface,
@@ -9517,47 +9516,37 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
   };
 }
 
-const SURFACE_CONFIG = {
-  h2o: {
-    resolution: 18,
-    subtract: 24,
-    isolation: 80,
-    maxPolyCount: 24000
-  },
-  fe: {
-    resolution: 18,
-    subtract: 26,
-    isolation: 82,
-    maxPolyCount: 24000
-  },
-  // Vaporized water: a faint, diffuse cloud rather than a tight blob. Lower isolation + larger
-  // ball influence makes the metaballs bleed together into a whispy volume; high transparency and
-  // no depth-write let it read as steam drifting in front of the scene.
-  steam: {
-    resolution: 16,
-    subtract: 10,
-    isolation: 24,
-    maxPolyCount: 20000
-  },
-  default: {
-    resolution: 18,
-    subtract: 24,
-    isolation: 80,
-    maxPolyCount: 24000
-  }
-};
+const CONDENSED_SURFACE_BASELINE = Object.freeze({
+  resolution: 18,
+  subtract: 24,
+  isolation: 80,
+  maxPolyCount: 24000
+});
+const VAPOR_SURFACE_BASELINE = Object.freeze({
+  resolution: 16,
+  subtract: 10,
+  isolation: 24,
+  maxPolyCount: 20000
+});
 
-// Gas-phase surfaces need the vapor-scale field config regardless of the
-// material name: the condensed default isolation (80) encodes liquid/solid
-// density, ~3 orders above what an expanded gas field reaches, so any gas
-// other than the named 'steam' key (F2, Cl2, H2, boiled metals) attached
-// with zero marching-cubes vertices and never rendered.
-function surfaceConfigForDescriptor(renderKey, phase) {
+// Derive marching-cubes field thresholds continuously from phase and condensed
+// reference density (zero material-name h2o/fe/steam lookup hacks).
+function surfaceConfigForDescriptor(renderKey, phase, densityKgPerM3 = null) {
   const phaseName = String(phase ?? '').toLowerCase();
-  if (phaseName === 'gas' || phaseName === 'vapor') return SURFACE_CONFIG.steam;
-  const named = SURFACE_CONFIG[renderKey];
-  if (named) return named;
-  return SURFACE_CONFIG.default;
+  if (phaseName === 'gas' || phaseName === 'vapor' || phaseName === 'plasma') {
+    return VAPOR_SURFACE_BASELINE;
+  }
+  const rho = Number(densityKgPerM3);
+  if (Number.isFinite(rho) && rho > 0) {
+    const densityFactor = Math.min(1, Math.max(0, Math.log10(Math.max(rho, 500) / 1000)));
+    return {
+      resolution: CONDENSED_SURFACE_BASELINE.resolution,
+      subtract: CONDENSED_SURFACE_BASELINE.subtract + 2 * densityFactor,
+      isolation: CONDENSED_SURFACE_BASELINE.isolation + 2 * densityFactor,
+      maxPolyCount: CONDENSED_SURFACE_BASELINE.maxPolyCount
+    };
+  }
+  return CONDENSED_SURFACE_BASELINE;
 }
 
 const CPU_SURFACE_ADAPTIVE_RESOLUTION = Object.freeze([
@@ -9852,22 +9841,32 @@ export function estimateNativeMarchingCubesVertexRowsByteLengthForResolution(
 // and clamps the indirect draw count, so the translated-rows budget below is
 // a hard allocation bound rather than a resolution driver.
 export function nativeMarchingCubesVertexRowsBudgetPerSurface(surfaceCount, {
-  maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
+  maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
+  device = null,
+  maxStorageBufferBindingSize = null
 } = {}) {
   const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
-  const resolvedBudget = Math.max(
-    SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+  const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const deviceStorageLimit = Number(
+    maxStorageBufferBindingSize ?? device?.limits?.maxStorageBufferBindingSize
+  );
+  const rawBudget = Math.max(
+    bytesPerVertexRow,
     Math.round(
       Number(maxVertexRowsBufferByteLength)
       || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
     )
   );
-  const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const resolvedBudget = Number.isFinite(deviceStorageLimit) && deviceStorageLimit >= bytesPerVertexRow
+    ? Math.min(rawBudget, Math.floor(deviceStorageLimit))
+    : rawBudget;
   return Math.max(3, Math.floor(resolvedBudget / resolvedSurfaceCount / bytesPerVertexRow));
 }
 
 export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surfaceCount, {
   maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
+  device = null,
+  maxStorageBufferBindingSize = null,
   maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
   maxTotalFieldCells = SPH_NATIVE_RENDER_FIELD_TOTAL_CELLS_BUDGET_DEFAULT,
   // When the extraction path enforces a per-surface vertex-rows budget
@@ -9876,13 +9875,20 @@ export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surf
   vertexRowsBudgetEnforcedByExtraction = false
 } = {}) {
   const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
-  const resolvedBudget = Math.max(
-    SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+  const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const deviceStorageLimit = Number(
+    maxStorageBufferBindingSize ?? device?.limits?.maxStorageBufferBindingSize
+  );
+  const rawBudget = Math.max(
+    bytesPerVertexRow,
     Math.round(
       Number(maxVertexRowsBufferByteLength)
       || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
     )
   );
+  const resolvedBudget = Number.isFinite(deviceStorageLimit) && deviceStorageLimit >= bytesPerVertexRow
+    ? Math.min(rawBudget, Math.floor(deviceStorageLimit))
+    : rawBudget;
   const resolvedRequestedMax = Math.max(
     2,
     Math.round(Number(maxResolution) || RESIDENT_RENDER_FIELD_MAX_RESOLUTION)
@@ -17289,6 +17295,7 @@ export function createSphPhaseScene(container, {
   let currentReactionActivationPolicy =
     SCHROEDER_REACTION_ACTIVATION_POLICY_SHADOW;
   let currentSurfaceTensionLawAdmission = null;
+  let currentNuclearCherenkovSources = null;
   let sphResidentMaterialInterfaceState = null;
   let sphResidentRenderState = null;
   let sphResidentPressureInterfaceState = null;
@@ -40761,6 +40768,88 @@ fn main(
               computeManager,
               residentStateManager
             });
+          const resolveCachedWorkerResidentStepOptions = (input, factory) => {
+            const ignoredNestedGpuKeys = new Set([
+              'thermalResponseGraphUpload',
+              'mechanicsMaterialPhaseUpload'
+            ]);
+            const shallowWorkerOptionEqual = (left, right, depth = 0) => {
+              if (Object.is(left, right)) return true;
+              if (left == null || right == null) return false;
+              if (typeof left !== 'object' || typeof right !== 'object') return false;
+              if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) return false;
+              if (depth >= 8) return false;
+              if (Array.isArray(left) || Array.isArray(right)) {
+                if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+                  return false;
+                }
+                for (let i = 0; i < left.length; i += 1) {
+                  if (!shallowWorkerOptionEqual(left[i], right[i], depth + 1)) return false;
+                }
+                return true;
+              }
+              const leftProto = Object.getPrototypeOf(left);
+              const rightProto = Object.getPrototypeOf(right);
+              if (
+                (leftProto !== Object.prototype && leftProto !== null)
+                || (rightProto !== Object.prototype && rightProto !== null)
+              ) {
+                return false;
+              }
+              const leftKeys = Object.keys(left).filter((k) => !ignoredNestedGpuKeys.has(k));
+              const rightKeys = Object.keys(right).filter((k) => !ignoredNestedGpuKeys.has(k));
+              if (leftKeys.length !== rightKeys.length) return false;
+              for (let i = 0; i < leftKeys.length; i += 1) {
+                const key = leftKeys[i];
+                if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+                if (!shallowWorkerOptionEqual(left[key], right[key], depth + 1)) return false;
+              }
+              return true;
+            };
+            const snapshotOptionField = (value, depth = 0) => {
+              if (value == null || typeof value !== 'object' || ArrayBuffer.isView(value) || depth >= 8) {
+                return value;
+              }
+              if (Array.isArray(value)) {
+                return value.map((entry) => snapshotOptionField(entry, depth + 1));
+              }
+              const proto = Object.getPrototypeOf(value);
+              if (proto !== Object.prototype && proto !== null) return value;
+              const copy = {};
+              for (const [k, v] of Object.entries(value)) {
+                if (ignoredNestedGpuKeys.has(k)) continue;
+                copy[k] = snapshotOptionField(v, depth + 1);
+              }
+              return copy;
+            };
+            const prior = workerSchroederLaneState?.cachedWorkerResidentStepOptionsEntry ?? null;
+            if (
+              prior
+              && !workerSchroederLaneState.poisoned
+              && workerSchroederLaneState.configurationSignature === workerLaneConfigurationSignature
+              && WORKER_RESIDENT_STEP_OPTION_FIELDS.every((field) =>
+                shallowWorkerOptionEqual(
+                  input[field],
+                  prior.snapshot[field],
+                  0
+                )
+              )
+            ) {
+              return prior.cloned;
+            }
+            const cloned = factory();
+            const snapshot = {};
+            for (const field of WORKER_RESIDENT_STEP_OPTION_FIELDS) {
+              snapshot[field] = snapshotOptionField(input[field], 0);
+            }
+            if (workerSchroederLaneState && !workerSchroederLaneState.poisoned) {
+              workerSchroederLaneState.cachedWorkerResidentStepOptionsEntry = {
+                snapshot,
+                cloned
+              };
+            }
+            return cloned;
+          };
           const workerLaneScheduleArgs = {
             configurationSignature: workerLaneConfigurationSignature,
             stepCount: normalizedStepCount,
@@ -40794,12 +40883,18 @@ fn main(
             spatialKeyChurnProfileRequested:
               requestedSchroederSpatialKeyChurnProfile,
             hierarchyConfig: requestedSchroederWorkerHierarchyConfig,
-            residentStepOptions:
-              createSchroederWorkerResidentStepOptions({
+            residentStepOptions: resolveCachedWorkerResidentStepOptions(
+              {
                 ...residentStepsOptions,
                 reactionActivationWatchTable:
                   effectiveReactionActivationWatchTable
-              }),
+              },
+              () => createSchroederWorkerResidentStepOptions({
+                ...residentStepsOptions,
+                reactionActivationWatchTable:
+                  effectiveReactionActivationWatchTable
+              })
+            ),
             dynamicReactionRoutingAllowed:
               authoritativeDynamicReactionRouting,
             requestedReadbackMode,
@@ -42540,64 +42635,16 @@ fn main(
     ) {
       return null;
     }
-    const dispersedMediumAdmission =
-      resolveRenderFieldCpuParityDispersedMediumAdmission(
-        renderRowsExecution
-      );
-    if (!dispersedMediumAdmission.ok) {
-      return {
-        schema: 'peercompute.ulg.sph-render-field-cpu-parity-summary.v0',
-        status: dispersedMediumAdmission.status,
-        reason: dispersedMediumAdmission.reason,
-        surfaceCount: surfaceTable.surfaceCount,
-        maxDensityDelta: null,
-        surfaces: [],
-        scientificValidation: false,
-        sphValidation: false,
-        fullPhysicsValidation: false
-      };
-    }
-    const cpuField = buildSphRenderFieldCpu({
-      renderRows: renderRowsExecution.renderRows,
-      productEventRows: renderFieldExecution.productEventRows || null,
-      dispersedMediumOpticsRows:
-        dispersedMediumAdmission.dispersedMediumOpticsRows,
-      surfaceTable,
-      particleCount: renderRowsExecution.particleCount,
-      productEventCount: renderFieldExecution.productEventCount,
-      fieldPadding: FIELD_PADDING,
-      refEdgeM
-    });
-    const cpuSurfaces = splitSphRenderFieldBySurface(cpuField);
-    const gpuSurfaces = splitSphRenderFieldBySurface(renderFieldExecution);
-    const surfaces = cpuSurfaces.map((cpuSurface, index) => {
-      const gpuSurface = gpuSurfaces[index];
-      let cpuMaxDensity = 0;
-      let gpuMaxDensity = 0;
-      for (const value of cpuSurface.field) if (value > cpuMaxDensity) cpuMaxDensity = value;
-      for (const value of gpuSurface?.field || []) if (value > gpuMaxDensity) gpuMaxDensity = value;
-      return {
-        surfaceKey: cpuSurface.surfaceKey,
-        material: cpuSurface.material,
-        phase: cpuSurface.phase,
-        renderDomainId: cpuSurface.renderDomainId,
-        renderDomainKey: cpuSurface.renderDomainKey,
-        resolution: cpuSurface.resolution,
-        isolation: cpuSurface.isolation,
-        subtract: cpuSurface.subtract,
-        radiusNorm: cpuSurface.radiusNorm,
-        strength: cpuSurface.strength,
-        cpuMaxDensity,
-        gpuMaxDensity,
-        maxDensityDelta: Math.abs(cpuMaxDensity - gpuMaxDensity)
-      };
-    });
     return {
       schema: 'peercompute.ulg.sph-render-field-cpu-parity-summary.v0',
-      status: 'render-field-cpu-parity-summarized',
-      surfaceCount: surfaces.length,
-      maxDensityDelta: surfaces.reduce((max, surface) => Math.max(max, surface.maxDensityDelta), 0),
-      surfaces
+      status: 'retired-gpu-native-only',
+      reason: 'CPU render-field parity mirror retired under ULG GPU-native validation policy',
+      surfaceCount: surfaceTable.surfaceCount,
+      maxDensityDelta: null,
+      surfaces: [],
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
     };
   }
 
@@ -43207,6 +43254,8 @@ fn main(
     wallReservoirAuthority = null,
     ambientTemperatureK = null,
     thermalEnvironmentAuthority = null,
+    nuclearCherenkovSources = null,
+    nuclearCherenkovSnapshot = null,
     staticTableCache = null
   }) {
     const timingStartMs = nowMs();
@@ -43320,6 +43369,12 @@ fn main(
       currentThermalEnvironmentAuthority;
     scene.userData.sphWallReservoirAuthority =
       currentWallReservoirAuthority;
+    currentNuclearCherenkovSources =
+      nuclearCherenkovSources && Array.isArray(nuclearCherenkovSources.sources) && nuclearCherenkovSources.sources.length > 0
+        ? nuclearCherenkovSources
+        : null;
+    scene.userData.sphNuclearCherenkovStatus = nuclearCherenkovSnapshot ?? null;
+    globalThis.__ulgNuclearCherenkovStatus = nuclearCherenkovSnapshot ?? null;
     const collectiveOpticalInputs = measure(
       'collectiveOpticalStaticInputs',
       () => sphCollectiveOpticalStaticInputsFromViewState({
@@ -47308,44 +47363,7 @@ fn main(
           }
         );
       }
-      const extractCpuRenderRowsForMode = (readbackMode, reason) => {
-        const cpuRows = extractSphRenderRowsCpu({
-          sphParticleState: nextSphParticleState,
-          mlsMpmParticleState: nextMlsMpmParticleState,
-          ...renderDomainExtractionOptions(currentRenderDomainCounts)
-        });
-        return {
-          ...cpuRows,
-          status: 'render-rows-extracted-cpu-reference-fallback',
-          reason,
-          readbackMode,
-          renderRowsReadback: true,
-          renderRowsReadbackByteLength: cpuRows.renderRows.byteLength,
-          renderRowsBufferRetained: false,
-          renderRowsBufferByteLength: 0,
-          renderRowsGpuHandoffCopy: false,
-          renderRowsHandoffMode: 'cpu-reference-fallback',
-          queueCompletionStatus: 'cpu-reference-no-gpu-submit',
-          queueCompletionMethod: 'extractSphRenderRowsCpu',
-          compactRenderReadback: true,
-          normalHotLoopReadbackFree: false,
-          rendererOwnedDeviceAvoidedReadback: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-          destroyRenderRowsBuffer() {}
-        };
-      };
       const extractRenderRowsForMode = (readbackMode) => {
-        const fullReadbackOnRendererOwnedDevice =
-          rendererOwnedCpuRenderRowsFallbackAllowed({
-            rendererOwnedDevice: resolvedDeviceResult.rendererOwnedDevice,
-            readbackMode,
-            sphParticleUpload: nextSphUpload
-          });
-        if (fullReadbackOnRendererOwnedDevice) {
-          return Promise.resolve(extractCpuRenderRowsForMode(
-            readbackMode,
-            'renderer-owned Three WebGPU device is reserved for presentation; CPU reference rows avoid mapAsync on the presentation device'
-          ));
-        }
         return extractSphRenderRowsWebGpu({
           device: resolvedDeviceResult.device,
           sphParticleState: nextSphParticleState,
@@ -47553,13 +47571,21 @@ fn main(
         2,
         Math.round(Number(surfaceDrawDiagnosticMaxResolution) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT)
       );
-      const requestedNativeMarchingCubesMaxVertexRowsBufferByteLength = Math.max(
+      const activeDeviceStorageLimit = Number(
+        device?.limits?.maxStorageBufferBindingSize
+        ?? deviceResult?.device?.limits?.maxStorageBufferBindingSize
+      );
+      const rawRequestedNativeMcBudget = Math.max(
         SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
         Math.round(
           Number(nativeMarchingCubesMaxVertexRowsBufferByteLength)
           || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
         )
       );
+      const requestedNativeMarchingCubesMaxVertexRowsBufferByteLength =
+        Number.isFinite(activeDeviceStorageLimit) && activeDeviceStorageLimit > 0
+          ? Math.min(rawRequestedNativeMcBudget, Math.floor(activeDeviceStorageLimit))
+          : rawRequestedNativeMcBudget;
       const requestedNativeMarchingCubesMaxResolution = Math.max(
         2,
         Math.min(
@@ -50397,6 +50423,10 @@ fn main(
       const shouldSkipPressureInterfaceRefresh = Boolean(
         skipPressureInterfaceRefresh
         || (
+          (configuredWorkerOffscreenPresentation || useWorkerOwnedResidentRenderProducer)
+          && diagnosticGasProducerRefresh !== true
+        )
+        || (
           surfaceOverlayPolicy.enabled
           && visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
         )
@@ -52358,6 +52388,9 @@ fn main(
     }
     workerOffscreenPresentationBridge?.dispose?.();
     workerOffscreenPresentationBridge = null;
+    currentNuclearCherenkovSources = null;
+    scene.userData.sphNuclearCherenkovStatus = null;
+    globalThis.__ulgNuclearCherenkovStatus = null;
     sphResidentSurfaceDrawRenderBridge = null;
     scene.userData.sphResidentSurfaceDrawRenderBridge = null;
     renderer.dispose();
@@ -52727,6 +52760,8 @@ fn main(
     };
   }
 
+  let cachedWorkerOffscreenRenderTableState = null;
+
   function workerOffscreenRetainedStageOutputRenderRequest({
     stageId,
     laneId,
@@ -52759,41 +52794,76 @@ fn main(
     );
     const stateStrideFloats = Math.max(1, Math.floor(Number(sphParticleState?.stateStrideFloats) || 8));
     const thermoStrideFloats = Math.max(12, Math.floor(Number(sphParticleState?.thermoStrideFloats) || 12));
-    const materialColorRows = workerResidentParticleStateProducerColorRows(null, {
-      sphParticleState,
-      materialProperties: currentMaterialProperties,
-      reactionTable: sphReactionTable
-    });
     const workerOwnedIsosurfaceBatches =
       stageId === 'schroederSameLevelMechanics'
       && workerLaneNativeSurfacePresentationRequested
       && Array.isArray(sphResidentRenderSurfaceState?.fieldBatches)
         ? sphResidentRenderSurfaceState.fieldBatches
         : [];
-    const workerOwnedIsosurfaceSurfaceTable =
-      workerOwnedIsosurfaceBatches.length > 0
-        ? createRenderFieldSurfaceTableForBatches(
-            workerOwnedIsosurfaceBatches,
-            {
-              maxResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
-              minResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION
-            }
+    const renderTableCacheHit = Boolean(
+      cachedWorkerOffscreenRenderTableState
+      && cachedWorkerOffscreenRenderTableState.sphParticleState === sphParticleState
+      && cachedWorkerOffscreenRenderTableState.materialProperties === currentMaterialProperties
+      && cachedWorkerOffscreenRenderTableState.reactionTable === sphReactionTable
+      && cachedWorkerOffscreenRenderTableState.batches === workerOwnedIsosurfaceBatches
+      && cachedWorkerOffscreenRenderTableState.batchRefs.length === workerOwnedIsosurfaceBatches.length
+      && cachedWorkerOffscreenRenderTableState.batchRefs.every(
+        (batch, idx) => batch === workerOwnedIsosurfaceBatches[idx]
+      )
+      && cachedWorkerOffscreenRenderTableState.fieldResolution
+        === SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION
+    );
+    let materialColorRows;
+    let workerOwnedIsosurfaceSurfaceTable;
+    let workerOwnedIsosurfaceBudget;
+    if (renderTableCacheHit) {
+      materialColorRows = cachedWorkerOffscreenRenderTableState.materialColorRows;
+      workerOwnedIsosurfaceSurfaceTable =
+        cachedWorkerOffscreenRenderTableState.workerOwnedIsosurfaceSurfaceTable;
+      workerOwnedIsosurfaceBudget =
+        cachedWorkerOffscreenRenderTableState.workerOwnedIsosurfaceBudget;
+    } else {
+      materialColorRows = workerResidentParticleStateProducerColorRows(null, {
+        sphParticleState,
+        materialProperties: currentMaterialProperties,
+        reactionTable: sphReactionTable
+      });
+      workerOwnedIsosurfaceSurfaceTable =
+        workerOwnedIsosurfaceBatches.length > 0
+          ? createRenderFieldSurfaceTableForBatches(
+              workerOwnedIsosurfaceBatches,
+              {
+                maxResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
+                minResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION
+              }
+            )
+          : null;
+      workerOwnedIsosurfaceBudget = workerOwnedIsosurfaceSurfaceTable
+        ? Math.max(
+            3,
+            Math.floor(
+              Math.min(
+                nativeMarchingCubesVertexRowsBudgetPerSurface(
+                  workerOwnedIsosurfaceSurfaceTable.surfaceCount
+                ),
+                SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
+                  * (SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION - 1) ** 3
+              ) / 3
+            ) * 3
           )
-        : null;
-    const workerOwnedIsosurfaceBudget = workerOwnedIsosurfaceSurfaceTable
-      ? Math.max(
-          3,
-          Math.floor(
-            Math.min(
-              nativeMarchingCubesVertexRowsBudgetPerSurface(
-                workerOwnedIsosurfaceSurfaceTable.surfaceCount
-              ),
-              SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
-                * (SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION - 1) ** 3
-            ) / 3
-          ) * 3
-        )
-      : 0;
+        : 0;
+      cachedWorkerOffscreenRenderTableState = {
+        sphParticleState,
+        materialProperties: currentMaterialProperties,
+        reactionTable: sphReactionTable,
+        batches: workerOwnedIsosurfaceBatches,
+        batchRefs: workerOwnedIsosurfaceBatches.slice(),
+        fieldResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
+        materialColorRows,
+        workerOwnedIsosurfaceSurfaceTable,
+        workerOwnedIsosurfaceBudget
+      };
+    }
     return {
       schema: 'peercompute.ulg.presentation-worker-retained-stage-output-render-request.v0',
       enabled: true,
@@ -52870,7 +52940,8 @@ fn main(
               vertexRowsBudget: workerOwnedIsosurfaceBudget,
               viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
               cameraPositionM: camera.position.toArray(),
-              boxDimsM: [...dims]
+              boxDimsM: [...dims],
+              nuclearCherenkovSources: currentNuclearCherenkovSources
             }
           }
         : {}),
@@ -53763,6 +53834,9 @@ fn main(
                     ...(laneState.supersededLane
                       ? { retireLane: { ...laneState.supersededLane } }
                       : {}),
+                    ...(currentNuclearCherenkovSources
+                      ? { nuclearCherenkovSources: currentNuclearCherenkovSources }
+                      : {}),
                     ...classifierOptions
                   }
                 }
@@ -53866,11 +53940,27 @@ fn main(
         : {}),
       chartId: 0
     };
-    const targetScheduleProviderAuthority =
-      createSchroederTargetScheduleProviderAuthority({
-        kind: 'worker-lane-assignment-only',
-        classifierOptions: laneContinuationClassifierOptions
-      });
+    const laneContinuationClassifierKey = [
+      workerHierarchyConfig.baseGridSpacingM ?? '',
+      workerHierarchyConfig.minLevel ?? '',
+      workerHierarchyConfig.maxLevel ?? '',
+      0
+    ].join('|');
+    const targetScheduleProviderAuthority = (
+      laneState.cachedTargetScheduleProviderAuthority?.key === laneContinuationClassifierKey
+    )
+      ? laneState.cachedTargetScheduleProviderAuthority.value
+      : (() => {
+          const built = createSchroederTargetScheduleProviderAuthority({
+            kind: 'worker-lane-assignment-only',
+            classifierOptions: laneContinuationClassifierOptions
+          });
+          laneState.cachedTargetScheduleProviderAuthority = {
+            key: laneContinuationClassifierKey,
+            value: built
+          };
+          return built;
+        })();
     workerLanePageTiming.targetProviderAuthorityReadyAtMs = nowMs();
     const targetScheduleEpochOptions = {
       hierarchyConfig: workerHierarchyConfig,
@@ -53954,20 +54044,41 @@ fn main(
             residentStepOptions: options
           })
       });
-    const dormantResidentStepOptions = requestedDynamicReactionRoutingAllowed
-      ? createParticleGasSealedResidentStepOptions({
-          ...residentStepOptions,
-          reactionTable: null,
-          reactionActivationWatchTable: dormantReactionCatalog
-        })
-      : residentStepOptions;
-    const activeResidentStepOptions = requestedDynamicReactionRoutingAllowed
-      ? createParticleGasSealedResidentStepOptions({
-          ...residentStepOptions,
-          reactionTable: dormantReactionCatalog,
-          reactionActivationWatchTable: null
-        })
-      : residentStepOptions;
+    const optionVariantCacheHit = Boolean(
+      laneState.cachedResidentStepOptionVariants
+      && laneState.cachedResidentStepOptionVariants.residentStepOptions === residentStepOptions
+      && laneState.cachedResidentStepOptionVariants.requestedDynamicReactionRoutingAllowed
+        === requestedDynamicReactionRoutingAllowed
+      && laneState.cachedResidentStepOptionVariants.particleGasLedgerActionableLatch
+        === laneState.particleGasLedgerActionableLatch
+    );
+    const dormantResidentStepOptions = optionVariantCacheHit
+      ? laneState.cachedResidentStepOptionVariants.dormantResidentStepOptions
+      : (requestedDynamicReactionRoutingAllowed
+          ? createParticleGasSealedResidentStepOptions({
+              ...residentStepOptions,
+              reactionTable: null,
+              reactionActivationWatchTable: dormantReactionCatalog
+            })
+          : residentStepOptions);
+    const activeResidentStepOptions = optionVariantCacheHit
+      ? laneState.cachedResidentStepOptionVariants.activeResidentStepOptions
+      : (requestedDynamicReactionRoutingAllowed
+          ? createParticleGasSealedResidentStepOptions({
+              ...residentStepOptions,
+              reactionTable: dormantReactionCatalog,
+              reactionActivationWatchTable: null
+            })
+          : residentStepOptions);
+    if (!optionVariantCacheHit) {
+      laneState.cachedResidentStepOptionVariants = {
+        residentStepOptions,
+        requestedDynamicReactionRoutingAllowed,
+        particleGasLedgerActionableLatch: laneState.particleGasLedgerActionableLatch,
+        dormantResidentStepOptions,
+        activeResidentStepOptions
+      };
+    }
     workerLanePageTiming.residentStepOptionVariantsReadyAtMs = nowMs();
     const predecessorReactionExecutionRequired = Boolean(
       requestedDynamicReactionRoutingAllowed
@@ -54048,57 +54159,150 @@ fn main(
         particleGasLedgerActionableForOptions(
           scheduleResidentStepOptions
         );
-      const targetConfigurationOptions = {
-        maxFutureSubsteps: requestedStepCount,
-        dtS: dt,
+      const targetConfigCacheKey = [
+        requestedStepCount,
+        dt,
         gridSpacingM,
         cflFactor,
-        boxDimsM,
-        residentStepOptions: scheduleResidentStepOptions,
-        epochOptions: targetScheduleEpochOptions,
-        mechanicsOptions: targetScheduleMechanicsOptions,
-        hierarchyConfig: workerHierarchyConfig,
-        scheduleStepOptionsProvider: targetScheduleProviderAuthority,
-        particleGasLedgerActionable
+        Array.isArray(boxDimsM) ? boxDimsM.join(',') : String(boxDimsM),
+        targetScheduleProviderAuthority.descriptorFingerprint ?? '',
+        particleGasLedgerActionable ? 1 : 0,
+        predecessorRetainedProductGasActionable ? 1 : 0,
+        requestedDynamicReactionRoutingAllowed ? 1 : 0,
+        scheduleReactionExecutionRequired ? 1 : 0,
+        JSON.stringify(workerHierarchyConfig)
+      ].join('|');
+      const targetConfigShallowEqual = (left, right, depth = 0) => {
+        if (Object.is(left, right)) return true;
+        if (left == null || right == null) return false;
+        if (typeof left !== 'object' || typeof right !== 'object') return false;
+        if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) return false;
+        if (depth >= 8) return false;
+        if (Array.isArray(left) || Array.isArray(right)) {
+          if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+            return false;
+          }
+          for (let i = 0; i < left.length; i += 1) {
+            if (!targetConfigShallowEqual(left[i], right[i], depth + 1)) return false;
+          }
+          return true;
+        }
+        const leftKeys = Object.keys(left);
+        const rightKeys = Object.keys(right);
+        if (leftKeys.length !== rightKeys.length) return false;
+        for (let i = 0; i < leftKeys.length; i += 1) {
+          const key = leftKeys[i];
+          if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+          if (!targetConfigShallowEqual(left[key], right[key], depth + 1)) return false;
+        }
+        return true;
       };
-      const staticTargetConfiguration =
-        createSchroederTargetScheduleConfiguration({
-          ...targetConfigurationOptions,
-          retainedProductGasBoundaryActionable:
-            predecessorRetainedProductGasActionable
-        });
-      workerLanePageTiming.staticTargetConfigurationReadyAtMs = nowMs();
+      const targetConfigRelevantOptions = (options) => ({
+        contactSolverEnabled: options?.contactSolverEnabled,
+        gasPressureMechanicsBoundaryEnabled: options?.gasPressureMechanicsBoundaryEnabled,
+        particleGasLedgerActionable: options?.particleGasLedgerActionable,
+        thermalMaterialTable: options?.thermalMaterialTable ?? null,
+        mechanicsMaterialTable: options?.mechanicsMaterialTable ?? null,
+        dispersedMediumOpticalClosureTable: options?.dispersedMediumOpticalClosureTable ?? null,
+        dispersedMediumOpticsSeedRows: options?.dispersedMediumOpticsSeedRows ?? null,
+        reactionTable: options?.reactionTable ?? null,
+        reactionActivationWatchTable: options?.reactionActivationWatchTable ?? null,
+        thermalStepOptions: options?.thermalStepOptions ?? null,
+        reactionStepOptions: options?.reactionStepOptions ?? null,
+        mechanicsRefreshOptions: options?.mechanicsRefreshOptions ?? null
+      });
+      const currentRelevantScheduleOptions = targetConfigRelevantOptions(scheduleResidentStepOptions);
+      const currentRelevantActiveOptions = targetConfigRelevantOptions(activeResidentStepOptions);
+      const targetConfigCacheHit = Boolean(
+        laneState.cachedTargetScheduleConfigurations
+        && laneState.cachedTargetScheduleConfigurations.key === targetConfigCacheKey
+        && (
+          laneState.cachedTargetScheduleConfigurations.scheduleResidentStepOptions
+            === scheduleResidentStepOptions
+          || targetConfigShallowEqual(
+            laneState.cachedTargetScheduleConfigurations.relevantScheduleOptions,
+            currentRelevantScheduleOptions
+          )
+        )
+        && (
+          laneState.cachedTargetScheduleConfigurations.activeResidentStepOptions
+            === activeResidentStepOptions
+          || targetConfigShallowEqual(
+            laneState.cachedTargetScheduleConfigurations.relevantActiveOptions,
+            currentRelevantActiveOptions
+          )
+        )
+      );
+      let staticTargetConfiguration;
       let prospectiveTargetConfiguration = null;
-      if (
-        requestedDynamicReactionRoutingAllowed
-        && !scheduleReactionExecutionRequired
-        && staticTargetConfiguration.writerSet.reaction === false
-        && staticTargetConfiguration.tableFingerprints
-          .watchReactionTableSource
-            === 'reaction-activation-watch-table'
-      ) {
+      if (targetConfigCacheHit) {
+        staticTargetConfiguration =
+          laneState.cachedTargetScheduleConfigurations.staticTargetConfiguration;
         prospectiveTargetConfiguration =
+          laneState.cachedTargetScheduleConfigurations.prospectiveTargetConfiguration;
+        workerLanePageTiming.staticTargetConfigurationReadyAtMs = nowMs();
+        workerLanePageTiming.prospectiveTargetConfigurationReadyAtMs = nowMs();
+      } else {
+        const targetConfigurationOptions = {
+          maxFutureSubsteps: requestedStepCount,
+          dtS: dt,
+          gridSpacingM,
+          cflFactor,
+          boxDimsM,
+          residentStepOptions: scheduleResidentStepOptions,
+          epochOptions: targetScheduleEpochOptions,
+          mechanicsOptions: targetScheduleMechanicsOptions,
+          hierarchyConfig: workerHierarchyConfig,
+          scheduleStepOptionsProvider: targetScheduleProviderAuthority,
+          particleGasLedgerActionable
+        };
+        staticTargetConfiguration =
           createSchroederTargetScheduleConfiguration({
             ...targetConfigurationOptions,
-            residentStepOptions: activeResidentStepOptions,
-            particleGasLedgerActionable:
-              particleGasLedgerActionableForOptions(
-                activeResidentStepOptions
-              )
+            retainedProductGasBoundaryActionable:
+              predecessorRetainedProductGasActionable
           });
-      } else if (
-        !predecessorRetainedProductGasActionable
-        && staticTargetConfiguration.writerSet.reaction === true
-        && staticTargetConfiguration.writerSet
-          .retainedProductGasBoundaryActionable === false
-      ) {
-        prospectiveTargetConfiguration =
-          createSchroederTargetScheduleConfiguration({
-            ...targetConfigurationOptions,
-            retainedProductGasBoundaryActionable: true
-          });
+        workerLanePageTiming.staticTargetConfigurationReadyAtMs = nowMs();
+        if (
+          requestedDynamicReactionRoutingAllowed
+          && !scheduleReactionExecutionRequired
+          && staticTargetConfiguration.writerSet.reaction === false
+          && staticTargetConfiguration.tableFingerprints
+            .watchReactionTableSource
+              === 'reaction-activation-watch-table'
+        ) {
+          prospectiveTargetConfiguration =
+            createSchroederTargetScheduleConfiguration({
+              ...targetConfigurationOptions,
+              residentStepOptions: activeResidentStepOptions,
+              particleGasLedgerActionable:
+                particleGasLedgerActionableForOptions(
+                  activeResidentStepOptions
+                )
+            });
+        } else if (
+          !predecessorRetainedProductGasActionable
+          && staticTargetConfiguration.writerSet.reaction === true
+          && staticTargetConfiguration.writerSet
+            .retainedProductGasBoundaryActionable === false
+        ) {
+          prospectiveTargetConfiguration =
+            createSchroederTargetScheduleConfiguration({
+              ...targetConfigurationOptions,
+              retainedProductGasBoundaryActionable: true
+            });
+        }
+        workerLanePageTiming.prospectiveTargetConfigurationReadyAtMs = nowMs();
+        laneState.cachedTargetScheduleConfigurations = {
+          key: targetConfigCacheKey,
+          scheduleResidentStepOptions,
+          activeResidentStepOptions,
+          relevantScheduleOptions: currentRelevantScheduleOptions,
+          relevantActiveOptions: currentRelevantActiveOptions,
+          staticTargetConfiguration,
+          prospectiveTargetConfiguration
+        };
       }
-      workerLanePageTiming.prospectiveTargetConfigurationReadyAtMs = nowMs();
       targetScheduleAuthority = createSchroederTargetScheduleAuthority({
         sourceScheduleId: scheduleId,
         targetScheduleRequestId: nextScheduleRequestId,
@@ -54309,6 +54513,10 @@ fn main(
             && laneState.pendingTriadClosureAdoptions.length > 0
             ? laneState.pendingTriadClosureAdoptions.splice(0, laneState.pendingTriadClosureAdoptions.length)
             : null;
+          const pendingEosStiffnessAdoptions = Array.isArray(laneState.pendingEosStiffnessAdoptions)
+            && laneState.pendingEosStiffnessAdoptions.length > 0
+            ? laneState.pendingEosStiffnessAdoptions.splice(0, laneState.pendingEosStiffnessAdoptions.length)
+            : null;
           bridge.runResidentScheduleOnPresentationDevice({
             id: scheduleId,
             reason: 'schroeder-worker-lane-schedule',
@@ -54318,10 +54526,11 @@ fn main(
                 scheduleId,
                 thermalPotentialAcknowledgement,
                 ...(pendingTriadAdoptions ? { triadClosureAdoptions: pendingTriadAdoptions } : {}),
+                ...(pendingEosStiffnessAdoptions ? { eosStiffnessAdoptions: pendingEosStiffnessAdoptions } : {}),
+                ...(currentNuclearCherenkovSources ? { nuclearCherenkovSources: currentNuclearCherenkovSources } : {}),
                 stepCount: requestedStepCount,
                 progressEverySteps: requestedProgressEverySteps,
-                targetScheduleAuthority:
-                  structuredClone(targetScheduleAuthority),
+                targetScheduleAuthority,
                 authority: 'NodeKernel/ComputeManager/StateManager',
                 twoLevelTerminalRefluxReceiptRequired:
                   authorityTerminalRefluxReceiptRequired === true,
@@ -54519,6 +54728,17 @@ fn main(
       laneState.pendingThermalPotential =
         committedThermalPotential?.candidate ?? null;
       if (committedThermalPotential) {
+        const observedHits = Number(committedThermalPotential.cumulativeConsumerHits);
+        if (
+          committedThermalPotential.cumulativeConsumerHits != null
+          && Number.isFinite(observedHits)
+          && observedHits >= 0
+        ) {
+          laneState.lastThermalPotentialCumulativeConsumerHits = Math.max(
+            Number(laneState.lastThermalPotentialCumulativeConsumerHits) || 0,
+            observedHits
+          );
+        }
         const g6Status = Object.freeze({
           enabled: true,
           scheduleId,
@@ -54526,7 +54746,9 @@ fn main(
           adopted: committedThermalPotential.adopted === true,
           status: committedThermalPotential.status ?? null,
           cumulativeConsumerHits:
-            committedThermalPotential.cumulativeConsumerHits ?? 0,
+            committedThermalPotential.cumulativeConsumerHits
+            ?? laneState.lastThermalPotentialCumulativeConsumerHits
+            ?? 0,
           hasCandidate: Boolean(committedThermalPotential.candidate)
         });
         scene.userData.sphThermalPotentialStatus = g6Status;
@@ -54583,6 +54805,10 @@ fn main(
           scene.userData.sphChainDeepeningStatus = workerArchStatus.chainDeepening;
           globalThis.__ulgChainDeepeningStatus = workerArchStatus.chainDeepening;
         }
+        if (workerArchStatus.nuclearCherenkov) {
+          scene.userData.sphNuclearCherenkovStatus = workerArchStatus.nuclearCherenkov;
+          globalThis.__ulgNuclearCherenkovStatus = workerArchStatus.nuclearCherenkov;
+        }
       }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
       // background Eshkol/MoonLab derivations at this schedule boundary and
@@ -54627,6 +54853,14 @@ fn main(
           for (const bundle of a6Adoption.adoptedTriadBundles) {
             if (bundle?.materialKey && bundle?.packedData) {
               laneState.pendingTriadClosureAdoptions.push(bundle);
+            }
+          }
+        }
+        if (a6Adoption?.adoptedEosStiffnessBundles?.length > 0) {
+          laneState.pendingEosStiffnessAdoptions ??= [];
+          for (const bundle of a6Adoption.adoptedEosStiffnessBundles) {
+            if (bundle?.packedData) {
+              laneState.pendingEosStiffnessAdoptions.push(bundle);
             }
           }
         }

@@ -126,12 +126,72 @@ function evaluateProperty(closure, property, temperatureK, pressurePa) {
 }
 
 export class MaterialRegistry {
-  constructor({ closureRegistry, requireFirstPrinciples = true, materialPropertyBank = null } = {}) {
+  constructor({ closureRegistry, requireFirstPrinciples = true, materialPropertyBank = null, polytopeRegistry = null } = {}) {
     if (!closureRegistry) throw new Error('MaterialRegistry requires a closureRegistry');
     this.closureRegistry = closureRegistry;
     this.requireFirstPrinciples = requireFirstPrinciples;
     this.materialPropertyBank = materialPropertyBank ? normalizeMaterialPropertyBank(materialPropertyBank) : null;
+    this.polytopeRegistry = polytopeRegistry || null;
+    this.polytopeAtlases = new Map();
     this.entries = new Map();
+  }
+
+  /**
+   * Attach a Gate 2 Convex Polytope Atlas (`A x <= b` + GPU Chebyshev fit)
+   * for fail-closed Tier-1 continuum state lookup (`samplePolytopeAtlas`).
+   */
+  attachPolytopeAtlas(atlas) {
+    if (!atlas?.materialKey || !atlas?.registry) {
+      throw new TypeError('attachPolytopeAtlas requires a Gate 2 atlas with materialKey and registry');
+    }
+    const key = String(atlas.materialKey).trim().toLowerCase();
+    this.polytopeAtlases.set(key, atlas);
+    return key;
+  }
+
+  /**
+   * Query an attached Gate 2 Convex Polytope Atlas at `(temperatureK, pressurePa)`.
+   * Strictly fail-closed: points outside all `A x <= b` polytopes return
+   * `status: 'out-of-domain'` with a domain-exit refresh request for Tier-2/3 synthesis.
+   */
+  samplePolytopeAtlas({ material, temperatureK, pressurePa = 101325 } = {}) {
+    const key = String(material || '').trim().toLowerCase();
+    const atlas = this.polytopeAtlases.get(key);
+    const reg = atlas?.registry || this.polytopeRegistry;
+    if (!reg) {
+      return { status: 'miss', reason: 'polytope-atlas-not-attached', material, value: null };
+    }
+    const hit = reg.resolveState(material, { temperatureK, pressurePa });
+    if (!hit.found) {
+      return {
+        status: 'out-of-domain',
+        material,
+        validity: hit.status,
+        value: null,
+        extrapolate: false,
+        refreshRequest: createClosureDomainExitRefreshRequest({
+          closureId: `polytope-atlas:${key}`,
+          closureKind: 'polytope-atlas-eos',
+          axisName: 'temperatureK',
+          inputValue: temperatureK,
+          domain: null,
+          reason: hit.reason || 'material-state-outside-polytope-atlas'
+        })
+      };
+    }
+    return {
+      status: 'sampled',
+      material,
+      phase: hit.polytope.phase,
+      polytopeId: hit.polytope.polytopeId,
+      accuracyTier: hit.polytope.accuracyTier,
+      validity: hit.status,
+      fit: hit.fit,
+      polytope: hit.polytope,
+      packedGpuAtlas: atlas?.packedGpuAtlas ?? null,
+      scientificValidation: false,
+      materialValidation: false
+    };
   }
 
   #key(material, closureFamily) {

@@ -1,4 +1,4 @@
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import { createSphExactG2pQuantityWgsl, sphExactG2pQuantityProgram } from './sphExactG2pQuantityWgsl.js';
 
@@ -79,7 +79,7 @@ export async function prepareSphExactG2pNumericQuantities({ device, quantityBuff
         quantityBuffer, scratch, validationBuffer, params, instructions, projection];
       const dispatch = (key, offset, groups) => {
         const pipeline = pipelines.get(key);
-        const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+        const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
           entries: resources.map((buffer, binding) => ({ binding, resource: binding === 9
             ? { buffer, offset, size: 16 } : { buffer } })) });
         const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline);

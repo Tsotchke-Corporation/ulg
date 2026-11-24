@@ -1,5 +1,16 @@
 # A6 PeerCompute-owned warm remote derivation: MoonLab and Eshkol in the client (WASM + WebGPU)
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 0A / Gate 3 / Gate 5D):**
+> **OPEN** (`0` formal oracle receipts). P0/P3 wired live `eshkolSample` +
+> `adoptedEosStiffnessBundles` into the worker stiffness table, removed all 6
+> hardcoded `/@fs/home/cos/...` dev URLs, hardened `verify-pages-build.mjs`, and
+> proved real 2-browser-context WebRTC `RTCPeerConnection` + `RTCDataChannel`
+> derivation (`Au`/`Hg`, signaling WS closed + fail-closed disconnect).
+> **Remaining:** split slim `peercompute-core` cutting `83 MB` `ort-wasm` dist
+> bloat (**Gate 0A**), wire into Gate 1–3 Polytope Atlas closure misses, and run
+> physical 2-host WAN/STUN/TURN validation (**Gate 5D**). See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Track A6. It builds on G5 (reservation), G6 (cache and
 adoption) and PeerCompute's remote-compute stack: `NodeKernel` responders,
 redundant network placement with replica promotion, and the quorum result

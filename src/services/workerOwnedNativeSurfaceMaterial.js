@@ -131,6 +131,14 @@ export function buildWorkerNativeSurfaceUniformValues(frame, surface, inverse) {
   return values;
 }
 
+function dampedNativeSurfaceMotionAgeS(frame) {
+  const rawAgeS = Math.max(0, Number(frame?.drawMotionAgeS) || 0);
+  const maxAgeS = Number(frame?.motionPacing?.maxSimulationAgeS) || 0;
+  if (!(rawAgeS > 0) || !(maxAgeS > 0)) return rawAgeS;
+  const tau = maxAgeS * 0.65;
+  return tau * (1 - Math.exp(-rawAgeS / tau));
+}
+
 export function buildWorkerNativeSurfaceMotionUniformValues(frame, surface, cameraValues) {
   const values = new Float32Array(WORKER_NATIVE_SURFACE_MOTION_UNIFORM_BYTES / 4);
   if (!frame.motionField?.buffer) return values;
@@ -138,7 +146,7 @@ export function buildWorkerNativeSurfaceMotionUniformValues(frame, surface, came
   words[0] = surface.descriptor?.fieldOffset ?? 0;
   words[1] = surface.metadata?.resolution ?? 0;
   words[2] = frame.motionField.rowCount;
-  values[4] = Math.max(0, Number(frame.drawMotionAgeS) || 0);
+  values[4] = dampedNativeSurfaceMotionAgeS(frame);
   values[5] = Math.abs(cameraValues[32]); // same one-field-cell presentation cap
   return values;
 }
@@ -564,6 +572,15 @@ export function createWorkerOwnedNativeSurfaceMaterial({
     return { r: 0, g: 0, b: 0, a: 1 };
   };
   return { ready, prepare, draw, drawBackground, releaseFrame, getDiagnostics, clearValue,
+    getSurfaceDrawResources(frame, surface) {
+      const entry = frames.get(frame);
+      if (!entry) return null;
+      const binding = entry.bindGroups.get(surface);
+      return {
+        opticalRecordsBuffer: entry.optical?.buffers?.recordsBuffer ?? null,
+        motionUniformBuffer: binding?.motionUniform ?? null
+      };
+    },
     transferFrame(source, target) {
       const entry = frames.get(source);
       if (entry && source !== target) { releaseFrame(target); frames.delete(source); frames.set(target, entry); }

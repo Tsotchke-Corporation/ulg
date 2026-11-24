@@ -1,4 +1,4 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
@@ -233,7 +233,7 @@ export function createSchroederPhaseSlotLedgerStage({ device, particleCount, lin
       code: schroederPhaseSlotLedgerProjectWgsl, entryPoint: 'project_ledger',
       bindings: ['read-only-storage', 'read-only-storage', 'read-only-storage', 'read-only-storage',
         'storage', 'storage', 'storage', 'uniform'].map((type, binding) => computeBufferBinding(binding, type)) });
-    const group = (pipeline, buffers) => device.createBindGroup({ layout: pipeline.bindGroupLayout,
+    const group = (pipeline, buffers) => createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
       entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
     const dispatch = (encoder, pipeline, bindGroup) => {
       const pass = encoder.beginComputePass({ label: pipeline.label });

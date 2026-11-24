@@ -560,7 +560,8 @@ export function solveKohnShamAtomLog({
   functional = 'lda',
   relativistic = false,
   spinOrbit = false,
-  returnRadialDensity = false
+  returnRadialDensity = false,
+  returnOrbitalWavefunctions = false
 }) {
   const usePbe = String(functional || 'lda').toLowerCase() === 'pbe';
   const xMin = Math.log(rMinBohr);
@@ -652,6 +653,13 @@ export function solveKohnShamAtomLog({
     const fxcVal = usePbe ? fxcGrid[i] : xcEnergyPerVolume(rho[i]);
     eXcCorrection += (fxcVal - vXC[i] * rho[i]) * dV;
   }
+  const wantRadial = returnRadialDensity || returnOrbitalWavefunctions;
+  const orbitalWavefunctions = returnOrbitalWavefunctions
+    ? configuration.map((sub) => {
+      const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+      return { n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa, u: Array.from(state.u) };
+    })
+    : null;
   const totalEnergyHa = sumOcc - eHartreeDouble + eXcCorrection;
   return {
     totalEnergyHa,
@@ -660,7 +668,14 @@ export function solveKohnShamAtomLog({
     electronCount,
     integratedElectrons,
     atomicNumberZ,
-    ...(returnRadialDensity ? { radialGrid: { r: Array.from(r), rho: Array.from(rho), dx } } : {}),
+    ...(wantRadial ? {
+      radialGrid: {
+        r: Array.from(r),
+        rho: Array.from(rho),
+        dx,
+        ...(orbitalWavefunctions ? { orbitalWavefunctions } : {})
+      }
+    } : {}),
     ...(relativistic ? { relativisticCorrectionHa, totalEnergyRelHa: totalEnergyHa + relativisticCorrectionHa } : {})
   };
 }
@@ -838,7 +853,8 @@ export function solveKohnShamAtomKH({
   tol = 1e-7,
   functional = 'lda',
   spinOrbit = false,
-  returnRadialDensity = false
+  returnRadialDensity = false,
+  returnOrbitalWavefunctions = false
 }) {
   const usePbe = String(functional || 'lda').toLowerCase() === 'pbe';
   const xMin = Math.log(rMinBohr);
@@ -920,6 +936,13 @@ export function solveKohnShamAtomKH({
     const fxcVal = usePbe ? fxcGrid[i] : xcEnergyPerVolume(rho[i]);
     eXcCorrection += (fxcVal - vXC[i] * rho[i]) * dV;
   }
+  const wantRadial = returnRadialDensity || returnOrbitalWavefunctions;
+  const orbitalWavefunctions = returnOrbitalWavefunctions
+    ? configuration.map((sub) => {
+      const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+      return { n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa, u: Array.from(state.u) };
+    })
+    : null;
   return {
     totalEnergyHa: sumOcc - eHartreeDouble + eXcCorrection,
     functional: usePbe ? 'pbe' : 'lda',
@@ -927,7 +950,14 @@ export function solveKohnShamAtomKH({
     electronCount,
     integratedElectrons,
     atomicNumberZ,
-    ...(returnRadialDensity ? { radialGrid: { r: Array.from(r), rho: Array.from(rho), dx } } : {}),
+    ...(wantRadial ? {
+      radialGrid: {
+        r: Array.from(r),
+        rho: Array.from(rho),
+        dx,
+        ...(orbitalWavefunctions ? { orbitalWavefunctions } : {})
+      }
+    } : {}),
     relativisticMethod: spinOrbit ? 'koelling-harmon+spin-orbit' : 'koelling-harmon'
   };
 }

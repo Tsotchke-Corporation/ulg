@@ -424,7 +424,7 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // Use the unified GPU marching-cubes isosurface pipeline like every
       // other preset (workerLivePreview=1 would disable true isosurfaces).
       workerLivePreview: '0',
-      residentStepsPerSchedule: '16',
+      residentStepsPerSchedule: '64',
       residentComputeManagerMode: 'worker-owned-resident-lane',
       residentInterfaceRefreshMode: 'pipelined',
       schroederLawQueue: '0',

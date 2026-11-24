@@ -1,4 +1,4 @@
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { createSphExactRationalQuantityWgsl, sphExactRationalQuantityLayout } from './sphExactRationalQuantityWgsl.js';
 import { createSphConservativeTransferPacketWgsl, validateSphTransportPacketMode } from './sphConservativeTransferPacketWgsl.js';
 
@@ -373,7 +373,7 @@ fn store_exact_exchange(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   const resources = [source, output, scratch, projection, edges, control, surfaces, params, instructions, adjacency];
   const dispatch = (encoder, index, operation = 0) => {
-    const group = device.createBindGroup({ layout: pipelines[index].bindGroupLayout,
+    const group = createCachedExplicitBindGroup(device, { layout: pipelines[index].bindGroupLayout,
       entries: resources.map((buffer, binding) => ({ binding, resource: binding === 8
         ? { buffer, offset: operation * alignment, size: 16 } : { buffer } })) });
     const pass = encoder.beginComputePass(); pass.setPipeline(pipelines[index].pipeline); pass.setBindGroup(0, group);

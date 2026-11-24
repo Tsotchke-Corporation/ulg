@@ -83,43 +83,48 @@ export function createZeroCopyResidentBodyPresenter({
     const aPosMass = attribute('aPosMass', 'vec4');
     const pos = aPosMass.xyz;
     const mass = aPosMass.w;
-    const radiusDist = length(pos);
     const alive = mass.greaterThan(float(0.0));
 
     let starScale;
     let starColor;
     if (palette === 'blackbody-thermo' && stride === 16) {
       // General self-gravitating thermodynamic fluid/plasma palette driven strictly
-      // by live physical state (log10T, log10Eps, heavy-element fraction xZ).
+      // by live per-particle GPU state (log10T, log10Rho, log10Eps, heavy-element fraction xZ).
       const aThermo = attribute('aThermo', 'vec4');
       const aState = attribute('aState', 'vec4');
       const logT = aThermo.x;
+      const logRho = aThermo.y;
       const logEps = aThermo.w;
       const xZ = aState.w;
 
-      const uWarm = clamp(logT.sub(float(2.2)).div(float(1.3)), float(0.0), float(1.0));
-      const uSolar = clamp(logT.sub(float(3.4)).div(float(1.1)), float(0.0), float(1.0));
-      const uHot = clamp(logT.sub(float(4.5)).div(float(2.6)), float(0.0), float(1.0));
+      const uWarm = clamp(logT.sub(float(2.1)).div(float(1.4)), float(0.0), float(1.0));
+      const uSolar = clamp(logT.sub(float(3.4)).div(float(1.2)), float(0.0), float(1.0));
+      const uHot = clamp(logT.sub(float(4.8)).div(float(2.4)), float(0.0), float(1.0));
+      const uDense = clamp(logRho.add(float(10.0)).div(float(16.0)), float(0.0), float(1.0));
       const uFuse = clamp(logEps.add(float(5.5)).div(float(6.5)), float(0.0), float(1.0));
       const uHeavy = clamp(xZ.sub(float(0.14)).div(float(0.45)), float(0.0), float(1.0));
+      const uCompact = clamp(logRho.sub(float(8.6)).div(float(1.4)), float(0.0), float(1.0));
 
-      const colCold = vec3(float(0.32), float(0.24), float(0.62));
-      const colDiss = vec3(float(0.95), float(0.34), float(0.14));
-      const colSolar = vec3(float(1.0), float(0.86), float(0.56));
-      const colBlue = vec3(float(0.62), float(0.88), float(1.0));
-      const colCore = vec3(float(1.0), float(0.98), float(0.92));
-      const colEjecta = vec3(float(0.28), float(0.88), float(1.0));
+      const colCold = vec3(float(0.32), float(0.24), float(0.64));
+      const colDiss = vec3(float(0.96), float(0.36), float(0.14));
+      const colSolar = vec3(float(1.0), float(0.86), float(0.54));
+      const colBlue = vec3(float(0.58), float(0.86), float(1.0));
+      const colCore = vec3(float(1.0), float(0.98), float(0.90));
+      const colEjecta = vec3(float(0.24), float(0.90), float(1.0));
+      const colCompact = vec3(float(0.96), float(0.76), float(1.0));
 
       let col = mix(colCold, colDiss, uWarm);
       col = mix(col, colSolar, uSolar);
       col = mix(col, colBlue, uHot);
-      col = mix(col, colCore, uFuse.mul(float(0.75)));
+      col = mix(col, colCore, uFuse.mul(float(0.82)));
       col = mix(col, colEjecta, uHeavy.mul(float(0.72)));
+      col = mix(col, colCompact, uCompact.mul(float(0.65)));
 
-      const rawScale = float(0.032)
-        .add(uWarm.mul(float(0.014)))
-        .add(uFuse.mul(float(0.042)))
-        .add(uHeavy.mul(float(0.032)));
+      const rawScale = float(0.030)
+        .add(uWarm.mul(float(0.016)))
+        .add(uDense.mul(float(0.022)))
+        .add(uFuse.mul(float(0.056)))
+        .add(uHeavy.mul(float(0.036)));
       starScale = select(alive, rawScale, float(0.0));
       starColor = col;
     } else if (palette === 'continuum-material') {
@@ -139,24 +144,31 @@ export function createZeroCopyResidentBodyPresenter({
         clamp(float(tb).mul(rim).add(speedBoost), float(0.0), float(1.0))
       );
     } else if (palette === 'cosmic-web') {
+      // Live GPU overdensity stored in vel_rho.w (`rho_vis` in [0.05..1.0] from supergalacticTreePmGpu.js),
+      // falling back to mass scale only if vel_rho.w is zero.
+      const aVelRadius = attribute('aVelRadius', 'vec4');
+      const rhoVis = clamp(aVelRadius.w, float(0.0), float(1.0));
       const mNorm = clamp(mass.div(float(5.5)), float(0.0), float(1.0));
-      const rawScale = float(0.026).add(pow(mNorm, float(0.72)).mul(float(0.068)));
+      const densNorm = select(rhoVis.greaterThan(float(0.001)), rhoVis, mNorm);
+      const rawScale = float(0.022).add(pow(densNorm, float(0.75)).mul(float(0.072)));
       starScale = select(alive, rawScale, float(0.0));
-      starColor = vec3(
-        float(0.34).add(mNorm.mul(float(0.66))),
-        float(0.24).add(mNorm.mul(float(0.56))),
-        float(0.96).sub(mNorm.mul(float(0.52)))
-      );
+      const colVoid = vec3(float(0.20), float(0.32), float(0.86));
+      const colFil = vec3(float(0.36), float(0.84), float(1.0));
+      const colHalo = vec3(float(1.0), float(0.88), float(0.46));
+      const loCol = mix(colVoid, colFil, clamp(densNorm.mul(float(1.6)), float(0.0), float(1.0)));
+      starColor = mix(loCol, colHalo, clamp(densNorm.sub(float(0.45)).mul(float(1.85)), float(0.0), float(1.0)));
     } else {
-      // Galactic astrophysics palette: SMBH core -> warm golden bulge -> vivid sapphire-cyan arms
+      // Translation-invariant galactic astrophysics palette driven strictly by
+      // physical stellar mass and radius (zero origin-anchored distance cutoffs!)
+      const aVelRadius = attribute('aVelRadius', 'vec4');
       const isCore = mass.greaterThan(float(20.0));
-      const isBulge = radiusDist.lessThan(float(2.4));
+      const isWarmGiant = aVelRadius.w.greaterThan(float(0.056));
       const bulgeMass = clamp(mass.div(float(0.25)), float(0.0), float(1.0));
       const armHot = clamp(mass.div(float(0.18)), float(0.0), float(1.0));
 
       const armScale = float(0.020).add(armHot.mul(float(0.026)));
       const bulgeScale = float(0.028).add(bulgeMass.mul(float(0.022)));
-      const nonCoreScale = select(isBulge, bulgeScale, armScale);
+      const nonCoreScale = select(isWarmGiant, bulgeScale, armScale);
       const rawScale = select(isCore, float(0.24), nonCoreScale);
       starScale = select(alive, rawScale, float(0.0));
 
@@ -167,7 +179,7 @@ export function createZeroCopyResidentBodyPresenter({
       );
       const bulgeCol = vec3(float(1.0), float(0.74), float(0.32));
       const coreCol = vec3(float(1.0), float(0.95), float(0.80));
-      starColor = select(isCore, coreCol, select(isBulge, bulgeCol, armCol));
+      starColor = select(isCore, coreCol, select(isWarmGiant, bulgeCol, armCol));
     }
 
     const mat = new THREE.MeshBasicNodeMaterial();
@@ -272,11 +284,11 @@ export function createZeroCopyResidentBodyPresenter({
         dummy.scale.setScalar(0.026 + 0.068 * Math.pow(mNorm, 0.72));
         color.setRGB(0.34 + 0.66 * mNorm, 0.24 + 0.56 * mNorm, 0.96 - 0.52 * mNorm);
       } else {
-        const r = Math.hypot(x, y, z);
-        if (i === 0 || mass > 20) {
+        const rad = bodies[b + 7] || 0;
+        if (mass > 20) {
           dummy.scale.setScalar(0.24);
           color.setRGB(1.0, 0.95, 0.80);
-        } else if (r < 2.4) {
+        } else if (rad > 0.056) {
           dummy.scale.setScalar(0.030 + 0.022 * Math.min(1, mass / 0.25));
           color.setRGB(1.0, 0.74, 0.32);
         } else {

@@ -7,7 +7,7 @@ import { createSphExactMassFormat } from '../../ulg-gpu-abi/src/sphExactMassInve
 // runs ledger thermal, the f32 phase split and its exact reconcile. One body
 // means no contact heat, which is not yet ledgered. Returns raw rows; the
 // caller checks them on the host.
-export async function runExactPhaseLedgerNative(device, { cycles = 6, wallTemperatureK = 600, exact = true, debug = false } = {}) {
+export async function runExactPhaseLedgerNative(device, { cycles = 8, wallTemperatureK = 800, exact = true, debug = false } = {}) {
   const { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial } = await preloadExactMassContinuationNative();
   const format = createSphExactMassFormat();
   const h2o = materials.createReferenceMaterialClosures().h2o.properties;
@@ -15,11 +15,14 @@ export async function runExactPhaseLedgerNative(device, { cycles = 6, wallTemper
   const conductivity = { solid: 2.2, liquid: 0.6, gas: 0.025 };
   const materialProperties = { h2o: { ...h2o,
     phases: h2o.phases.map(phase => ({ ...phase, thermalConductivityWPerMK: conductivity[phase.name] })) } };
-  const seeds = [272, 372, 272, 372.5];
+  const seeds = [273.05, 373.05, 273.05, 373.12];
   const lineages = seeds.length;
   const primaries = seeds.map((temperatureK, l) => ({ id: `ledger-${l}`, material: 'h2o',
     initialBodyDomainId: 1, initialBodyId: 'ledger-body', massKg: 0.001,
-    x: [0.3 + 0.004 * (l & 1), 1 + 0.004 * (l >> 1), 1], v: [0, 0, 0],
+    // Honest Walls (distance < parcel_edge ~ 10.3 mm for 1 g H2O): place all 4
+    // lineages touching the heated xMin wall (x = 2 mm) spaced 40 mm apart in y/z
+    // so both ice melting and water boiling occur without 4 mm ice-water short-circuiting.
+    x: [0.002, 1 + 0.04 * (l & 1), 1 + 0.04 * (l >> 1)], v: [0, 0, 0],
     specificInternalEnergyJPerKg: energy.specificInternalEnergyJPerKg(materialProperties.h2o, temperatureK) }));
   const companions = [1, 2, 3].flatMap(lane => primaries.map((primary, l) => ({ ...primary, id: `ledger-${l}-lane-${lane}`,
     x: [...primary.x], massKg: 0, phaseCompanionSlot: true, phaseCarrierPrimaryIndex: l, phaseCarrierLineageIndex: l,
@@ -61,7 +64,7 @@ export async function runExactPhaseLedgerNative(device, { cycles = 6, wallTemper
         sphParticleState: packed, mlsMpmParticleState: mls, sphParticleUpload: upload, mlsMpmParticleUpload: mlsUpload,
         levelAssignment: assignment, levelAssignmentSourceFamily: family, levelAssignmentSourceFamilyLease: lease,
         selectedLevel: 0, minLevel: 0, maxLevel: 0, baseGridSpacingM: .5, boxDimsM: [2, 2, 2],
-        dt: .001, gravityMPerS2: [0, 0, 0], readbackMode: 'no-full-readback',
+        dt: .05, gravityMPerS2: [0, 0, 0], readbackMode: 'no-full-readback',
         enableTwoLevelMechanics: false, enableCrossLevelCoupling: false, enableLawQueue: false, enableLawNeighborCandidates: false,
         enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
         residentStepOptions: { thermalMaterialTable: table, mechanicsMaterialTable: mechanicsTable,

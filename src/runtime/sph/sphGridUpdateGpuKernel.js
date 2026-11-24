@@ -40,6 +40,7 @@ import {
   assertQueueOrderedCleanupClaimsRegistered,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   deferSubmittedWorkCleanup,
@@ -3125,14 +3126,16 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           entries,
           label: 'ulg-mls-mpm-mechanics-field-grid-update-main-bind-group'
         })
-      : device.createBindGroup({
+      : createCachedExplicitBindGroup(device, {
+          label: 'ulg-mls-mpm-mechanics-field-grid-update-main',
           layout: main.bindGroupLayout,
           entries
         });
     const bindGroupForMechanicsPipeline = (pipelineInfo) => (
       pipelineInfo.bindGroupLayout === main.bindGroupLayout
         ? mainBindGroup
-        : device.createBindGroup({
+        : createCachedExplicitBindGroup(device, {
+            label: `ulg-mls-mpm-mechanics-field-grid-update-${pipelineInfo.pipeline?.label ?? 'stage'}`,
             layout: pipelineInfo.bindGroupLayout,
             entries
           })
@@ -3204,7 +3207,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
               entries: transportEntries,
               label: 'ulg-mls-mpm-grid-update-phase-volume-transport-stage-bind-group'
             })
-          : device.createBindGroup({
+          : createCachedExplicitBindGroup(device, {
+              label: 'ulg-mls-mpm-grid-update-phase-volume-transport-stage',
               layout: transportStage.bindGroupLayout,
               entries: transportEntries
             }))
@@ -3220,7 +3224,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
                   entries: transportEntries,
                   label: 'ulg-mls-mpm-grid-update-phase-volume-transport-validate-bind-group'
                 })
-              : device.createBindGroup({
+              : createCachedExplicitBindGroup(device, {
+                  label: 'ulg-mls-mpm-grid-update-phase-volume-transport-validate',
                   layout: transportValidate.bindGroupLayout,
                   entries: transportEntries
                 })))
@@ -3239,7 +3244,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
               entries: surfaceStressEntries,
               label: 'ulg-mls-mpm-grid-update-phase-volume-surface-stress-primary-bind-group'
             })
-          : device.createBindGroup({
+          : createCachedExplicitBindGroup(device, {
+              label: 'ulg-mls-mpm-grid-update-phase-volume-surface-stress-primary',
               layout: surfaceStressPrimaryPipeline.bindGroupLayout,
               entries: surfaceStressEntries
             }))
@@ -3255,7 +3261,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
                 entries: surfaceStressEntries,
                 label: 'ulg-mls-mpm-grid-update-phase-volume-surface-stress-bind-group'
               })
-            : device.createBindGroup({
+            : createCachedExplicitBindGroup(device, {
+                label: `ulg-mls-mpm-grid-update-phase-volume-surface-stress-${pipelineInfo.pipeline?.label ?? 'stage'}`,
                 layout: pipelineInfo.bindGroupLayout,
                 entries: surfaceStressEntries
               }))
@@ -3272,7 +3279,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
                   entries: surfaceStressEntries,
                   label: 'ulg-mls-mpm-grid-update-phase-volume-surface-stress-bind-group'
                 })
-              : device.createBindGroup({
+              : createCachedExplicitBindGroup(device, {
+                  label: `ulg-mls-mpm-grid-update-phase-volume-surface-stress-stage-${stageIndex}`,
                   layout: pipelineInfo.bindGroupLayout,
                   entries: surfaceStressEntries
                 }))
@@ -3298,7 +3306,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
                   entries: transportEntries,
                   label: 'ulg-mls-mpm-grid-update-phase-volume-transport-commit-bind-group'
                 })
-              : device.createBindGroup({
+              : createCachedExplicitBindGroup(device, {
+                  label: 'ulg-mls-mpm-grid-update-phase-volume-transport-commit',
                   layout: transportCommit.bindGroupLayout,
                   entries: transportEntries
                 })))
@@ -4414,7 +4423,8 @@ export async function runMlsMpmGridUpdateWebGpu({
         computeBufferBinding(3, 'read-only-storage')
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-mls-mpm-grid-update-direct',
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceGridBuffer } },

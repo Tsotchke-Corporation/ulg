@@ -684,10 +684,16 @@ export function createResidentModuleBufferSession({
     stepIndex = resolvedStep;
     ledger.step = stepIndex;
 
-    // Retire any previous unleased generation for the same baseKey and prune it from the ledger.
+    // Retire any previous generation for the same baseKey; destroy its GPU buffer if unleased and replaced.
     const previous = resolveLiveEntry(baseKey);
     if (previous) {
       liveBuffers.delete(previous.resourceKey);
+      if (previous.destroyFn && previous.buffer !== buffer) {
+        destroyResidentBufferWithLease(ledger, previous.resourceKey, previous.destroyFn, {
+          reason: 'superseded-by-publish',
+          step: resolvedStep
+        });
+      }
       pruneRetiredLedgerEntries(previous.resourceKey);
     }
 

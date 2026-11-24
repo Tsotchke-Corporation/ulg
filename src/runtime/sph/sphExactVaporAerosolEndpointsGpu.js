@@ -1,4 +1,4 @@
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { createSphExactResidentProductHistoryValidationWgsl } from './sphExactResidentProductHistoryWgsl.js';
 
 // Materialize the original candidate's complete numerical endpoint arrays.
@@ -85,7 +85,7 @@ fn materialize_exact_vapor_endpoints(@builtin(global_invocation_id) id: vec3<u32
       'storage', 'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type)) });
   if (!pipeline.pipeline) throw pipeline.error ?? new Error('Exact endpoint materialization pipeline unavailable');
   validate();
-  const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+  const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
     entries: [edges, pairs, projection, candidateArena, particleBuffer, aerosolBuffer, historyBuffer, control]
       .map((buffer, binding) => ({ binding, resource: { buffer } })) });
   return Object.freeze({ particleBuffer, aerosolBuffer, historyBuffer: l ? historyBuffer : null,

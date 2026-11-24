@@ -1,5 +1,15 @@
 # G2 proposal — exact integer ledgers instead of exact rationals
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 0D / Gate 3):**
+> **OPEN** (`0` PASS / `18` FAIL historical receipts). P2 added first-principles
+> Chapman–Enskog gas `k, μ`, generalized `sphExactVaporParcelLedgerGpu.js`
+> beyond H2O/air, and verified GPU two-way Stokes drag momentum conservation on
+> Vulkan. **Remaining:** migrate `sphPhaseCarrierTransferGpu.js` off 63-limb
+> `sphExactRational*` onto 9-limb `2^-149` & delete dead 63-limb modules
+> (**Gate 0D**), then enable `exactEnergyLedger` + multi-level first-class air
+> by default on presets once Section 3 budget headroom is restored (**Gate 3**).
+> See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Status: **section 5 answered, 2026-10-27; new real-time requirement.** The
 user paused G2 code changes for this review ("Stop and review first"),
 approved Phase 0 and the pass budget in 2.5 ("yes add it, then start phase

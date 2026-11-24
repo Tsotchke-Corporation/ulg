@@ -4,18 +4,22 @@ These are checked-in ULG campaign and acceptance definitions. Durable tasks,
 leases, attempts, source indexes and runtime evidence live outside the repo.
 
 ICC executes completion-oracle and production-audit policies today. The active
-routing document is [`plan/CURRENT-PLAN.md`](../plan/CURRENT-PLAN.md) (with full
-historical campaign definitions in
+routing document is [`plan/CURRENT-PLAN.md`](../plan/CURRENT-PLAN.md) (Unified
+40-OOM Foundation-First Scale-Ladder Roadmap, `10^-15 m` Nuclear to `10^+25 m`
+Supergalactic; historical granular definitions preserved in
 [seven-goal-campaign.md](../plan/todo/seven-goal-campaign.md)). **G5** and
-**G7** were accepted on 2026-11-18; on 2026-11-19 the owner re-sequenced the
-remaining eleven targets **architecture-first** (Phase 1: A1/A2/G6/A3/A4
-substrate, fast N-level SS chain, and live closure loop; Phase 2: G2/G3/A5/G4/A6
-on that single canonical lane; Phase 3: decoupled G1 reassessment at `>=54 Hz`
-latest committed state), authorized local slice commits and retiring superseded
-legacy routes, and added a hard per-step submit/indirect-dispatch/ms budget
-gate. Historical 2026-09-13 G1 failure evidence remains preserved; do not confuse
-configuration validation, static test references, or a matching event label with
-application acceptance.
+**G7** were accepted on 2026-11-18; on 2026-11-22 **big dog** restructured the
+active campaign into **6 clean Scale-Ladder Gates (`Gate 0`–`Gate 5`, 8 total
+with `G5` & `G7`)** so ULG gets the architectural spine (`peercompute-core`,
+`gpuMath`, canonical ABIs, Zero-Churn Step Loop), complete `Z=1..118`
+first-principles Periodic Table Engine + live GPU visualizations, chemical
+reactions → recursive compound feedback loop → convex Polytope Atlas right
+first before scaling back up through Continuum/Studio (`Gates 3–4`) and
+Planetary → Stellar → Galactic → Supergalactic FLRW TreePM (`Gate 5`).
+Historical 2026-09-13 G1 failure evidence and all 13 legacy target names remain
+preserved in `completion-oracles.yaml`; deleted `bulk-water` has been removed
+from `ulg-g1-presentation`. Do not confuse configuration validation, static test
+references, or a matching event label with application acceptance.
 
 ## Files
 

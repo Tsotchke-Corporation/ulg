@@ -51,6 +51,12 @@ import { ISOSURFACE_MOTION_WGSL } from '../visualization/isosurfaceMotionWgsl.js
 import { encodeNativeSurfaceTemperatureRowsWebGpu } from '../visualization/nativeSurfaceTemperatureWgsl.js';
 import { createIsosurfaceMotionPacing, createPresentationPauseClock, isosurfaceMotionAge, resumeIsosurfaceMotionPacing, slowIsosurfaceMotionPacing, snapshotIsosurfaceSourceTimingBootstrap } from './workerOwnedIsosurfaceMotion.js';
 import {
+  clearSphNuclearCherenkovState,
+  createSphCherenkovVolumetricRenderer,
+  latestSphNuclearCherenkovState,
+  seedSphNuclearCherenkovSources
+} from '../runtime/sph/sphNuclearCherenkovGpu.js';
+import {
   createWorkerOwnedNativeSurfaceMaterial,
   snapshotWorkerNativeSurfaceMaterial,
   workerNativeSurfaceKind,
@@ -87,7 +93,7 @@ const ULG_SPH_GPU_RENDER_FIELD_SCHEMA =
   'peercompute.ulg.sph-gpu-render-field.v1';
 // A1: physics may wait for a busy render lane (a retained submission gap) only
 // when no lane frame has completed for this long: about 30 presented frames/s.
-export const RETAINED_GAP_STARVATION_MS = 1000 / 30;
+export const RETAINED_GAP_STARVATION_MS = 1000 / 60;
 
 // Convert a Three.js column-major OpenGL-NDC (z in [-w, w]) view-projection
 // matrix into WebGPU-NDC (z in [0, w]) so opaque rigid solid meshes write
@@ -867,6 +873,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   let latestCameraPositionM = null;
   let latestNativeSurfaceAppearance = null;
   let nativeMaterial = null;
+  let cherenkovVolumetricRenderer = null;
   let mostRecentSubmittedGeneration = 0;
   let temporalLoopToken = 0;
   let temporalDelayHandle = null;
@@ -893,6 +900,106 @@ export function createWorkerOwnedIsosurfacePresenter({
   let participatingMediumRuntime = null;
   let firstDrawValidated = false;
   let presentationQueueCompletionCount = 0;
+  let submittedRenderSerial = 0;
+  let recentPresentationGpuCompleteMs = 0;
+  let recentBuildFrameMs = 0;
+  let recentScheduleHandoffMs = 0;
+  let lastScheduleStepsCompletedAtMs = null;
+  let lastScheduleStepsSourceTimeS = null;
+  let pendingScheduleSourceTimeS = null;
+  let activePresentationQueueCompletion = null;
+  const nextRenderSubmitWaiters = new Set();
+  const wakeRenderSubmitWaiters = (forceAll = false) => {
+    if (nextRenderSubmitWaiters.size === 0) return;
+    for (const waiter of [...nextRenderSubmitWaiters]) {
+      if (forceAll || submittedRenderSerial >= waiter.targetSerial) {
+        nextRenderSubmitWaiters.delete(waiter);
+        try { waiter.wake(submittedRenderSerial); } catch {}
+      }
+    }
+  };
+  const drainActivePresentationFence = async (maxWaitMs = 50) => {
+    const inflightFence = activePresentationQueueCompletion;
+    if (!inflightFence) return false;
+    await Promise.race([
+      inflightFence,
+      new Promise((resolve) => globalThis.setTimeout(resolve, maxWaitMs))
+    ]);
+    return true;
+  };
+  const waitForPresentationSubmitTurnInternal = async ({
+    afterSerial = submittedRenderSerial,
+    timeoutMs = 14,
+    force = false
+  } = {}) => {
+    const isRealGpu = Boolean(
+      typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+    );
+    const presentationCanInterleave = () => Boolean(
+      isRealGpu
+      && !disposed
+      && presentationPlaying
+      && currentFrame?.motionField?.buffer
+      && currentFrame?.motionPacing
+      && currentFrame.invalidationEpoch === invalidationEpoch
+      && (currentFrame.lastDisplayedMotionAgeS || 0)
+        < currentFrame.motionPacing.maxSimulationAgeS
+    );
+    if (!presentationCanInterleave()) {
+      return submittedRenderSerial;
+    }
+    // Zero-extra-fence GPU queue backpressure: when a presentation render
+    // frame is already awaiting its own `onSubmittedWorkDone()` behind a prior
+    // physics submit, drain that existing fence (bounded safely at 60 ms)
+    // before submitting another physics step onto the shared GPU queue so
+    // multiple heavy physics steps cannot pile up in front of one render.
+    const drainedInflightFence = await drainActivePresentationFence(60);
+    if (drainedInflightFence && !presentationCanInterleave()) {
+      return submittedRenderSerial;
+    }
+    const congestedQueue = !force && (
+      recentPresentationGpuCompleteMs >= 5.5
+      || (drainedInflightFence && recentPresentationGpuCompleteMs >= 3.5)
+    );
+    const targetTurns = force
+      ? (recentPresentationGpuCompleteMs >= 22.0
+          ? 3
+          : (recentPresentationGpuCompleteMs >= 14.0 ? 2 : 1))
+      : (recentPresentationGpuCompleteMs < 3.5
+          ? 0
+          : (congestedQueue
+              ? Math.min(3, Math.max(1, Math.ceil((recentPresentationGpuCompleteMs - 3.5) / 8.0)))
+              : Math.min(3, Math.max(1, Math.ceil(recentPresentationGpuCompleteMs / 5.0)))));
+    const baseSerial = (congestedQueue || force)
+      ? Math.max(afterSerial, submittedRenderSerial)
+      : afterSerial;
+    const targetSerial = baseSerial + targetTurns;
+    if (targetTurns <= 0 || submittedRenderSerial >= targetSerial) {
+      return submittedRenderSerial;
+    }
+    const adaptiveTimeoutMs = Math.max(
+      Number(timeoutMs) || 14,
+      Math.min(52, 16 + targetTurns * 12)
+    );
+    const boundedTimeoutMs = Math.max(4, Math.min(54, adaptiveTimeoutMs));
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+      const waiter = {
+        targetSerial,
+        wake: () => {
+          if (settled) return;
+          settled = true;
+          nextRenderSubmitWaiters.delete(waiter);
+          if (timer != null) globalThis.clearTimeout(timer);
+          resolve(submittedRenderSerial);
+        }
+      };
+      nextRenderSubmitWaiters.add(waiter);
+      timer = globalThis.setTimeout(waiter.wake, boundedTimeoutMs);
+    });
+  };
   const adapterCache = new Map();
 
   const terminal = (job, status, extra = {}) => {
@@ -1373,6 +1480,19 @@ export function createWorkerOwnedIsosurfacePresenter({
       device.pushErrorScope('validation');
       validationScopeOpen = true;
     }
+    const bypassPhysicsBurst = !submissionBoundary
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice;
+    const runWithDecoupledBypass = (fn) => {
+      if (!bypassPhysicsBurst) return fn();
+      const previous = globalThis.__ulgDecoupledPresentationBypassBurst;
+      globalThis.__ulgDecoupledPresentationBypassBurst = true;
+      try {
+        return fn();
+      } finally {
+        globalThis.__ulgDecoupledPresentationBypassBurst = previous;
+      }
+    };
     try {
       const encoder = device.createCommandEncoder({
         label: 'ulg-worker-owned-isosurface-presentation'
@@ -1387,80 +1507,118 @@ export function createWorkerOwnedIsosurfacePresenter({
           inverse: inverseViewProjectionMatrix, ...options
         }) !== true) throw new Error('native isosurface draw is missing mandatory GPU buffers');
       };
-      const opaquePass = encoder.beginRenderPass({
-        label: 'ulg-worker-owned-isosurface-opaque-pass',
-        colorAttachments: [{
-          view: colorView, clearValue: material.clearValue(frame),
-          loadOp: 'clear', storeOp: 'store'
-        }],
-        depthStencilAttachment: {
-          view: depthView, depthClearValue: 1,
-          depthLoadOp: 'clear', depthStoreOp: 'store'
-        }
-      });
-      try {
-        material.drawBackground(opaquePass, frame);
-        const activeDeformableFamily = frame?.deformableSolidFamily
-          ?? latestSchroederDeformableSolidSurfaceFamily(device);
-        const deformableSolidDomainIds = (
-          activeDeformableFamily
-          && !activeDeformableFamily.destroyed
-          && activeDeformableFamily.device === device
-          && Array.isArray(frame.viewProjectionMatrix)
-        )
-          ? new Set(
-              activeDeformableFamily.entries
-                .map((entry) => Number(entry.domainId))
-                .filter((id) => Number.isFinite(id) && id > 0)
-            )
-          : null;
-        for (const surface of orderedSurfaces) {
-          if (workerNativeSurfaceKind(surface) !== 'opaque') continue;
-          // Explicit SOL-4 deformable solid carriers render their watertight
-          // material-space surface mesh directly; skip duplicate solid metaballs
-          // for the same renderDomainId while keeping any melted liquid surfaces.
-          if (
-            deformableSolidDomainIds
-            && Number(surface?.metadata?.phaseId) === 1
-            && deformableSolidDomainIds.has(Number(surface?.metadata?.renderDomainId))
-          ) {
-            continue;
-          }
-          drawNative(opaquePass, surface);
-        }
-        // Rigid & deformable solid shape carriers draw inside the opaque pass (no separate pass).
-        drawSolidRigidShapes(opaquePass, frame);
-        drawDeformableSolidSurfaces(opaquePass, frame);
-      } finally { opaquePass.end(); }
-
-      // Each condensed surface gets its own rear-depth map and scene-color
-      // snapshot. Front and rear passes use the same camera and motion age.
-      // The native fragment writes alpha one with depth, not an alpha shell.
-      const refractiveSurfaces = orderedSurfaces.filter(surface =>
-        workerNativeSurfaceKind(surface) === 'refractive');
-      if (refractiveSurfaces.length) passOrder.push('refractive-isosurface');
-      for (const surface of refractiveSurfaces) {
-        material.copySceneColor(encoder, colorTexture);
-        const backPass = encoder.beginRenderPass({
-          label: 'ulg-worker-owned-isosurface-refractive-backface-pass',
-          colorAttachments: [],
+      runWithDecoupledBypass(() => {
+        const opaquePass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-opaque-pass',
+          colorAttachments: [{
+            view: colorView, clearValue: material.clearValue(frame),
+            loadOp: 'clear', storeOp: 'store'
+          }],
           depthStencilAttachment: {
-            view: material.backDepthView(), depthClearValue: 1,
+            view: depthView, depthClearValue: 1,
             depthLoadOp: 'clear', depthStoreOp: 'store'
           }
         });
-        try { drawNative(backPass, surface, { backface: true }); }
-        finally { backPass.end(); }
-        const frontPass = encoder.beginRenderPass({
-          label: 'ulg-worker-owned-isosurface-refractive-pass',
-          colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
-          depthStencilAttachment: {
-            view: depthView, depthLoadOp: 'load', depthStoreOp: 'store'
+        try {
+          material.drawBackground(opaquePass, frame);
+          const activeDeformableFamily = frame?.deformableSolidFamily
+            ?? latestSchroederDeformableSolidSurfaceFamily(device);
+          const deformableSolidDomainIds = (
+            activeDeformableFamily
+            && !activeDeformableFamily.destroyed
+            && activeDeformableFamily.device === device
+            && Array.isArray(frame.viewProjectionMatrix)
+          )
+            ? new Set(
+                activeDeformableFamily.entries
+                  .map((entry) => Number(entry.domainId))
+                  .filter((id) => Number.isFinite(id) && id > 0)
+              )
+            : null;
+          for (const surface of orderedSurfaces) {
+            if (workerNativeSurfaceKind(surface) !== 'opaque') continue;
+            // Explicit SOL-4 deformable solid carriers render their watertight
+            // material-space surface mesh directly; skip duplicate solid metaballs
+            // for the same renderDomainId while keeping any melted liquid surfaces.
+            if (
+              deformableSolidDomainIds
+              && Number(surface?.metadata?.phaseId) === 1
+              && deformableSolidDomainIds.has(Number(surface?.metadata?.renderDomainId))
+            ) {
+              continue;
+            }
+            drawNative(opaquePass, surface);
           }
-        });
-        try { drawNative(frontPass, surface, { refractive: true }); }
-        finally { frontPass.end(); }
-      }
+          // Rigid & deformable solid shape carriers draw inside the opaque pass (no separate pass).
+          drawSolidRigidShapes(opaquePass, frame);
+          drawDeformableSolidSurfaces(opaquePass, frame);
+        } finally { opaquePass.end(); }
+
+        // Each condensed surface gets its own rear-depth map and scene-color
+        // snapshot. Front and rear passes use the same camera and motion age.
+        // The native fragment writes alpha one with depth, not an alpha shell.
+        const refractiveSurfaces = orderedSurfaces.filter(surface =>
+          workerNativeSurfaceKind(surface) === 'refractive');
+        if (refractiveSurfaces.length) passOrder.push('refractive-isosurface');
+        for (const surface of refractiveSurfaces) {
+          material.copySceneColor(encoder, colorTexture);
+          const backPass = encoder.beginRenderPass({
+            label: 'ulg-worker-owned-isosurface-refractive-backface-pass',
+            colorAttachments: [],
+            depthStencilAttachment: {
+              view: material.backDepthView(), depthClearValue: 1,
+              depthLoadOp: 'clear', depthStoreOp: 'store'
+            }
+          });
+          try { drawNative(backPass, surface, { backface: true }); }
+          finally { backPass.end(); }
+          const frontPass = encoder.beginRenderPass({
+            label: 'ulg-worker-owned-isosurface-refractive-pass',
+            colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
+            depthStencilAttachment: {
+              view: depthView, depthLoadOp: 'load', depthStoreOp: 'store'
+            }
+          });
+          try {
+            drawNative(frontPass, surface, { refractive: true });
+            const reqNuclear = frame?.request?.nuclearCherenkovSources;
+            if (frame?.request && 'nuclearCherenkovSources' in frame.request && !(reqNuclear?.sources?.length > 0)) {
+              if (latestSphNuclearCherenkovState(device)?.activeSourceCount > 0) {
+                clearSphNuclearCherenkovState(device);
+              }
+            } else {
+              let nuclearState = latestSphNuclearCherenkovState(device);
+              if (reqNuclear?.sources?.length > 0 && !(nuclearState?.activeSourceCount > 0)) {
+                seedSphNuclearCherenkovSources(device, { nuclearDescriptor: reqNuclear });
+                nuclearState = latestSphNuclearCherenkovState(device);
+              }
+              if (nuclearState?.activeSourceCount > 0 && nuclearState.cherenkovSourcesBuffer) {
+                cherenkovVolumetricRenderer ??= createSphCherenkovVolumetricRenderer(device, {
+                  colorFormat: format,
+                  depthFormat
+                });
+                const res = material.getSurfaceDrawResources?.(frame, surface);
+                const vertices = surface.translation?.surfaceVertices;
+                const indirect = surface.translation?.surfaceDraw?.drawIndirectRowsBuffer;
+                if (res?.opticalRecordsBuffer && vertices && indirect && surface.uniformBuffer) {
+                  cherenkovVolumetricRenderer.draw(frontPass, {
+                    compactPositionRowsBuffer: vertices.compactPositionRowsBuffer,
+                    compactNormalRowsBuffer: vertices.compactNormalRowsBuffer,
+                    drawIndirectRowsBuffer: indirect,
+                    cameraUniformBuffer: surface.uniformBuffer,
+                    opticalRecordsBuffer: res.opticalRecordsBuffer,
+                    motionFieldBuffer: frame.motionField?.buffer ?? null,
+                    motionUniformBuffer: res.motionUniformBuffer ?? null,
+                    backDepthView: material.backDepthView(),
+                    cherenkovSourcesBuffer: nuclearState.cherenkovSourcesBuffer
+                  });
+                }
+              }
+            }
+          }
+          finally { frontPass.end(); }
+        }
+      });
       if (packedMedium) {
         passOrder.push('depth-clipped-participating-medium');
         const volumePass = encoder.beginRenderPass({
@@ -1474,25 +1632,28 @@ export function createWorkerOwnedIsosurfacePresenter({
               cameraPositionM: frame.cameraPositionM, viewportSize,
               depthTextureView: depthView, lightDirection: [0.38, 0.82, 0.42],
               motionField: frame.motionField,
-              motionAgeS: dampedIsosurfaceShaderMotionAgeS(frame)
+              motionAgeS: dampedIsosurfaceShaderMotionAgeS(frame),
+              decoupledBurstBypass: bypassPhysicsBurst
             }
           );
         } finally { volumePass.end(); }
       }
       passOrder.push('transparent-isosurface-and-overlay');
-      const vaporPass = encoder.beginRenderPass({
-        label: 'ulg-worker-owned-isosurface-transparent-overlay-pass',
-        colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
-        depthStencilAttachment: {
-          view: depthView, depthLoadOp: 'load', depthStoreOp: 'discard'
-        }
+      runWithDecoupledBypass(() => {
+        const vaporPass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-transparent-overlay-pass',
+          colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
+          depthStencilAttachment: {
+            view: depthView, depthLoadOp: 'load', depthStoreOp: 'discard'
+          }
+        });
+        try {
+          for (const surface of orderedSurfaces) {
+            if (workerNativeSurfaceKind(surface) === 'vapor') drawNative(vaporPass, surface);
+          }
+          drawOverlay?.(vaporPass, frame.viewProjectionMatrix, frame.boxDimsM);
+        } finally { vaporPass.end(); }
       });
-      try {
-        for (const surface of orderedSurfaces) {
-          if (workerNativeSurfaceKind(surface) === 'vapor') drawNative(vaporPass, surface);
-        }
-        drawOverlay?.(vaporPass, frame.viewProjectionMatrix, frame.boxDimsM);
-      } finally { vaporPass.end(); }
       submittedPassOrder = Object.freeze(passOrder);
       if (!frameIsCurrent()) {
         await closeValidationScope();
@@ -1515,8 +1676,12 @@ export function createWorkerOwnedIsosurfacePresenter({
         await closeValidationScope();
         return false;
       }
-      device.queue.submit([commandBuffer]);
+      runWithDecoupledBypass(() => {
+        device.queue.submit([commandBuffer]);
+      });
       submissionQueued = true;
+      submittedRenderSerial += 1;
+      wakeRenderSubmitWaiters();
       frame.lastSubmittedMotionAgeS = motionAgeS;
       mostRecentSubmittedGeneration = Math.max(mostRecentSubmittedGeneration, frame.generation);
       // Once validated, install the queue fence without yielding: a later
@@ -1559,12 +1724,22 @@ export function createWorkerOwnedIsosurfacePresenter({
       );
     }
     presentationQueueCompletionCount = presentationQueueCompletionSerial;
-    const queueCompletion = device.queue.onSubmittedWorkDone();
+    const queueCompletion = runWithDecoupledBypass(() => device.queue.onSubmittedWorkDone());
     let gpuCompletionObserved = false;
-    void Promise.resolve(queueCompletion).then(
-      () => { gpuCompletionObserved = true; },
-      () => {} // The original fence is still awaited below for its exact error.
+    const settledQueueCompletion = Promise.resolve(queueCompletion).then(
+      () => {
+        gpuCompletionObserved = true;
+        if (activePresentationQueueCompletion === settledQueueCompletion) {
+          activePresentationQueueCompletion = null;
+        }
+      },
+      () => {
+        if (activePresentationQueueCompletion === settledQueueCompletion) {
+          activePresentationQueueCompletion = null;
+        }
+      } // The original fence is still awaited below for its exact error.
     );
+    activePresentationQueueCompletion = settledQueueCompletion;
     const opportunityCompletion = (() => {
       try {
         if (typeof waitForPresentationOpportunity !== 'function') {
@@ -1602,6 +1777,11 @@ export function createWorkerOwnedIsosurfacePresenter({
       || Number(getFramebufferEpoch()) !== submittedFramebufferEpoch
     ) return false;
     const gpuCompletedAtMs = nowMs();
+    const observedGpuWaitMs = Math.min(40, Math.max(0, gpuCompletedAtMs - submittedAtMs));
+    recentPresentationGpuCompleteMs = Math.max(
+      observedGpuWaitMs,
+      recentPresentationGpuCompleteMs * 0.85 + observedGpuWaitMs * 0.15
+    );
     const opportunity = await opportunityCompletion;
     const opportunityTimedOut = opportunity?.available === false
       && opportunity.method === 'worker-request-animation-frame-timeout';
@@ -1778,6 +1958,7 @@ export function createWorkerOwnedIsosurfacePresenter({
       && frame.invalidationEpoch === invalidationEpoch && temporalLoopToken === token;
     const coalesced = Symbol('coalesced-isosurface-temporal-frame');
     let retryingOpportunity = false;
+    let initialKickUsed = false;
     // One outstanding draw on the same render lane. Queue completion and its
     // post-GPU presentation opportunity already pace the loop; do not add a
     // second rAF wait, which would halve cadence on a 60 Hz display.
@@ -1787,8 +1968,8 @@ export function createWorkerOwnedIsosurfacePresenter({
         const ageS = isosurfaceMotionAge(frame.motionPacing, startedAtMs);
         if (ageS == null || (retryingOpportunity
           && ageS >= frame.motionPacing.maxSimulationAgeS)) return;
+        let proof = null;
         if (ageS > (frame.lastDisplayedMotionAgeS || 0)) {
-          let proof;
           try {
             proof = await onRenderLane(() => {
               if (!current()) return false;
@@ -1798,7 +1979,23 @@ export function createWorkerOwnedIsosurfacePresenter({
               const freshAgeS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
               if (freshAgeS == null || (retryingOpportunity
                 && freshAgeS >= frame.motionPacing.maxSimulationAgeS)) return false;
-              if (!(freshAgeS > (frame.lastDisplayedMotionAgeS || 0))) return coalesced;
+              const prevAgeS = frame.lastDisplayedMotionAgeS || 0;
+              if (!(freshAgeS > prevAgeS)) return coalesced;
+              const prevShaderF32 = Math.fround(
+                dampedIsosurfaceShaderMotionAgeS({
+                  motionPacing: frame.motionPacing,
+                  drawMotionAgeS: prevAgeS
+                })
+              );
+              const nextShaderF32 = Math.fround(
+                dampedIsosurfaceShaderMotionAgeS({
+                  motionPacing: frame.motionPacing,
+                  drawMotionAgeS: freshAgeS
+                })
+              );
+              if (!(nextShaderF32 > prevShaderF32)) {
+                return freshAgeS >= frame.motionPacing.maxSimulationAgeS ? false : coalesced;
+              }
               return renderFrame(frame, {
                 reason: 'worker-owned-isosurface-temporal-presentation',
                 allowLaggedGeneration: true,
@@ -1829,15 +2026,92 @@ export function createWorkerOwnedIsosurfacePresenter({
           }
         }
         if ((frame.lastDisplayedMotionAgeS || 0) >= frame.motionPacing.maxSimulationAgeS) return;
-        const remainingMs = 1000 / frame.motionPacing.targetHz - (temporalNowMs() - startedAtMs);
-        if (remainingMs > 0 && current()) {
+        // A real post-GPU rAF opportunity already paced this iteration to the
+        // display vsync. Adding a setTimeout afterwards slips past the start of
+        // the next 16.67 ms vsync window and halves 60 Hz cadence to ~30 Hz.
+        // Immediately after committed source admission (ageS === 0), wake after
+        // 2 ms instead of a full 16.67 ms frame so Temporal Frame #1 lands on
+        // the very next vsync without dropping a frame.
+        const isRealGpuDevice = Boolean(
+          typeof globalThis.GPUDevice === 'function'
+          && device instanceof globalThis.GPUDevice
+        );
+        const pacedByRealOpportunity = Boolean(
+          proof && proof !== coalesced
+          && (
+            Number(proof.presentationFrameSubmitToPresentationOpportunityMs) >= 4
+            || (
+              isRealGpuDevice
+              && proof.presentationFramePresentationOpportunityMethod
+                === 'worker-request-animation-frame-after-gpu-completion'
+            )
+          )
+        );
+        // Strictly one-shot, liveness-gated build-handoff slowdown: ONLY if a
+        // real successor schedule or mesh extraction is actively in flight for
+        // this frame (`latestJob || activeJob || captureInFlightCount > 0 ||
+        // pendingScheduleSourceTimeS === frame.sourceTimeS`) AND measured GPU
+        // pipeline latency is >= 1 ms, allow at most ONE finite 0.12–0.20 s
+        // build-handoff extension per frame. When physics halts or pauses, zero
+        // extension runs; even if a schedule hangs forever, motion still
+        // terminates strictly at its one-shot finite horizon (zero Zeno decay,
+        // zero mock/GPU divergence).
+        const measuredHandoffLatencyMs = Math.max(
+          recentScheduleHandoffMs,
+          recentBuildFrameMs + recentPresentationGpuCompleteMs
+        );
+        const successorActiveForFrame = Boolean(
+          latestJob
+          || activeJob
+          || captureInFlightCount > 0
+          || (
+            pendingScheduleSourceTimeS != null
+            && frame.sourceTimeS != null
+            && pendingScheduleSourceTimeS >= frame.sourceTimeS
+          )
+        );
+        if (
+          !frame.buildHandoffSlowed
+          && successorActiveForFrame
+          && measuredHandoffLatencyMs >= 1.0
+          && frame.motionPacing
+          && (frame.lastDisplayedMotionAgeS || 0) >= frame.motionPacing.maxSimulationAgeS * 0.5
+          && (frame.lastDisplayedMotionAgeS || 0) < frame.motionPacing.maxSimulationAgeS
+        ) {
+          frame.buildHandoffSlowed = true;
+          const handoffExtendS = Math.min(
+            0.20,
+            Math.max(
+              0.12,
+              (recentScheduleHandoffMs * 1.25) / 1000,
+              (recentBuildFrameMs * 2.0 + recentPresentationGpuCompleteMs * 1.5) / 1000
+            )
+          );
+          const slowed = slowIsosurfaceMotionPacing(
+            frame.motionPacing,
+            temporalNowMs(),
+            handoffExtendS,
+            frame.lastDisplayedMotionAgeS || 0
+          );
+          if (slowed !== frame.motionPacing) frame.motionPacing = slowed;
+        }
+        const framePeriodMs = 1000 / frame.motionPacing.targetHz;
+        let remainingMs = framePeriodMs - (temporalNowMs() - startedAtMs);
+        const kickDelayMs = isRealGpuDevice ? 0 : 2;
+        if (!proof && !initialKickUsed && (frame.lastDisplayedMotionAgeS || 0) === 0 && remainingMs > kickDelayMs) {
+          initialKickUsed = true;
+          remainingMs = kickDelayMs;
+        } else if (isRealGpuDevice && proof === coalesced && remainingMs > 1) {
+          remainingMs = 1;
+        }
+        if ((remainingMs > 0 || (isRealGpuDevice && !proof && initialKickUsed && (frame.lastDisplayedMotionAgeS || 0) === 0)) && !pacedByRealOpportunity && current()) {
           await new Promise(resolve => {
             releaseTemporalDelay = resolve;
             temporalDelayHandle = globalThis.setTimeout(() => {
               temporalDelayHandle = null;
               releaseTemporalDelay = null;
               resolve();
-            }, remainingMs);
+            }, Math.max(0, remainingMs));
           });
         }
       }
@@ -1897,6 +2171,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   };
 
   const buildFrame = async (job, captured) => {
+    const buildStartedAtMs = nowMs();
     if (
       (captured?.dispersedMediumOptics ?? null)
       !== job.dispersedMediumOptics
@@ -1944,6 +2219,19 @@ export function createWorkerOwnedIsosurfacePresenter({
     releaseDispersedMediumSourceBorrow(job);
     releaseCapturedRows(captured, 'worker-isosurface-render-field-submitted');
     job.capturedReleased = true;
+    if (
+      typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+      && presentationPlaying
+      && currentFrame?.motionField?.buffer
+    ) {
+      // Reuse any already-in-flight presentation fence (0 extra GPU fences)
+      // and yield one macrotask between render-field build and marching-cubes
+      // extraction so an armed temporal rAF draw can submit before the
+      // multi-surface marching-cubes command buffer.
+      await drainActivePresentationFence(50);
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+    }
 
     // Extension extraction yields repeatedly. Capture presentation values at
     // the render-field publication boundary so a later caller mutation cannot
@@ -2140,6 +2428,17 @@ export function createWorkerOwnedIsosurfacePresenter({
           );
         }
       }
+      if (
+        typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice
+        && presentationPlaying
+        && currentFrame?.motionField?.buffer
+      ) {
+        const drainedMcFence = await drainActivePresentationFence(50);
+        if (drainedMcFence || marchingCubesDescriptors.length >= 6 || recentPresentationGpuCompleteMs >= 5.5) {
+          await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+        }
+      }
       device.queue.submit([encoder.finish()]);
       if (solidIsosurfaceParams || ledgerParcelOpticsParams) {
         const solidParams = solidIsosurfaceParams;
@@ -2259,6 +2558,10 @@ export function createWorkerOwnedIsosurfacePresenter({
         releaseLeases: true,
         reason: 'worker-isosurface-extraction-submitted'
       });
+      const buildElapsedMs = Math.min(200, Math.max(0, nowMs() - buildStartedAtMs));
+      recentBuildFrameMs = recentBuildFrameMs > 0
+        ? Math.max(buildElapsedMs, recentBuildFrameMs * 0.7 + buildElapsedMs * 0.3)
+        : buildElapsedMs;
       return {
         generation: job.generation,
         invalidationEpoch: job.invalidationEpoch,
@@ -2332,7 +2635,29 @@ export function createWorkerOwnedIsosurfacePresenter({
   const admitCommittedFrame = (frame, sourceTimingBootstrap, reason, proof) => {
     const previousFrame = currentFrame;
     currentFrame = frame;
+    if (
+      pendingScheduleSourceTimeS != null
+      && frame.sourceTimeS != null
+      && frame.sourceTimeS > pendingScheduleSourceTimeS
+    ) {
+      pendingScheduleSourceTimeS = null;
+    }
     currentFrame.sourcePresentedAtMs = temporalNowMs();
+    if (
+      lastScheduleStepsCompletedAtMs != null
+      && previousFrame
+      && previousFrame.sourceTimeS === lastScheduleStepsSourceTimeS
+    ) {
+      const observedHandoffMs = Math.min(
+        260,
+        Math.max(0, currentFrame.sourcePresentedAtMs - lastScheduleStepsCompletedAtMs)
+      );
+      recentScheduleHandoffMs = recentScheduleHandoffMs > 0
+        ? Math.max(observedHandoffMs, recentScheduleHandoffMs * 0.7 + observedHandoffMs * 0.3)
+        : observedHandoffMs;
+      lastScheduleStepsCompletedAtMs = null;
+      lastScheduleStepsSourceTimeS = null;
+    }
     currentFrame.sourcePresentationPausedWallMs = presentationPauseClock.pausedAt(currentFrame.sourcePresentedAtMs);
     const previousPausedWallMs = previousFrame
       ? previousFrame.sourcePresentationPausedWallMs : frame.sourceTimingPausedWallMs;
@@ -2936,6 +3261,12 @@ export function createWorkerOwnedIsosurfacePresenter({
       presentationMotionController.abort();
       presentationMotionController = new AbortController();
       stopTemporalPresentation();
+      if (!value) {
+        pendingScheduleSourceTimeS = null;
+        lastScheduleStepsCompletedAtMs = null;
+        lastScheduleStepsSourceTimeS = null;
+        wakeRenderSubmitWaiters(true);
+      }
       if (value) {
         if (currentFrame?.motionPacing) {
           currentFrame.motionPacing = resumeIsosurfaceMotionPacing(
@@ -2979,6 +3310,7 @@ export function createWorkerOwnedIsosurfacePresenter({
         || typeof sourceTimeS !== 'number' || !Number.isFinite(sourceTimeS) || sourceTimeS < 0
         || !Number.isSafeInteger(totalStepCount) || totalStepCount <= 1
         || !Number.isFinite(startedAtMs) || startedAtMs < 0) return null;
+      pendingScheduleSourceTimeS = sourceTimeS;
       let frame = null;
       let lastStep = 0;
       let lastObservedAtMs = startedAtMs;
@@ -2995,7 +3327,46 @@ export function createWorkerOwnedIsosurfacePresenter({
           || !Number.isFinite(atMs) || atMs < lastObservedAtMs) return false;
         lastStep = step;
         lastObservedAtMs = atMs;
-        if (step === totalStepCount) { closed = true; return false; }
+        if (step === totalStepCount) {
+          closed = true;
+          lastScheduleStepsCompletedAtMs = atMs;
+          lastScheduleStepsSourceTimeS = sourceTimeS;
+          if (!frame) {
+            const candidate = currentFrame;
+            if (candidate?.motionField?.buffer && candidate.motionPacing
+              && candidate.invalidationEpoch === epoch
+              && candidate.sourceTimeS === sourceTimeS
+              && candidate.receiptFields?.laneId === laneId
+              && candidate.receiptFields?.stateKey === stateKey
+              && candidate.receiptFields?.presentationLaneEpoch === presentationLaneEpoch) {
+              frame = candidate;
+            }
+          }
+          if (frame) {
+            const measuredLatencyMs = Math.max(
+              recentScheduleHandoffMs,
+              recentBuildFrameMs + recentPresentationGpuCompleteMs
+            );
+            if (measuredLatencyMs >= 1.0) {
+              const measuredHandoffS = Math.min(
+                0.26,
+                Math.max(
+                  0.06,
+                  (recentScheduleHandoffMs * 1.15) / 1000,
+                  (recentBuildFrameMs * 2.5 + recentPresentationGpuCompleteMs * 1.5) / 1000
+                )
+              );
+              const pacing = slowIsosurfaceMotionPacing(
+                frame.motionPacing,
+                atMs,
+                measuredHandoffS,
+                frame.lastDisplayedMotionAgeS || 0
+              );
+              if (pacing !== frame.motionPacing) frame.motionPacing = pacing;
+            }
+          }
+          return false;
+        }
         // Physics may resume once source capture is safe, before the new mesh
         // reaches the screen. Bind lazily to that exact source, never to the
         // predecessor still visible when the schedule began.
@@ -3011,7 +3382,21 @@ export function createWorkerOwnedIsosurfacePresenter({
         }
         const activeWallMs = atMs - startedAtMs
           - (presentationPauseClock.pausedAt(atMs) - startedPausedWallMs);
-        const remainingWallS = activeWallMs / 1000 * (totalStepCount - step) / step;
+        const measuredLatencyMs = Math.max(
+          recentScheduleHandoffMs,
+          recentBuildFrameMs + recentPresentationGpuCompleteMs
+        );
+        const buildHandoffMarginS = measuredLatencyMs >= 1.0
+          ? Math.min(
+              0.26,
+              Math.max(
+                0.06,
+                (recentScheduleHandoffMs * 1.15) / 1000,
+                (recentBuildFrameMs * 2.5 + recentPresentationGpuCompleteMs * 1.5) / 1000
+              )
+            )
+          : 0;
+        const remainingWallS = activeWallMs / 1000 * (totalStepCount - step) / step + buildHandoffMarginS;
         const pacing = slowIsosurfaceMotionPacing(frame.motionPacing, atMs,
           remainingWallS, frame.lastDisplayedMotionAgeS || 0);
         if (pacing === frame.motionPacing) return false;
@@ -3023,10 +3408,32 @@ export function createWorkerOwnedIsosurfacePresenter({
     },
     hasSubmissionBoundaryOpportunity() {
       const frame = currentFrame;
-      if (disposed || !presentationPlaying || !frame?.motionField?.buffer || !frame.motionPacing
+      if (disposed || !presentationPlaying || renderLaneDepth > 0
+        || activePresentationQueueCompletion != null
+        || !frame?.motionField?.buffer || !frame.motionPacing
         || frame.invalidationEpoch !== invalidationEpoch) return false;
-      return isosurfaceMotionAge(frame.motionPacing, temporalNowMs())
-        > (frame.lastDisplayedMotionAgeS || 0);
+      const ageS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
+      const prevAgeS = frame.lastDisplayedMotionAgeS || 0;
+      if (!(ageS > prevAgeS) || !(ageS < frame.motionPacing.maxSimulationAgeS)) return false;
+      const prevShaderF32 = Math.fround(
+        dampedIsosurfaceShaderMotionAgeS({
+          motionPacing: frame.motionPacing,
+          drawMotionAgeS: prevAgeS
+        })
+      );
+      const nextShaderF32 = Math.fround(
+        dampedIsosurfaceShaderMotionAgeS({
+          motionPacing: frame.motionPacing,
+          drawMotionAgeS: ageS
+        })
+      );
+      return nextShaderF32 > prevShaderF32;
+    },
+    getPresentationSubmitSerial() {
+      return submittedRenderSerial;
+    },
+    waitForPresentationSubmitTurn({ afterSerial = submittedRenderSerial, timeoutMs = 12, force = false } = {}) {
+      return waitForPresentationSubmitTurnInternal({ afterSerial, timeoutMs, force });
     },
     hasRetainedSubmissionGapOpportunity,
     presentRetainedSubmissionGap({ signal = null, waitForPendingSlot = false } = {}) {
@@ -3227,6 +3634,10 @@ export function createWorkerOwnedIsosurfacePresenter({
       if (disposed) return false;
       retireRetainedSubmissionGap();
       stopTemporalPresentation();
+      pendingScheduleSourceTimeS = null;
+      lastScheduleStepsCompletedAtMs = null;
+      lastScheduleStepsSourceTimeS = null;
+      wakeRenderSubmitWaiters(true);
       invalidationEpoch += 1;
       resizeRetryInvalidationEpoch = null;
       generation += 1;
@@ -3292,7 +3703,11 @@ export function createWorkerOwnedIsosurfacePresenter({
       if (disposed) return;
       retireRetainedSubmissionGap();
       stopTemporalPresentation();
+      pendingScheduleSourceTimeS = null;
+      lastScheduleStepsCompletedAtMs = null;
+      lastScheduleStepsSourceTimeS = null;
       disposed = true;
+      wakeRenderSubmitWaiters(true);
       invalidationEpoch += 1;
       resizeRetryInvalidationEpoch = null;
       generation += 1;
@@ -3310,6 +3725,8 @@ export function createWorkerOwnedIsosurfacePresenter({
       releaseFrame(currentFrame, 'worker-isosurface-presenter-dispose');
       currentFrame = null;
       await releaseAdapterCache();
+      cherenkovVolumetricRenderer?.dispose?.();
+      cherenkovVolumetricRenderer = null;
       nativeMaterial?.dispose();
       nativeMaterial = null;
       fieldRowsBuffer?.destroy?.();

@@ -3147,9 +3147,13 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         reactionMotionEnvelope: null,
         captureActivationObservation: false,
         gpuTimestampRecorder,
-        // G4 reaction node scope (exact; off unless the state declares it).
+        // G4 reaction node scope (exact; carries G6 temperature uncertainty when present).
         reactionDormancy: sphParticleState?.reactionDormancy && boxDimsM
-          ? { boxM: Array.from(boxDimsM, Number) }
+          ? {
+              boxM: Array.from(boxDimsM, Number),
+              uncertaintyBuffer: thermalStep?.thermalDormancy?.uncertaintyBuffer ?? null,
+              uncertaintyWordOffset: thermalStep?.thermalDormancy?.uncertaintyWordOffset ?? 0
+            }
           : null
       })
     );
@@ -3433,11 +3437,21 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       'phaseCarrierTransfer',
       phaseCarrierTransferRunner, () => ({
         ...phaseCarrierTransferOptions,
-        phaseDormancy: phaseCarrierTransferOptions?.phaseDormancy !== undefined
-          ? phaseCarrierTransferOptions.phaseDormancy
-          : ((thermalStepOptions.thermalDormancy ?? sphParticleState?.thermalDormancy)?.epsilonK >= 0
-              ? { epsilonK: 0 }
-              : null),
+        phaseDormancy: (() => {
+          const basePhaseDormancy = phaseCarrierTransferOptions?.phaseDormancy !== undefined
+            ? phaseCarrierTransferOptions.phaseDormancy
+            : ((thermalStepOptions.thermalDormancy ?? sphParticleState?.thermalDormancy)?.epsilonK >= 0
+                ? { epsilonK: 0 }
+                : null);
+          if (!basePhaseDormancy) return null;
+          const uBuf = basePhaseDormancy.uncertaintyBuffer
+            ?? thermalStep?.thermalDormancy?.uncertaintyBuffer
+            ?? null;
+          const uOff = basePhaseDormancy.uncertaintyWordOffset
+            ?? thermalStep?.thermalDormancy?.uncertaintyWordOffset
+            ?? 0;
+          return uBuf ? { ...basePhaseDormancy, uncertaintyBuffer: uBuf, uncertaintyWordOffset: uOff } : basePhaseDormancy;
+        })(),
         // A thermal energy record (G2 ledger) continues through the f32 split
         // plus its exact reconcile; the rational stage serves the rest.
         ...(massCapture && !reactionStep && massCapture.seals[0]?.exactEnergy && !massCapture.seals[0]?.exactThermal ? {

@@ -28,6 +28,7 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import { getCachedPipelineBindGroupLayout } from '../webgpuComputeLayout.js';
 import { sphGpuIdentityValueMaxForBuffer } from './sphGpuBuffers.js';
 
 const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
@@ -539,26 +540,38 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
     bindLabel
   ) {
     const buffers = bindings.map((binding) => resources.get(binding));
-    const cached = arena.bindGroupCache.get(cacheKey);
-    if (
-      cached?.pipeline === pipelineObject
-      && cached.bindings.length === bindings.length
-      && cached.bindings.every((binding, index) => (
-        binding === bindings[index]
-        && cached.buffers[index] === buffers[index]
-      ))
-    ) {
-      return cached.bindGroup;
+    let bucket = arena.bindGroupCache.get(cacheKey);
+    if (!bucket) {
+      bucket = [];
+      arena.bindGroupCache.set(cacheKey, bucket);
+    }
+    for (let i = 0; i < bucket.length; i += 1) {
+      const cached = bucket[i];
+      if (
+        cached.pipeline === pipelineObject
+        && cached.bindings.length === bindings.length
+        && cached.bindings.every((binding, index) => (
+          binding === bindings[index]
+          && cached.buffers[index] === buffers[index]
+        ))
+      ) {
+        if (i !== bucket.length - 1) {
+          bucket.splice(i, 1);
+          bucket.push(cached);
+        }
+        return cached.bindGroup;
+      }
     }
     const bindGroup = device.createBindGroup({
       label: bindLabel,
-      layout: pipelineObject.getBindGroupLayout(0),
+      layout: getCachedPipelineBindGroupLayout(pipelineObject, 0),
       entries: bindings.map((binding, index) => ({
         binding,
         resource: { buffer: buffers[index] }
       }))
     });
-    arena.bindGroupCache.set(cacheKey, {
+    if (bucket.length >= 32) bucket.shift();
+    bucket.push({
       pipeline: pipelineObject,
       bindings: [...bindings],
       buffers,
@@ -754,20 +767,51 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         0,
         3 * UINT32_BYTES
       );
-      encodedDispatchCount += encodeIndirectPass(
-        encoder,
+      const directParentFieldAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true
+        && typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice;
+      const encodeGuardedIndirectOrDirect = (
+        pipeline,
+        bindGroup,
+        indirectBuffer,
+        indirectOffset,
+        ceilingInvocations,
+        passLabel
+      ) => {
+        const ceilingGroups = Math.ceil(
+          Math.max(1, Number(ceilingInvocations) || 0)
+            / SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_WORKGROUP_SIZE
+        );
+        if (
+          directParentFieldAllowed
+          && ceilingGroups > 0
+          && ceilingGroups <= maxComputeWorkgroupsPerDimension
+        ) {
+          return encodePass(encoder, pipeline, bindGroup, [ceilingGroups, 1, 1], passLabel);
+        }
+        return encodeIndirectPass(
+          encoder,
+          pipeline,
+          bindGroup,
+          indirectBuffer,
+          indirectOffset,
+          passLabel
+        );
+      };
+      encodedDispatchCount += encodeGuardedIndirectOrDirect(
         pipelines.emitFine,
         group(pipelines.emitFine, [0, 2, 3, 5, 7, 12], 'emit-fine'),
         fineSource.indirectDispatchBuffer,
         fineSource.indirectDispatchOffsetBytes,
+        plan.fineFieldCapacity,
         `${label}EmitFineParentCandidates`
       );
-      encodedDispatchCount += encodeIndirectPass(
-        encoder,
+      encodedDispatchCount += encodeGuardedIndirectOrDirect(
         pipelines.emitCoarse,
         group(pipelines.emitCoarse, [0, 1, 2, 3, 7, 12], 'emit-coarse'),
         coarseFieldView.indirectDispatchBuffer,
         coarseFieldView.indirectDispatchOffsetBytes,
+        plan.coarseFieldCapacity,
         `${label}EmitCoarseNativeCandidates`
       );
       radixUnique = arena.radix.encodeSortUniqueGpuCount(encoder, {
@@ -801,8 +845,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         [10, radixUnique.sortedIndicesBuffer],
         [11, radixUnique.uniqueGroupIndexBySortedPositionBuffer]
       ]);
-      encodedDispatchCount += encodeIndirectPass(
-        encoder,
+      encodedDispatchCount += encodeGuardedIndirectOrDirect(
         pipelines.materialize,
         group(
           pipelines.materialize,
@@ -812,10 +855,10 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         ),
         arena.candidateDispatchBuffer,
         0,
+        plan.candidateCapacity,
         `${label}MaterializeCandidateUnionMap`
       );
-      encodedDispatchCount += encodeIndirectPass(
-        encoder,
+      encodedDispatchCount += encodeGuardedIndirectOrDirect(
         pipelines.assemble,
         group(
           pipelines.assemble,
@@ -825,6 +868,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         ),
         radixUnique.uniqueDispatchIndirectBuffer,
         0,
+        plan.parentFieldCapacity,
         `${label}AssembleParentFieldKeys`
       );
       const edgeScan = arena.edgeScan.prepare({
@@ -836,8 +880,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         labelPrefix: `${label}FineFieldEdges`
       });
       encodedDispatchCount += edgeScan.encodedDispatchCount;
-      encodedDispatchCount += encodeIndirectPass(
-        encoder,
+      encodedDispatchCount += encodeGuardedIndirectOrDirect(
         pipelines.scatterFine,
         group(
           pipelines.scatterFine,
@@ -847,6 +890,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         ),
         fineSource.indirectDispatchBuffer,
         fineSource.indirectDispatchOffsetBytes,
+        plan.fineFieldCapacity,
         `${label}ScatterFineFieldEdges`
       );
       encodedDispatchCount += encodePass(

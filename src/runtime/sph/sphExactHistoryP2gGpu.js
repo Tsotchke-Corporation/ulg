@@ -1,4 +1,4 @@
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { createSphExactRationalQuantityWgsl } from './sphExactRationalQuantityWgsl.js';
 import { createSphExactResidentProductHistoryValidationWgsl } from './sphExactResidentProductHistoryWgsl.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
@@ -170,7 +170,7 @@ fn project_exact_history_p2g(@builtin(global_invocation_id) id:vec3<u32>){
     if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Exact history pipeline unavailable: ${entryPoint}`);
     source.validate(); pipelines.push(pipeline);
   }
-  const group = (pipeline, instruction) => device.createBindGroup({ layout: pipeline.bindGroupLayout, entries: [
+  const group = (pipeline, instruction) => createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout, entries: [
     { binding: 0, resource: { buffer: source.buffer } },
     { binding: 1, resource: { buffer: count.controlBuffer, offset: count.controlOffsetBytes, size: 64 } },
     { binding: 2, resource: { buffer: outputBuffer } }, { binding: 3, resource: { buffer: scratch } },

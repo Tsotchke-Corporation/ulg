@@ -169,11 +169,11 @@ test('A4 2-D gas response GPU evaluator + live A3 implicit pressure regional lan
       const tThermo = new Float32Array(mCount * 12);
       for (let i = 0; i < 64; i += 1) {
         tState.set([0.2, 0.2, 0.2, 1.0], i * 8);
-        tThermo.set([290 + i, 2, 11, 998], i * 12); // phase 2 (liquid), material 11
+        tThermo.set([11, 2, 290 + i, 998], i * 12); // canonical [materialId=11, phase=2 (liquid), tempK, rho0]
       }
       for (let i = 64; i < 128; i += 1) {
         tState.set([0.8, 0.8, 0.8, 1.0], i * 8);
-        tThermo.set([373 + (i - 64), i % 2 === 0 ? 2 : 3, 11, 500], i * 12); // mixed liquid/gas
+        tThermo.set([11, i % 2 === 0 ? 2 : 3, 373 + (i - 64), 500], i * 12); // mixed liquid/gas
       }
       const tStateBuf = upload(tState);
       const tThermoBuf = upload(tThermo);

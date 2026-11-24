@@ -71,11 +71,15 @@ export function createHydrogenNebulaInitialBodies({
   count = 8192,
   preset = 'solar-nebula',
   gravityG = 0.42,
-  seed = 1939
+  seed = 1939,
+  centerOffset = [0, 0, 0]
 } = {}) {
   const cfg = NEBULA_INITIAL_CONDITIONS[preset] || NEBULA_INITIAL_CONDITIONS['solar-nebula'];
   const n = Math.max(256, Math.min(32768, Math.floor(count)));
   const bodies = new Float32Array(n * HYDRO_PARTICLE_STRIDE_FLOATS);
+  const ox = Number(centerOffset?.[0]) || 0;
+  const oy = Number(centerOffset?.[1]) || 0;
+  const oz = Number(centerOffset?.[2]) || 0;
   const rand = mulberry32(seed + (preset === 'massive-supernova' ? 101 : preset === 'binary-nursery' ? 202 : 0));
   const gauss = () => {
     const u1 = Math.max(1e-7, rand());
@@ -105,16 +109,19 @@ export function createHydrogenNebulaInitialBodies({
     let x; let y; let z;
     let vx; let vy; let vz;
 
+    let localCenterX = 0;
     if (cfg.geometry === 'twin-lobe') {
       const lobe = i & 1;
       const sign = lobe === 0 ? -1 : 1;
       const sepHalf = 4.5;
+      localCenterX = sign * sepHalf;
       const isBridge = i % 10 === 0;
       if (isBridge) {
         const s = (rand() * 2 - 1) * sepHalf;
         x = s;
         y = gauss() * 0.65;
         z = gauss() * 0.85 + Math.sin(s * 0.55) * 0.75;
+        localCenterX = s;
       } else {
         // Two Jeans-unstable cores in true circular Keplerian mutual orbit (v = sqrt(G M_tot / (4 a)))
         const u = Math.pow(rand(), 1.15);
@@ -168,16 +175,17 @@ export function createHydrogenNebulaInitialBodies({
       vz = (x / rXz) * vRot + (z / r3) * vInfall + gauss() * 0.14;
     }
 
-    const rInit = Math.hypot(x, y, z);
+    // Measure local core boost from each lobe's own center (translation- & multi-body-invariant!)
+    const rInit = Math.hypot(x - localCenterX, y, z);
     const coreBoost = Math.exp(-rInit * rInit / 12.0);
     const localLogRho = logRho0 + coreBoost * 1.0;
     const localLogT = logT0 + coreBoost * 0.10;
     const hSmooth = 0.32 + 0.04 * Math.min(6, rInit);
 
     // Primordial cosmic abundances: X_H = 0.74, X_He = 0.25, X_Z = 0.01 (sum == 1.0)
-    bodies[off + 0] = x;
-    bodies[off + 1] = y;
-    bodies[off + 2] = z;
+    bodies[off + 0] = x + ox;
+    bodies[off + 1] = y + oy;
+    bodies[off + 2] = z + oz;
     bodies[off + 3] = particleMass;
     bodies[off + 4] = vx;
     bodies[off + 5] = vy;

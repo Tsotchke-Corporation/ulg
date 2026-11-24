@@ -28,6 +28,7 @@ import {
   SPH_BUNDLED_BACKGROUND_IMAGES,
   SPH_DEFAULT_BACKGROUND_IMAGE_URL,
   STUDIO_CUSTOM_TEMPLATES,
+  autoResolveStagedConfigLayout,
   buildBlankCustomConfig,
   buildLaunchParamsFromStagedConfig,
   buildStagedConfigFromCustomTemplate,
@@ -44,7 +45,6 @@ import {
   validateStagedSimulationConfig
 } from './ulgSimStudioModel.js';
 import {
-  createSphNuclearCherenkovController,
   supportedIsotopesForMaterial
 } from '../runtime/sph/sphNuclearCherenkovBridge.js';
 
@@ -223,15 +223,12 @@ export function mountUlgSimStudioApp({
   let miniHudPinned = true;
   let pendingLocalBgFile = null;
   let diagnosticsPollTimer = null;
-  let activeNuclearController = null;
-  let activeNuclearLastSimTimeS = 0;
 
   const root = document.createElement('div');
   root.id = 'ulg-sim-studio';
   root.className = 'ulg-studio-root';
   root.innerHTML = `
     <div id="ulg-stage" class="ulg-studio-stage"></div>
-    <div id="ulg-cherenkov-aura" style="position:fixed;inset:0;pointer-events:none;z-index:90;mix-blend-mode:screen;display:none;transition:opacity 240ms ease;" aria-hidden="true"></div>
     <div id="ulg-empty-state" class="ulg-studio-empty">
       <div class="ulg-empty-card">
         <p class="ulg-empty-eyebrow">ULG · Schroeder Spatial Physics</p>
@@ -239,8 +236,10 @@ export function mountUlgSimStudioApp({
         <p class="ulg-empty-copy">Nothing is allocated yet. Open the menu in the top right to choose a preset or assemble custom bodies, then launch on WebGPU.</p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
           <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Configure &amp; Launch</button>
+          <a id="ulg-empty-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
           <a id="ulg-empty-cq-link" class="ulg-btn ulg-btn-subtle" href="./cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
           <a id="ulg-empty-sg-link" class="ulg-btn ulg-btn-subtle" href="./stellar-genesis.html" style="text-decoration:none;">Stellar Genesis ↗</a>
+          <a id="ulg-empty-cosmo-link" class="ulg-btn ulg-btn-subtle" href="./supergalactic.html" style="text-decoration:none;">Supergalactic TreePM ↗</a>
         </div>
       </div>
     </div>
@@ -313,8 +312,10 @@ export function mountUlgSimStudioApp({
           <div class="ulg-footer-group">
             <button id="ulg-stop-btn" class="ulg-btn ulg-btn-subtle ulg-btn-danger" type="button" hidden>Unload</button>
             <button id="ulg-diagnostics-toggle" class="ulg-btn ulg-btn-subtle" type="button" aria-expanded="false">Diagnostics</button>
+            <a id="ulg-elements-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
             <a id="ulg-cosmic-quantum-link" class="ulg-btn ulg-btn-subtle" href="./cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
             <a id="ulg-stellar-genesis-link" class="ulg-btn ulg-btn-subtle" href="./stellar-genesis.html" style="text-decoration:none;">Stellar Genesis ↗</a>
+            <a id="ulg-supergalactic-link" class="ulg-btn ulg-btn-subtle" href="./supergalactic.html" style="text-decoration:none;">Supergalactic TreePM ↗</a>
           </div>
           <div class="ulg-footer-group">
             <label class="ulg-autoplay-label">
@@ -499,41 +500,9 @@ export function mountUlgSimStudioApp({
     }
 
     miniHudEl.hidden = !miniHudPinned || !visuallyReady;
-    const cherenkovAuraEl = root.querySelector('#ulg-cherenkov-aura');
-    let ncSnap = null;
-    if (activeNuclearController?.enabled && snap) {
-      const simT = Number(snap.simTimeS) || 0;
-      const dtAdvance = Math.max(0, simT - activeNuclearLastSimTimeS);
-      if (dtAdvance > 0) {
-        ncSnap = activeNuclearController.step(dtAdvance);
-        activeNuclearLastSimTimeS = simT;
-      } else {
-        ncSnap = activeNuclearController.getSnapshot();
-      }
-      globalThis.__ulgNuclearCherenkovStatus = ncSnap;
-    } else if (!activeSession) {
+    const ncSnap = activeSession ? (globalThis.__ulgNuclearCherenkovStatus ?? null) : null;
+    if (!activeSession) {
       globalThis.__ulgNuclearCherenkovStatus = null;
-    }
-    if (cherenkovAuraEl) {
-      if (visuallyReady && ncSnap?.cherenkovActive) {
-        const [cr, cg, cb] = ncSnap.cherenkovSrgb;
-        // Amplify spectral blue-dominant Frank-Tamm CIE emission for screen-blended display over daylight backdrops
-        const bDom = Math.max(0.25, cb);
-        const coreR = Math.round(Math.max(0, Math.min(255, (cr * 0.24) * 255)));
-        const coreG = Math.round(Math.max(0, Math.min(255, (cg * 0.92) * 255)));
-        const coreB = Math.round(Math.max(0, Math.min(255, Math.min(1, bDom * 1.18) * 255)));
-        const haloR = Math.round(Math.max(0, Math.min(255, (cr * 0.42) * 255)));
-        const haloG = Math.round(Math.max(0, Math.min(255, (cg * 0.78) * 255)));
-        const haloB = Math.round(Math.max(0, Math.min(255, Math.min(1, bDom * 1.15) * 255)));
-        const fluxScale = Math.min(1.0, Math.max(0.55, Math.log10(Math.max(10, ncSnap.cherenkovPhotonsPerMeter || 1e4)) / 4.4));
-        cherenkovAuraEl.style.display = 'block';
-        cherenkovAuraEl.style.background = [
-          `radial-gradient(ellipse 19% 25% at 50% 54%, rgba(${coreR}, ${coreG}, ${coreB}, ${(0.82 * fluxScale).toFixed(3)}) 0%, rgba(${haloR}, ${haloG}, ${haloB}, ${(0.52 * fluxScale).toFixed(3)}) 42%, rgba(${haloR}, ${haloG}, ${haloB}, ${(0.18 * fluxScale).toFixed(3)}) 74%, rgba(${haloR}, ${haloG}, ${haloB}, 0.0) 100%)`,
-          `radial-gradient(circle at 50% 54%, rgba(${coreR}, ${coreG}, ${coreB}, ${(0.32 * fluxScale).toFixed(3)}) 0%, rgba(${haloR}, ${haloG}, ${haloB}, 0.0) 46%)`
-        ].join(', ');
-      } else {
-        cherenkovAuraEl.style.display = 'none';
-      }
     }
     if (!miniHudEl.hidden && snap) {
       const label = activePresetLabel || 'Custom';
@@ -755,6 +724,12 @@ export function mountUlgSimStudioApp({
   function markStagedCustom() {
     stagedConfig.presetId = 'custom';
     stagedConfig.customTemplateId = null;
+    // Pause any running live simulation when controls are edited so nothing
+    // dynamically mutates under the user until they press Play or Relaunch.
+    const snap = activeSession?.getTelemetrySnapshot?.() || null;
+    if (snap?.running === true) {
+      activeSession?.togglePlay?.();
+    }
     syncUrlFromStagedConfig();
   }
 
@@ -1771,8 +1746,6 @@ export function mountUlgSimStudioApp({
     activeSession = null;
     activeSignature = null;
     activePresetLabel = null;
-    activeNuclearController = null;
-    activeNuclearLastSimTimeS = 0;
     globalThis.__ulgNuclearCherenkovStatus = null;
     try {
       session.close();
@@ -1863,14 +1836,6 @@ export function mountUlgSimStudioApp({
       activeSession = session;
       activeSignature = sig;
       activePresetLabel = label;
-      activeNuclearController = createSphNuclearCherenkovController({
-        bodies: snapshot.bodies,
-        environmentMode: snapshot.environment?.mode || 'vacuum'
-      });
-      activeNuclearLastSimTimeS = 0;
-      globalThis.__ulgNuclearCherenkovStatus = activeNuclearController.enabled
-        ? activeNuclearController.getSnapshot()
-        : null;
       if (pendingLocalBgFile) {
         session.setLocalBackgroundImageFile?.(pendingLocalBgFile);
       }
@@ -1924,16 +1889,10 @@ export function mountUlgSimStudioApp({
   }
 
   fitAllBtn.addEventListener('click', () => {
-    const box = stagedConfig.boxDimensionsM;
-    stagedConfig.bodies = separateOverlappingSphInitialBodies(stagedConfig.bodies, box, {
-      coordinateFrame: 'floor-centered'
-    }).map((body) => ({
-      ...body,
-      centerM: Array.from(body.centerM).map((v) => roundNice(v, 6)),
-      sizeM: Array.from(body.sizeM).map((v) => roundNice(v, 6)),
-      particlesPerEdge: [...body.particlesPerEdge],
-      velocityMPerS: [...body.velocityMPerS]
-    }));
+    const resolved = autoResolveStagedConfigLayout(stagedConfig);
+    if (resolved.resolved) {
+      stagedConfig = resolved.config;
+    }
     markStagedCustom();
     renderAllTabs();
     updateChromeAndStatus();

@@ -16,8 +16,11 @@ export async function run(data = {}) {
   const payload = data?.payload || data || {};
 
   if (kind === 'nuclear.cherenkov') {
-    const kineticEnergyMeV = Number(payload.kineticEnergyMeV ?? 1.0);
-    const refractiveIndex = Number(payload.refractiveIndex ?? 1.333);
+    const kineticEnergyMeV = Number(payload.kineticEnergyMeV ?? 0);
+    // Fail closed to vacuum (n = 1.0) when refractiveIndex is omitted (never silently assume H2O 1.333)
+    const refractiveIndex = Number.isFinite(Number(payload.refractiveIndex)) && Number(payload.refractiveIndex) >= 1.0
+      ? Number(payload.refractiveIndex)
+      : 1.0;
     const ch = evaluateCherenkovClosure({ kineticEnergyMeV, refractiveIndex });
     const value = {
       schema: COSMIC_QUANTUM_PEER_TASK_SCHEMA,
@@ -38,7 +41,11 @@ export async function run(data = {}) {
     };
   }
 
-  const atomicNumberZ = Math.max(1, Math.min(118, Math.floor(Number(payload.atomicNumberZ ?? 80) || 80)));
+  const rawZ = Number(payload.atomicNumberZ);
+  if (!Number.isInteger(rawZ) || rawZ < 1 || rawZ > 118) {
+    throw new RangeError(`cosmicQuantumPeerTask requires an explicit integer atomicNumberZ in [1, 118], got ${payload.atomicNumberZ}`);
+  }
+  const atomicNumberZ = rawZ;
   const functional = String(payload.functional || 'pbe').toLowerCase();
   const props = deriveElementProperties(atomicNumberZ, {
     functional,

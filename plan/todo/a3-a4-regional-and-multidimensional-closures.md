@@ -1,5 +1,16 @@
 # A3 regional sampling and A4 multidimensional response functions
 
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 2 / Gate 3):**
+> **OPEN** (`0` formal oracle receipts). P1/P3 wired live GPU A3 radiation
+> consumer (`consume_thermal_regional_radiation`) and fixed the swapped
+> `thermo0.x/z` (`materialId`/`temperatureK`) bug in
+> `sphThermalRegionalClosureGpu.js`, landed GPU Chebyshev fitter
+> (`responseFunctionFitGpu.js`, `<1e-4` on Vulkan), wired worker
+> `eshkolHigherOrderLawCompiler`, and landed `materialPolytopeRegistry.js`.
+> **Remaining:** connect to Gate 2 Convex Polytope Atlas, retire CPU startup
+> fitters, and promote `implicitPressure` inside its 1% envelope under Gate 3.
+> See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Tracks A3 and A4. These build on G6 (`localClosureFitCache.js`)
 and G4 (homogeneity as a span test).
 

@@ -392,6 +392,10 @@ function optionalPositiveFinite(value) {
 export function createSchroederWorkerHierarchyConfig(options = {}) {
   const phaseSlotRefinementAdmissions = options.enablePhaseSlotRefinement === true
     ? cloneSchroederPhaseSlotWorkerAdmissions(options.phaseSlotRefinementAdmissions) : null;
+  const enableLiquidPhaseSlotRefinement = options.enableLiquidPhaseSlotRefinement === true;
+  if (enableLiquidPhaseSlotRefinement && !phaseSlotRefinementAdmissions) {
+    throw new TypeError('Worker liquid phase-slot refinement requires enablePhaseSlotRefinement');
+  }
   if (phaseSlotRefinementAdmissions
       && (options.enablePhaseVolumeMigration !== true || options.enableTwoLevelMechanics === true)) {
     throw new TypeError('Worker phase-slot refinement requires single-level phase-volume migration');
@@ -450,7 +454,13 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
     );
   }
   const config = {
-    ...(phaseSlotRefinementAdmissions ? { enablePhaseSlotRefinement: true, phaseSlotRefinementAdmissions } : {}),
+    ...(phaseSlotRefinementAdmissions
+      ? {
+          enablePhaseSlotRefinement: true,
+          ...(enableLiquidPhaseSlotRefinement ? { enableLiquidPhaseSlotRefinement: true } : {}),
+          phaseSlotRefinementAdmissions
+        }
+      : {}),
     schema: ULG_SCHROEDER_WORKER_HIERARCHY_CONFIG_SCHEMA,
     status: 'schroeder-worker-hierarchy-config-ready',
     selectedLevel,
@@ -510,6 +520,9 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
   ].join(':');
   if (phaseSlotRefinementAdmissions) {
     signature += ':' + schroederPhaseSlotAdmissionFingerprint(phaseSlotRefinementAdmissions);
+    if (enableLiquidPhaseSlotRefinement) {
+      signature += ':liq1';
+    }
   }
   if (enableLevelChainMechanics) {
     signature += ':chain1';

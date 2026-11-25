@@ -1395,6 +1395,8 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'schroederPhaseVolumeMigration',
   'ssPhaseVolumeMigration',
   'schroederPhaseSlotRefinement',
+  'schroederLiquidPhaseSlotRefinement',
+  'liquidPhaseSlotRefinement',
   'schroederLawQueue',
   'stageMechanicsTrace',
   'schroederLawNeighbors',
@@ -7440,6 +7442,8 @@ export async function mountSphPhaseDemoOverlay({
     'schroederPhaseVolumeMigration',
     'ssPhaseVolumeMigration',
     'schroederPhaseSlotRefinement',
+    'schroederLiquidPhaseSlotRefinement',
+    'liquidPhaseSlotRefinement',
     'schroederTwoLevel',
     'ssTwoLevel',
     'schroederTwoLevelAuthority',
@@ -8277,12 +8281,26 @@ export async function mountSphPhaseDemoOverlay({
     ),
     false
   );
+  const initialSchroederLiquidPhaseSlotRefinementEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederLiquidPhaseSlotRefinement', 'liquidPhaseSlotRefinement'],
+      ['enableLiquidPhaseSlotRefinement', 'schroederEnableLiquidPhaseSlotRefinement']
+    ),
+    false
+  );
+  const initialSchroederPhaseSlotRefinementEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederPhaseSlotRefinement'],
+      ['enablePhaseSlotRefinement', 'schroederEnablePhaseSlotRefinement']
+    ),
+    initialSchroederLiquidPhaseSlotRefinementEnabled
+  );
   const initialSchroederPhaseVolumeMigrationEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederPhaseVolumeMigration', 'ssPhaseVolumeMigration'],
       ['enablePhaseVolumeMigration', 'phaseVolumeMigration', 'schroederEnablePhaseVolumeMigration']
     ),
-    false
+    initialSchroederPhaseSlotRefinementEnabled
   );
   const initialSchroederLawQueueEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
@@ -8342,13 +8360,6 @@ export async function mountSphPhaseDemoOverlay({
       ['twoLevelFineSubstepCount', 'schroederTwoLevelFineSubstepCount']
     )
   ) || 2;
-  const initialSchroederPhaseSlotRefinementEnabled = booleanUrlParam(
-    initialUrlOrSchroederPolicyValue(
-      ['schroederPhaseSlotRefinement'],
-      ['enablePhaseSlotRefinement', 'schroederEnablePhaseSlotRefinement']
-    ),
-    false
-  );
   const initialSchroederParticleStorageMaterializationEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederParticleStorageMaterialization', 'ssParticleStorageMaterialization'],
@@ -8359,7 +8370,7 @@ export async function mountSphPhaseDemoOverlay({
         'enableParticleStorageAdoption'
       ]
     ),
-    false
+    initialSchroederPhaseSlotRefinementEnabled
   );
   const initialSchroederParticleStorageAdmissionRowBudget = positiveIntegerUrlParam(
     initialUrlOrSchroederPolicyValue(
@@ -8455,6 +8466,9 @@ export async function mountSphPhaseDemoOverlay({
     spatialKeyChurnProfileEnabled:
       initialSpatialKeyChurnProfileEnabled,
     enablePhaseSlotRefinement: initialSchroederPhaseSlotRefinementEnabled,
+    enableLiquidPhaseSlotRefinement: Boolean(
+      initialSchroederPhaseSlotRefinementEnabled && initialSchroederLiquidPhaseSlotRefinementEnabled
+    ),
     enableParticleStorageMaterialization: initialSchroederParticleStorageMaterializationEnabled,
     particleStorageAdmissionRowBudget: initialSchroederParticleStorageAdmissionRowBudget,
     particleStorageRequiredCapacity: initialSchroederParticleStorageRequiredCapacity,
@@ -8529,6 +8543,9 @@ export async function mountSphPhaseDemoOverlay({
       schroederSpatialKeyChurnProfile:
         config.spatialKeyChurnProfileEnabled === true,
       schroederEnablePhaseSlotRefinement: config.enablePhaseSlotRefinement,
+      schroederEnableLiquidPhaseSlotRefinement: Boolean(
+        config.enablePhaseSlotRefinement && config.enableLiquidPhaseSlotRefinement
+      ),
       schroederEnableParticleStorageMaterialization: config.enableParticleStorageMaterialization,
       schroederParticleStorageAdmissionRowBudget: config.particleStorageAdmissionRowBudget,
       schroederParticleStorageRequiredCapacity: config.particleStorageRequiredCapacity,
@@ -9272,6 +9289,7 @@ export async function mountSphPhaseDemoOverlay({
       );
     }
     if (initialSchroederPhaseSlotRefinementEnabled) q.set('schroederPhaseSlotRefinement', '1');
+    if (initialSchroederLiquidPhaseSlotRefinementEnabled) q.set('schroederLiquidPhaseSlotRefinement', '1');
     if (initialSplitSpareLineages != null) {
       q.set('splitSpareLineages', String(Math.round(initialSplitSpareLineages)));
     }
@@ -9535,7 +9553,18 @@ export async function mountSphPhaseDemoOverlay({
       reactionProductReserveMinimumLiveFraction:
         initialReactionProductReserveMinimumLiveFraction,
       splitSpareLineageCount: initialSplitSpareLineages == null
-        ? 0
+        ? (initialSchroederLiquidPhaseSlotRefinementEnabled
+            ? Math.min(
+                512,
+                Math.max(
+                  64,
+                  Math.round(
+                    ((Number.isFinite(dropEdge) && dropEdge >= 1 ? dropEdge : DROP_PARTICLE_EDGE_DEFAULT) ** 3)
+                      + ((Number.isFinite(baseEdge) && baseEdge >= 1 ? baseEdge : BASE_PARTICLE_EDGE_DEFAULT) ** 3)
+                  )
+                )
+              )
+            : 0)
         : Math.round(initialSplitSpareLineages),
       reactionProductReserveExactDiscovery:
         initialReactionProductReserveExactDiscovery,
@@ -12917,6 +12946,7 @@ export async function mountSphPhaseDemoOverlay({
     schroederEnableLawQueue = true,
     schroederEnableLawNeighborCandidates = true,
     schroederEnablePhaseSlotRefinement = false,
+    schroederEnableLiquidPhaseSlotRefinement = false,
     schroederEnableParticleStorageMaterialization = false,
     schroederParticleStorageAdmissionRowBudget = null,
     schroederParticleStorageRequiredCapacity = null,
@@ -12969,6 +12999,7 @@ export async function mountSphPhaseDemoOverlay({
       `ssLawNeighbors=${Boolean(schroederEnableLawNeighborCandidates) ? 1 : 0}`,
       `ssSpatialChurnProfile=${Boolean(schroederSpatialKeyChurnProfile) ? 1 : 0}`,
       `ssPhaseSlotRefinement=${Boolean(schroederEnablePhaseSlotRefinement) ? 1 : 0}`,
+      `ssLiquidPhaseSlotRefinement=${Boolean(schroederEnableLiquidPhaseSlotRefinement) ? 1 : 0}`,
       `ssParticleStorage=${Boolean(schroederEnableParticleStorageMaterialization) ? 1 : 0}`,
       `ssParticleStorageRows=${schroederParticleStorageAdmissionRowBudget ?? 'auto'}`,
       `ssParticleStorageCapacity=${schroederParticleStorageRequiredCapacity ?? 'auto'}`,

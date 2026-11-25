@@ -36,6 +36,9 @@ test('native Vulkan executes generated ABI lane accessors, paired RepresentedVol
   if (result.status === 'unsupported') return;
   console.log('[ss-law-guardrails]', JSON.stringify(result));
   assert.deepEqual(result.compileErrors, []);
+  assert.equal(result.composedVariantCount, 14);
+  assert.deepEqual(result.composedVariantErrors, []);
+  assert.ok(result.manifestCount >= 21, `expected >= 21 WGSL variant manifests on device, got ${result.manifestCount}`);
   assert.equal(result.validationError, null, result.validationError);
   assert.deepEqual(result.uncapturedErrors, []);
   assert.equal(result.leaseSnapshot.live, 0);

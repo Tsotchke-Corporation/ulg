@@ -141,6 +141,7 @@ export function composeWgslVariantFromSource({
       }
       const first = current.indexOf(spec.match);
       if (first < 0) {
+        if (spec.optional === true) continue;
         throw new Error(`${id}:${variant}: missing WGSL slot anchor "${slot}"`);
       }
       const second = current.indexOf(spec.match, first + spec.match.length);
@@ -154,6 +155,7 @@ export function composeWgslVariantFromSource({
       }
       const startIndex = current.indexOf(spec.start);
       if (startIndex < 0) {
+        if (spec.optional === true) continue;
         throw new Error(`${id}:${variant}: missing WGSL range start for slot "${slot}"`);
       }
       const duplicateStart = current.indexOf(spec.start, startIndex + spec.start.length);

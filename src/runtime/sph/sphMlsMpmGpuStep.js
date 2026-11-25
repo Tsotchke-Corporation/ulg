@@ -39,6 +39,7 @@ import { releaseMlsMpmPostMechanicsExactMassCapture,
 import { acquireSphAerosolSpatialParcelRead } from './sphAerosolSpatialBinding.js';
 import { releaseSphAerosolParcelRead } from './sphAerosolParcelGpu.js';
 import {
+  composeWgslModule,
   composeWgslVariantFromSource,
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS,
@@ -4866,8 +4867,14 @@ function createSpatialGasLedgerProductEventCompactParams({
 }
 
 function createSpatialGasLedgerProductEventCompactWgsl() {
-  return `
-struct Params {
+  return recordWgslVariantManifest(composeWgslModule({
+    moduleId: 'spatial-gas-ledger',
+    variantId: 'product-event-compact',
+    includeProvenanceHeader: false,
+    fragments: [
+      {
+        slot: 'spatial-gas-compact-params',
+        code: `struct Params {
   product_event_row_count: u32,
   product_event_stride_floats: u32,
   compact_stride_floats: u32,
@@ -4880,9 +4887,11 @@ struct Params {
 
 @group(0) @binding(0) var<storage, read> product_events: array<f32>;
 @group(0) @binding(1) var<storage, read_write> compact_rows: array<f32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-@compute @workgroup_size(64)
+@group(0) @binding(2) var<uniform> params: Params;`
+      },
+      {
+        slot: 'spatial-gas-compact-main',
+        code: `@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let row = global_id.x;
   if (row >= params.product_event_row_count) {
@@ -4911,8 +4920,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   compact_rows[dst + 9u] = f32(row);
   compact_rows[dst + 10u] = status;
   compact_rows[dst + 11u] = routing;
-}
-`;
+}`
+      }
+    ]
+  }));
 }
 
 function productTermMetadataByIndexForSpatialLedger(reactionTable) {
@@ -5342,36 +5353,13 @@ function recordWgslVariantManifest(variant) {
   return variant.code;
 }
 
-function replaceRequiredWgsl(source, search, replacement, label) {
-  const first = source.indexOf(search);
-  if (first < 0) {
-    throw new Error(`Unable to build active-grid WGSL variant; missing ${label}`);
-  }
-  if (source.indexOf(search, first + search.length) >= 0) {
-    throw new Error(`Unable to build active-grid WGSL variant; ambiguous ${label}`);
-  }
-  return `${source.slice(0, first)}${replacement}${source.slice(first + search.length)}`;
-}
-
-function replaceRequiredWgslRange(source, start, end, replacement, label) {
-  const startIndex = source.indexOf(start);
-  if (startIndex < 0) {
-    throw new Error(`Unable to build active-grid WGSL variant; missing ${label}`);
-  }
-  if (source.indexOf(start, startIndex + start.length) >= 0) {
-    throw new Error(`Unable to build active-grid WGSL variant; ambiguous range start for ${label}`);
-  }
-  const endIndex = source.indexOf(end, startIndex + start.length);
-  if (endIndex < 0) {
-    throw new Error(`Unable to build active-grid WGSL variant; missing ${label}`);
-  }
-  return `${source.slice(0, startIndex)}${replacement}${source.slice(endIndex)}`;
-}
-
-function createActiveGridP2gProjectionWgsl(sourceWgsl = mlsMpmP2gGridProjectionWgsl) {
+function createActiveGridP2gProjectionWgsl(
+  sourceWgsl = mlsMpmP2gGridProjectionWgsl,
+  variantId = 'active-grid'
+) {
   return recordWgslVariantManifest(composeWgslVariantFromSource({
     moduleId: 'mls-mpm-p2g',
-    variantId: 'active-grid',
+    variantId,
     baseSource: sourceWgsl,
     slots: [
       {
@@ -5502,18 +5490,29 @@ function createActiveGridUpdateWgsl() {
   }));
 }
 
-function createCompactMechanicsP2gProjectionWgsl(sourceWgsl) {
-  const withReadOnlyMechanicsView = replaceRequiredWgsl(
-    sourceWgsl,
-    '@group(0) @binding(7) var<storage, read_write> schroeder_spatial_authority_evidence: array<atomic<u32>>;',
-    '@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;',
-    'compact mechanics immutable authority binding'
-  );
-  const withOwnedRejectionEvidence = replaceRequiredWgslRange(
-    withReadOnlyMechanicsView,
-    'fn p2g_spatial_evidence_add(word: u32, value: u32) {',
-    '\nfn p2g_authenticate_spatial_header',
-    `fn p2g_spatial_evidence_add(word: u32, value: u32) {
+function createCompactMechanicsP2gProjectionWgsl(
+  sourceWgsl,
+  variantId = 'compact-mechanics'
+) {
+  const rejectedFlags = SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_CAPACITY_OVERFLOW;
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-p2g',
+    variantId,
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'compact-mechanics-immutable-authority-binding',
+        match: '@group(0) @binding(7) var<storage, read_write> schroeder_spatial_authority_evidence: array<atomic<u32>>;',
+        code: '@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;'
+      },
+      {
+        slot: 'compact-mechanics-owned-rejection-evidence',
+        kind: 'range',
+        start: 'fn p2g_spatial_evidence_add(word: u32, value: u32) {',
+        end: '\nfn p2g_authenticate_spatial_header',
+        code: `fn p2g_spatial_evidence_add(word: u32, value: u32) {
   let evidence_word = compact_mechanics_evidence_word(word);
   if (params.schroeder_spatial_evidence_enabled != 0u
       && evidence_word < arrayLength(&grid_accumulators)) {
@@ -5557,32 +5556,30 @@ fn p2g_spatial_evidence_identity(particle_index: u32) {
     bitcast<i32>(params.schroeder_spatial_generation_id)
   );
 }
-`,
-    'compact mechanics owned rejection evidence'
-  );
-  const withPreflightGate = replaceRequiredWgsl(
-    withOwnedRejectionEvidence,
-    `fn p2g_particle_enabled(particle_index: u32) -> bool {
+`
+      },
+      {
+        slot: 'compact-mechanics-p2g-preflight-gate',
+        match: `fn p2g_particle_enabled(particle_index: u32) -> bool {
   p2g_authenticate_spatial_header(particle_index);`,
-    `fn p2g_particle_enabled(particle_index: u32) -> bool {
+        code: `fn p2g_particle_enabled(particle_index: u32) -> bool {
   if (p2g_spatial_authority_rejected()) {
     return false;
   }
   p2g_authenticate_spatial_header(particle_index);
   if (p2g_spatial_authority_rejected()) {
     return false;
-  }`,
-    'compact mechanics P2G preflight gate'
-  );
-  const withCompactNodeMapping = replaceRequiredWgsl(
-    withPreflightGate,
-    `fn p2g_finalize_node_index(global_index: u32) -> u32 {
+  }`
+      },
+      {
+        slot: 'compact-mechanics-p2g-node-index-mapping',
+        match: `fn p2g_finalize_node_index(global_index: u32) -> u32 {
   if (global_index >= params.grid_node_count) {
     return params.grid_node_count;
   }
   return global_index;
 }`,
-    `fn p2g_finalize_node_index(global_index: u32) -> u32 {
+        code: `fn p2g_finalize_node_index(global_index: u32) -> u32 {
   let bound_words = arrayLength(&schroeder_spatial_authority_evidence);
   if (bound_words <= 53u) {
     return params.grid_node_count;
@@ -5599,15 +5596,13 @@ fn p2g_spatial_evidence_identity(particle_index: u32) {
   let node_index =
     schroeder_spatial_authority_evidence[node_offset_words + global_index];
   return select(node_index, params.grid_node_count, node_index >= params.grid_node_count);
-}`,
-    'compact mechanics P2G node index mapping'
-  );
-  const rejectedFlags = SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_FAIL_CLOSED
-    | SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_INVALID_SOURCE
-    | SCHROEDER_SPATIAL_MECHANICS_VIEW_STATUS_CAPACITY_OVERFLOW;
-  return `${withCompactNodeMapping}
-
-fn compact_mechanics_view_word(index: u32) -> u32 {
+}`
+      }
+    ],
+    append: [
+      {
+        slot: 'compact-mechanics-preflight-and-clear',
+        code: `fn compact_mechanics_view_word(index: u32) -> u32 {
   return schroeder_spatial_authority_evidence[index];
 }
 
@@ -5868,7 +5863,10 @@ fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
   atomicStore(&grid_accumulators[accumulator_base + 2u], 0);
   atomicStore(&grid_accumulators[accumulator_base + 3u], 0);
 }
-`;
+`
+      }
+    ]
+  }));
 }
 
 function createCompactMechanicsGridUpdateWgsl() {
@@ -5915,39 +5913,50 @@ function createCompactMechanicsGridUpdateWgsl() {
   }));
 }
 
-function createMechanicsFieldP2gProjectionWgsl(sourceWgsl) {
+function createMechanicsFieldP2gProjectionWgsl(
+  sourceWgsl,
+  variantId = 'mechanics-field'
+) {
   const rejectedFlags = SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_FAIL_CLOSED
     | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_INVALID_SOURCE
     | SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_CAPACITY_OVERFLOW;
-  const withMutationParams = replaceRequiredWgsl(
-    sourceWgsl,
-    `  schroeder_spatial_pad2: u32,
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-p2g',
+    variantId,
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'mechanics-field-mutation-params',
+        match: `  schroeder_spatial_pad2: u32,
 };`,
-    `  schroeder_spatial_pad2: u32,
+        code: `  schroeder_spatial_pad2: u32,
   mechanics_field_expected_mutation_ordinal: u32,
   mechanics_field_output_mutation_ordinal: u32,
   mechanics_field_expected_state_encoding: u32,
   pressure_required_consumer_mask: u32,
-};`,
-    'mechanics field mutation parameter fields'
-  );
-  const withFieldReductionBindings = replaceRequiredWgsl(
-    withMutationParams,
-    `@group(0) @binding(5) var<storage, read> product_events: array<vec4<f32>>;
+};`
+      },
+      {
+        slot: 'mechanics-field-deterministic-reduction-bindings',
+        match: `@group(0) @binding(5) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> grid_nodes: array<vec4<f32>>;`,
-    `// Product events are forbidden in mechanics-field mode. Reuse their
+        code: `// Product events are forbidden in mechanics-field mode. Reuse their
 // binding for particle-major, non-atomic P2G contribution records and the
 // superseded dense-grid output binding for the field builder's retained
 // stable candidate order.
 @group(0) @binding(5) var<storage, read_write> product_events: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read> p2g_field_sorted_candidate_indices: array<u32>;`,
-    'mechanics field deterministic reduction bindings'
-  );
-  const withFieldOwnedRejectionEvidence = replaceRequiredWgslRange(
-    withFieldReductionBindings,
-    'fn compact_mechanics_evidence_word(word: u32) -> u32 {',
-    '\nfn p2g_authenticate_spatial_header',
-    `fn compact_mechanics_rejection_word() -> u32 {
+@group(0) @binding(6) var<storage, read> p2g_field_sorted_candidate_indices: array<u32>;`
+      },
+      {
+        slot: 'mechanics-field-owned-rejection-evidence',
+        kind: 'range',
+        start: 'fn p2g_spatial_evidence_add(word: u32, value: u32) {',
+        end: '\nfn p2g_authenticate_spatial_header',
+        code: `fn p2g_spatial_evidence_add(word: u32, value: u32) {
+  // The producer-owned mechanics field view is immutable to evidence counters.
+}
+
+fn compact_mechanics_rejection_word() -> u32 {
   return 2u;
 }
 
@@ -6000,19 +6009,18 @@ fn p2g_spatial_authority_rejected() -> bool {
 fn p2g_spatial_evidence_identity(particle_index: u32) {
   // The borrowed mechanics-view header is immutable to every consumer.
 }
-`,
-    'mechanics field owned rejection evidence'
-  );
-  const withFieldHelpers = replaceRequiredWgsl(
-    withFieldOwnedRejectionEvidence,
-    `fn p2g_atomic_add(node_index: u32, mass: f32, momentum: vec3<f32>) {
+`
+      },
+      {
+        slot: 'mechanics-field-p2g-accumulator-helpers',
+        match: `fn p2g_atomic_add(node_index: u32, mass: f32, momentum: vec3<f32>) {
   let base = node_index * 4u;
   atomicAdd(&grid_accumulators[base], p2g_quantize(mass));
   atomicAdd(&grid_accumulators[base + 1u], p2g_quantize(momentum.x));
   atomicAdd(&grid_accumulators[base + 2u], p2g_quantize(momentum.y));
   atomicAdd(&grid_accumulators[base + 3u], p2g_quantize(momentum.z));
 }`,
-    `fn p2g_atomic_add(node_index: u32, mass: f32, momentum: vec3<f32>) {
+        code: `fn p2g_atomic_add(node_index: u32, mass: f32, momentum: vec3<f32>) {
   // Product-event mechanics is forbidden by the compact-field preflight.
   // Keep this legacy function only so the unused product-event entry point
   // remains a valid WGSL module; it is never dispatched in field mode.
@@ -6432,17 +6440,16 @@ fn p2g_weight_derivative_at(weights_coordinate: f32, offset: i32) -> f32 {
   if (offset == 1) { return 2.0 * (1.0 - weights_coordinate); }
   if (offset == 2) { return weights_coordinate - 0.5; }
   return 0.0;
-}`,
-    'mechanics field P2G accumulator helpers'
-  );
-  const withFieldAdmissionGate = replaceRequiredWgsl(
-    withFieldHelpers,
-    `  if (!p2g_particle_enabled(particle_index)) {
+}`
+      },
+      {
+        slot: 'mechanics-field-p2g-admission-gate',
+        match: `  if (!p2g_particle_enabled(particle_index)) {
     return;
   }
 
   let state_base = particle_index * 2u;`,
-    `  p2g_field_clear_particle_contributions(particle_index);
+        code: `  p2g_field_clear_particle_contributions(particle_index);
   if (!p2g_particle_enabled(particle_index)) {
     return;
   }
@@ -6454,13 +6461,12 @@ fn p2g_weight_derivative_at(weights_coordinate: f32, offset: i32) -> f32 {
     return;
   }
 
-  let state_base = particle_index * 2u;`,
-    'mechanics field P2G admission gate'
-  );
-  const withFieldDeposit = replaceRequiredWgsl(
-    withFieldAdmissionGate,
-    `        p2g_atomic_add(node_index, weight * pos_mass.w, weight * particle_momentum);`,
-    `        let weight_gradient = params.inv_grid_spacing_m * vec3<f32>(
+  let state_base = particle_index * 2u;`
+      },
+      {
+        slot: 'mechanics-field-p2g-particle-deposit',
+        match: `        p2g_atomic_add(node_index, weight * pos_mass.w, weight * particle_momentum);`,
+        code: `        let weight_gradient = params.inv_grid_spacing_m * vec3<f32>(
           p2g_weight_derivative_at(p_grid.x - f32(base_x), ox)
             * p2g_weight_at(wy, oy) * p2g_weight_at(wz, oz),
           p2g_weight_at(wx, ox)
@@ -6478,14 +6484,14 @@ fn p2g_weight_derivative_at(weights_coordinate: f32, offset: i32) -> f32 {
           pos_mass.w * weight_gradient,
           weight * volume,
           weight * volume * resolved_absolute_pressure_pa
-        );`,
-    'mechanics field P2G particle deposit'
-  );
-  const withFieldFinalize = replaceRequiredWgslRange(
-    withFieldDeposit,
-    '@compute @workgroup_size(64)\nfn finalize_grid',
-    '\n\nfn compact_mechanics_view_word',
-    `@compute @workgroup_size(64)
+        );`
+      },
+      {
+        slot: 'mechanics-field-p2g-finalize',
+        kind: 'range',
+        start: '@compute @workgroup_size(64)\nfn finalize_grid',
+        end: '\n\nfn compact_mechanics_view_word',
+        code: `@compute @workgroup_size(64)
 fn finalize_grid(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
@@ -6642,12 +6648,11 @@ fn finalize_grid(
   // Count publishes the immutable row last.
   p2g_field_store_word(pressure_base + 3u, contribution_count);
 }
-`,
-    'mechanics field P2G finalize'
-  );
-  const withFieldClear = replaceRequiredWgsl(
-    withFieldFinalize,
-    `@compute @workgroup_size(64)
+`
+      },
+      {
+        slot: 'mechanics-field-accumulator-clear',
+        match: `@compute @workgroup_size(64)
 fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let node_index = p2g_finalize_node_index(global_id.x);
   if (node_index >= params.grid_node_count) {
@@ -6659,7 +6664,7 @@ fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
   atomicStore(&grid_accumulators[accumulator_base + 2u], 0);
   atomicStore(&grid_accumulators[accumulator_base + 3u], 0);
 }`,
-    `@compute @workgroup_size(64)
+        code: `@compute @workgroup_size(64)
 fn clear_accumulators(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
@@ -6685,12 +6690,13 @@ fn clear_accumulators(
   if (field_index == 0u) {
     p2g_field_store_word(43u, p2g_field_word(34u) * P2G_FIELD_ACCUMULATOR_WORDS);
   }
-}`,
-    'mechanics field accumulator clear'
-  );
-  return `${withFieldClear}
-
-fn preflight_mechanics_field_continue() -> bool {
+}`
+      }
+    ],
+    append: [
+      {
+        slot: 'mechanics-field-preflight-and-seal',
+        code: `fn preflight_mechanics_field_continue() -> bool {
   if (!p2g_field_view_structurally_admitted()) {
     p2g_field_reject();
     return false;
@@ -6854,28 +6860,55 @@ fn seal_mechanics_field_momentum_state() {
     receipt + 3u, P2G_FIELD_RECEIPT_PHASE_P2G_FINALIZED
   );
 }
-`;
+`
+      }
+    ]
+  }));
 }
 
-function createSingleLevelMechanicsFieldP2gProjectionWgsl(sourceWgsl) {
-  return replaceRequiredWgsl(
-    sourceWgsl,
-    '  p2g_field_store_word(pressure_base + 3u, contribution_count);',
-    `  p2g_field_store_word(pressure_base + 3u, contribution_count);
+function createSingleLevelMechanicsFieldP2gProjectionWgsl(
+  sourceWgsl,
+  variantId = 'single-level-mechanics-field'
+) {
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-p2g',
+    variantId,
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'single-level-mechanics-field-p2g-finalize-heat-clear',
+        match: '  p2g_field_store_word(pressure_base + 3u, contribution_count);',
+        code: `  p2g_field_store_word(pressure_base + 3u, contribution_count);
   // P2G contributions live in the transient deterministic reduction buffer;
   // the ordinary fused single-level field accumulator bank remains a
   // separate mutable heat/work ledger while these pressure rows stay
-  // immutable through local transport and G2P.`,
-    'single-level mechanics field P2G finalize heat clear'
-  );
+  // immutable through local transport and G2P.`
+      }
+    ]
+  }));
 }
 
-function createActiveSourceV2MechanicsFieldP2gWgsl(sourceWgsl) {
-  const withParams = replaceRequiredWgsl(
-    sourceWgsl,
-    `  pressure_required_consumer_mask: u32,
+function createActiveSourceV2MechanicsFieldP2gWgsl(
+  sourceWgsl,
+  variantId = 'active-source-v2-mechanics-field'
+) {
+  const rejectedStatusMask =
+    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE;
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-p2g',
+    variantId,
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'active-source-v2-p2g-params',
+        match: `  pressure_required_consumer_mask: u32,
 };`,
-    `  pressure_required_consumer_mask: u32,
+        code: `  pressure_required_consumer_mask: u32,
   active_source_physical_capacity: u32,
   active_source_active_capacity: u32,
   active_source_view_capacity_words: u32,
@@ -6888,27 +6921,19 @@ function createActiveSourceV2MechanicsFieldP2gWgsl(sourceWgsl) {
   temporal_coarse_successor_dt: f32,
   temporal_coarse_pad0: u32,
   temporal_coarse_pad1: u32,
-};`,
-    'ActiveSource-v2 P2G parameter fields'
-  );
-  const withBinding = replaceRequiredWgsl(
-    withParams,
-    '@group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;',
-    '@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;',
-    'ActiveSource-v2 exact authority binding'
-  );
-  const rejectedStatusMask =
-    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE;
-  const withAuthority = replaceRequiredWgslRange(
-    withBinding,
-    'const SCHROEDER_SPATIAL_MAGIC: u32',
-    '\nfn p2g_finalize_node_index',
-    `const ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC}u;
+};`
+      },
+      {
+        slot: 'active-source-v2-p2g-authority-binding',
+        match: '@group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;',
+        code: '@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;'
+      },
+      {
+        slot: 'active-source-v2-p2g-authority',
+        kind: 'range',
+        start: 'const SCHROEDER_SPATIAL_MAGIC: u32',
+        end: '\nfn p2g_finalize_node_index',
+        code: `const ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC}u;
 const ACTIVE_SOURCE_VERSION: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION}u;
 const ACTIVE_SOURCE_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS}u;
 const ACTIVE_SOURCE_READY_ADMITTED: u32 = ${
@@ -7189,56 +7214,50 @@ fn p2g_particle_enabled(particle_index: u32) -> bool {
     && bitcast<u32>(atomicLoad(&grid_accumulators[descriptor_base + 3u]))
       == 1u;
 }
-`,
-    'ActiveSource-v2 P2G authority'
-  );
-  let result = replaceRequiredWgsl(
-    withAuthority,
-    `    && p2g_field_word(33u) % P2G_FIELD_STENCIL_SIZE == 0u
+`
+      },
+      {
+        slot: 'active-source-v2-field-candidate-cardinality',
+        match: `    && p2g_field_word(33u) % P2G_FIELD_STENCIL_SIZE == 0u
     && p2g_field_word(33u) / P2G_FIELD_STENCIL_SIZE == params.particle_count`,
-    `    && p2g_field_word(33u) == active_source_view[43u]
+        code: `    && p2g_field_word(33u) == active_source_view[43u]
     && p2g_field_word(33u) % P2G_FIELD_STENCIL_SIZE == 0u
     && p2g_field_word(33u) / P2G_FIELD_STENCIL_SIZE
-      == active_source_view[18u]`,
-    'ActiveSource-v2 field candidate cardinality'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    'fn p2g_field_clear_particle_contributions(particle_index: u32) {\n  let candidate_count = p2g_field_word(33u);\n  let first_candidate = particle_index * P2G_FIELD_STENCIL_SIZE;',
-    'fn p2g_field_clear_particle_contributions(active_ordinal: u32) {\n  let candidate_count = p2g_field_word(33u);\n  let first_candidate = active_ordinal * P2G_FIELD_STENCIL_SIZE;',
-    'ActiveSource-v2 contribution clear identity'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `fn p2g_field_store_contribution(
+      == active_source_view[18u]`
+      },
+      {
+        slot: 'active-source-v2-contribution-clear-identity',
+        match: 'fn p2g_field_clear_particle_contributions(particle_index: u32) {\n  let candidate_count = p2g_field_word(33u);\n  let first_candidate = particle_index * P2G_FIELD_STENCIL_SIZE;',
+        code: 'fn p2g_field_clear_particle_contributions(active_ordinal: u32) {\n  let candidate_count = p2g_field_word(33u);\n  let first_candidate = active_ordinal * P2G_FIELD_STENCIL_SIZE;'
+      },
+      {
+        slot: 'active-source-v2-contribution-store-signature',
+        match: `fn p2g_field_store_contribution(
   particle_index: u32,
   stencil_ordinal: u32,`,
-    `fn p2g_field_store_contribution(
+        code: `fn p2g_field_store_contribution(
   active_ordinal: u32,
   particle_index: u32,
-  stencil_ordinal: u32,`,
-    'ActiveSource-v2 contribution store signature'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `  let candidate_index = particle_index * P2G_FIELD_STENCIL_SIZE
+  stencil_ordinal: u32,`
+      },
+      {
+        slot: 'active-source-v2-contribution-candidate-identity',
+        match: `  let candidate_index = particle_index * P2G_FIELD_STENCIL_SIZE
     + stencil_ordinal;`,
-    `  let candidate_index = active_ordinal * P2G_FIELD_STENCIL_SIZE
-    + stencil_ordinal;`,
-    'ActiveSource-v2 contribution candidate identity'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `        p2g_field_store_contribution(
+        code: `  let candidate_index = active_ordinal * P2G_FIELD_STENCIL_SIZE
+    + stencil_ordinal;`
+      },
+      {
+        slot: 'active-source-v2-contribution-call-identity',
+        match: `        p2g_field_store_contribution(
           particle_index,`,
-    `        p2g_field_store_contribution(
+        code: `        p2g_field_store_contribution(
           active_ordinal,
-          particle_index,`,
-    'ActiveSource-v2 contribution call identity'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `  let particle_index = candidate_index / P2G_FIELD_STENCIL_SIZE;
+          particle_index,`
+      },
+      {
+        slot: 'active-source-v2-sorted-candidate-projection',
+        match: `  let particle_index = candidate_index / P2G_FIELD_STENCIL_SIZE;
   let stencil_ordinal = candidate_index
     - particle_index * P2G_FIELD_STENCIL_SIZE;
   if (particle_index >= params.particle_count
@@ -7247,7 +7266,7 @@ fn p2g_particle_enabled(particle_index: u32) -> bool {
   }
   let descriptor_base = p2g_field_word(24u)
     + particle_index * P2G_FIELD_DESCRIPTOR_WORDS;`,
-    `  let active_ordinal = candidate_index / P2G_FIELD_STENCIL_SIZE;
+        code: `  let active_ordinal = candidate_index / P2G_FIELD_STENCIL_SIZE;
   let stencil_ordinal = candidate_index
     - active_ordinal * P2G_FIELD_STENCIL_SIZE;
   let particle_index = p2g_physical_for_active(active_ordinal);
@@ -7256,28 +7275,26 @@ fn p2g_particle_enabled(particle_index: u32) -> bool {
     return P2G_FIELD_INVALID_INDEX;
   }
   let descriptor_base = p2g_field_word(24u)
-    + particle_index * P2G_FIELD_DESCRIPTOR_WORDS;`,
-    'ActiveSource-v2 sorted candidate projection'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `    let particle_index = candidate_index / P2G_FIELD_STENCIL_SIZE;
+    + particle_index * P2G_FIELD_DESCRIPTOR_WORDS;`
+      },
+      {
+        slot: 'active-source-v2-final-reduction-projection',
+        match: `    let particle_index = candidate_index / P2G_FIELD_STENCIL_SIZE;
     let stencil_ordinal = candidate_index
       - particle_index * P2G_FIELD_STENCIL_SIZE;
     if (p2g_field_find(particle_index, stencil_ordinal, node_index)
         != field_index) {`,
-    `    let active_ordinal = candidate_index / P2G_FIELD_STENCIL_SIZE;
+        code: `    let active_ordinal = candidate_index / P2G_FIELD_STENCIL_SIZE;
     let particle_index = p2g_physical_for_active(active_ordinal);
     let stencil_ordinal = candidate_index
       - active_ordinal * P2G_FIELD_STENCIL_SIZE;
     if (particle_index == ACTIVE_SOURCE_MISSING
         || p2g_field_find(particle_index, stencil_ordinal, node_index)
-          != field_index) {`,
-    'ActiveSource-v2 final reduction projection'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `@compute @workgroup_size(64)
+          != field_index) {`
+      },
+      {
+        slot: 'active-source-v2-indirect-p2g-entry',
+        match: `@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
   if (particle_index >= params.particle_count) {
@@ -7294,7 +7311,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     p2g_field_reject();
     return;
   }`,
-    `@compute @workgroup_size(64)
+        code: `@compute @workgroup_size(64)
 fn main(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
@@ -7323,41 +7340,37 @@ fn main(
   }
   if (!p2g_particle_enabled(particle_index)) {
     return;
-  }`,
-    'ActiveSource-v2 indirect P2G entry point'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    '    || compact_mechanics_view_word(49u) != params.particle_count\n    || selected_source_count > params.particle_count',
-    '    || compact_mechanics_view_word(49u) != active_source_view[18u]\n    || selected_source_count > active_source_view[18u]',
-    'ActiveSource-v2 compact source counts'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `    || compact_mechanics_view_word(52u) != params.schroeder_spatial_pad2
+  }`
+      },
+      {
+        slot: 'active-source-v2-compact-source-counts',
+        match: '    || compact_mechanics_view_word(49u) != params.particle_count\n    || selected_source_count > params.particle_count',
+        code: '    || compact_mechanics_view_word(49u) != active_source_view[18u]\n    || selected_source_count > active_source_view[18u]'
+      },
+      {
+        slot: 'active-source-v2-completion-lineage',
+        match: `    || compact_mechanics_view_word(52u) != params.schroeder_spatial_pad2
     || schroeder_spatial_directory[33u] != params.schroeder_spatial_pad2`,
-    `    || compact_mechanics_view_word(52u) != params.schroeder_spatial_pad2
-    || active_source_view[30u] != params.schroeder_spatial_pad2`,
-    'ActiveSource-v2 completion lineage'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `  momentum: vec3<f32>,
+        code: `    || compact_mechanics_view_word(52u) != params.schroeder_spatial_pad2
+    || active_source_view[30u] != params.schroeder_spatial_pad2`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-contribution-signature',
+        match: `  momentum: vec3<f32>,
   mass_gradient: vec3<f32>,`,
-    `  momentum: vec3<f32>,
+        code: `  momentum: vec3<f32>,
   successor_momentum: vec3<f32>,
-  mass_gradient: vec3<f32>,`,
-    'ActiveSource-v2 temporal coarse contribution signature'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `      || !all(vec3<bool>(
+  mass_gradient: vec3<f32>,`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-contribution-validation',
+        match: `      || !all(vec3<bool>(
         p2g_field_finite(mass_gradient.x),
         p2g_field_finite(mass_gradient.y),
         p2g_field_finite(mass_gradient.z)
       ))
       || !(represented_volume_m3 > 0.0)`,
-    `      || !all(vec3<bool>(
+        code: `      || !all(vec3<bool>(
         p2g_field_finite(successor_momentum.x),
         p2g_field_finite(successor_momentum.y),
         p2g_field_finite(successor_momentum.z)
@@ -7369,12 +7382,11 @@ fn main(
         p2g_field_finite(mass_gradient.y),
         p2g_field_finite(mass_gradient.z)
       ))
-      || !(represented_volume_m3 > 0.0)`,
-    'ActiveSource-v2 temporal coarse contribution validation'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `  product_events[row] = vec4<f32>(mass, momentum);
+      || !(represented_volume_m3 > 0.0)`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-contribution-record',
+        match: `  product_events[row] = vec4<f32>(mass, momentum);
   product_events[row + 1u] = vec4<f32>(mass_gradient, 0.0);
   // Publish last so a stale or torn three-row record is never observable.
   product_events[row + 2u] = vec4<f32>(
@@ -7383,7 +7395,7 @@ fn main(
     0.0,
     1.0
   );`,
-    `  product_events[row] = vec4<f32>(mass, momentum);
+        code: `  product_events[row] = vec4<f32>(mass, momentum);
   product_events[row + 1u] = vec4<f32>(
     mass_gradient,
     successor_momentum.x
@@ -7397,15 +7409,14 @@ fn main(
     pressure_volume_moment_pa_m3,
     successor_momentum.y,
     successor_momentum.z
-  );`,
-    'ActiveSource-v2 temporal coarse contribution record'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `        p2g_field_store_contribution(
+  );`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-particle-momentum',
+        match: `        p2g_field_store_contribution(
           active_ordinal,
           particle_index,`,
-    `        var successor_particle_momentum = vec3<f32>(0.0);
+        code: `        var successor_particle_momentum = vec3<f32>(0.0);
         if (params.temporal_coarse_enabled != 0u) {
           let successor_stress_scale =
             -params.temporal_coarse_successor_dt * volume * 4.0
@@ -7433,49 +7444,45 @@ fn main(
         }
         p2g_field_store_contribution(
           active_ordinal,
-          particle_index,`,
-    'ActiveSource-v2 temporal coarse particle momentum'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `          weight * pos_mass.w,
+          particle_index,`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-contribution-arg',
+        match: `          weight * pos_mass.w,
           weight * particle_momentum,
           pos_mass.w * weight_gradient,`,
-    `          weight * pos_mass.w,
+        code: `          weight * pos_mass.w,
           weight * particle_momentum,
           weight * successor_particle_momentum,
-          pos_mass.w * weight_gradient,`,
-    'ActiveSource-v2 temporal coarse contribution argument'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `  var momentum = vec3<f32>(0.0);
+          pos_mass.w * weight_gradient,`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-reduction-accumulator',
+        match: `  var momentum = vec3<f32>(0.0);
   var mass_gradient = vec3<f32>(0.0);`,
-    `  var momentum = vec3<f32>(0.0);
+        code: `  var momentum = vec3<f32>(0.0);
   var successor_momentum = vec3<f32>(0.0);
-  var mass_gradient = vec3<f32>(0.0);`,
-    'ActiveSource-v2 temporal coarse reduction accumulator'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `    let contribution_published = contribution2.w;
+  var mass_gradient = vec3<f32>(0.0);`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-publish-tag',
+        match: `    let contribution_published = contribution2.w;
     if (contribution_published != 0.0) {
       if (contribution_published != 1.0
           || !p2g_field_finite(contribution0.x)`,
-    `    let contribution_published = contribution2.x != 0.0;
+        code: `    let contribution_published = contribution2.x != 0.0;
     if (contribution_published) {
-      if (!p2g_field_finite(contribution0.x)`,
-    'ActiveSource-v2 temporal coarse publish tag'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `          || !(contribution2.x > 0.0)
+      if (!p2g_field_finite(contribution0.x)`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-payload-validation',
+        match: `          || !(contribution2.x > 0.0)
           || !p2g_field_finite(contribution2.x)
           || !(contribution2.y >= 0.0)
           || !p2g_field_finite(contribution2.y)
           || contribution2.z != 0.0
           || contribution_count == P2G_FIELD_INVALID_INDEX)`,
-    `          || !(contribution2.x < 0.0)
+        code: `          || !(contribution2.x < 0.0)
           || !p2g_field_finite(contribution2.x)
           || !(contribution2.y >= 0.0)
           || !p2g_field_finite(contribution2.y)
@@ -7486,17 +7493,16 @@ fn main(
             && (contribution1.w != 0.0
               || contribution2.z != 0.0
               || contribution2.w != 0.0))
-          || contribution_count == P2G_FIELD_INVALID_INDEX)`,
-    'ActiveSource-v2 temporal coarse payload validation'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `      let next_mass = mass + contribution0.x;
+          || contribution_count == P2G_FIELD_INVALID_INDEX)`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-stable-reduction',
+        match: `      let next_mass = mass + contribution0.x;
       let next_momentum = momentum + contribution0.yzw;
       let next_mass_gradient = mass_gradient + contribution1.xyz;
       let next_represented_volume_m3 =
         represented_volume_m3 + contribution2.x;`,
-    `      let next_mass = mass + contribution0.x;
+        code: `      let next_mass = mass + contribution0.x;
       let next_momentum = momentum + contribution0.yzw;
       let next_successor_momentum = successor_momentum + vec3<f32>(
         contribution1.w,
@@ -7505,41 +7511,38 @@ fn main(
       );
       let next_mass_gradient = mass_gradient + contribution1.xyz;
       let next_represented_volume_m3 =
-        represented_volume_m3 - contribution2.x;`,
-    'ActiveSource-v2 temporal coarse stable reduction'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `          || !all(vec3<bool>(
+        represented_volume_m3 - contribution2.x;`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-running-sum-validation',
+        match: `          || !all(vec3<bool>(
             p2g_field_finite(next_mass_gradient.x),`,
-    `          || !all(vec3<bool>(
+        code: `          || !all(vec3<bool>(
             p2g_field_finite(next_successor_momentum.x),
             p2g_field_finite(next_successor_momentum.y),
             p2g_field_finite(next_successor_momentum.z)
           ))
           || !all(vec3<bool>(
-            p2g_field_finite(next_mass_gradient.x),`,
-    'ActiveSource-v2 temporal coarse running-sum validation'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `      mass = next_mass;
+            p2g_field_finite(next_mass_gradient.x),`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-running-sum-commit',
+        match: `      mass = next_mass;
       momentum = next_momentum;
       mass_gradient = next_mass_gradient;`,
-    `      mass = next_mass;
+        code: `      mass = next_mass;
       momentum = next_momentum;
       successor_momentum = next_successor_momentum;
-      mass_gradient = next_mass_gradient;`,
-    'ActiveSource-v2 temporal coarse running-sum commit'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `  p2g_field_store_word(
+      mass_gradient = next_mass_gradient;`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-field-sidecar',
+        match: `  p2g_field_store_word(
     pressure_base + 2u,
     bitcast<u32>(absolute_pressure_pa)
   );
   // Count publishes the immutable row last.`,
-    `  p2g_field_store_word(
+        code: `  p2g_field_store_word(
     pressure_base + 2u,
     bitcast<u32>(absolute_pressure_pa)
   );
@@ -7559,23 +7562,21 @@ fn main(
       bitcast<u32>(successor_momentum.z)
     );
   }
-  // Count publishes the immutable row last.`,
-    'ActiveSource-v2 temporal coarse field sidecar'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `      || p2g_field_word(58u) != 0u
+  // Count publishes the immutable row last.`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-preflight',
+        match: `      || p2g_field_word(58u) != 0u
       || p2g_field_word(59u) != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u`,
-    `      || p2g_field_word(58u) != 0u
+        code: `      || p2g_field_word(58u) != 0u
       || !p2g_temporal_coarse_params_admitted()
-      || p2g_field_word(59u) != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u`,
-    'ActiveSource-v2 temporal coarse preflight'
-  );
-  result = replaceRequiredWgsl(
-    result,
-    `  p2g_field_store_word(receipt + 6u, p2g_field_word(34u));
+      || p2g_field_word(59u) != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u`
+      },
+      {
+        slot: 'active-source-v2-temporal-coarse-receipt',
+        match: `  p2g_field_store_word(receipt + 6u, p2g_field_word(34u));
   p2g_field_store_word(receipt + 24u, P2G_PRESSURE_MAGIC);`,
-    `  p2g_field_store_word(receipt + 6u, p2g_field_word(34u));
+        code: `  p2g_field_store_word(receipt + 6u, p2g_field_word(34u));
   if (params.temporal_coarse_enabled != 0u) {
     p2g_field_store_word(receipt + 13u, TEMPORAL_COARSE_MAGIC);
     p2g_field_store_word(
@@ -7585,52 +7586,57 @@ fn main(
     // Publish the temporal subreceipt seal after its identity and dt.
     p2g_field_store_word(receipt + 15u, p2g_temporal_coarse_seal());
   }
-  p2g_field_store_word(receipt + 24u, P2G_PRESSURE_MAGIC);`,
-    'ActiveSource-v2 temporal coarse receipt'
-  );
-  return result;
+  p2g_field_store_word(receipt + 24u, P2G_PRESSURE_MAGIC);`
+      }
+    ]
+  }));
 }
 
-function createMechanicsFieldG2pWgsl(sourceWgsl) {
-  const withRefluxBinding = replaceRequiredWgsl(
-    sourceWgsl,
-    '@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;',
-    '@group(0) @binding(1) var<storage, read_write> cross_level_reflux: array<atomic<u32>>;',
-    'mechanics field G2P reflux binding'
-  );
-  const withoutUnusedThermoRead = replaceRequiredWgsl(
-    withRefluxBinding,
-    '  let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;',
-    '  // Binding 1 is the cross-level reflux ledger in this field variant.',
-    'mechanics field G2P unused thermo read removal'
-  );
-  const withFieldBinding = replaceRequiredWgsl(
-    withoutUnusedThermoRead,
-    '@group(0) @binding(3) var<storage, read> updated_grid_nodes: array<vec4<f32>>;',
-    '@group(0) @binding(3) var<storage, read_write> mechanics_field_view: array<atomic<u32>>;',
-    'mechanics field G2P binding'
-  );
-  const withReadOnlyAuthorityBinding = replaceRequiredWgsl(
-    withFieldBinding,
-    '@group(0) @binding(7) var<storage, read_write> schroeder_spatial_authority_evidence: array<atomic<u32>>;',
-    '@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;',
-    'mechanics field G2P immutable mechanics-view binding'
-  );
-  const withoutBorrowedSuccessEvidence = replaceRequiredWgslRange(
-    withReadOnlyAuthorityBinding,
-    'fn g2p_spatial_evidence_add(word: u32, value: u32) {',
-    '\nfn g2p_canonical_query_geometry_admitted',
-    `fn g2p_spatial_evidence_add(word: u32, value: u32) {
+function createMechanicsFieldG2pWgsl(
+  sourceWgsl,
+  variantId = 'mechanics-field'
+) {
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-g2p',
+    variantId,
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'mechanics-field-g2p-reflux-binding',
+        match: '@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;',
+        code: '@group(0) @binding(1) var<storage, read_write> cross_level_reflux: array<atomic<u32>>;'
+      },
+      {
+        slot: 'mechanics-field-g2p-unused-thermo-read',
+        match: '  let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;',
+        code: '  // Binding 1 is the cross-level reflux ledger in this field variant.'
+      },
+      {
+        slot: 'mechanics-field-g2p-field-binding',
+        match: '@group(0) @binding(3) var<storage, read> updated_grid_nodes: array<vec4<f32>>;',
+        code: '@group(0) @binding(3) var<storage, read_write> mechanics_field_view: array<atomic<u32>>;'
+      },
+      {
+        slot: 'mechanics-field-g2p-immutable-authority-binding',
+        match: '@group(0) @binding(7) var<storage, read_write> schroeder_spatial_authority_evidence: array<atomic<u32>>;',
+        code: '@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;'
+      },
+      {
+        slot: 'mechanics-field-g2p-borrowed-success-evidence',
+        kind: 'range',
+        start: 'fn g2p_spatial_evidence_add(word: u32, value: u32) {',
+        end: '\nfn g2p_canonical_query_geometry_admitted',
+        code: `fn g2p_spatial_evidence_add(word: u32, value: u32) {
   // The producer-owned compact mechanics view is immutable.
 }
-`,
-    'mechanics field G2P borrowed success evidence removal'
-  );
-  const withFieldOwnedAuthorityRejection = replaceRequiredWgslRange(
-    withoutBorrowedSuccessEvidence,
-    'fn g2p_spatial_reject(word: u32) {',
-    '\nfn g2p_authenticate_spatial_header',
-    `fn g2p_spatial_reject(word: u32) {
+`
+      },
+      {
+        slot: 'mechanics-field-g2p-owned-rejection-evidence',
+        kind: 'range',
+        start: 'fn g2p_spatial_reject(word: u32) {',
+        end: '\nfn g2p_authenticate_spatial_header',
+        code: `fn g2p_spatial_reject(word: u32) {
   if (arrayLength(&mechanics_field_view)
       >= ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS}u) {
     atomicOr(
@@ -7680,18 +7686,18 @@ fn g2p_spatial_authority_rejected() -> bool {
 fn g2p_spatial_evidence_identity(particle_index: u32) {
   // The producer-owned compact mechanics view is immutable.
 }
-`,
-    'mechanics field G2P owned rejection evidence'
-  );
-  const withoutBorrowedUpstreamNormalization =
-    withFieldOwnedAuthorityRejection.replace(
-      '    atomicStore(&schroeder_spatial_authority_evidence[14u], 1u);',
-      '    g2p_spatial_reject(16u);'
-    );
-  const withFieldHelpers = replaceRequiredWgsl(
-    withoutBorrowedUpstreamNormalization,
-    'fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {',
-    `const G2P_FIELD_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u;
+`
+      },
+      {
+        slot: 'mechanics-field-g2p-upstream-normalization-reject',
+        optional: true,
+        match: '    atomicStore(&schroeder_spatial_authority_evidence[14u], 1u);',
+        code: '    g2p_spatial_reject(16u);'
+      },
+      {
+        slot: 'mechanics-field-g2p-helpers',
+        match: 'fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {',
+        code: `const G2P_FIELD_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u;
 const G2P_FIELD_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u;
 const G2P_FIELD_READY_ADMITTED: u32 = ${
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_STATUS_READY
@@ -8645,14 +8651,13 @@ fn consume_g2p_coarse_reflux_receipt() {
   g2p_reflux_store(95u, token);
 }
 
-fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
-    'mechanics field G2P helpers'
-  );
-  const withInactiveCarrierCopyThrough = replaceRequiredWgsl(
-    withFieldHelpers,
-    `  let pos_mass = sph_state[state_base];
+fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`
+      },
+      {
+        slot: 'mechanics-field-g2p-inactive-carrier-copy',
+        match: `  let pos_mass = sph_state[state_base];
   let vel_u = sph_state[state_base + 1u];`,
-    `  let pos_mass = sph_state[state_base];
+        code: `  let pos_mass = sph_state[state_base];
   let vel_u = sph_state[state_base + 1u];
   // Fixed-capacity reaction and phase-companion rows are valid retained
   // storage, but deliberately have no mechanics-field descriptor while
@@ -8666,12 +8671,11 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
     g2p_spatial_reject(17u);
     g2p_copy_input_particle(state_base, mechanics_base);
     return;
-  }`,
-    'mechanics field G2P inactive carrier copy-through'
-  );
-  const withFieldSample = replaceRequiredWgsl(
-    withInactiveCarrierCopyThrough,
-    `        let idx = g2p_grid_index(node_i, node_j, node_k);
+  }`
+      },
+      {
+        slot: 'mechanics-field-g2p-sample',
+        match: `        let idx = g2p_grid_index(node_i, node_j, node_k);
         let grid_row = updated_grid_nodes[idx * 2u];
         let grid_meta = updated_grid_nodes[idx * 2u + 1u];
         if (!(grid_row.x > 0.0) && !(grid_meta.w > 0.0)) {
@@ -8679,7 +8683,7 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
         }
         sampled_weight = sampled_weight + weight;
         let grid_velocity = grid_row.yzw;`,
-    `        let idx = g2p_grid_index(node_i, node_j, node_k);
+        code: `        let idx = g2p_grid_index(node_i, node_j, node_k);
         let field_index = g2p_field_find(
           particle_index,
           u32(a * 9i + b * 3i + c),
@@ -8746,13 +8750,12 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
           + weight * field_route_specific_energy;
         sampled_route_internal_energy_delta =
           sampled_route_internal_energy_delta
-          + weight * (field_route_specific_energy + reflux_specific_energy);`,
-    'mechanics field G2P sample'
-  );
-  const withEnergyAccumulator = replaceRequiredWgsl(
-    withFieldSample,
-    '  var sampled_weight = 0.0;',
-    `  var sampled_weight = 0.0;
+          + weight * (field_route_specific_energy + reflux_specific_energy);`
+      },
+      {
+        slot: 'mechanics-field-g2p-energy-accumulator',
+        match: '  var sampled_weight = 0.0;',
+        code: `  var sampled_weight = 0.0;
   // Keep the energy transpose on the raw P2G basis. Velocity reconstruction
   // may renormalize clipped support, but doing that to energy would violate
   // sum_p m_p * sum_i(w_pi * E_i/m_i) == sum_i E_i.
@@ -8766,13 +8769,12 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
   var sampled_pressure_common_bits = 0u;
   var sampled_pressure_initialized = false;
   var sampled_pressure_uniform = true;
-  var sampled_pressure_valid = true;`,
-    'mechanics field G2P reflux energy accumulator'
-  );
-  const withEnergyDeposit = replaceRequiredWgsl(
-    withEnergyAccumulator,
-    '  out_sph_state[state_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, vel_u.w);',
-    `  var resolved_absolute_pressure = 0.0;
+  var sampled_pressure_valid = true;`
+      },
+      {
+        slot: 'mechanics-field-g2p-energy-deposit',
+        match: '  out_sph_state[state_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, vel_u.w);',
+        code: `  var resolved_absolute_pressure = 0.0;
   if (sampled_pressure_initialized && sampled_pressure_weight > 0.0) {
     if (sampled_pressure_uniform) {
       // Preserve an exactly uniform/reference pressure bitwise. This avoids
@@ -8847,70 +8849,74 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
   }
   out_sph_state[state_base + 1u] = vec4<f32>(
     velocity.x, velocity.y, velocity.z, next_internal_energy
-  );`,
-    'mechanics field G2P reflux internal-energy deposit'
-  );
-  const withPressurePublication = replaceRequiredWgsl(
-    withEnergyDeposit,
-    '  out_mls_mechanics[mechanics_base + 7u] = row7;',
-    `  out_mls_mechanics[mechanics_base + 7u] = vec4<f32>(
+  );`
+      },
+      {
+        slot: 'mechanics-field-g2p-resolved-pressure-publication',
+        match: '  out_mls_mechanics[mechanics_base + 7u] = row7;',
+        code: `  out_mls_mechanics[mechanics_base + 7u] = vec4<f32>(
     resolved_absolute_pressure, row7.y, row7.z, row7.w
-  );`,
-    'mechanics field G2P resolved pressure publication'
-  );
-  return replaceRequiredWgsl(
-    withPressurePublication,
-    '    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);',
-    `    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);
+  );`
+      },
+      {
+        slot: 'mechanics-field-g2p-canonical-rollback-receipt',
+        match: '    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);',
+        code: `    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);
     // Canonical final rollback is the only place that can see receipt-stage
     // rejection after candidate reconstruction. Particle zero publishes one
     // durable rollback event while every invocation preserves bitwise input.
     if (particle_index == 0u && g2p_reflux_present()) {
       _ = g2p_reflux_increment_checked(122u);
-    }`,
-    'mechanics field G2P canonical rollback receipt'
-  );
+    }`
+      }
+    ]
+  }));
 }
 
-function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
-  const withStaticNoReflux = replaceRequiredWgsl(
-    sourceWgsl,
-    `fn g2p_reflux_present() -> bool {
+function createSingleLevelMechanicsFieldG2pWgsl(
+  sourceWgsl,
+  variantId = 'single-level-mechanics-field'
+) {
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-g2p',
+    variantId,
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'single-level-mechanics-field-static-no-reflux',
+        match: `fn g2p_reflux_present() -> bool {
   return arrayLength(&cross_level_reflux) >= G2P_REFLUX_HEADER_WORDS
     && g2p_reflux_load(0u) == G2P_REFLUX_MAGIC;
 }`,
-    `fn g2p_reflux_present() -> bool {
+        code: `fn g2p_reflux_present() -> bool {
   // runFusedNoFullMlsMpmMechanicsWebGpu always binds the dummy ledger.
   return false;
-}`,
-    'single-level mechanics field static no-reflux contract'
-  );
-  const withPerParticleAdmission = replaceRequiredWgsl(
-    withStaticNoReflux,
-    `  if (!g2p_reflux_admitted()) {
+}`
+      },
+      {
+        slot: 'single-level-mechanics-field-per-particle-admission',
+        match: `  if (!g2p_reflux_admitted()) {
     g2p_spatial_reject(17u);
     g2p_copy_input_particle(state_base, mechanics_base);
     return;
   }`,
-    `  // The field header and claimed local-energy receipt are immutable for
+        code: `  // The field header and claimed local-energy receipt are immutable for
   // this dispatch, so authenticate them once per particle rather than once
   // for every stencil sample.
   if (!g2p_field_view_admitted()) {
     g2p_spatial_reject(17u);
     g2p_copy_input_particle(state_base, mechanics_base);
     return;
-  }`,
-    'single-level mechanics field per-particle admission'
-  );
-  const withHoistedFieldFindAdmission = replaceRequiredWgsl(
-    withPerParticleAdmission,
-    '  if (!g2p_field_view_admitted()) { return G2P_FIELD_INVALID_INDEX; }',
-    '  // Field admission was authenticated once by this particle invocation.',
-    'single-level mechanics field stencil admission hoist'
-  );
-  const withHoistedEnergyAdmission = replaceRequiredWgsl(
-    withHoistedFieldFindAdmission,
-    `fn g2p_field_specific_energy(field_index: u32, field_mass: f32) -> f32 {
+  }`
+      },
+      {
+        slot: 'single-level-mechanics-field-stencil-admission-hoist',
+        match: '  if (!g2p_field_view_admitted()) { return G2P_FIELD_INVALID_INDEX; }',
+        code: '  // Field admission was authenticated once by this particle invocation.'
+      },
+      {
+        slot: 'single-level-mechanics-field-energy-admission-hoist',
+        match: `fn g2p_field_specific_energy(field_index: u32, field_mass: f32) -> f32 {
   if (!(field_mass > 0.0)
       || !g2p_field_receipt_structural(G2P_FIELD_RECEIPT_G2P_CLAIMED)) {
     g2p_receipt_reject(false, true, false);
@@ -8929,7 +8935,7 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
   }
   return heat_j / field_mass;
 }`,
-    `fn g2p_field_specific_energy(field_index: u32, field_mass: f32) -> f32 {
+        code: `fn g2p_field_specific_energy(field_index: u32, field_mass: f32) -> f32 {
   // Admission and receipt phase were authenticated once before the stencil.
   if (!(field_mass > 0.0)) {
     g2p_receipt_reject(false, true, false);
@@ -8944,12 +8950,11 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
     return 0.0;
   }
   return heat_j / field_mass;
-}`,
-    'single-level mechanics field energy admission hoist'
-  );
-  const withHoistedPressureEnergyAdmission = replaceRequiredWgsl(
-    withHoistedEnergyAdmission,
-    `fn g2p_field_pressure_specific_energy(
+}`
+      },
+      {
+        slot: 'single-level-mechanics-field-pressure-energy-admission-hoist',
+        match: `fn g2p_field_pressure_specific_energy(
   field_index: u32,
   field_mass: f32
 ) -> f32 {
@@ -8973,7 +8978,7 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
   }
   return pressure_internal_compensation_j / field_mass;
 }`,
-    `fn g2p_field_pressure_specific_energy(
+        code: `fn g2p_field_pressure_specific_energy(
   field_index: u32,
   field_mass: f32
 ) -> f32 {
@@ -8993,12 +8998,11 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
     return 0.0;
   }
   return pressure_internal_compensation_j / field_mass;
-}`,
-    'single-level mechanics field pressure-energy admission hoist'
-  );
-  const withSingleLevelSample = replaceRequiredWgsl(
-    withHoistedPressureEnergyAdmission,
-    `        let field_specific_energy = g2p_field_specific_energy(
+}`
+      },
+      {
+        slot: 'single-level-mechanics-field-g2p-sample',
+        match: `        let field_specific_energy = g2p_field_specific_energy(
           field_index, field_mass
         );
         let field_pressure_specific_energy =
@@ -9027,7 +9031,7 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
         sampled_route_internal_energy_delta =
           sampled_route_internal_energy_delta
           + weight * (field_route_specific_energy + reflux_specific_energy);`,
-    `        // This fused route always binds the four-word dummy reflux buffer.
+        code: `        // This fused route always binds the four-word dummy reflux buffer.
         // Preserve the local field-energy transpose, but do not authenticate or
         // sample cross-level route/reflux state that cannot exist here.
         let field_specific_energy = g2p_field_specific_energy(
@@ -9044,31 +9048,28 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
           + weight * field_specific_energy;
         sampled_pressure_internal_energy_delta =
           sampled_pressure_internal_energy_delta
-          + weight * field_pressure_specific_energy;`,
-    'single-level mechanics field G2P sample'
-  );
-  const withSingleLevelAccumulators = replaceRequiredWgsl(
-    withSingleLevelSample,
-    `  var sampled_field_route_internal_energy_delta = 0.0;
+          + weight * field_pressure_specific_energy;`
+      },
+      {
+        slot: 'single-level-mechanics-field-route-accumulators',
+        match: `  var sampled_field_route_internal_energy_delta = 0.0;
   var sampled_route_internal_energy_delta = 0.0;`,
-    '',
-    'single-level mechanics field route accumulators'
-  );
-  const withSingleLevelValidation = replaceRequiredWgsl(
-    withSingleLevelAccumulators,
-    `      || sampled_field_route_internal_energy_delta
+        code: ''
+      },
+      {
+        slot: 'single-level-mechanics-field-route-validation',
+        match: `      || sampled_field_route_internal_energy_delta
         != sampled_field_route_internal_energy_delta
       || abs(sampled_field_route_internal_energy_delta) > 3.402823466e+38
       || sampled_field_route_internal_energy_delta < 0.0
       || sampled_route_internal_energy_delta != sampled_route_internal_energy_delta
       || abs(sampled_route_internal_energy_delta) > 3.402823466e+38
       || sampled_route_internal_energy_delta < 0.0`,
-    '',
-    'single-level mechanics field route validation'
-  );
-  const withSingleLevelDeposit = replaceRequiredWgsl(
-    withSingleLevelValidation,
-    `  if (g2p_reflux_present()) {
+        code: ''
+      },
+      {
+        slot: 'single-level-mechanics-field-route-deposit',
+        match: `  if (g2p_reflux_present()) {
     let consumed_route_j = pos_mass.w * sampled_route_internal_energy_delta;
     let consumed_local_j = pos_mass.w * max(
       0.0,
@@ -9084,22 +9085,22 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
     }
   }
 `,
-    '',
-    'single-level mechanics field route deposit'
-  );
-  return replaceRequiredWgsl(
-    withSingleLevelDeposit,
-    `    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);
+        code: ''
+      },
+      {
+        slot: 'single-level-mechanics-field-g2p-canonical-rollback',
+        match: `    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);
     // Canonical final rollback is the only place that can see receipt-stage
     // rejection after candidate reconstruction. Particle zero publishes one
     // durable rollback event while every invocation preserves bitwise input.
     if (particle_index == 0u && g2p_reflux_present()) {
       _ = g2p_reflux_increment_checked(122u);
     }`,
-    `    // Single-level finalization has no cross-level terminal receipt.
-    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);`,
-    'single-level mechanics field G2P canonical rollback'
-  );
+        code: `    // Single-level finalization has no cross-level terminal receipt.
+    g2p_copy_input_particle(particle_index * 2u, particle_index * 8u);`
+      }
+    ]
+  }));
 }
 
 // Fused grid-update params are bound to the mechanics-field grid-update
@@ -9980,12 +9981,27 @@ fn seal_velocity_state() {
 }
 `;
 
-function createActiveSourceV2MechanicsFieldG2pWgsl(sourceWgsl) {
-  const withParams = replaceRequiredWgsl(
-    sourceWgsl,
-    `  schroeder_spatial_pad0: u32,
+function createActiveSourceV2MechanicsFieldG2pWgsl(
+  sourceWgsl,
+  variantId = 'active-source-v2-mechanics-field'
+) {
+  const rejectedStatusMask =
+    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
+    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE;
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-g2p',
+    variantId,
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'active-source-v2-g2p-params',
+        match: `  schroeder_spatial_pad0: u32,
 };`,
-    `  schroeder_spatial_pad0: u32,
+        code: `  schroeder_spatial_pad0: u32,
   active_source_physical_capacity: u32,
   active_source_active_capacity: u32,
   active_source_view_capacity_words: u32,
@@ -9994,29 +10010,21 @@ function createActiveSourceV2MechanicsFieldG2pWgsl(sourceWgsl) {
   active_source_fingerprint: u32,
   active_source_dispatch_x_limit: u32,
   active_source_completion_ordinal: u32,
-};`,
-    'ActiveSource-v2 G2P parameter fields'
-  );
-  const withBindings = replaceRequiredWgsl(
-    withParams,
-    `@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;
+};`
+      },
+      {
+        slot: 'active-source-v2-g2p-authority-bindings',
+        match: `@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;
 @group(0) @binding(8) var<storage, read> schroeder_spatial_directory: array<u32>;`,
-    `@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;
-@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;`,
-    'ActiveSource-v2 G2P immutable authority bindings'
-  );
-  const rejectedStatusMask =
-    SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_FAIL_CLOSED
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_INVALID_SOURCE
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_CAPACITY_OVERFLOW
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_UNSUPPORTED_SOURCE
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_IDENTITY_MISMATCH
-    | SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_STATUS_NONFINITE;
-  const withAuthority = replaceRequiredWgslRange(
-    withBindings,
-    'const G2P_SCHROEDER_SPATIAL_MAGIC: u32',
-    '\nfn g2p_particle_enabled',
-    `const G2P_ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC}u;
+        code: `@group(0) @binding(7) var<storage, read> schroeder_spatial_authority_evidence: array<u32>;
+@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;`
+      },
+      {
+        slot: 'active-source-v2-g2p-authority',
+        kind: 'range',
+        start: 'const G2P_SCHROEDER_SPATIAL_MAGIC: u32',
+        end: '\nfn g2p_particle_enabled',
+        code: `const G2P_ACTIVE_SOURCE_MAGIC: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_MAGIC}u;
 const G2P_ACTIVE_SOURCE_VERSION: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_VERSION}u;
 const G2P_ACTIVE_SOURCE_HEADER_WORDS: u32 = ${SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_HEADER_WORDS}u;
 const G2P_ACTIVE_SOURCE_READY_ADMITTED: u32 = ${
@@ -10217,14 +10225,14 @@ fn g2p_authenticate_spatial_header(particle_index: u32) {
     g2p_spatial_reject(16u);
   }
 }
-`,
-    'ActiveSource-v2 G2P authority'
-  );
-  return replaceRequiredWgslRange(
-    withAuthority,
-    'fn g2p_particle_enabled(particle_index: u32) -> bool {',
-    '\nfn g2p_copy_input_particle',
-    `fn g2p_particle_enabled(particle_index: u32) -> bool {
+`
+      },
+      {
+        slot: 'active-source-v2-physical-g2p-admission',
+        kind: 'range',
+        start: 'fn g2p_particle_enabled(particle_index: u32) -> bool {',
+        end: '\nfn g2p_copy_input_particle',
+        code: `fn g2p_particle_enabled(particle_index: u32) -> bool {
   g2p_authenticate_spatial_header(particle_index);
   if (g2p_spatial_authority_rejected()
       || particle_index >= params.particle_count) {
@@ -10247,79 +10255,103 @@ fn g2p_authenticate_spatial_header(particle_index: u32) {
   return descriptor_base + 3u < arrayLength(&mechanics_field_view)
     && g2p_field_load(descriptor_base + 3u) == 1u;
 }
-`,
-    'ActiveSource-v2 physical G2P admission'
-  );
+`
+      }
+    ]
+  }));
 }
 
-const mlsMpmP2gGridProjectionActiveGridWgsl = createActiveGridP2gProjectionWgsl();
+const mlsMpmP2gGridProjectionActiveGridWgsl =
+  createActiveGridP2gProjectionWgsl(mlsMpmP2gGridProjectionWgsl, 'active-grid');
 const mlsMpmP2gGridProjectionCanonicalSpatialActiveGridWgsl =
-  createActiveGridP2gProjectionWgsl(mlsMpmP2gGridProjectionCanonicalSpatialWgsl);
+  createActiveGridP2gProjectionWgsl(
+    mlsMpmP2gGridProjectionCanonicalSpatialWgsl,
+    'canonical-spatial-active-grid'
+  );
 const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveGridWgsl =
   createActiveGridP2gProjectionWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl,
+    'canonical-spatial-unobserved-active-grid'
   );
 const mlsMpmP2gGridProjectionCanonicalSpatialCompactMechanicsWgsl =
   createCompactMechanicsP2gProjectionWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialWgsl,
+    'canonical-spatial-compact-mechanics'
   );
 const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedCompactMechanicsWgsl =
   createCompactMechanicsP2gProjectionWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl,
+    'canonical-spatial-unobserved-compact-mechanics'
   );
 export const mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl =
   createMechanicsFieldP2gProjectionWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialCompactMechanicsWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialCompactMechanicsWgsl,
+    'canonical-spatial-mechanics-field'
   );
 export const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl =
   createMechanicsFieldP2gProjectionWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedCompactMechanicsWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedCompactMechanicsWgsl,
+    'canonical-spatial-unobserved-mechanics-field'
   );
 export const mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl =
   createSingleLevelMechanicsFieldP2gProjectionWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl,
+    'canonical-spatial-single-level-mechanics-field'
   );
 export const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl =
   createSingleLevelMechanicsFieldP2gProjectionWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl,
+    'canonical-spatial-unobserved-single-level-mechanics-field'
   );
 export const mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl =
   createActiveSourceV2MechanicsFieldP2gWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl,
+    'canonical-spatial-active-source-v2-single-level-mechanics-field'
   );
 export const mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl =
   createActiveSourceV2MechanicsFieldP2gWgsl(
-    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl
+    mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+    'canonical-spatial-unobserved-active-source-v2-single-level-mechanics-field'
   );
 export const mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl =
-  createMechanicsFieldG2pWgsl(mlsMpmG2pReconstructCanonicalSpatialWgsl);
+  createMechanicsFieldG2pWgsl(
+    mlsMpmG2pReconstructCanonicalSpatialWgsl,
+    'canonical-spatial-mechanics-field'
+  );
 export const mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl =
   createMechanicsFieldG2pWgsl(
-    mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl,
+    'canonical-spatial-unobserved-mechanics-field'
   );
 export const mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl =
   createActiveSourceV2MechanicsFieldG2pWgsl(
-    mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl
+    mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl,
+    'canonical-spatial-active-source-v2-mechanics-field'
   );
 export const mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl =
   createActiveSourceV2MechanicsFieldG2pWgsl(
-    mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl,
+    'canonical-spatial-unobserved-active-source-v2-mechanics-field'
   );
 export const mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl =
   createSingleLevelMechanicsFieldG2pWgsl(
-    mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl
+    mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl,
+    'canonical-spatial-single-level-mechanics-field'
   );
 export const mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl =
   createSingleLevelMechanicsFieldG2pWgsl(
-    mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl,
+    'canonical-spatial-unobserved-single-level-mechanics-field'
   );
 export const mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl =
   createActiveSourceV2MechanicsFieldG2pWgsl(
-    mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl
+    mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl,
+    'canonical-spatial-active-source-v2-single-level-mechanics-field'
   );
 export const mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl =
   createActiveSourceV2MechanicsFieldG2pWgsl(
-    mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl
+    mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+    'canonical-spatial-unobserved-active-source-v2-single-level-mechanics-field'
   );
 // Spatial (grid-measured) density term for the liquid EOS. DISABLED: with
 // particle lattices coarser than the grid, the estimator aliases above rest

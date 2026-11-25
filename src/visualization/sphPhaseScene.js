@@ -37101,6 +37101,7 @@ fn main(
     schroederPhaseVolumeMigrationAdmission = null,
     schroederEnableParticleStorageMaterialization = false,
     schroederEnablePhaseSlotRefinement = false,
+    schroederEnableLiquidPhaseSlotRefinement = false,
     schroederParticleStorageAdmissionRowBudget = null,
     schroederParticleStorageRequiredCapacity = null,
     schroederParticleStorageCapacityMargin = null,
@@ -37905,6 +37906,7 @@ fn main(
       requestedSchroederWorkerHierarchyConfig = createSchroederWorkerHierarchyConfig({
         ...requestedSchroederWorkerHierarchyConfig,
         enablePhaseSlotRefinement: true,
+        ...(schroederEnableLiquidPhaseSlotRefinement ? { enableLiquidPhaseSlotRefinement: true } : {}),
         phaseSlotRefinementAdmissions: {
           phaseVolumeSplitMergeAdmission: requestedSchroederPhaseVolumeSplitMergeAdmission,
           particleStorageAllocatorAdmission: requestedSchroederParticleStorageAllocatorAdmission,
@@ -39725,6 +39727,9 @@ fn main(
                 ? { particleStorageAllocatorAdmission: requestedSchroederParticleStorageAllocatorAdmission }
                 : {}),
               enablePhaseSlotRefinement: schroederEnablePhaseSlotRefinement,
+              enableLiquidPhaseSlotRefinement: Boolean(
+                schroederEnablePhaseSlotRefinement && schroederEnableLiquidPhaseSlotRefinement
+              ),
               ...(requestedSchroederParticleStorageFreeList && !schroederEnablePhaseSlotRefinement
                 ? { particleStorageFreeList: requestedSchroederParticleStorageFreeList }
                 : {}),

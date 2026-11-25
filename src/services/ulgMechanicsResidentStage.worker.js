@@ -6119,7 +6119,11 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     if (policy.signature !== data.hierarchyConfig.signature) {
       throw new TypeError('Worker phase-slot admission receipts do not match the hierarchy signature');
     }
-    phaseSlotRefinementOptions = { enablePhaseSlotRefinement: true, ...policy.phaseSlotRefinementAdmissions };
+    phaseSlotRefinementOptions = {
+      enablePhaseSlotRefinement: true,
+      ...(policy.enableLiquidPhaseSlotRefinement === true ? { enableLiquidPhaseSlotRefinement: true } : {}),
+      ...policy.phaseSlotRefinementAdmissions
+    };
   }
   const sphParticleUpload = lane.sphParticleUpload || data.sphParticleUpload || null;
   const mlsMpmParticleUpload =
@@ -7220,6 +7224,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         status: data.hierarchyConfig.status ?? null,
         signature: data.hierarchyConfig.signature ?? null,
         ...(data.hierarchyConfig.enablePhaseSlotRefinement === true ? { enablePhaseSlotRefinement: true } : {}),
+        ...(data.hierarchyConfig.enableLiquidPhaseSlotRefinement === true ? { enableLiquidPhaseSlotRefinement: true } : {}),
         selectedLevel: data.hierarchyConfig.selectedLevel ?? null,
         minLevel: data.hierarchyConfig.minLevel ?? null,
         maxLevel: data.hierarchyConfig.maxLevel ?? null,

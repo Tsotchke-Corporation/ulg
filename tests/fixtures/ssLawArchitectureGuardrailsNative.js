@@ -14,6 +14,23 @@ import {
   generateBindGroupLayoutEntriesFromLawDescriptor
 } from '../../src/runtime/sph/lawAdapterContract.js';
 import { createGpuResourceLeaseScope } from '../../src/runtime/sph/gpuResourceLease.js';
+import {
+  getSphMlsMpmWgslVariantManifests,
+  mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+  mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl,
+  mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl
+} from '../../src/runtime/sph/sphMlsMpmGpuStep.js';
 
 export async function runSsLawGuardrailsNative() {
   let adapter = null;
@@ -164,11 +181,42 @@ fn main() {
       scope.release(item.lease, { by: 'teardown' });
     }
     const leaseSnapshot = scope.assertDrained({ requireAllReleased: true });
+    // 4. Compile ALL 14 exported composed sphMlsMpmGpuStep WGSL variants on real Vulkan!
+    const exportedComposedVariants = [
+      ['p2g-field', mlsMpmP2gGridProjectionCanonicalSpatialMechanicsFieldWgsl],
+      ['p2g-field-unobserved', mlsMpmP2gGridProjectionCanonicalSpatialUnobservedMechanicsFieldWgsl],
+      ['p2g-single-field', mlsMpmP2gGridProjectionCanonicalSpatialSingleLevelMechanicsFieldWgsl],
+      ['p2g-single-field-unobserved', mlsMpmP2gGridProjectionCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl],
+      ['p2g-v2-single-field', mlsMpmP2gGridProjectionCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl],
+      ['p2g-v2-single-field-unobserved', mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl],
+      ['g2p-field', mlsMpmG2pReconstructCanonicalSpatialMechanicsFieldWgsl],
+      ['g2p-field-unobserved', mlsMpmG2pReconstructCanonicalSpatialUnobservedMechanicsFieldWgsl],
+      ['g2p-v2-field', mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2MechanicsFieldWgsl],
+      ['g2p-v2-field-unobserved', mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2MechanicsFieldWgsl],
+      ['g2p-single-field', mlsMpmG2pReconstructCanonicalSpatialSingleLevelMechanicsFieldWgsl],
+      ['g2p-single-field-unobserved', mlsMpmG2pReconstructCanonicalSpatialUnobservedSingleLevelMechanicsFieldWgsl],
+      ['g2p-v2-single-field', mlsMpmG2pReconstructCanonicalSpatialActiveSourceV2SingleLevelMechanicsFieldWgsl],
+      ['g2p-v2-single-field-unobserved', mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2SingleLevelMechanicsFieldWgsl]
+    ];
+    const composedVariantErrors = [];
+    for (const [label, wgsl] of exportedComposedVariants) {
+      const m = device.createShaderModule({ label: `composed:${label}`, code: wgsl });
+      const ci = await m.getCompilationInfo();
+      const errs = ci.messages.filter((msg) => msg.type === 'error');
+      if (errs.length > 0) {
+        composedVariantErrors.push(`${label}: ${errs.map((e) => `${e.lineNum}: ${e.message}`).join('; ')}`);
+      }
+    }
+    const manifestCount = Object.keys(getSphMlsMpmWgslVariantManifests()).length;
+
     const hostExpected = retargetRepresentedVolumeToPhase(liquidVol, 8.0, 0.6);
     const validationError = await device.popErrorScope();
     return {
       status: 'ok',
       compileErrors,
+      composedVariantCount: exportedComposedVariants.length,
+      composedVariantErrors,
+      manifestCount,
       fingerprint: composed.fingerprint,
       activeFragments: composed.activeFragments,
       gpuSourceVolume: out.slice(0, 4),

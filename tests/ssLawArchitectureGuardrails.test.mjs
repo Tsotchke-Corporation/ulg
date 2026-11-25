@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
@@ -35,6 +36,7 @@ import {
   createGpuResourceLeaseScope
 } from '../src/runtime/sph/gpuResourceLease.js';
 import { getSphMlsMpmWgslVariantManifests } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import { createSchroederWorkerHierarchyConfig } from '../src/runtime/sph/schroederWorkerLaneControlPlane.js';
 
 test('Slice 3.1: laneAccessorGenerator derives exact WGSL offsets from canonical ABI *_ROW_LAYOUT descriptors', () => {
   const parsed = parseRowLayoutDescriptor(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT, {
@@ -267,8 +269,107 @@ test('Slice 3.5: named WGSL fragment composer rejects unknown/ambiguous slots an
     /ambiguous WGSL slot anchor/
   );
 
-  // Live sphMlsMpmGpuStep variant manifest registry is exported cleanly.
+  // Live sphMlsMpmGpuStep variant manifest registry tracks ALL 21 composed
+  // P2G / GridUpdate / G2P WGSL variants with ZERO replaceRequiredWgsl left.
+  const stepSource = fs.readFileSync(
+    new URL('../src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url),
+    'utf8'
+  );
+  assert.equal(stepSource.includes('replaceRequiredWgsl'), false, 'zero ad-hoc replaceRequiredWgsl calls may remain in sphMlsMpmGpuStep.js');
+
   assert.equal(typeof getSphMlsMpmWgslVariantManifests, 'function');
   const manifests = getSphMlsMpmWgslVariantManifests();
-  assert.equal(typeof manifests, 'object');
+  const keys = Object.keys(manifests);
+  assert.ok(keys.length >= 21, `expected >= 21 composed WGSL variant manifests, got ${keys.length}: ${keys.join(', ')}`);
+  for (const requiredKey of [
+    'mls-mpm-p2g:active-grid',
+    'mls-mpm-p2g:canonical-spatial-compact-mechanics',
+    'mls-mpm-p2g:canonical-spatial-mechanics-field',
+    'mls-mpm-p2g:canonical-spatial-single-level-mechanics-field',
+    'mls-mpm-p2g:canonical-spatial-active-source-v2-single-level-mechanics-field',
+    'mls-mpm-grid-update:active-grid',
+    'mls-mpm-grid-update:compact-mechanics',
+    'mls-mpm-g2p:canonical-spatial-mechanics-field',
+    'mls-mpm-g2p:canonical-spatial-active-source-v2-mechanics-field',
+    'mls-mpm-g2p:canonical-spatial-single-level-mechanics-field',
+    'mls-mpm-g2p:canonical-spatial-active-source-v2-single-level-mechanics-field'
+  ]) {
+    const entry = manifests[requiredKey];
+    assert.ok(entry, `missing composed WGSL manifest for ${requiredKey}`);
+    assert.equal(entry.schema, ULG_WGSL_COMPOSED_MODULE_SCHEMA);
+    assert.ok(entry.activeFragments.length > 0);
+    assert.match(entry.fingerprint, /^[0-9a-f]{8}$/);
+  }
+});
+
+test('Track 2B: createSchroederWorkerHierarchyConfig forwards liquid phase-slot refinement and fails closed without base refinement', () => {
+  const validAdmissions = {
+    phaseVolumeSplitMergeAdmission: {
+      schema: 'peercompute.ulg.schroeder-phase-volume-split-merge-admission.v0',
+      phaseVolumeSplitMergeAdmissionApproved: true,
+      admissionStatus: 'approved',
+      committed: true,
+      admittedEpoch: 1,
+      stateFamilyId: 1,
+      allowedSplitRowCount: 64,
+      allowedMergeRowCount: 64
+    },
+    particleStorageAllocatorAdmission: {
+      schema: 'peercompute.ulg.schroeder-particle-storage-allocator-admission.v0',
+      particleStorageAllocatorAdmissionApproved: true,
+      admissionStatus: 'approved',
+      committed: true,
+      admittedEpoch: 1,
+      stateFamilyId: 1,
+      requiredParticleCapacity: 256,
+      targetStateFamilyMask: 7
+    },
+    particleStorageSlotAssignmentAdmission: {
+      schema: 'peercompute.ulg.schroeder-particle-storage-slot-assignment-admission.v0',
+      particleStorageSlotAssignmentAdmissionApproved: true,
+      admissionStatus: 'approved',
+      committed: true,
+      admittedEpoch: 1,
+      stateFamilyId: 1,
+      maxAssignedSlots: 64,
+      targetStateFamilyMask: 7
+    },
+    particleStorageMaterializationAdmission: {
+      schema: 'peercompute.ulg.schroeder-particle-storage-materialization-admission.v0',
+      particleStorageMaterializationAdmissionApproved: true,
+      admissionStatus: 'approved',
+      committed: true,
+      admittedEpoch: 1,
+      stateFamilyId: 1,
+      maxMaterializedRows: 64,
+      targetStateFamilyMask: 7
+    }
+  };
+
+  // Liquid phase-slot refinement without base enablePhaseSlotRefinement fails closed!
+  assert.throws(
+    () => createSchroederWorkerHierarchyConfig({
+      enablePhaseVolumeMigration: true,
+      enableLiquidPhaseSlotRefinement: true
+    }),
+    TypeError
+  );
+
+  const gasOnly = createSchroederWorkerHierarchyConfig({
+    enablePhaseVolumeMigration: true,
+    enablePhaseSlotRefinement: true,
+    phaseSlotRefinementAdmissions: validAdmissions
+  });
+  const withLiquid = createSchroederWorkerHierarchyConfig({
+    enablePhaseVolumeMigration: true,
+    enablePhaseSlotRefinement: true,
+    enableLiquidPhaseSlotRefinement: true,
+    phaseSlotRefinementAdmissions: validAdmissions
+  });
+  assert.equal(gasOnly.enablePhaseSlotRefinement, true);
+  assert.equal(gasOnly.enableLiquidPhaseSlotRefinement, undefined);
+  assert.equal(withLiquid.enablePhaseSlotRefinement, true);
+  assert.equal(withLiquid.enableLiquidPhaseSlotRefinement, true);
+  assert.notEqual(gasOnly.signature, withLiquid.signature);
+  assert.match(withLiquid.signature, /:liq1$/);
 });

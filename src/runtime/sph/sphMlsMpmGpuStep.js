@@ -15,6 +15,10 @@ import {
   runSchroederDeformableSolidSurfaceLaneStep,
   runSchroederSolidRigidLaneStep
 } from './schroederSolidRigidLane.js';
+import {
+  detectMixedSolidLiquidContinuumState,
+  runCachedSphSolidLiquidVelocitySeparationStep
+} from './sphSolidLiquidVelocitySeparationGpu.js';
 import { runSchroederSpatialChainResidentBatchWebGpu, schroederSpatialChainResidentClock,
   retireSchroederSpatialChainResidentStep, bindSchroederSpatialChainResidentDelta } from './schroederSpatialChainResidentGpu.js';
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
@@ -3076,7 +3080,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   // valid when the caller declared contact-free AND built no proposal.
   canonicalContactFreeExplicit = false,
   consumeCompactMechanicsView = true,
-  observeCanonicalSpatialAuthority = false
+  observeCanonicalSpatialAuthority = false,
+  solidLiquidVelocitySeparation = undefined
 }) {
   const exactMassMlsFields = exactMassSourceRead ? ['schema', 'status', 'mechanicsBuffer',
     'mechanicsBufferByteLength', 'mechanicsStrideBytes', 'particleCount', 'storageGeneration',
@@ -4425,6 +4430,22 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       if (!mechanicsFieldPostG2pPass) g2pFinalizePass.end();
     }
     if (mechanicsFieldPostG2pPass) mechanicsFieldPostG2pPass.end();
+    if (solidLiquidVelocitySeparation !== false && outStateBuffer && outMechanicsBuffer && particleCount > 0) {
+      const slipInfo = detectMixedSolidLiquidContinuumState(mlsMpmParticleState, sphParticleState);
+      if (solidLiquidVelocitySeparation === true || slipInfo.hasMixedSolidLiquid) {
+        runCachedSphSolidLiquidVelocitySeparationStep({
+          device,
+          stateBuffer: outStateBuffer,
+          mechanicsBuffer: outMechanicsBuffer,
+          particleCount,
+          gridDims: gridSpec.gridDims,
+          gridSpacingM: gridSpec.gridSpacingM,
+          shift: gridSpec.shift,
+          refParticleMassKg: slipInfo.refParticleMassKg,
+          encoder
+        });
+      }
+    }
     if (fusedBracket) {
       encodeSphGpuTimestampMarkerPass(encoder, {
         querySet: fusedBracket.timestampWrites.querySet,
@@ -27683,7 +27704,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   measureFusedSequenceQueueFence = false,
   measureGpuQueueFence = false,
   gpuTimestampRecorder = null,
-  onResidentStageProgress = null
+  onResidentStageProgress = null,
+  solidLiquidVelocitySeparation = undefined
 } = {}) {
   const exactMassContinuation = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload);
   if (phaseSlotRefinement && ((exactMassContinuation && !sphGpuParticleUploadExactEnergyRows(sphParticleUpload))
@@ -28606,7 +28628,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         canonicalSpatialRequired,
         canonicalContactFreeExplicit,
         consumeCompactMechanicsView,
-        observeCanonicalSpatialAuthority
+        observeCanonicalSpatialAuthority,
+        solidLiquidVelocitySeparation
       }).then(result => {
         if (exactMassContinuation) {
           exactMassFusedOutput = result;
@@ -28966,6 +28989,29 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         mechanicsBuffer: solidReleaseFluid?.mechanicsBuffer
       }
     );
+  }
+  if (
+    !useFusedNoFullMechanics
+    && solidLiquidVelocitySeparation !== false
+    && solidReleaseFluid?.stateBuffer
+    && solidReleaseFluid?.mechanicsBuffer
+    && solidReleaseFluid.particleCount > 0
+    && resolvedDevice?.createCommandEncoder
+  ) {
+    const slipInfo = detectMixedSolidLiquidContinuumState(mlsMpmParticleState, sphParticleState);
+    if (solidLiquidVelocitySeparation === true || slipInfo.hasMixedSolidLiquid) {
+      const slipGridSpec = createMlsMpmGridSpec({ boxDimsM: dims, gridSpacingM });
+      runCachedSphSolidLiquidVelocitySeparationStep({
+        device: resolvedDevice,
+        stateBuffer: solidReleaseFluid.stateBuffer,
+        mechanicsBuffer: solidReleaseFluid.mechanicsBuffer,
+        particleCount: solidReleaseFluid.particleCount,
+        gridDims: slipGridSpec.gridDims,
+        gridSpacingM: slipGridSpec.gridSpacingM,
+        shift: slipGridSpec.shift,
+        refParticleMassKg: slipInfo.refParticleMassKg
+      });
+    }
   }
   postMechanicsClosure = await timedStage('postMechanicsClosure', () => runMlsMpmPostMechanicsClosureWebGpu({
     device: resolvedDevice,
@@ -30587,6 +30633,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
   schroederSingleLevelQueueOrderedCleanupCapability = null,
   canonicalSpatialRequired = false,
   observeCanonicalSpatialAuthority = false,
+  solidLiquidVelocitySeparation = undefined,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -30920,6 +30967,28 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
           mechanicsBuffer: mechanicsOnlySolidFluid?.mechanicsBuffer
         }
       );
+    }
+    if (
+      solidLiquidVelocitySeparation !== false
+      && mechanicsOnlySolidFluid?.stateBuffer
+      && mechanicsOnlySolidFluid?.mechanicsBuffer
+      && mechanicsOnlySolidFluid.particleCount > 0
+      && resolvedDevice?.createCommandEncoder
+    ) {
+      const slipInfo = detectMixedSolidLiquidContinuumState(mlsMpmParticleState, sphParticleState);
+      if (solidLiquidVelocitySeparation === true || slipInfo.hasMixedSolidLiquid) {
+        const slipGridSpec = createMlsMpmGridSpec({ boxDimsM: dims, gridSpacingM });
+        runCachedSphSolidLiquidVelocitySeparationStep({
+          device: resolvedDevice,
+          stateBuffer: mechanicsOnlySolidFluid.stateBuffer,
+          mechanicsBuffer: mechanicsOnlySolidFluid.mechanicsBuffer,
+          particleCount: mechanicsOnlySolidFluid.particleCount,
+          gridDims: slipGridSpec.gridDims,
+          gridSpacingM: slipGridSpec.gridSpacingM,
+          shift: slipGridSpec.shift,
+          refParticleMassKg: slipInfo.refParticleMassKg
+        });
+      }
     }
 
     const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
@@ -32042,7 +32111,8 @@ async function runThermalSidecarDirectResidentStepWithOptionalWebGpu({
   // when a thermal sidecar is present -- was invisible to the recorder while
   // every other resident stage was measured.
   gpuTimestampRecorder = null,
-  onResidentStageProgress = null
+  onResidentStageProgress = null,
+  solidLiquidVelocitySeparation = undefined
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   assertResidentCpuMirrorGuards({

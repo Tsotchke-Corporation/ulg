@@ -101,9 +101,9 @@ struct SlipParams {
 //   [0..3] solid (m, px, py, pz)
 //   [4..7] fluid (m, px, py, pz)
 @group(0) @binding(3) var<storage, read_write> split_acc: array<atomic<i32>>;
-// Resolved phase velocities: per node = 2 vec4<f32> rows:
-//   [node*2 + 0] = (vs.x, vs.y, vs.z, ms)
-//   [node*2 + 1] = (vl.x, vl.y, vl.z, ml)
+// Resolved phase velocity deltas (exact momentum-conserving FLIP impulse):
+//   [node*2 + 0] = (dv_s.x, dv_s.y, dv_s.z, ms)
+//   [node*2 + 1] = (dv_l.x, dv_l.y, dv_l.z, ml)
 @group(0) @binding(4) var<storage, read_write> split_vel: array<vec4<f32>>;
 // Compact diagnostic receipt: [mixed_nodes, unilateral_contacts, separated_nodes, 0]
 @group(0) @binding(5) var<storage, read_write> slip_receipt: array<atomic<u32>>;
@@ -217,8 +217,10 @@ fn resolve_mixed_node_unilateral_slip(@builtin(global_invocation_id) id: vec3<u3
     f32(atomicLoad(&split_acc[base + 6u])) * inv,
     f32(atomicLoad(&split_acc[base + 7u])) * inv
   );
-  var vs = select(vec3<f32>(0.0), ps / max(ms, 1.0e-30), ms > 1.0e-12);
-  var vl = select(vec3<f32>(0.0), pl / max(ml, 1.0e-30), ml > 1.0e-12);
+  let vs = select(vec3<f32>(0.0), ps / max(ms, 1.0e-30), ms > 1.0e-12);
+  let vl = select(vec3<f32>(0.0), pl / max(ml, 1.0e-30), ml > 1.0e-12);
+  var dv_s = vec3<f32>(0.0);
+  var dv_l = vec3<f32>(0.0);
 
   if (ms > 1.0e-12 && ml > 1.0e-12) {
     atomicAdd(&slip_receipt[0], 1u);
@@ -243,13 +245,13 @@ fn resolve_mixed_node_unilateral_slip(@builtin(global_invocation_id) id: vec3<u3
       let n = grad_s / g_len;
       let v_rel_n = dot(vl - vs, n);
       if (v_rel_n < 0.0) {
-        // Unilateral normal impenetrability conserving exact total momentum:
-        //   m_s * vs_n' + m_l * vl_n' = m_s * vs_n + m_l * vl_n
+        // Unilateral normal impenetrability via exact momentum-conserving FLIP
+        // impulse delta: sum_p m_p (alpha * sum_i w_pi dv_i) = alpha * sum_i (-J_i + J_i) n_i = 0.
         // Tangential velocities (v - dot(v, n) * n) remain 100% frictionless!
         let m_tot = ms + ml;
         let impulse_n = (ms * ml / m_tot) * (-v_rel_n);
-        vl = vl + (impulse_n / ml) * n;
-        vs = vs - (impulse_n / ms) * n;
+        dv_l = (impulse_n / ml) * n;
+        dv_s = -(impulse_n / ms) * n;
         atomicAdd(&slip_receipt[1], 1u);
       } else {
         // Separating or purely tangential flow: zero artificial mixed-cell suction/locking!
@@ -257,8 +259,8 @@ fn resolve_mixed_node_unilateral_slip(@builtin(global_invocation_id) id: vec3<u3
       }
     }
   }
-  split_vel[node * 2u] = vec4<f32>(vs, ms);
-  split_vel[node * 2u + 1u] = vec4<f32>(vl, ml);
+  split_vel[node * 2u] = vec4<f32>(dv_s, ms);
+  split_vel[node * 2u + 1u] = vec4<f32>(dv_l, ml);
 }
 
 @compute @workgroup_size(64)
@@ -283,8 +285,7 @@ fn g2p_apply_separated_velocities(@builtin(global_invocation_id) id: vec3<u32>) 
   let wz = sl_weights(pg.z - f32(bz));
   let row_off = select(1u, 0u, is_solid);
 
-  var v_field = vec3<f32>(0.0);
-  var w_sum = 0.0;
+  var dv_acc = vec3<f32>(0.0);
   var touched_mixed = false;
   for (var ox = 0i; ox < 3i; ox = ox + 1i) {
     for (var oy = 0i; oy < 3i; oy = oy + 1i) {
@@ -300,20 +301,79 @@ fn g2p_apply_separated_velocities(@builtin(global_invocation_id) id: vec3<u32>) 
         let vl_row = split_vel[node * 2u + 1u];
         if (vs_row.w > 1.0e-12 && vl_row.w > 1.0e-12) {
           touched_mixed = true;
-        }
-        let chosen = select(vl_row, vs_row, row_off == 0u);
-        if (chosen.w > 1.0e-12) {
-          v_field = v_field + w * chosen.xyz;
-          w_sum = w_sum + w;
+          let chosen = select(vl_row, vs_row, row_off == 0u);
+          dv_acc = dv_acc + w * chosen.xyz;
         }
       }
     }
   }
-  if (!touched_mixed || !(w_sum > 1.0e-6)) { return; }
-  let v_new = mix(vel_u.xyz, v_field / w_sum, clamp(params.blend_alpha, 0.0, 1.0));
+  if (!touched_mixed) { return; }
+  let v_new = vel_u.xyz + clamp(params.blend_alpha, 0.0, 1.0) * dv_acc;
   sph_state[p * 2u + 1u] = vec4<f32>(v_new, vel_u.w);
 }
 `;
+
+const mixedContinuumDetectCache = new WeakMap();
+const cachedDeviceSlipStages = new WeakMap();
+
+const SOLID_FLAG_OFFSET = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.findIndex((s) => s.startsWith('solidFlag:'));
+const EOS_MODEL_OFFSET = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.findIndex((s) => s.startsWith('eosModelId:'));
+const MECHANICS_STRIDE = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
+const STATE_STRIDE = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
+
+/**
+ * Memoized O(1) steady-state check whether a packed continuum particle set
+ * contains BOTH solid (`solidFlag > 0.5`) and liquid (`!solid && eos == 1`)
+ * continuum MPM carriers, plus a representative particle mass for fixed-point
+ * accumulator scaling.
+ */
+export function detectMixedSolidLiquidContinuumState(mlsMpmParticleState, sphParticleState = null) {
+  if (!mlsMpmParticleState || typeof mlsMpmParticleState !== 'object') {
+    return { hasMixedSolidLiquid: false, refParticleMassKg: 1.0 };
+  }
+  const cached = mixedContinuumDetectCache.get(mlsMpmParticleState);
+  if (cached) return cached;
+  const mechanics = mlsMpmParticleState.mechanics;
+  const count = Math.max(0, Math.trunc(mlsMpmParticleState.particleCount ?? sphParticleState?.particleCount ?? 0));
+  let hasSolid = false;
+  let hasLiquid = false;
+  if (mechanics && mechanics.length >= count * MECHANICS_STRIDE && SOLID_FLAG_OFFSET >= 0 && EOS_MODEL_OFFSET >= 0) {
+    for (let i = 0; i < count; i += 1) {
+      const base = i * MECHANICS_STRIDE;
+      const isSolid = mechanics[base + SOLID_FLAG_OFFSET] > 0.5;
+      if (isSolid) {
+        hasSolid = true;
+      } else {
+        const eos = mechanics[base + EOS_MODEL_OFFSET];
+        if (eos > 0.5 && eos < 1.5) hasLiquid = true;
+      }
+      if (hasSolid && hasLiquid) break;
+    }
+  }
+  let refMass = 1.0;
+  const state = sphParticleState?.state;
+  if (hasSolid && hasLiquid && state && state.length >= count * STATE_STRIDE && count > 0) {
+    let massSum = 0;
+    let massCount = 0;
+    const step = Math.max(1, Math.floor(count / 256));
+    for (let i = 0; i < count; i += step) {
+      const m = state[i * STATE_STRIDE + 3];
+      if (Number.isFinite(m) && m > 0) {
+        massSum += m;
+        massCount += 1;
+      }
+    }
+    if (massCount > 0) refMass = massSum / massCount;
+  }
+  const info = Object.freeze({ hasMixedSolidLiquid: hasSolid && hasLiquid, refParticleMassKg: refMass });
+  mixedContinuumDetectCache.set(mlsMpmParticleState, info);
+  return info;
+}
+
+export function resolveSolidLiquidSlipFixedScale(refParticleMassKg = 1.0) {
+  const m = Number.isFinite(refParticleMassKg) && refParticleMassKg > 0 ? refParticleMassKg : 1.0;
+  return Math.min(1.0e9, Math.max(1.0e5, Math.round(1.0e4 / Math.max(1.0e-6, m))));
+}
 
 export function createSphSolidLiquidVelocitySeparationStage(device, {
   gridDims,
@@ -339,7 +399,7 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
       (entryPoint) => [
         entryPoint,
         createCachedExplicitComputePipeline(device, {
-          cacheKey: `ulg-solid-liquid-slip-v1-${entryPoint}`,
+          cacheKey: `ulg-solid-liquid-slip-v2-flip-${entryPoint}`,
           label: `ulg-solid-liquid-slip-${entryPoint}`,
           code: sphSolidLiquidVelocitySeparationWgsl,
           entryPoint,
@@ -364,11 +424,20 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
   return Object.freeze({
     schema: ULG_SOLID_LIQUID_SLIP_SCHEMA,
     descriptor: SOLID_LIQUID_VELOCITY_SEPARATION_LAW_DESCRIPTOR,
+    gridDims: Object.freeze([nx, ny, nz]),
     receiptBuffer,
-    encode(encoder, { stateBuffer, mechanicsBuffer, particleCount }) {
-      if (!(particleCount > 0)) return 0;
-      pu.set([particleCount, nx, ny, nz, shift, nodeCount, 0, 0], 0);
-      pf.set([1 / gridSpacingM, fixedScale, 1 / fixedScale, blendAlpha], 8);
+    encode(encoder, {
+      stateBuffer,
+      mechanicsBuffer,
+      particleCount,
+      gridSpacingM: stepGridSpacingM = gridSpacingM,
+      shift: stepShift = shift,
+      fixedScale: stepFixedScale = fixedScale,
+      blendAlpha: stepBlendAlpha = blendAlpha
+    }) {
+      if (!(particleCount > 0) || !(stepGridSpacingM > 0)) return 0;
+      pu.set([particleCount, nx, ny, nz, stepShift, nodeCount, 0, 0], 0);
+      pf.set([1 / stepGridSpacingM, stepFixedScale, 1 / stepFixedScale, stepBlendAlpha], 8);
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
       const bg = createCachedExplicitBindGroup(device, {
         label: 'ulg-sl-slip-bg',
@@ -398,4 +467,84 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
       leaseScope.assertDrained({ requireAllReleased: true });
     }
   });
+}
+
+/**
+ * Zero-churn device-cached runner wired into ULG's canonical MLS-MPM continuum
+ * step loop. Encodes into an already-open command encoder (`0` extra submits,
+ * `0` steady-state buffer allocations, `0` bind-group churn) or submits cleanly
+ * when called standalone.
+ */
+export function runCachedSphSolidLiquidVelocitySeparationStep({
+  device,
+  stateBuffer,
+  mechanicsBuffer,
+  particleCount,
+  gridDims,
+  gridSpacingM,
+  shift = 2,
+  blendAlpha = 1.0,
+  fixedScale = null,
+  refParticleMassKg = 1.0,
+  encoder = null
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer || !stateBuffer || !mechanicsBuffer) return false;
+  if (!(particleCount > 0) || !(gridSpacingM > 0) || !Array.isArray(gridDims) || gridDims.length < 3) return false;
+  const nx = Math.max(1, Math.trunc(gridDims[0]));
+  const ny = Math.max(1, Math.trunc(gridDims[1]));
+  const nz = Math.max(1, Math.trunc(gridDims[2]));
+  const nodeCount = nx * ny * nz;
+  const maxBinding = device.limits?.maxStorageBufferBindingSize ?? (128 * 1024 * 1024);
+  if (nodeCount * 32 > maxBinding) return false;
+
+  let byDims = cachedDeviceSlipStages.get(device);
+  if (!byDims) {
+    byDims = new Map();
+    cachedDeviceSlipStages.set(device, byDims);
+  }
+  const key = `${nx}x${ny}x${nz}`;
+  let stage = byDims.get(key);
+  if (!stage) {
+    if (byDims.size >= 4) {
+      const oldestKey = byDims.keys().next().value;
+      byDims.get(oldestKey)?.destroy();
+      byDims.delete(oldestKey);
+    }
+    stage = createSphSolidLiquidVelocitySeparationStage(device, {
+      gridDims: [nx, ny, nz],
+      gridSpacingM,
+      shift,
+      fixedScale: fixedScale ?? resolveSolidLiquidSlipFixedScale(refParticleMassKg),
+      blendAlpha
+    });
+    byDims.set(key, stage);
+  }
+
+  const resolvedFixedScale = fixedScale ?? resolveSolidLiquidSlipFixedScale(refParticleMassKg);
+  const ownedEncoder = !encoder;
+  const activeEncoder = encoder || device.createCommandEncoder({ label: 'ulg-solid-liquid-slip-step' });
+  const dispatches = stage.encode(activeEncoder, {
+    stateBuffer,
+    mechanicsBuffer,
+    particleCount,
+    gridSpacingM,
+    shift,
+    fixedScale: resolvedFixedScale,
+    blendAlpha
+  });
+  if (ownedEncoder) {
+    device.queue.submit([activeEncoder.finish()]);
+  }
+  const prev = globalThis.__ulgSolidLiquidSlipStatus;
+  globalThis.__ulgSolidLiquidSlipStatus = {
+    schema: ULG_SOLID_LIQUID_SLIP_SCHEMA,
+    active: true,
+    steps: (prev?.steps ?? 0) + 1,
+    lastParticleCount: particleCount,
+    gridDims: [nx, ny, nz],
+    gridSpacingM,
+    dispatches,
+    sharedEncoder: !ownedEncoder
+  };
+  return true;
 }

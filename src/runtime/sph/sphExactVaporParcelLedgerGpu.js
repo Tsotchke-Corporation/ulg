@@ -212,8 +212,12 @@ fn scan_members(@builtin(local_invocation_id) lid: vec3<u32>) {
   let tiles = (total_cells + 63u) / 64u;
   for (var tile = 0u; tile < tiles; tile = tile + 1u) {
     let c = tile * 64u + lane;
-    let gc = select(0u, atomicLoad(&cells[gas_count_word(c)]), c < total_cells);
-    let pc = select(0u, atomicLoad(&cells[parcel_count_word(c)]), c < total_cells);
+    var gc = 0u;
+    var pc = 0u;
+    if (c < total_cells) {
+      gc = atomicLoad(&cells[gas_count_word(c)]);
+      pc = atomicLoad(&cells[parcel_count_word(c)]);
+    }
     scan_gas_wg[lane] = gc;
     scan_parcel_wg[lane] = pc;
     workgroupBarrier();

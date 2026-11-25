@@ -33,7 +33,7 @@ test('Gate 6 Phase B: native Vulkan verifies all parallelized shaders + 100,000 
     await browser.close();
   }
 
-  if (result.status === 'unsupported') return;
+  assert.equal(result.status, 'ok', `Gate 6 Phase B native Vulkan probe did not execute: ${JSON.stringify(result)}`);
   console.log('[gate6-phase-b-100k]', JSON.stringify(result));
   assert.deepEqual(result.compileErrors, []);
   assert.equal(result.validationError, null, result.validationError);

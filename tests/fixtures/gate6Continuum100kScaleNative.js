@@ -33,9 +33,13 @@ async function checkWgslCompile(device, label, code) {
 }
 
 export async function runGate6Continuum100kScaleNative({ particleCount = 100000, warmupSteps = 8, measuredSteps = 16 } = {}) {
-  if (!navigator.gpu) return { status: 'unsupported' };
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) return { status: 'unsupported' };
+  if (!navigator.gpu) return { status: 'unsupported', reason: 'navigator.gpu unavailable' };
+  let adapter = null;
+  for (let attempt = 0; attempt < 8 && !adapter; attempt += 1) {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!adapter) return { status: 'unsupported', reason: 'requestAdapter returned null after 8 attempts' };
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxStorageBuffersPerShaderStage: Math.min(16, adapter.limits.maxStorageBuffersPerShaderStage),
@@ -252,6 +256,6 @@ export async function runGate6Continuum100kScaleNative({ particleCount = 100000,
     minVolumeRatioJ: Number(summary?.minVolumeRatioJ ?? 0),
     maxVolumeRatioJ: Number(summary?.maxVolumeRatioJ ?? 0),
     activeGridNodeCount: Number(summary?.activeGridNodeCount ?? 0),
-    summaryStatus: Number(summary?.status ?? 0)
+    summaryStatus: String(summary?.status ?? '')
   };
 }

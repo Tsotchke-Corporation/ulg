@@ -98,9 +98,13 @@ async function runTaitLawOnGpu(device, lawIr) {
 }
 
 export async function runGate6PhaseALawCompilerNative({ eshkolCEmittedLawIr = null } = {}) {
-  if (!navigator.gpu) return { status: 'unsupported' };
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) return { status: 'unsupported' };
+  if (!navigator.gpu) return { status: 'unsupported', reason: 'navigator.gpu unavailable' };
+  let adapter = null;
+  for (let attempt = 0; attempt < 8 && !adapter; attempt += 1) {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!adapter) return { status: 'unsupported', reason: 'requestAdapter returned null after 8 attempts' };
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxStorageBuffersPerShaderStage: Math.min(16, adapter.limits.maxStorageBuffersPerShaderStage)
@@ -146,15 +150,37 @@ export async function runGate6PhaseALawCompilerNative({ eshkolCEmittedLawIr = nu
   const scheduler = createCanonicalMlsMpmLawDagEpochScheduler({ epochId: 'vulkan-epoch', epochGeneration: 1 });
   let retargetOut = null;
   let dagReceipt = null;
+  let sharedViewIdentityMatched = false;
+  let firstCellLocalView = null;
   try {
     dagReceipt = await scheduler.executeEpoch(
       {
-        'phase-carrier-transfer': async ({ leaseScope }) => {
+        'mls-mpm-g2p': async ({ sharedView }) => {
+          firstCellLocalView = sharedView;
+          return { status: 'executed' };
+        },
+        'phase-carrier-transfer': async ({ leaseScope, sharedView, scheduler: activeScheduler }) => {
+          sharedViewIdentityMatched = sharedView != null && sharedView === firstCellLocalView;
           const lease = leaseScope.issue(rParamsBuf, {
             label: 'retarget-params',
             producer: 'phase-carrier-transfer',
             onRelease: (b) => b.destroy()
           });
+          const phaseBindingTable = {
+            'sph-particle-state': 0,
+            'sph-thermo-phase': 1,
+            'mls-mpm-mechanics': 2,
+            'exact-mass-ledger': 3,
+            'exact-energy-ledger': 4
+          };
+          const phaseBoundEntries = [
+            { binding: 0, buffer: rStateBuf, type: 'storage' },
+            { binding: 1, buffer: rStateBuf, type: 'storage' },
+            { binding: 2, buffer: rMechBuf, type: 'storage' },
+            { binding: 3, buffer: rReceiptBuf, type: 'storage' },
+            { binding: 4, buffer: rReceiptBuf, type: 'storage' }
+          ];
+          activeScheduler.assertStageBindGroup('phase-carrier-transfer', phaseBindingTable, phaseBoundEntries);
           const bg = device.createBindGroup({
             layout: retargetBgl,
             entries: [
@@ -182,7 +208,12 @@ export async function runGate6PhaseALawCompilerNative({ eshkolCEmittedLawIr = nu
           return { status: 'executed' };
         }
       },
-      { requireAllReleased: true }
+      {
+        viewBuilders: {
+          'cell-local': () => ({ kind: 'ss-cell-local-derived-view', epochGeneration: 1 })
+        },
+        requireAllReleased: true
+      }
     );
   } finally {
     for (const b of [rStateBuf, rMechBuf, rReceiptBuf, rReadMech]) b.destroy();
@@ -207,6 +238,7 @@ export async function runGate6PhaseALawCompilerNative({ eshkolCEmittedLawIr = nu
     eshkolCTait,
     retargetCompileErrors,
     retargetOut,
+    sharedViewIdentityMatched,
     dagReceipt,
     implicitPressureErrors,
     phaseSlotMaterializationErrors

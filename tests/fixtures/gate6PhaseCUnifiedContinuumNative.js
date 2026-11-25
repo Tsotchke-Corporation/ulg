@@ -5,35 +5,53 @@ import {
 import { createSphSolidLiquidVelocitySeparationStage } from '../../src/runtime/sph/sphSolidLiquidVelocitySeparationGpu.js';
 import { schroederSolidFluidContactSsWgsl } from '../../src/runtime/sph/schroederSolidFluidContactGpu.js';
 import { schroederSolidFluidThermalSsWgsl } from '../../src/runtime/sph/schroederSolidFluidThermalGpu.js';
+import { createReferenceMaterialClosures } from '../../src/runtime/material/materialClosures.js';
+import { specificInternalEnergyJPerKg } from '../../src/runtime/material/thermoState.js';
+import {
+  buildMlsMpmGpuParticleBuffers,
+  buildSphGpuParticleBuffers,
+  uploadMlsMpmGpuParticleBuffers,
+  uploadSphGpuParticleBuffers
+} from '../../src/runtime/sph/sphGpuBuffers.js';
+import {
+  destroyMlsMpmResidentStepBuffers,
+  runMlsMpmResidentStepWithOptionalWebGpu
+} from '../../src/runtime/sph/sphMlsMpmGpuStep.js';
 
 async function runSlipCase(device, { offsetM = [0, 0, 0], liquidVel = [2.0, -1.0, 0.0], solidVel = [0.0, 0.0, 0.0] } = {}) {
   // 2x2x2 solid slab below y = offsetM[1] + 1.0, 2x2x2 liquid slab right above at y = offsetM[1] + 1.08
   // Sharing MPM grid nodes at y = 1.0 (gridSpacingM = 0.2)!
   const dx = 0.2;
-  const gridDims = [14, 14, 14];
+  const gridDims = [16, 16, 16];
   const shift = 2;
   const stateStride = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length; // 8
   const mechStride = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length; // 32
 
   const particles = [];
-  const solidMass = 4.0;
+  const solidMass = 0.5;
   const liquidMass = 1.0;
-  for (let ix = 0; ix < 2; ix += 1) {
-    for (let iz = 0; iz < 2; iz += 1) {
-      // Solid slab (2 layers thick so outward solid normal points cleanly along +Y!)
-      for (let iy = 0; iy < 2; iy += 1) {
+  // Uniform dx/2 = 0.10 m solid slab (exact 2 ppc per axis -> flat interior solid mass density,
+  // zero grid-aliasing corrugation, exact vertical outward normal n = (0, +1, 0) under centered liquid!)
+  const sp = 0.1;
+  for (let ix = -4; ix <= 5; ix += 1) {
+    for (let iz = -4; iz <= 5; iz += 1) {
+      for (let iy = 0; iy < 3; iy += 1) {
         particles.push({
           solid: true,
           mass: solidMass,
-          pos: [offsetM[0] + 0.8 + ix * 0.15, offsetM[1] + 0.72 + iy * 0.16, offsetM[2] + 0.8 + iz * 0.15],
+          pos: [offsetM[0] + 1.05 + ix * sp, offsetM[1] + 0.55 + iy * sp, offsetM[2] + 1.05 + iz * sp],
           vel: [...solidVel]
         });
       }
-      // Liquid layer immediately above solid slab (sharing grid stencil nodes!)
+    }
+  }
+  for (let ix = 0; ix < 2; ix += 1) {
+    for (let iz = 0; iz < 2; iz += 1) {
+      // Liquid patch centered over the flat interior top of the solid slab
       particles.push({
         solid: false,
         mass: liquidMass,
-        pos: [offsetM[0] + 0.8 + ix * 0.15, offsetM[1] + 0.96, offsetM[2] + 0.8 + iz * 0.15],
+        pos: [offsetM[0] + 1.05 + ix * sp, offsetM[1] + 0.90, offsetM[2] + 1.05 + iz * sp],
         vel: [...liquidVel]
       });
     }
@@ -123,10 +141,97 @@ async function runSlipCase(device, { offsetM = [0, 0, 0], liquidVel = [2.0, -1.0
   }
 }
 
+async function runProductionResidentMixedSolidLiquidStep(device) {
+  const closures = createReferenceMaterialClosures();
+  const h2oProps = closures.h2o.properties;
+  const feProps = closures.fe.properties;
+  const materialProperties = { h2o: h2oProps, fe: feProps };
+  const uLiquid = specificInternalEnergyJPerKg(h2oProps, 300);
+  const uSolid = specificInternalEnergyJPerKg(feProps, 300);
+  const particles = [];
+  for (let ix = 0; ix < 2; ix += 1) {
+    for (let iz = 0; iz < 2; iz += 1) {
+      for (let iy = 0; iy < 2; iy += 1) {
+        particles.push({
+          id: `fe_${ix}_${iy}_${iz}`,
+          material: 'fe',
+          massKg: 0.25,
+          x: [0.8 + ix * 0.15, 0.72 + iy * 0.16, 0.8 + iz * 0.15],
+          v: [0, 0, 0],
+          specificInternalEnergyJPerKg: uSolid
+        });
+      }
+      particles.push({
+        id: `h2o_${ix}_${iz}`,
+        material: 'h2o',
+        massKg: 0.08,
+        x: [0.8 + ix * 0.15, 0.96, 0.8 + iz * 0.15],
+        v: [1.5, -0.5, 0],
+        specificInternalEnergyJPerKg: uLiquid
+      });
+    }
+  }
+  const initial = {
+    smoothingLengthM: 0.2,
+    dimension: 3,
+    step: 0,
+    time: 0,
+    storageGeneration: 1,
+    particles
+  };
+  const packedSph = buildSphGpuParticleBuffers(initial, { materialProperties });
+  const packedMls = buildMlsMpmGpuParticleBuffers(initial, {
+    materialProperties,
+    particleSeparationRelaxation: 0
+  });
+  const sphUpload = uploadSphGpuParticleBuffers(device, packedSph);
+  const mlsUpload = uploadMlsMpmGpuParticleBuffers(device, packedMls);
+  const prevSteps = globalThis.__ulgSolidLiquidSlipStatus?.steps ?? 0;
+  let stepResult = null;
+  try {
+    stepResult = await runMlsMpmResidentStepWithOptionalWebGpu({
+      device,
+      sphParticleState: packedSph,
+      mlsMpmParticleState: packedMls,
+      sphParticleUpload: sphUpload,
+      mlsMpmParticleUpload: mlsUpload,
+      boxDimsM: [2.4, 2.4, 2.4],
+      gridSpacingM: 0.2,
+      dt: 0.0005,
+      gravityMPerS2: [0, -9.81, 0],
+      preferWebGpu: true,
+      readbackMode: 'no-full-readback',
+      fuseNoFullResidentMechanics: true,
+      retainOutputParticleBuffers: true,
+      contactSolverEnabled: false,
+      gasPressureMechanicsBoundaryEnabled: false,
+      thermalStepOptions: null,
+      reactionStepOptions: null
+    });
+    await device.queue.onSubmittedWorkDone();
+    const status = globalThis.__ulgSolidLiquidSlipStatus ?? null;
+    return {
+      executedStepsDelta: (status?.steps ?? 0) - prevSteps,
+      sharedEncoder: Boolean(status?.sharedEncoder),
+      lastParticleCount: Number(status?.lastParticleCount ?? 0),
+      dispatches: Number(status?.dispatches ?? 0),
+      stepBackend: String(stepResult?.backend ?? '')
+    };
+  } finally {
+    if (stepResult) destroyMlsMpmResidentStepBuffers(stepResult);
+    sphUpload?.destroy?.();
+    mlsUpload?.destroy?.();
+  }
+}
+
 export async function runGate6PhaseCUnifiedContinuumNative() {
-  if (!navigator.gpu) return { status: 'unsupported' };
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) return { status: 'unsupported' };
+  if (!navigator.gpu) return { status: 'unsupported', reason: 'navigator.gpu unavailable' };
+  let adapter = null;
+  for (let attempt = 0; attempt < 8 && !adapter; attempt += 1) {
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!adapter) return { status: 'unsupported', reason: 'requestAdapter returned null after 8 attempts' };
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxStorageBuffersPerShaderStage: Math.min(16, adapter.limits.maxStorageBuffersPerShaderStage)
@@ -154,6 +259,8 @@ export async function runGate6PhaseCUnifiedContinuumNative() {
   const shifted = await runSlipCase(device, { offsetM: [0.4, 0.4, 0.4], liquidVel: [2.0, -1.0, 0.0], solidVel: [0.0, 0.0, 0.0] });
   // Case 3: Separating liquid moving AWAY from solid (+Y) + tangential (+X) -> ZERO artificial solid-liquid suction/sticking!
   const separating = await runSlipCase(device, { offsetM: [0, 0, 0], liquidVel: [2.0, +1.0, 0.0], solidVel: [0.0, 0.0, 0.0] });
+  // Case 4: Live production runMlsMpmGpuResidentStep invoking unilateral slip automatically in the shared fused encoder!
+  const productionStep = await runProductionResidentMixedSolidLiquidStep(device);
 
   const valErr = await device.popErrorScope();
   device.destroy();
@@ -165,6 +272,7 @@ export async function runGate6PhaseCUnifiedContinuumNative() {
     uncapturedErrors,
     approaching,
     shifted,
-    separating
+    separating,
+    productionStep
   };
 }

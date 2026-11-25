@@ -1316,6 +1316,13 @@ export function admitDynamicPolytopeAtlasOnDevice(device, {
   const admissionId = `polytope-bank:${normKey}:g${bank.generation}`;
   const commit = ledger.commit(res.token, { admissionId });
   if (!commit.ok) {
+    for (const k of aliasKeys) {
+      if (prevDynamicSnapshots.has(k)) state.dynamicAtlasesByKey.set(k, prevDynamicSnapshots.get(k));
+      else state.dynamicAtlasesByKey.delete(k);
+    }
+    if (!prevSeededHadKey) state.seededKeys.delete(normKey);
+    if (prevMaterialIdHadKey) state.lastMaterialIdByKey.set(normKey, prevMaterialIdVal);
+    else state.lastMaterialIdByKey.delete(normKey);
     const err = new Error(
       `Polytope bank hot-swap commit rejected for "${canonicalKey}": ${commit.reason}`
     );

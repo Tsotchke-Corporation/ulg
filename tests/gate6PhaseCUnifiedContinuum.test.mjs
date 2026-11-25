@@ -14,6 +14,8 @@ import {
 import {
   SOLID_LIQUID_VELOCITY_SEPARATION_LAW_DESCRIPTOR,
   ULG_SOLID_LIQUID_SLIP_SCHEMA,
+  detectMixedSolidLiquidContinuumState,
+  resolveSolidLiquidSlipFixedScale,
   sphSolidLiquidVelocitySeparationWgsl
 } from '../src/runtime/sph/sphSolidLiquidVelocitySeparationGpu.js';
 import {
@@ -53,6 +55,11 @@ test('Gate 6 Phase C: unilateral solid-liquid slip law uses generated ABI access
   assert.match(sphSolidLiquidVelocitySeparationWgsl, /sl_mech_solid_flag\(p\)/);
   assert.match(sphSolidLiquidVelocitySeparationWgsl, /sl_mech_eos_model_id\(p\)/);
   assert.doesNotMatch(sphSolidLiquidVelocitySeparationWgsl, /@workgroup_size\(\s*1\b/);
+  // Verify live production wiring in sphMlsMpmGpuStep.js and pure-liquid zero-cost skip!
+  const stepSrc = fs.readFileSync(path.join(REPO_ROOT, 'src/runtime/sph/sphMlsMpmGpuStep.js'), 'utf8');
+  assert.match(stepSrc, /runCachedSphSolidLiquidVelocitySeparationStep/);
+  assert.equal(detectMixedSolidLiquidContinuumState(null).hasMixedSolidLiquid, false);
+  assert.ok(resolveSolidLiquidSlipFixedScale(1e-4) >= 1e7);
 });
 
 test('Gate 6 Phase C: shipped Studio presets promote exact energy ledger (non-finite-wall presets) and dynamic hierarchy LOD to default-ON', () => {

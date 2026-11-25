@@ -1832,6 +1832,16 @@ try {
     evidence.ledgerAudit = (await inAll(() => globalThis.__s0.readLedger()))
       .filter(entry => Object.keys(entry.value.latest).length || Object.keys(entry.value.cold).length);
   }
+  if (process.env.S0_WORKSPACE_TIMELINE === '1') {
+    evidence.twoLevelRefluxRejection = (await inAll(() => globalThis.__ulgTwoLevelRefluxRejection ?? null, 20000))
+      .filter((entry) => entry.value);
+    evidence.workspaceHeaders = (await inAll(() => globalThis.__s0?.readWorkspaceHeaders?.() ?? null, 30000))
+      .filter((entry) => entry.value && entry.value.length);
+    evidence.workspaceTimeline = (await inAll(() => globalThis.__s0?.readWorkspaceTimeline?.() ?? null, 30000))
+      .filter((entry) => entry.value);
+    evidence.passStatus = (await inAll(() => globalThis.__s0?.readPassStatus?.() ?? null, 30000))
+      .filter((entry) => entry.value);
+  }
   const wallS = (Date.now() - t0) / 1000;
   const snapshots = await inAll(() => globalThis.__s0.snapshot());
   const traces = snapshots.flatMap(s => s.value.traces);

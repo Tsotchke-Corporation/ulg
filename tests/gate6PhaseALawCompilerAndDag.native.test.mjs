@@ -56,7 +56,7 @@ test('native Vulkan executes Law-IR compiled Tait EOS + AD (JS & Eshkol C emitte
     await browser.close();
   }
 
-  if (result.status === 'unsupported') return;
+  assert.equal(result.status, 'ok', `Gate 6 Phase A native Vulkan probe did not execute: ${JSON.stringify(result)}`);
   console.log('[gate6-phase-a-native]', JSON.stringify(result));
   assert.equal(result.validationError, null, result.validationError);
   assert.deepEqual(result.uncapturedErrors, []);
@@ -96,4 +96,8 @@ test('native Vulkan executes Law-IR compiled Tait EOS + AD (JS & Eshkol C emitte
   assert.equal(result.dagReceipt.leaseSnapshot.live, 0);
   assert.equal(result.dagReceipt.zeroWriteConflicts, true);
   assert.equal(result.dagReceipt.zeroLegacyPrivateGrids, true);
+  assert.equal(result.sharedViewIdentityMatched, true);
+  assert.ok(result.dagReceipt.hoistedViewBuilds >= 1, `expected hoistedViewBuilds >= 1, got ${result.dagReceipt.hoistedViewBuilds}`);
+  assert.ok(result.dagReceipt.hoistedViewReuses >= 1, `expected hoistedViewReuses >= 1, got ${result.dagReceipt.hoistedViewReuses}`);
+  assert.ok(result.dagReceipt.validatedStageBindGroups.includes('phase-carrier-transfer'));
 });

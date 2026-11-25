@@ -312,14 +312,9 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
       ...ssFluidDirectoryArgs
     });
   }
-  const canShareSolidGrid = Boolean(
-    !useCanonicalSsFluidDir && couplingEligible && contactEligible && family.couplingStage?.spatialGrid
-  );
   if (contactEligible) {
     family.contactStage.prepare?.(dtSeconds, {
       particleCount: fluid.particleCount,
-      sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
-      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0,
       ...ssFluidDirectoryArgs
     });
   }
@@ -348,8 +343,6 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
   family.lastContactEnabled = contactEligible
     && family.contactStage.encode(encoder, dtSeconds, { fluidStateBuffer: fluid.stateBuffer,
       fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount,
-      sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
-      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0,
       ...ssFluidDirectoryArgs,
       pass, prepared: true });
   if (releaseEnabled) family.releaseStage.encode(encoder, { ...fluid, pass, prepared: true });

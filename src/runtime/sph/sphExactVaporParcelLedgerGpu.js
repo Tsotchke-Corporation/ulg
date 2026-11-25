@@ -195,19 +195,68 @@ fn count_members(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&cells[parcel_count_word(cell_of(vec3<f32>(parcels[base], parcels[base + 1u], parcels[base + 2u])))], 1u);
   }
 }
-@compute @workgroup_size(1)
-fn scan_members() {
-  var gas_total = 0u; var parcel_total = 0u;
-  for (var c = 0u; c < cell_count(); c++) {
-    atomicStore(&cells[gas_offset_word(c)], gas_total);
-    atomicStore(&cells[parcel_offset_word(c)], parcel_total);
-    atomicStore(&cells[gas_cursor_word(c)], gas_total);
-    atomicStore(&cells[parcel_cursor_word(c)], parcel_total);
-    gas_total += atomicLoad(&cells[gas_count_word(c)]);
-    parcel_total += atomicLoad(&cells[parcel_count_word(c)]);
+var<workgroup> scan_gas_wg: array<u32, 64>;
+var<workgroup> scan_parcel_wg: array<u32, 64>;
+var<workgroup> scan_gas_carry: u32;
+var<workgroup> scan_parcel_carry: u32;
+
+@compute @workgroup_size(64)
+fn scan_members(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let lane = lid.x;
+  let total_cells = cell_count();
+  if (lane == 0u) {
+    scan_gas_carry = 0u;
+    scan_parcel_carry = 0u;
   }
-  atomicStore(&cells[gas_offset_word(cell_count())], gas_total);
-  atomicStore(&cells[parcel_offset_word(cell_count())], parcel_total);
+  workgroupBarrier();
+  let tiles = (total_cells + 63u) / 64u;
+  for (var tile = 0u; tile < tiles; tile = tile + 1u) {
+    let c = tile * 64u + lane;
+    var gc = 0u;
+    var pc = 0u;
+    if (c < total_cells) {
+      gc = atomicLoad(&cells[gas_count_word(c)]);
+      pc = atomicLoad(&cells[parcel_count_word(c)]);
+    }
+    scan_gas_wg[lane] = gc;
+    scan_parcel_wg[lane] = pc;
+    workgroupBarrier();
+    var offset = 1u;
+    loop {
+      if (offset >= 64u) { break; }
+      var ga = 0u;
+      var pa = 0u;
+      if (lane >= offset) {
+        ga = scan_gas_wg[lane - offset];
+        pa = scan_parcel_wg[lane - offset];
+      }
+      workgroupBarrier();
+      scan_gas_wg[lane] = scan_gas_wg[lane] + ga;
+      scan_parcel_wg[lane] = scan_parcel_wg[lane] + pa;
+      workgroupBarrier();
+      offset = offset * 2u;
+    }
+    let g_carry = scan_gas_carry;
+    let p_carry = scan_parcel_carry;
+    if (c < total_cells) {
+      let g_off = g_carry + (scan_gas_wg[lane] - gc);
+      let p_off = p_carry + (scan_parcel_wg[lane] - pc);
+      atomicStore(&cells[gas_offset_word(c)], g_off);
+      atomicStore(&cells[parcel_offset_word(c)], p_off);
+      atomicStore(&cells[gas_cursor_word(c)], g_off);
+      atomicStore(&cells[parcel_cursor_word(c)], p_off);
+    }
+    workgroupBarrier();
+    if (lane == 63u) {
+      scan_gas_carry = g_carry + scan_gas_wg[63u];
+      scan_parcel_carry = p_carry + scan_parcel_wg[63u];
+    }
+    workgroupBarrier();
+  }
+  if (lane == 0u) {
+    atomicStore(&cells[gas_offset_word(total_cells)], scan_gas_carry);
+    atomicStore(&cells[parcel_offset_word(total_cells)], scan_parcel_carry);
+  }
 }
 @compute @workgroup_size(64)
 fn scatter_members(@builtin(global_invocation_id) id: vec3<u32>) {

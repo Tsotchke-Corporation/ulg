@@ -1782,7 +1782,7 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
   assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(32\)/);
   assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read> partial_summaries/);
   assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read_write> resident_summary/);
-  assert.match(mlsMpmResidentSummaryFinalizeWgsl, /@compute @workgroup_size\(1\)/);
+  assert.match(mlsMpmResidentSummaryFinalizeWgsl, /@compute @workgroup_size\(32\)/);
 });
 
 test('schema sketches validate representative artifacts', () => {

@@ -1241,10 +1241,36 @@ const appRow = () => {
     }
     return out.slice(0, 6);
   })();
+  const playEl = document.querySelector('#sph-play');
+  const stepEl = document.querySelector('#sph-step');
+  const studioPlaybackBarEl = document.querySelector('#ulg-playback-bar');
+  const studioPlayEl = document.querySelector('#ulg-play-btn');
+  const studioStepEl = document.querySelector('#ulg-step-btn');
+  const studioStatusEl = document.querySelector('#ulg-status-pill');
+  const residentStepsError = typeof overlay?.__mlsMpmResidentStepsError === 'string'
+    ? overlay.__mlsMpmResidentStepsError
+    : (overlay?.__mlsMpmResidentStepsError?.message ?? null);
+  const autoSched = overlay?.__mlsMpmResidentAutoSchedule ?? null;
+  const autoScheduleStatus = autoSched?.status ?? null;
+  const autoScheduleError = autoSched?.errorMessage ?? autoSched?.reason ?? null;
+  const studioStatusState = studioStatusEl?.dataset?.state ?? null;
+  const studioStatusText = studioStatusEl?.textContent?.trim() ?? null;
+  const playbackBarVisible = Boolean(studioPlaybackBarEl && !studioPlaybackBarEl.hidden);
+  const playDisabled = Boolean(playEl?.disabled || (playbackBarVisible && studioPlayEl?.disabled));
+  const stepDisabled = Boolean(stepEl?.disabled || (playbackBarVisible && studioStepEl?.disabled));
   return {
     errorText,
     fps: document.querySelector('#sph-fps')?.textContent ?? '',
-    play: document.querySelector('#sph-play')?.textContent ?? '',
+    play: (playbackBarVisible ? studioPlayEl?.textContent?.trim() : '') || playEl?.textContent || '',
+    playbackBarVisible,
+    playDisabled,
+    stepDisabled,
+    studioStatusState,
+    studioStatusText,
+    blocked: playDisabled || studioStatusState === 'error' || Boolean(residentStepsError) || autoScheduleStatus === 'resident-auto-schedule-stopped-terminal-error',
+    residentStepsError,
+    autoScheduleStatus,
+    autoScheduleError,
     rebuild: overlay?.__sphPhaseRebuildWorker?.status ?? null,
     laneSteps: lane?.laneCompletedStepTotal ?? null,
     laneSimTimeS: lane?.laneSimTimeS ?? null,
@@ -1831,6 +1857,17 @@ try {
     await page.waitForTimeout(8000);
     evidence.ledgerAudit = (await inAll(() => globalThis.__s0.readLedger()))
       .filter(entry => Object.keys(entry.value.latest).length || Object.keys(entry.value.cold).length);
+  }
+  evidence.twoLevelRefluxRejection = (await inAll(() => globalThis.__ulgTwoLevelRefluxRejection ?? null, 15000))
+    .filter((entry) => entry.value);
+  evidence.terminalExecution = await page.evaluate(appRow);
+  if (process.env.S0_WORKSPACE_TIMELINE === '1') {
+    evidence.workspaceHeaders = (await inAll(() => globalThis.__s0?.readWorkspaceHeaders?.() ?? null, 30000))
+      .filter((entry) => entry.value && entry.value.length);
+    evidence.workspaceTimeline = (await inAll(() => globalThis.__s0?.readWorkspaceTimeline?.() ?? null, 30000))
+      .filter((entry) => entry.value);
+    evidence.passStatus = (await inAll(() => globalThis.__s0?.readPassStatus?.() ?? null, 30000))
+      .filter((entry) => entry.value);
   }
   const wallS = (Date.now() - t0) / 1000;
   const snapshots = await inAll(() => globalThis.__s0.snapshot());

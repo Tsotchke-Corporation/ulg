@@ -122,6 +122,10 @@ import {
   createGpuReadbackTelemetry,
   createGpuReadbackTelemetryAccumulator
 } from './sphGpuReadbackTelemetry.js';
+import { getCanonicalLawAdapterDescriptor } from './lawDagEpochScheduler.js';
+
+export const SPH_REACTION_LAW_ADAPTER_DESCRIPTOR =
+  getCanonicalLawAdapterDescriptor('reaction-discovery-apply');
 
 
 export {

@@ -754,6 +754,12 @@ export function buildLaunchParamsFromStagedConfig(config) {
       : {})
   };
   delete compiled.surfaceDraw;
+  if (
+    twoLevelAirEnabled
+    || (effectiveWallModel === 'finite-heat-capacity-lumped-face' && !multiLevelChainAirEnabled)
+  ) {
+    delete compiled.exactEnergyLedger;
+  }
   return compiled;
 }
 

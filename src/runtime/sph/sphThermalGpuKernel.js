@@ -115,6 +115,10 @@ import {
   appendGpuReadbackTelemetryObservation,
   createGpuReadbackTelemetry
 } from './sphGpuReadbackTelemetry.js';
+import { getCanonicalLawAdapterDescriptor } from './lawDagEpochScheduler.js';
+
+export const SPH_THERMAL_LAW_ADAPTER_DESCRIPTOR =
+  getCanonicalLawAdapterDescriptor('thermal-conduction-radiation');
 
 const A3_THERMAL_REGIONAL_CACHE_SYMBOL = Symbol.for('ulg.a3ThermalRegionalByDevice');
 function getSphThermalRegionalRadiativeFluxBinding(device) {

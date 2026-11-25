@@ -1,4 +1,8 @@
-import { parseRowLayoutDescriptor, resolveLayoutFieldOffset } from './laneAccessorGenerator.js';
+import {
+  ULG_LANE_ACCESSOR_DESCRIPTOR_SCHEMA,
+  parseRowLayoutDescriptor,
+  resolveLayoutFieldOffset
+} from './laneAccessorGenerator.js';
 
 export const ULG_REPRESENTED_VOLUME_SCHEMA =
   'peercompute.ulg.represented-volume.v1';
@@ -191,10 +195,12 @@ export function generateRepresentedVolumeWgsl({
   mechanicsLayout,
   bufferName = 'mls_mechanics'
 } = {}) {
-  const parsed = parseRowLayoutDescriptor(mechanicsLayout, {
-    layoutName: 'MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT',
-    requireVec4Aligned: true
-  });
+  const parsed = mechanicsLayout?.schema === ULG_LANE_ACCESSOR_DESCRIPTOR_SCHEMA
+    ? mechanicsLayout
+    : parseRowLayoutDescriptor(mechanicsLayout, {
+        layoutName: 'MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT',
+        requireVec4Aligned: true
+      });
   const jField = resolveLayoutFieldOffset(parsed, 'volumeRatioJ');
   const v0Field = resolveLayoutFieldOffset(parsed, 'restVolumeM3');
   const stride = parsed.vec4Stride;

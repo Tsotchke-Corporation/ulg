@@ -25,6 +25,73 @@ import {
 } from '../closureRegimeStore.js';
 import { schroederAuthorityTextFingerprint } from '../sph/schroederAuthorityFingerprint.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { validateLawAdapterDescriptor } from '../sph/lawAdapterContract.js';
+import {
+  MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT,
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  ULG_COMPILED_LAW_IR_WGSL_SCHEMA,
+  ULG_LAW_IR_SCHEMA,
+  compileLawIrToWgsl,
+  createRepresentedVolumePhaseRetargetLawIr,
+  createTaitEosCavitationLawIr,
+  differentiateLawIrExpr,
+  simplifyLawIrExpr
+} from '../../../ulg-gpu-abi/src/index.js';
+
+export {
+  ULG_COMPILED_LAW_IR_WGSL_SCHEMA,
+  ULG_LAW_IR_SCHEMA,
+  compileLawIrToWgsl,
+  createRepresentedVolumePhaseRetargetLawIr,
+  createTaitEosCavitationLawIr,
+  differentiateLawIrExpr,
+  simplifyLawIrExpr
+};
+
+export const CANONICAL_ULG_LAW_IR_RESOURCE_LAYOUTS = Object.freeze({
+  'sph-particle-state': SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  'sph-thermo-phase': SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  'mls-mpm-mechanics': MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  'mls-mpm-grid-velocity': MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT
+});
+
+/**
+ * Compile a declarative `peercompute.ulg.law-ir.v1` object (authored directly
+ * or emitted by Eshkol's portable C WGSL emitter `vm_wgsl_emitter.c`) into a
+ * validated WebGPU WGSL compute shader with canonical ABI lane accessors,
+ * paired RepresentedVolume guards, symbolic AD, and fail-closed envelope watch.
+ */
+export function compileDeclarativeLawIrToWgsl(lawIr, {
+  resourceLayouts = CANONICAL_ULG_LAW_IR_RESOURCE_LAYOUTS,
+  workgroupSize = 64,
+  includeEnvelopeWatch = true,
+  requireExtendedDescriptor = true
+} = {}) {
+  if (!lawIr || lawIr.schema !== ULG_LAW_IR_SCHEMA) {
+    throw new TypeError(`compileDeclarativeLawIrToWgsl requires schema "${ULG_LAW_IR_SCHEMA}"`);
+  }
+  const descCheck = validateLawAdapterDescriptor(lawIr.descriptor, {
+    requireExtendedMetadata: requireExtendedDescriptor
+  });
+  if (!descCheck.valid) {
+    const err = new Error(
+      `Law-IR "${lawIr.id || 'unknown'}" failed Law Adapter Contract validation: ${descCheck.errors.join(', ')}`
+    );
+    err.code = 'ERR_LAW_IR_DESCRIPTOR_INVALID';
+    err.errors = descCheck.errors;
+    throw err;
+  }
+  return compileLawIrToWgsl(lawIr, {
+    resourceLayouts: {
+      ...CANONICAL_ULG_LAW_IR_RESOURCE_LAYOUTS,
+      ...(resourceLayouts || {})
+    },
+    workgroupSize,
+    includeEnvelopeWatch
+  });
+}
 
 export const ULG_ESHKOL_LAW_OBJECT_SCHEMA = 'peercompute.ulg.eshkol-law-object.v1';
 export const ULG_ESHKOL_APPROXIMATED_LAW_SCHEMA = 'peercompute.ulg.eshkol-approximated-law.v1';
@@ -660,10 +727,20 @@ export function approximateLaw(law, {
  */
 export function compileLawToWgsl(approximatedLaw, {
   fnPrefix = 'eshkol_law',
-  generation = 1
+  generation = 1,
+  resourceLayouts = CANONICAL_ULG_LAW_IR_RESOURCE_LAYOUTS,
+  workgroupSize = 64,
+  includeEnvelopeWatch = true
 } = {}) {
+  if (approximatedLaw?.schema === ULG_LAW_IR_SCHEMA) {
+    return compileDeclarativeLawIrToWgsl(approximatedLaw, {
+      resourceLayouts,
+      workgroupSize,
+      includeEnvelopeWatch
+    });
+  }
   if (approximatedLaw?.schema !== ULG_ESHKOL_APPROXIMATED_LAW_SCHEMA || approximatedLaw.representation !== 'chebyshev') {
-    throw new TypeError('compileLawToWgsl requires a chebyshev approximatedLaw from approximateLaw');
+    throw new TypeError('compileLawToWgsl requires a chebyshev approximatedLaw or a peercompute.ulg.law-ir.v1 object');
   }
   const safePrefix = String(fnPrefix).replace(/[^a-zA-Z0-9_]/g, '_') || 'eshkol_law';
   const axes = approximatedLaw.responseFunction.axes;

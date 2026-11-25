@@ -4228,6 +4228,15 @@ fn validate_fine_velocity_correction(
   valid = ws_atomic_add_f32(96u, angular.x) && valid;
   valid = ws_atomic_add_f32(97u, angular.y) && valid;
   valid = ws_atomic_add_f32(98u, angular.z) && valid;
+  // Pre-cancellation conditioning for causal momentum & angular conservation:
+  // sealed_causal_impulse = (phase + causal) - phase and sums across opposing
+  // fine/coarse cells can cancel near zero while individual terms are large.
+  let fine_causal_cond_p = length(sealed_causal_impulse)
+    + length(impulse) + length(phase_impulse);
+  let fine_causal_cond_l = length(angular)
+    + length(fine_position) * (length(impulse) + length(phase_impulse));
+  valid = ws_atomic_add_f32(58u, fine_causal_cond_p) && valid;
+  valid = ws_atomic_add_f32(59u, fine_causal_cond_l) && valid;
   if (!valid) {
     ws_reject(STATUS_NONFINITE, 39u);
     reflux_reject(REFLUX_NONFINITE);
@@ -4413,6 +4422,12 @@ fn validate_routed_coarse_cfl(
   valid = ws_atomic_add_f32(99u, angular.x) && valid;
   valid = ws_atomic_add_f32(100u, angular.y) && valid;
   valid = ws_atomic_add_f32(101u, angular.z) && valid;
+  let coarse_causal_cond_p = length(causal_impulse)
+    + length(proposal) + length(phase_impulse);
+  let coarse_causal_cond_l = length(angular)
+    + length(position) * (length(proposal) + length(phase_impulse));
+  valid = ws_atomic_add_f32(58u, coarse_causal_cond_p) && valid;
+  valid = ws_atomic_add_f32(59u, coarse_causal_cond_l) && valid;
   if (!valid) {
     ws_reject(STATUS_NONFINITE, 39u);
     reflux_reject(REFLUX_NONFINITE);
@@ -4489,17 +4504,25 @@ fn seal_fine_correction_alpha() {
     8.0 * 1.175494351e-38,
     1024.0 * 5.960464477539063e-8 * causal_scale
   );
+  let causal_momentum_sum_abs = bitcast<f32>(ws_load(58u));
+  let causal_angular_sum_abs = bitcast<f32>(ws_load(59u));
+  ws_store(58u, 0u);
+  ws_store(59u, 0u);
+  let causal_momentum_conditioning = max(
+    length(fine_causal_impulse) + length(coarse_causal_impulse),
+    causal_momentum_sum_abs
+  );
+  let causal_angular_conditioning = max(
+    length(fine_causal_angular) + length(coarse_causal_angular),
+    causal_angular_sum_abs
+  );
   let causal_momentum_tolerance = max(
     8.0 * 1.175494351e-38,
-    1024.0 * 5.960464477539063e-8 * (
-      length(fine_causal_impulse) + length(coarse_causal_impulse)
-    )
+    1024.0 * 5.960464477539063e-8 * causal_momentum_conditioning
   );
   let causal_angular_tolerance = max(
     8.0 * 1.175494351e-38,
-    1024.0 * 5.960464477539063e-8 * (
-      length(fine_causal_angular) + length(coarse_causal_angular)
-    )
+    1024.0 * 5.960464477539063e-8 * causal_angular_conditioning
   );
   if (!finite_f32(raw_causal_linear)
       || !finite_f32(phase_causal_cross)
@@ -4509,6 +4532,10 @@ fn seal_fine_correction_alpha() {
       || !finite_f32(causal_linear)
       || !finite_f32(causal_quadratic)
       || causal_quadratic < 0.0
+      || !finite_f32(causal_momentum_sum_abs)
+      || causal_momentum_sum_abs < 0.0
+      || !finite_f32(causal_angular_sum_abs)
+      || causal_angular_sum_abs < 0.0
       || max(abs(causal_momentum_residual.x), max(
         abs(causal_momentum_residual.y),
         abs(causal_momentum_residual.z)
@@ -4523,16 +4550,23 @@ fn seal_fine_correction_alpha() {
   }
   var causal_alpha = 1.0;
   if (causal_linear + causal_quadratic > causal_tolerance) {
-    if (!(causal_linear < 0.0) || !(causal_quadratic > 0.0)) {
+    if (!(causal_linear < 0.0)) {
+      // The post-phase Jacobi causal direction has nonnegative linear work
+      // (dE/dalpha >= 0 at alpha = 0). The largest energy-safe causal step is
+      // strictly causal_alpha = 0.0, preserving phase transport intact with
+      // zero kinetic energy creation.
+      causal_alpha = 0.0;
+    } else if (!(causal_quadratic > 0.0)) {
       ws_reject(STATUS_ENERGY_REJECTED, 86u);
       reflux_reject(REFLUX_ENERGY_REJECTED);
       return;
+    } else {
+      causal_alpha = clamp(
+        -causal_linear / causal_quadratic,
+        0.0,
+        1.0
+      );
     }
-    causal_alpha = clamp(
-      -causal_linear / causal_quadratic,
-      0.0,
-      1.0
-    );
   }
   let sealed_causal_delta =
     causal_alpha * causal_linear
@@ -6736,14 +6770,29 @@ fn validate_coarse_velocity_publish(
     + 0.5 * dot(impulse, impulse) / mass;
   let vmax = params.cfl_factor * params.coarse_spacing_m / params.macro_dt;
   let cfl_ratio = velocity_magnitude_ratio(future, vmax);
-  if (!all(vec3<bool>(
+  let coarse_numeric_valid = all(vec3<bool>(
       finite_f32(future.x), finite_f32(future.y), finite_f32(future.z)
-    )) || !finite_f32(delta_energy) || !finite_f32(vmax) || !(vmax > 0.0)
-      || !finite_f32(cfl_ratio)
-      || cfl_ratio < 0.0
-      || !velocity_endpoint_within_physical_audit(future, vmax)) {
+    )) && finite_f32(delta_energy) && finite_f32(vmax) && vmax > 0.0
+    && finite_f32(cfl_ratio) && cfl_ratio >= 0.0;
+  if (!coarse_numeric_valid) {
     ws_reject(STATUS_CFL_REJECTED | STATUS_NONFINITE, 86u);
     reflux_reject(REFLUX_CFL_REJECTED | REFLUX_NONFINITE);
+    return;
+  }
+  if (!velocity_endpoint_within_physical_audit(future, vmax)) {
+    ws_reject(STATUS_CFL_REJECTED, 86u);
+    reflux_reject(REFLUX_CFL_REJECTED);
+    publish_cfl_interval_reject_trace(
+      1u,
+      coarse_field,
+      prior,
+      impulse / mass,
+      impulse / mass,
+      vmax,
+      0.0,
+      vec3<f32>(0.0, -1.0, 0.0),
+      vec3<f32>(0.0, -1.0, 0.0)
+    );
     return;
   }
   let proposal = params.route_proposal_offset
@@ -7174,8 +7223,11 @@ fn seal_coarse_velocity_publish() {
     0.0,
     deferred_route_heat - coarse_cross_level_drag_heat
   );
-  if (coarse_causal_route_heat <= causal_energy_tolerance
-      && !(causal_weight_sum > 0.0)) {
+  if ((coarse_causal_route_heat <= causal_energy_tolerance
+      && !(causal_weight_sum > 0.0))
+      || (deferred_route_heat < coarse_cross_level_drag_heat
+        && coarse_cross_level_drag_heat
+          <= deferred_route_heat + causal_energy_tolerance)) {
     coarse_causal_route_heat = 0.0;
     // Preserve the independently accumulated mandatory drag subset exactly;
     // the resulting closure perturbation is already bounded by tolerance.

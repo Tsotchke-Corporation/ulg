@@ -140,6 +140,24 @@ oracles:
         event_names: [supergalactic-treepm-and-peercompute]
         event_contract_ids: [ulg.gate5-planetary-to-supergalactic.v1]
 
+  - name: ulg-gate6-architecture-1-0
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: gate6-architecture-candidate-review
+        label: "Exact Phase A-E source manifest (ULG + sibling eshkol C99 emitter), host/Vulkan/gpuprobe logs, monolith export parity, and adversarial independent review agree"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.gate6-architecture-1-0.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate6-law-compiler-parallel-and-unified-continuum
+        label: "Declarative Law-IR -> WGSL compiler (JS + zero-LLVM C99 eshkol emitter) + Law-DAG epoch scheduler execute identically on Vulkan; 10 hot-path @workgroup_size(1) kernels parallelized with permanent ratchet + 100,000 live continuum carriers <= 10 ms/step within Section 3 GPU budgets; final private 4096-bucket solid-fluid hashes retired (0 private grids), unilateral solid-liquid slip live, and unified defaults pass all 5 Studio gpuprobe.sh sweeps"
+        event_names: [law-compiler-parallel-and-unified-continuum]
+        event_contract_ids: [ulg.gate6-architecture-1-0.v1]
+      - <<: *ulg_campaign_receipt
+        id: gate6-monolith-decomposition-and-unseen-material-loop
+        label: "All 7 giant monoliths mechanically decomposed into 14 submodules with exact ESM export parity and <45 MB zero-AI dist/; plan/todo archive hygiene completed; live unseen-material (KBr, GeO2) GPU derivation -> OPFS persistent cache -> PeerCompute ReservationLedger CAS bank hot-swap -> cross-reload bit-exact continuum mechanics hit & corrupt-cache fail-closed recovery proven on Vulkan"
+        event_names: [monolith-decomposition-and-unseen-material-loop]
+        event_contract_ids: [ulg.gate6-architecture-1-0.v1]
+
   # =========================================================================
   # Retained Legacy Granular Campaign Targets (G5 & G7 Accepted; G1-G4/G6/A1-A6
   # preserved for historical audit lineage — superseded as active gates above)

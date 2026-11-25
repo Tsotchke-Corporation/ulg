@@ -21,8 +21,24 @@ import {
   sphThermalStepWgsl as canonicalSphThermalStepWgsl
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 
+const SPLIT_MODULE_COMPANIONS = Object.freeze({
+  'ulg-gpu-abi/src/wgsl.js': [
+    'ulg-gpu-abi/src/sphReactionWgsl.js',
+    'ulg-gpu-abi/src/sphRenderWgsl.js',
+    'ulg-gpu-abi/src/mlsMpmWgsl.js',
+    'ulg-gpu-abi/src/schroederHierarchyWgsl.js'
+  ],
+  'src/runtime/sph/sphMlsMpmGpuStep.js': [
+    'src/runtime/sph/sphMlsMpmStepContracts.js',
+    'src/runtime/sph/sphMlsMpmWgslVariants.js'
+  ]
+});
+
 function readRepoText(relativePath) {
-  return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
+  const parts = [relativePath, ...(SPLIT_MODULE_COMPANIONS[relativePath] || [])];
+  return parts
+    .map((p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8'))
+    .join('\n');
 }
 
 function escapeRegExp(value) {

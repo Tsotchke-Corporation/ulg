@@ -732,13 +732,40 @@ struct RadixParams {
 @group(0) @binding(1) var<storage, read_write> radix_histogram_offsets: array<u32>;
 @group(0) @binding(2) var<uniform> radix_params: RadixParams;
 
-@compute @workgroup_size(1)
-fn scan_histogram_serial() {
+var<workgroup> hist_scan_wg: array<u32, 64>;
+var<workgroup> hist_scan_carry: u32;
+
+@compute @workgroup_size(64)
+fn scan_histogram_serial(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let lane = lid.x;
   let histogram_element_count = radix_params.workgroup_count * 16u;
-  var running = 0u;
-  for (var index = 0u; index < histogram_element_count; index = index + 1u) {
-    radix_histogram_offsets[index] = running;
-    running = running + radix_histograms[index];
+  if (lane == 0u) { hist_scan_carry = 0u; }
+  workgroupBarrier();
+  let tiles = (histogram_element_count + 63u) / 64u;
+  for (var tile = 0u; tile < tiles; tile = tile + 1u) {
+    let idx = tile * 64u + lane;
+    let val = select(0u, radix_histograms[idx], idx < histogram_element_count);
+    hist_scan_wg[lane] = val;
+    workgroupBarrier();
+    var offset = 1u;
+    loop {
+      if (offset >= 64u) { break; }
+      var add = 0u;
+      if (lane >= offset) { add = hist_scan_wg[lane - offset]; }
+      workgroupBarrier();
+      hist_scan_wg[lane] = hist_scan_wg[lane] + add;
+      workgroupBarrier();
+      offset = offset * 2u;
+    }
+    let carry = hist_scan_carry;
+    if (idx < histogram_element_count) {
+      radix_histogram_offsets[idx] = carry + (hist_scan_wg[lane] - val);
+    }
+    workgroupBarrier();
+    if (lane == 63u) {
+      hist_scan_carry = carry + hist_scan_wg[63u];
+    }
+    workgroupBarrier();
   }
 }
 `;

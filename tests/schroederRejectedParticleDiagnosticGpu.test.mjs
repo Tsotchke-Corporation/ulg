@@ -23,7 +23,7 @@ test('rejected-particle diagnostic embeds exact production gather arithmetic wit
     assert.throws(() => extractRejectedParticleG2pFragments(mlsMpmG2pReconstructWgsl.replace(anchor, 'missing')), /unique production/);
     assert.throws(() => extractRejectedParticleG2pFragments(mlsMpmG2pReconstructWgsl + '\n' + anchor), /unique production/);
   }
-  const production = readFileSync(new URL('../src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url), 'utf8');
+  const production = readFileSync(new URL('../src/runtime/sph/sphMlsMpmWgslVariants.js', import.meta.url), 'utf8');
   const numeric = text => text.match(/fn g2p_scale_close\([\s\S]*?\n\}/)?.[0];
   assert.equal(numeric(shader), numeric(production), 'exact operation-conditioned pressure eligibility');
   assert.match(shader, /!pressure_admitted\(field_index\)/);

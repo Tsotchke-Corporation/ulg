@@ -61,6 +61,7 @@ export * from './materialFoundationAbi.js';
 export * from './laneAccessorGenerator.js';
 export * from './representedVolume.js';
 export * from './wgslComposer.js';
+export * from './lawIrWgslCompiler.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';
@@ -445,8 +446,8 @@ export const SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT = Object.freeze([
   'densityFromKgPerM3:f32',
   'densityToKgPerM3:f32',
   'status:f32',
-  // Phase-resolved bulk conductivity used by the CPU contact-conduction
-  // reference. The resident GPU proposal path does not consume this lane yet.
+  // Phase-resolved bulk conductivity consumed by ULG's canonical GPU thermal
+  // pair conduction sidecar (`thermal_harmonic_mean_positive`) and reference path.
   'thermalConductivityWPerMK:f32'
 ]);
 export const SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT = Object.freeze([

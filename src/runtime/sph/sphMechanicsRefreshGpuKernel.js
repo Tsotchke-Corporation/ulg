@@ -1301,7 +1301,10 @@ fn eval_tier1_polytope_refresh(
       }
       exact?.encode(encoder, true);
     },
-    cleanupSubmittedWork: cleanup
+    cleanupSubmittedWork: cleanup,
+    releaseAuthorityValidation() {
+      if (!exact?.retainAcceptance) destroyBufferOnce(authorityValidationBuffer);
+    }
   };
 }
 
@@ -1498,8 +1501,13 @@ async function runMechanicsRefreshWebGpu(args) {
     stage.result.mechanicsBuffer = null;
   }
   if (token) {
+    const releaseSealResources = () => {
+      const sourceRelease = exact?.releaseSource?.();
+      stage.releaseAuthorityValidation?.();
+      return sourceRelease;
+    };
     const base = createPostMechanicsStageOutputSeal(stage.result, capturedInputs,
-      { onLastRelease: exact?.releaseSource ?? null });
+      { onLastRelease: releaseSealResources });
     mechanicsSourceCaptures.set(token, exact ? Object.freeze({ ...base,
       exactMechanics: Object.freeze({ quantityBuffer: exact.quantityBuffer, quantityLayout: exact.quantityLayout,
         format: exact.format, source: exact.source }),

@@ -3558,6 +3558,8 @@ test('native surface bridge reuse is independent of optical material identities 
     refractionDummyBindGroup: {},
     refractionBackfaceDummyTexture: {},
     refractionBackfaceDummyView: {},
+    refractionOpaqueDepthDummyTexture: {},
+    refractionOpaqueDepthDummyView: {},
     envDummyTexture: {},
     envDummyView: {}
   };

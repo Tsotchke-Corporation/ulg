@@ -9,21 +9,22 @@ import {
 } from '../src/visualization/nativeRefractionTransportWgsl.js';
 import * as scene from '../src/visualization/sphPhaseScene.js';
 
-// Captured from the evaluated scene exports immediately before the extraction
-// on 2026-09-04. These are generated-WGSL snapshots, not GPU validation. An
-// intentional shader behavior change must review and update the snapshots.
+// Captured after binding opaque_scene_depth (@group(1) @binding(5)) and
+// 2x2 bilinear foreground-occluder depth rejection (2026-11-24). These are
+// generated-WGSL snapshots, not GPU validation. An intentional shader behavior
+// change must review and update the snapshots.
 const PRE_EXTRACTION_SHADERS = Object.freeze({
   SPH_NATIVE_WEBGPU_BACKGROUND_WGSL: {
     bytes: 1481,
     sha256: '4eec9414f2807388bee643fd5d2f38efbb98d68f308781aee14e077483997e06'
   },
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL: {
-    bytes: 35981,
-    sha256: '0f7dd731c70dd513b8fdaf3987a947b628978410b80860449c34507bc0c6e865'
+    bytes: 41386,
+    sha256: 'e19fb74287ebc1b77a505f33d83c3888adefd12f11cc77a95443466f1e76fd2a'
   },
   SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL: {
-    bytes: 41921,
-    sha256: 'e8d3ca232267e135a9205ea9fba25db6d72539c819eaae38334852570a63f016'
+    bytes: 47326,
+    sha256: 'd49371de0cc0046352e11db2af2642390597312fe7a3dbc34193e3dc42eb652d'
   }
 });
 
@@ -52,8 +53,11 @@ test('shared compact material retains optical tables, rear-depth transport, and 
     '@group(0) @binding(3) var<storage, read> spectral_samples: array<vec4<f32>>;',
     '@group(1) @binding(0) var scene_color_copy: texture_2d<f32>;',
     '@group(1) @binding(2) var env_map: texture_2d<f32>;',
-    '@group(1) @binding(4) var refractive_back_depth: texture_depth_2d;'
+    '@group(1) @binding(4) var refractive_back_depth: texture_depth_2d;',
+    '@group(1) @binding(5) var opaque_scene_depth: texture_depth_2d;'
   ]) assert.ok(source.includes(declaration), declaration);
+  assert.match(source, /fn sample_refracted_scene_color_depth_rejected\(/);
+  assert.match(source, /refraction_depth_filtered_weights\(/);
   assert.match(source, /let metalness = clamp\(optical\.metalness/);
   assert.match(source, /refractive_index = max\(optical\.ior, 1\.0\)/);
   assert.match(source, /optical\.transmission > 0\.01/);

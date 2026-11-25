@@ -3186,6 +3186,7 @@ function ensureWorkerPresentationDepthView() {
       (self.GPUTextureUsage?.RENDER_ATTACHMENT
         ?? TEXTURE_RENDER_ATTACHMENT)
       | (self.GPUTextureUsage?.TEXTURE_BINDING ?? TEXTURE_BINDING)
+      | (self.GPUTextureUsage?.COPY_SRC ?? 1)
   });
   renderDepthView = renderDepthTexture.createView();
   renderDepthTextureWidth = width;
@@ -4306,6 +4307,10 @@ function ensureWorkerOwnedIsosurfacePresenter() {
     presentationPauseClock: workerPresentationPauseClock,
     depthFormat: WORKER_PRESENTATION_DEPTH_FORMAT,
     getDepthView: () => ensureWorkerPresentationDepthView(),
+    getDepthTexture: () => {
+      ensureWorkerPresentationDepthView();
+      return renderDepthTexture;
+    },
     getViewportSize: () => [
       Math.max(1, Number(canvas?.width) || 1),
       Math.max(1, Number(canvas?.height) || 1)

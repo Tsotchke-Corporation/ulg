@@ -28,17 +28,18 @@ spatial views rather than adding another private neighbor search.
 - Retained-GPU evidence can report hundreds of kilograms of liquid H2O while
   the melt remains effectively stationary, followed by an abrupt gas/volume
   instability instead of progressive melt flow.
-- **Foreground refraction leakage (reported 2026-11-23):** Refractive surfaces
-  (e.g., water) refract opaque objects positioned *in front* of the fluid
-  instead of only objects inside or behind it (`nativeSurfaceMaterialWgsl.js:690-694`
-  samples `scene_color_copy` at `refracted_path.exit_uv` without binding or
-  testing the opaque scene depth texture `opaque_scene_depth` against
-  `in.position.z`; `opticsLayout` at `workerOwnedNativeSurfaceMaterial.js:237-243`
-  currently binds only `backDepth` of the refractive surface itself). Fix:
-  copy and bind `opaque_scene_depth` (`@group(1) @binding(5)`) after the opaque
-  pass, test the 2×2 bilinear footprint at `exit_uv` for `opaque_depth >=
-  in.position.z - eps`, and reject/clamp foreground occluder texels back to
-  valid behind-surface samples or the environment ray (zero material hacks).
+- **Foreground refraction leakage (reported 2026-11-23 — FIXED & VERIFIED 2026-11-24):** Refractive surfaces
+  (e.g., water) previously refracted opaque objects positioned *in front* of the fluid
+  instead of only objects inside or behind it. Now fixed across both worker-owned
+  (`workerOwnedNativeSurfaceMaterial.js`, `workerOwnedIsosurfacePresenter.js`,
+  `ulgOffscreenRender.worker.js`) and page-native (`sphPhaseScene.js`) surface
+  paths: `opaque_scene_depth` (`@group(1) @binding(5)`) is copied from `depth24plus`
+  after the opaque pass, 2×2 bilinear footprints are depth-filtered against
+  `in.position.z - 1.0e-4` (`refraction_bilinear_footprint`,
+  `refraction_depth_filtered_weights`, `sample_refracted_scene_color_depth_rejected`),
+  and foreground occluders are rejected cleanly while submerged objects refract
+  faithfully (`57/57` science probe + `tests/nativeRefractionForegroundRejection.native.test.mjs`
+  bit-exact Vulkan render proof + live `iron-ice-quench` `gpuprobe.sh`).
 
 ## Source Diagnosis
 

@@ -114,6 +114,13 @@ function scienceChecks(result) {
       && evidence[73] === 0 && evidence[74] === 0
       && evidence[75] === 0],
     ['near-plane-depth-is-out-of-range', evidence[79] < 0],
+    ['foreground-occluder-depth-rejected', evidence[80] === 0],
+    ['background-and-submerged-depth-admitted', evidence[81] === 1 && evidence[82] === 1],
+    ['nan-opaque-depth-fails-closed', evidence[83] === 0],
+    ['bilinear-footprint-partial-occluder-rejects-only-foreground-texels',
+      evidence[84] === 0 && evidence[85] > 0.70 && evidence[85] < 0.80],
+    ['bilinear-footprint-full-occluder-zeroes-all-weights', evidence[86] === 0],
+    ['bilinear-footprint-all-behind-preserves-unit-weight-sum', nearlyEqual(evidence[87], 1.0)],
     ['production-surface-shader-compiles', result.productionShaderCompilationErrorCount === 0],
     ['validation-errors-empty', (result.validationErrors || []).length === 0],
     ['uncaptured-errors-empty', (result.uncapturedErrors || []).length === 0]
@@ -371,6 +378,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let negative_depth_unprojection = refraction_unproject_uv_depth(
     vec2<f32>(0.5), -0.01, wide_inverse_view_projection
   );
+  let fg_rejected = refraction_opaque_depth_is_behind(0.35, 0.60, 1.0e-4);
+  let submerged_admitted = refraction_opaque_depth_is_behind(0.75, 0.60, 1.0e-4);
+  let bg_admitted = refraction_opaque_depth_is_behind(1.0, 0.60, 1.0e-4);
+  let nan_depth_rejected = refraction_opaque_depth_is_behind(nan, 0.60, 1.0e-4);
+  let fp_mid = refraction_bilinear_footprint(vec2<f32>(0.5, 0.5), vec2<u32>(4u, 4u));
+  let partial_w = refraction_depth_filtered_weights(
+    fp_mid.weights,
+    vec4<f32>(0.25, 0.85, 0.90, 1.0),
+    0.60,
+    1.0e-4
+  );
+  let full_occ_w = refraction_depth_filtered_weights(
+    fp_mid.weights,
+    vec4<f32>(0.20, 0.30, 0.40, 0.50),
+    0.60,
+    1.0e-4
+  );
+  let all_behind_w = refraction_depth_filtered_weights(
+    fp_mid.weights,
+    vec4<f32>(0.70, 0.80, 0.90, 1.0),
+    0.60,
+    1.0e-4
+  );
 
   evidence[0] = thin.path_m;
   evidence[1] = thin.lateral_displacement_m;
@@ -451,6 +481,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   evidence[77] = high_uv_unprojection.valid;
   evidence[78] = negative_depth_unprojection.valid;
   evidence[79] = before_near_plane.depth;
+  evidence[80] = fg_rejected;
+  evidence[81] = submerged_admitted;
+  evidence[82] = bg_admitted;
+  evidence[83] = nan_depth_rejected;
+  evidence[84] = partial_w.x;
+  evidence[85] = partial_w.x + partial_w.y + partial_w.z + partial_w.w;
+  evidence[86] = full_occ_w.x + full_occ_w.y + full_occ_w.z + full_occ_w.w;
+  evidence[87] = all_behind_w.x + all_behind_w.y + all_behind_w.z + all_behind_w.w;
 }`;
 
       device.pushErrorScope('validation');

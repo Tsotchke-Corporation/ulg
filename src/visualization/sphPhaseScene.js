@@ -14116,6 +14116,8 @@ export function canReuseSphNativeSurfaceDrawRenderBridge(
     && previousBridge.refractionDummyBindGroup
     && previousBridge.refractionBackfaceDummyTexture
     && previousBridge.refractionBackfaceDummyView
+    && previousBridge.refractionOpaqueDepthDummyTexture
+    && previousBridge.refractionOpaqueDepthDummyView
     && previousBridge.envDummyTexture
     && previousBridge.envDummyView
   );
@@ -23027,6 +23029,8 @@ export function createSphPhaseScene(container, {
       renderBridge.refractionDummyTexture = null;
       renderBridge.refractionBackfaceDummyTexture = null;
       renderBridge.refractionBackfaceDummyView = null;
+      renderBridge.refractionOpaqueDepthDummyTexture = null;
+      renderBridge.refractionOpaqueDepthDummyView = null;
       renderBridge.envDummyTexture = null;
       renderBridge.envMapTexture = null;
       renderBridge.envMapView = null;
@@ -24089,10 +24093,13 @@ export function createSphPhaseScene(container, {
     bridge.refractionBackfaceHeight = 0;
     bridge.refractionBackfaceByteLength = 0;
     bridge.refractionBackfaceCacheValid = false;
+    bridge.refractionOpaqueDepthTexture = null;
+    bridge.refractionOpaqueDepthView = null;
     bridge.refractionBindGroup = null;
     bridge.refractionBindGroupSceneColorView = null;
     bridge.refractionBindGroupEnvironmentView = null;
     bridge.refractionBindGroupBackDepthView = null;
+    bridge.refractionBindGroupOpaqueDepthView = null;
   }
 
   function destroySphResidentSurfaceRefractionTargetSet(targetSet) {
@@ -24100,10 +24107,13 @@ export function createSphPhaseScene(container, {
     targetSet.destroyed = true;
     try { targetSet.copyTexture?.destroy?.(); } catch { /* device teardown */ }
     try { targetSet.backfaceTexture?.destroy?.(); } catch { /* device teardown */ }
+    try { targetSet.opaqueDepthTexture?.destroy?.(); } catch { /* device teardown */ }
     targetSet.copyTexture = null;
     targetSet.copyView = null;
     targetSet.backfaceTexture = null;
     targetSet.backfaceView = null;
+    targetSet.opaqueDepthTexture = null;
+    targetSet.opaqueDepthView = null;
     return true;
   }
 
@@ -24191,6 +24201,7 @@ export function createSphPhaseScene(container, {
     }
     let copyTexture = null;
     let backfaceTexture = null;
+    let opaqueDepthTexture = null;
     try {
       copyTexture = bridge.device.createTexture({
         label: 'ulg-sph-resident-surface-draw-refraction-copy',
@@ -24204,8 +24215,15 @@ export function createSphPhaseScene(container, {
         format: action.depthFormat,
         usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.TEXTURE_BINDING
       });
+      opaqueDepthTexture = bridge.device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-opaque-depth',
+        size: [action.width, action.height, 1],
+        format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.COPY_DST
+      });
       const copyView = copyTexture.createView();
       const backfaceView = backfaceTexture.createView();
+      const opaqueDepthView = opaqueDepthTexture.createView();
       const targetSet = {
         schema: 'peercompute.ulg.native-refraction-target-set.v0',
         generation: Math.max(
@@ -24221,6 +24239,8 @@ export function createSphPhaseScene(container, {
         copyView,
         backfaceTexture,
         backfaceView,
+        opaqueDepthTexture,
+        opaqueDepthView,
         destroyed: false,
         retirementStatus: 'active'
       };
@@ -24248,6 +24268,8 @@ export function createSphPhaseScene(container, {
       bridge.refractionCopyByteLength = targetSet.width * targetSet.height * 4;
       bridge.refractionBackfaceTexture = targetSet.backfaceTexture;
       bridge.refractionBackfaceView = targetSet.backfaceView;
+      bridge.refractionOpaqueDepthTexture = targetSet.opaqueDepthTexture;
+      bridge.refractionOpaqueDepthView = targetSet.opaqueDepthView;
       bridge.refractionBackfaceWidth = targetSet.width;
       bridge.refractionBackfaceHeight = targetSet.height;
       bridge.refractionBackfaceByteLength =
@@ -24260,6 +24282,7 @@ export function createSphPhaseScene(container, {
     } catch (error) {
       try { copyTexture?.destroy?.(); } catch { /* device teardown */ }
       try { backfaceTexture?.destroy?.(); } catch { /* device teardown */ }
+      try { opaqueDepthTexture?.destroy?.(); } catch { /* device teardown */ }
       bridge.refractionTargetLifecycleStatus = 'target-set-create-error';
       bridge.refractionTargetLifecycleReason = error instanceof Error
         ? error.message
@@ -24647,7 +24670,8 @@ export function createSphPhaseScene(container, {
         { binding: 1, resource: bridge.refractionSampler },
         { binding: 2, resource: bridge.envMapView || bridge.envDummyView },
         { binding: 3, resource: bridge.envSampler },
-        { binding: 4, resource: bridge.refractionBackfaceDummyView }
+        { binding: 4, resource: bridge.refractionBackfaceDummyView },
+        { binding: 5, resource: bridge.refractionOpaqueDepthDummyView }
       ]
     });
   }
@@ -24852,7 +24876,7 @@ export function createSphPhaseScene(container, {
         label: 'ulg-sph-resident-surface-draw-depth',
         size: [widthPx, heightPx],
         format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
+        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC
       });
       nextDepthView = nextDepthTexture.createView();
     } catch (error) {
@@ -26358,7 +26382,7 @@ fn main(
         label: `ulg-sph-native-surface-candidate-presentation-depth-${serial}`,
         size: [width, height, 1],
         format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
+        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC
       });
       targets.depthView = targets.depthTexture.createView();
       if (diagnosticPixelProofEnabled) {
@@ -27297,10 +27321,13 @@ fn main(
     bridge.refractionBackfaceView = null;
     bridge.refractionBackfaceWidth = 0;
     bridge.refractionBackfaceHeight = 0;
+    bridge.refractionOpaqueDepthTexture = null;
+    bridge.refractionOpaqueDepthView = null;
     bridge.refractionBindGroup = null;
     bridge.refractionBindGroupSceneColorView = null;
     bridge.refractionBindGroupEnvironmentView = null;
     bridge.refractionBindGroupBackDepthView = null;
+    bridge.refractionBindGroupOpaqueDepthView = null;
     bridge.refractionBackfaceCacheValid = false;
     bridge.boxWireframe = null;
     bridge.schroederRenderProxyNativeExecutor = null;
@@ -32697,6 +32724,11 @@ fn main(
             binding: 4,
             visibility: GPU_SHADER_STAGE.FRAGMENT,
             texture: { sampleType: 'depth' }
+          },
+          {
+            binding: 5,
+            visibility: GPU_SHADER_STAGE.FRAGMENT,
+            texture: { sampleType: 'depth' }
           }
         ]
       });
@@ -32803,6 +32835,13 @@ fn main(
         usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
       }));
       const refractionBackfaceDummyView = refractionBackfaceDummyTexture.createView();
+      const refractionOpaqueDepthDummyTexture = trackBridgeOwnedAllocation(device.createTexture({
+        label: 'ulg-sph-resident-surface-draw-refraction-opaque-depth-dummy',
+        size: [1, 1, 1],
+        format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        usage: GPU_TEXTURE_USAGE.TEXTURE_BINDING | GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
+      }));
+      const refractionOpaqueDepthDummyView = refractionOpaqueDepthDummyTexture.createView();
       // Environment sampler wraps in longitude (latlong seam) and walks the
       // prefiltered mip chain for roughness-indexed lookups.
       const envSampler = device.createSampler({
@@ -32828,7 +32867,8 @@ fn main(
           { binding: 1, resource: refractionSampler },
           { binding: 2, resource: envDummyView },
           { binding: 3, resource: envSampler },
-          { binding: 4, resource: refractionBackfaceDummyView }
+          { binding: 4, resource: refractionBackfaceDummyView },
+          { binding: 5, resource: refractionOpaqueDepthDummyView }
         ]
       });
       const fieldGradientDummyBuffer = trackBridgeOwnedAllocation(device.createBuffer({
@@ -33013,6 +33053,8 @@ fn main(
         refractionDummyTexture,
         refractionBackfaceDummyTexture,
         refractionBackfaceDummyView,
+        refractionOpaqueDepthDummyTexture,
+        refractionOpaqueDepthDummyView,
         refractionDummyBindGroup,
         envSampler,
         envDummyTexture,
@@ -33993,6 +34035,19 @@ fn main(
               { texture: copyTexture },
               [surfaceTextureWidth, surfaceTextureHeight, 1]
             );
+            const activeOpaqueDepthTexture = stageOnly
+              ? presentationTarget?.depthTexture
+              : bridge.depthTexture;
+            const opaqueDepthCopyTexture = bridge.refractionOpaqueDepthTexture || null;
+            let opaqueDepthView = bridge.refractionOpaqueDepthDummyView;
+            if (activeOpaqueDepthTexture && opaqueDepthCopyTexture && bridge.refractionOpaqueDepthView) {
+              encoder.copyTextureToTexture(
+                { texture: activeOpaqueDepthTexture },
+                { texture: opaqueDepthCopyTexture },
+                [surfaceTextureWidth, surfaceTextureHeight, 1]
+              );
+              opaqueDepthView = bridge.refractionOpaqueDepthView;
+            }
             const sceneColorView = bridge.refractionCopyView || copyTexture.createView();
             const environmentView = bridge.envMapView || bridge.envDummyView;
             const backDepthView = refractionBackfaceView || bridge.refractionBackfaceDummyView;
@@ -34001,6 +34056,7 @@ fn main(
               && bridge.refractionBindGroupSceneColorView === sceneColorView
               && bridge.refractionBindGroupEnvironmentView === environmentView
               && bridge.refractionBindGroupBackDepthView === backDepthView
+              && bridge.refractionBindGroupOpaqueDepthView === opaqueDepthView
             ) {
               refractionBindGroup = bridge.refractionBindGroup;
             } else {
@@ -34012,13 +34068,15 @@ fn main(
                   { binding: 1, resource: bridge.refractionSampler },
                   { binding: 2, resource: environmentView },
                   { binding: 3, resource: bridge.envSampler },
-                  { binding: 4, resource: backDepthView }
+                  { binding: 4, resource: backDepthView },
+                  { binding: 5, resource: opaqueDepthView }
                 ]
               });
               bridge.refractionBindGroup = refractionBindGroup;
               bridge.refractionBindGroupSceneColorView = sceneColorView;
               bridge.refractionBindGroupEnvironmentView = environmentView;
               bridge.refractionBindGroupBackDepthView = backDepthView;
+              bridge.refractionBindGroupOpaqueDepthView = opaqueDepthView;
             }
           }
         }

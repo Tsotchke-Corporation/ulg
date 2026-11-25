@@ -820,6 +820,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   format,
   depthFormat = DEFAULT_DEPTH_FORMAT,
   getDepthView,
+  getDepthTexture = null,
   getViewportSize = null,
   drawOverlay = null,
   onTerminal = null,
@@ -1562,6 +1563,12 @@ export function createWorkerOwnedIsosurfacePresenter({
         if (refractiveSurfaces.length) passOrder.push('refractive-isosurface');
         for (const surface of refractiveSurfaces) {
           material.copySceneColor(encoder, colorTexture);
+          const opaqueDepthTexture = typeof getDepthTexture === 'function' ? getDepthTexture() : null;
+          const copiedOpaqueDepth = Boolean(
+            opaqueDepthTexture
+            && typeof material.copyOpaqueDepth === 'function'
+            && material.copyOpaqueDepth(encoder, opaqueDepthTexture) !== false
+          );
           const backPass = encoder.beginRenderPass({
             label: 'ulg-worker-owned-isosurface-refractive-backface-pass',
             colorAttachments: [],
@@ -1580,7 +1587,7 @@ export function createWorkerOwnedIsosurfacePresenter({
             }
           });
           try {
-            drawNative(frontPass, surface, { refractive: true });
+            drawNative(frontPass, surface, { refractive: true, hasOpaqueDepth: copiedOpaqueDepth });
             const reqNuclear = frame?.request?.nuclearCherenkovSources;
             if (frame?.request && 'nuclearCherenkovSources' in frame.request && !(reqNuclear?.sources?.length > 0)) {
               if (latestSphNuclearCherenkovState(device)?.activeSourceCount > 0) {

@@ -250,4 +250,69 @@ fn refraction_beer_lambert_from_extinction_rgb(
     path_m
   );
 }
+
+struct RefractionBilinearFootprint {
+  p00: vec2<i32>,
+  p10: vec2<i32>,
+  p01: vec2<i32>,
+  p11: vec2<i32>,
+  weights: vec4<f32>,
+};
+
+fn refraction_opaque_depth_is_behind(
+  opaque_depth: f32,
+  surface_front_depth: f32,
+  epsilon: f32
+) -> f32 {
+  let finite = opaque_depth == opaque_depth
+    && surface_front_depth == surface_front_depth
+    && epsilon == epsilon
+    && abs(opaque_depth) < 1.0e20
+    && abs(surface_front_depth) < 1.0e20
+    && epsilon >= 0.0;
+  if (!finite) {
+    return 0.0;
+  }
+  return select(0.0, 1.0, opaque_depth >= surface_front_depth - epsilon);
+}
+
+fn refraction_bilinear_footprint(
+  uv: vec2<f32>,
+  dimensions: vec2<u32>
+) -> RefractionBilinearFootprint {
+  let dims_i = max(vec2<i32>(dimensions), vec2<i32>(1));
+  let max_coord = dims_i - vec2<i32>(1);
+  let uv_c = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+  let texel_f = uv_c * vec2<f32>(dims_i) - vec2<f32>(0.5);
+  let base_f = floor(texel_f);
+  let base = vec2<i32>(base_f);
+  let frac = clamp(texel_f - base_f, vec2<f32>(0.0), vec2<f32>(1.0));
+  let p00 = clamp(base, vec2<i32>(0), max_coord);
+  let p10 = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), max_coord);
+  let p01 = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), max_coord);
+  let p11 = clamp(base + vec2<i32>(1, 1), vec2<i32>(0), max_coord);
+  let w00 = (1.0 - frac.x) * (1.0 - frac.y);
+  let w10 = frac.x * (1.0 - frac.y);
+  let w01 = (1.0 - frac.x) * frac.y;
+  let w11 = frac.x * frac.y;
+  return RefractionBilinearFootprint(
+    p00, p10, p01, p11,
+    vec4<f32>(w00, w10, w01, w11)
+  );
+}
+
+fn refraction_depth_filtered_weights(
+  bilinear_weights: vec4<f32>,
+  opaque_depths: vec4<f32>,
+  surface_front_depth: f32,
+  epsilon: f32
+) -> vec4<f32> {
+  let mask = vec4<f32>(
+    refraction_opaque_depth_is_behind(opaque_depths.x, surface_front_depth, epsilon),
+    refraction_opaque_depth_is_behind(opaque_depths.y, surface_front_depth, epsilon),
+    refraction_opaque_depth_is_behind(opaque_depths.z, surface_front_depth, epsilon),
+    refraction_opaque_depth_is_behind(opaque_depths.w, surface_front_depth, epsilon)
+  );
+  return max(bilinear_weights, vec4<f32>(0.0)) * mask;
+}
 `;

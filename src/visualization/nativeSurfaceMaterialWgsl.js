@@ -196,6 +196,11 @@ fn blackbody_emission_rgb(temperature_k: f32) -> vec3<f32> {
 // by a front-culled backface pass. Legacy paths bind a 1x1 dummy and therefore
 // fail closed to reflective/opaque PBR without ray bending.
 @group(1) @binding(4) var refractive_back_depth: texture_depth_2d;
+// Opaque scene depth copied after the opaque pass so screen-space refraction
+// rejects foreground occluders (opaque_depth < in.position.z - eps) and only
+// refracts objects inside or behind the dielectric surface. A 1x1 dummy skips
+// depth filtering when unavailable.
+@group(1) @binding(5) var opaque_scene_depth: texture_depth_2d;
 
 struct RefractiveBackfaceGeometry {
   world_position: vec3<f32>,
@@ -227,6 +232,63 @@ fn env_latlong_sample(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
   let sampled = textureSampleLevel(env_map, env_sampler, vec2<f32>(u, v), lod).rgb;
   // The background image is display-encoded; shading runs in linear light.
   return pow(clamp(sampled, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
+}
+
+fn sample_refracted_scene_color_at_uv(
+  sample_uv: vec2<f32>,
+  surface_front_depth: f32,
+  depth_dims: vec2<u32>,
+  color_dims: vec2<u32>
+) -> vec4<f32> {
+  let fp = refraction_bilinear_footprint(sample_uv, depth_dims);
+  let depths = vec4<f32>(
+    textureLoad(opaque_scene_depth, fp.p00, 0),
+    textureLoad(opaque_scene_depth, fp.p10, 0),
+    textureLoad(opaque_scene_depth, fp.p01, 0),
+    textureLoad(opaque_scene_depth, fp.p11, 0)
+  );
+  let w = refraction_depth_filtered_weights(fp.weights, depths, surface_front_depth, 1.0e-4);
+  let w_sum = w.x + w.y + w.z + w.w;
+  if (w_sum >= 0.999) {
+    let c = textureSampleLevel(scene_color_copy, scene_color_sampler, sample_uv, 0.0).rgb;
+    return vec4<f32>(c, 1.0);
+  }
+  if (w_sum > 1.0e-4) {
+    let c_max = max(vec2<i32>(color_dims), vec2<i32>(1)) - vec2<i32>(1);
+    let c00 = textureLoad(scene_color_copy, clamp(fp.p00, vec2<i32>(0), c_max), 0).rgb;
+    let c10 = textureLoad(scene_color_copy, clamp(fp.p10, vec2<i32>(0), c_max), 0).rgb;
+    let c01 = textureLoad(scene_color_copy, clamp(fp.p01, vec2<i32>(0), c_max), 0).rgb;
+    let c11 = textureLoad(scene_color_copy, clamp(fp.p11, vec2<i32>(0), c_max), 0).rgb;
+    return vec4<f32>((c00 * w.x + c10 * w.y + c01 * w.z + c11 * w.w) / w_sum, 1.0);
+  }
+  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+fn sample_refracted_scene_color_depth_rejected(
+  exit_uv: vec2<f32>,
+  surface_uv: vec2<f32>,
+  surface_front_depth: f32,
+  fallback_display: vec3<f32>
+) -> vec3<f32> {
+  let depth_dims = textureDimensions(opaque_scene_depth);
+  let color_dims = textureDimensions(scene_color_copy, 0);
+  if (depth_dims.x <= 1u || depth_dims.y <= 1u || color_dims.x <= 1u || color_dims.y <= 1u) {
+    return textureSampleLevel(scene_color_copy, scene_color_sampler, exit_uv, 0.0).rgb;
+  }
+  let primary = sample_refracted_scene_color_at_uv(exit_uv, surface_front_depth, depth_dims, color_dims);
+  if (primary.w > 0.5) {
+    return primary.rgb;
+  }
+  let mid_uv = mix(surface_uv, exit_uv, 0.5);
+  let mid_sample = sample_refracted_scene_color_at_uv(mid_uv, surface_front_depth, depth_dims, color_dims);
+  if (mid_sample.w > 0.5) {
+    return mid_sample.rgb;
+  }
+  let direct_sample = sample_refracted_scene_color_at_uv(surface_uv, surface_front_depth, depth_dims, color_dims);
+  if (direct_sample.w > 0.5) {
+    return direct_sample.rgb;
+  }
+  return fallback_display;
 }
 
 struct OpticalMaterial {
@@ -687,10 +749,18 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
       attenuation_sigma_rgb,
       path_m_rgb
     );
+    let surface_px = refraction_surface_pixel(in.position.xy, textureDimensions(scene_color_copy, 0));
+    let surface_uv = select(refracted_path_g.exit_uv, surface_px.uv, surface_px.valid > 0.5);
+    let env_refract_linear = select(
+      env_color,
+      env_latlong_sample(refract(-view_dir, normal, 1.0 / refractive_index), roughness),
+      textureDimensions(env_map, 0).x > 1u
+    );
+    let fallback_display = pow(clamp(env_refract_linear, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
     let refracted = vec3<f32>(
-      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_r.exit_uv, 0.0).r,
-      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_g.exit_uv, 0.0).g,
-      textureSampleLevel(scene_color_copy, scene_color_sampler, refracted_path_b.exit_uv, 0.0).b
+      sample_refracted_scene_color_depth_rejected(refracted_path_r.exit_uv, surface_uv, in.position.z, fallback_display).r,
+      sample_refracted_scene_color_depth_rejected(refracted_path_g.exit_uv, surface_uv, in.position.z, fallback_display).g,
+      sample_refracted_scene_color_depth_rejected(refracted_path_b.exit_uv, surface_uv, in.position.z, fallback_display).b
     );
     // The canvas copy is display-encoded; shading runs in linear light.
     let refracted_linear = pow(clamp(refracted, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));

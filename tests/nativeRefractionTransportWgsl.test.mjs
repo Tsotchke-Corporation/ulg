@@ -38,6 +38,18 @@ test('shared native refraction WGSL owns geometric projection and Beer-Lambert t
     ULG_NATIVE_REFRACTION_TRANSPORT_WGSL,
     /fn refraction_beer_lambert_from_extinction_rgb/
   );
+  assert.match(
+    ULG_NATIVE_REFRACTION_TRANSPORT_WGSL,
+    /fn refraction_opaque_depth_is_behind/
+  );
+  assert.match(
+    ULG_NATIVE_REFRACTION_TRANSPORT_WGSL,
+    /fn refraction_bilinear_footprint/
+  );
+  assert.match(
+    ULG_NATIVE_REFRACTION_TRANSPORT_WGSL,
+    /fn refraction_depth_filtered_weights/
+  );
   assert.match(ULG_NATIVE_REFRACTION_TRANSPORT_WGSL, /12\.566370614359172/);
   assert.doesNotMatch(
     ULG_NATIVE_REFRACTION_TRANSPORT_WGSL,
@@ -110,7 +122,11 @@ test('manufactured native refraction probe executes the shared WGSL into bounded
     'aspect-resize-roundtrip-valid',
     'behind-camera-projection-fails-closed',
     'fragment-pixel-bounds-fail-closed',
-    'rear-depth-invalid-cases-fail-closed'
+    'rear-depth-invalid-cases-fail-closed',
+    'foreground-occluder-depth-rejected',
+    'background-and-submerged-depth-admitted',
+    'bilinear-footprint-partial-occluder-rejects-only-foreground-texels',
+    'bilinear-footprint-full-occluder-zeroes-all-weights'
   ]) {
     assert.ok(source.includes(invariant), `missing manufactured invariant ${invariant}`);
   }

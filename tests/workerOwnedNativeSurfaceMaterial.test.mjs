@@ -413,7 +413,12 @@ test('appearance changes and viewport resize rebuild only presentation resources
   const f = frame(input({ backgroundImageUrl: '/old.jpg' }));
   await r.material.prepare(f, [640, 480]); await settle();
   assert.equal(requestedUrl, '/old.jpg');
-  const oldTargets = r.textures.filter(t => ['ulg-worker-native-scene-copy', 'ulg-worker-native-back-depth'].includes(t.label));
+  const oldTargets = r.textures.filter(t => [
+    'ulg-worker-native-scene-copy',
+    'ulg-worker-native-back-depth',
+    'ulg-worker-native-opaque-depth'
+  ].includes(t.label));
+  assert.equal(oldTargets.length, 3);
   f.nativeSurfaceAppearance = { backgroundImageUrl: null, backgroundColor: '#123456' };
   await r.material.prepare(f, [800, 600]); await settle();
   assert.equal(aborted, true);
@@ -421,9 +426,20 @@ test('appearance changes and viewport resize rebuild only presentation resources
   assert.equal(r.buffers.filter(b => b.label === 'ulg-optical-material-records').length, 1);
   assert.ok(oldTargets.every(t => t.destroyCount === 1));
   const copies = [];
-  r.material.copySceneColor({ copyTextureToTexture: (...args) => copies.push(args) }, { label: 'canvas' });
+  const encoderStub = { copyTextureToTexture: (...args) => copies.push(args) };
+  r.material.copySceneColor(encoderStub, { label: 'canvas' });
+  assert.equal(r.material.copyOpaqueDepth(encoderStub, { label: 'opaque-depth' }), true);
   assert.deepEqual(copies[0][2], [800, 600]);
+  assert.equal(copies[1][0].texture.label, 'opaque-depth');
+  assert.equal(copies[1][1].texture.label, 'ulg-worker-native-opaque-depth');
+  assert.deepEqual(copies[1][2], [800, 600]);
   assert.equal(r.material.backDepthView().texture.label, 'ulg-worker-native-back-depth');
+  const s = surface();
+  assert.equal(r.material.draw(r.pass, f, s, { inverse: identity, refractive: true, hasOpaqueDepth: true }), true);
+  assert.equal(r.material.draw(r.pass, f, s, { inverse: identity, refractive: true, hasOpaqueDepth: false }), true);
+  const group1Draws = r.actions.filter(a => a[0] === 'group' && a[1] === 1).slice(-2).map(a => a[2]);
+  assert.equal(group1Draws[0].entries[5].resource.texture.label, 'ulg-worker-native-opaque-depth');
+  assert.equal(group1Draws[1].entries[5].resource.texture.label, 'ulg-worker-native-dummy-opaque-depth');
   fetching.resolve({ ok: true }); await settle();
   assert.equal(r.externalCopies.length, 0);
   await assert.rejects(r.material.prepare(f, [Infinity, 1]), /viewport unavailable/);

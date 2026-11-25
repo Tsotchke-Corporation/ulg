@@ -215,6 +215,10 @@ export function createWorkerOwnedNativeSurfaceMaterial({
     label: 'ulg-worker-native-dummy-back-depth', size: [1, 1], format: 'depth32float',
     usage: TEXTURE_RENDER_BINDING
   }));
+  const dummyOpaqueDepth = own(device.createTexture({
+    label: 'ulg-worker-native-dummy-opaque-depth', size: [1, 1], format: depthFormat,
+    usage: TEXTURE_RENDER_BINDING
+  }));
   const emptyTemperature = own(device.createBuffer({
     label: 'ulg-worker-native-no-vertex-temperature', size: 16, usage: BUFFER_STORAGE_COPY_DST
   }));
@@ -239,7 +243,8 @@ export function createWorkerOwnedNativeSurfaceMaterial({
     { binding: 1, visibility: 2, sampler: { type: 'filtering' } },
     { binding: 2, visibility: 2, texture: { sampleType: 'float' } },
     { binding: 3, visibility: 2, sampler: { type: 'filtering' } },
-    { binding: 4, visibility: 2, texture: { sampleType: 'depth' } }
+    { binding: 4, visibility: 2, texture: { sampleType: 'depth' } },
+    { binding: 5, visibility: 2, texture: { sampleType: 'depth' } }
   ] });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [dataLayout, opticsLayout] });
   const createPipeline = (descriptor) => device.createRenderPipelineAsync
@@ -418,13 +423,15 @@ export function createWorkerOwnedNativeSurfaceMaterial({
       throw new TypeError('native material viewport unavailable');
     }
     if (!targets || targets.width !== width || targets.height !== height) {
-      if (targets) retire([targets.color, targets.backDepth]);
+      if (targets) retire([targets.color, targets.backDepth, targets.opaqueDepth]);
       targets = {
         width, height,
         color: own(device.createTexture({ label: 'ulg-worker-native-scene-copy',
           size: [width, height], format, usage: TEXTURE_BINDING_COPY_DST })),
         backDepth: own(device.createTexture({ label: 'ulg-worker-native-back-depth',
-          size: [width, height], format: 'depth32float', usage: TEXTURE_RENDER_BINDING }))
+          size: [width, height], format: 'depth32float', usage: TEXTURE_RENDER_BINDING })),
+        opaqueDepth: own(device.createTexture({ label: 'ulg-worker-native-opaque-depth',
+          size: [width, height], format: depthFormat, usage: TEXTURE_BINDING_COPY_DST }))
       };
     }
     const input = frame.request.nativeSurfaceMaterial;
@@ -459,14 +466,24 @@ export function createWorkerOwnedNativeSurfaceMaterial({
       { binding: 1, resource: sampler },
       { binding: 2, resource: environment.createView() },
       { binding: 3, resource: environmentSampler },
-      { binding: 4, resource: targets.backDepth.createView() }
+      { binding: 4, resource: targets.backDepth.createView() },
+      { binding: 5, resource: targets.opaqueDepth.createView() }
+      ] });
+      entry.opticsBindGroupNoOpaqueDepth = device.createBindGroup({ layout: opticsLayout, entries: [
+      { binding: 0, resource: targets.color.createView() },
+      { binding: 1, resource: sampler },
+      { binding: 2, resource: environment.createView() },
+      { binding: 3, resource: environmentSampler },
+      { binding: 4, resource: targets.backDepth.createView() },
+      { binding: 5, resource: dummyOpaqueDepth.createView() }
       ] });
       entry.opaqueOpticsBindGroup = device.createBindGroup({ layout: opticsLayout, entries: [
       { binding: 0, resource: dummyColor.createView() },
       { binding: 1, resource: sampler },
       { binding: 2, resource: environment.createView() },
       { binding: 3, resource: environmentSampler },
-      { binding: 4, resource: dummyDepth.createView() }
+      { binding: 4, resource: dummyDepth.createView() },
+      { binding: 5, resource: dummyOpaqueDepth.createView() }
       ] });
       entry.opticsTargets = targets;
       entry.environmentTexture = environment;
@@ -474,7 +491,7 @@ export function createWorkerOwnedNativeSurfaceMaterial({
     entry.diagnostics = getDiagnostics(frame);
     return entry;
   };
-  const draw = (pass, frame, surface, { inverse, refractive = false, backface = false } = {}) => {
+  const draw = (pass, frame, surface, { inverse, refractive = false, backface = false, hasOpaqueDepth = true } = {}) => {
     const entry = frames.get(frame);
     const vertices = surface.translation?.surfaceVertices;
     const indirect = surface.translation?.surfaceDraw?.drawIndirectRowsBuffer;
@@ -518,7 +535,12 @@ export function createWorkerOwnedNativeSurfaceMaterial({
       buildWorkerNativeSurfaceMotionUniformValues(frame, surface, cameraValues));
     pass.setPipeline(pipelines[backface ? 'backface' : workerNativeSurfaceKind(surface) === 'vapor' ? 'vapor' : 'opaque']);
     pass.setBindGroup(0, binding.bindGroup);
-    pass.setBindGroup(1, refractive ? entry.opticsBindGroup : entry.opaqueOpticsBindGroup);
+    pass.setBindGroup(
+      1,
+      refractive
+        ? (hasOpaqueDepth ? entry.opticsBindGroup : entry.opticsBindGroupNoOpaqueDepth)
+        : entry.opaqueOpticsBindGroup
+    );
     pass.drawIndirect(indirect, 0);
     return true;
   };
@@ -588,6 +610,12 @@ export function createWorkerOwnedNativeSurfaceMaterial({
     copySceneColor(encoder, colorTexture) {
       encoder.copyTextureToTexture({ texture: colorTexture }, { texture: targets.color },
         [targets.width, targets.height]);
+    },
+    copyOpaqueDepth(encoder, depthTexture) {
+      if (!depthTexture || !targets?.opaqueDepth) return false;
+      encoder.copyTextureToTexture({ texture: depthTexture }, { texture: targets.opaqueDepth },
+        [targets.width, targets.height]);
+      return true;
     },
     backDepthView() { return targets.backDepth.createView(); },
     dispose() {

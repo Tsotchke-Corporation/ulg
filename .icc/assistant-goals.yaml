@@ -72,6 +72,16 @@ goals:
     reason: "Accepted 2026-11-24 at commit 846ddaee (dirty: false): ICC completion-oracle ulg-gate5-planetary-to-supergalactic 3/3 PASS (status: complete) on FRESH ICC index after independent adversarial read-only review ACCEPT (66ba0501; pre-acceptance audit cd3aaaf8 preserved verbatim at pre-acceptance-audit-cd3aaaf8.md). Closed all B1-B8 blockers: canonical parallel @workgroup_size(64/256) SchroederScaleAtlas multipole default gravity with zero private octrees and zero @workgroup_size(1) (bhTransMaxDiff=4.46e-6, multipoleMomentumRelError=0), inline WGSL eval_polytope_atlas_bank_2d planetary interiors with overflow-free MoI scaling and fail-closed out-of-domain rejection, exact Gate 1 beta+/EC Q-values (26.731 MeV total / 26.201 MeV thermal) + WebGPU nuclear/Lane-Emden + conservative Q*dX stellar heating, race-free ping-pong compressible SPH ISM hydro with Gate 1 atomic cooling & symmetric Paczynski-Wiita SMBH recoil (momentumDrift < 1e-3), 1-submit/step (13<=25 passes) FLRW 3D-FFT TreePM with live 16-bin GPU P(k) & full-Nyquist GPU Zeldovich ICs & GPUBufferUsage.VERTEX on particleBuf, official PeerCompute SpatialTileLeaseBroker fail-closed disjoint-slab 2-browser WebRTC (signaling WS closed, 32-byte GPU multipole exchange, measurable +X cross-slab pull, fail-closed peer eviction/reclaim), cosmic-quantum supergalactic-cosmic 0 errors & 151343 changed px, all 10 locked-camera PNGs visually verified (210265 pure WebGPU cosmic-web px outside HUD), 5/5 native Vulkan + WebRTC PASS, 6215/6215 host PASS, 37M dist/ (0 AI/ort-wasm), KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate5-acceptance-20261123/ and plan/done/gate5-planetary-to-supergalactic.md."
     tags: [ulg-scale-ladder, gate-5, planetary, stellar, galactic, supergalactic, accepted]
 
+  - id: gate6-architecture-1-0
+    task_id: ulg-gate6-architecture-1-0
+    priority: high
+    status: in_progress
+    goal: "Gate 6 (ULG Architecture 1.0 Completion): Declarative Law-IR -> WGSL compiler (JS + zero-LLVM C99 eshkol emitter) & Law-DAG epoch scheduler, parallel GPU kernel overhaul + 100K continuum scale proof, zero-private-grid unified continuum physics defaults, mechanical decomposition of 7 monoliths + plan/todo archive hygiene, and live unseen-material OPFS + PeerCompute CAS hot-swap loop"
+    oracle: ulg-gate6-architecture-1-0
+    depends_on: [gate0-foundation-arch, gate1-periodic-table-engine, gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics, gate4-studio-presentation, gate5-planetary-to-supergalactic]
+    reason: "Phases A-E implemented on feat/gate6-architecture-1-0; running full pre-acceptance verification battery and independent adversarial read-only review before formal ulg-gate6-architecture-1-0 acceptance."
+    tags: [ulg-scale-ladder, gate-6, architecture-1-0, in-progress]
+
   - id: g5-reservation
     task_id: ulg-g5-reservation
     priority: high

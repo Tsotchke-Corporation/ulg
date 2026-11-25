@@ -44,9 +44,13 @@ import {
   registerTriadClosureBundleOnDevice,
   getTriadClosureDeviceStatus
 } from './triadClosureGpuRegistry.js';
+import { ReservationLedger } from '../peercomputeCore.js';
+import { deriveCompoundBundleWebGpu } from './recursiveCompoundPipeline.js';
 
 export const ULG_FOUNDATION_POLYTOPE_GPU_BRIDGE_SCHEMA =
   'peercompute.ulg.foundation-polytope-gpu-bridge.v1';
+export const ULG_FOUNDATION_POLYTOPE_HOTSWAP_SCHEMA =
+  'peercompute.ulg.foundation-polytope-hotswap.v1';
 
 const GPU_BUFFER_USAGE = Object.freeze({
   MAP_READ: 0x0001,
@@ -546,6 +550,10 @@ function getOrCreateDevicePolytopeState(device) {
       materialIdToKey: new Map(),
       lastMaterialIdByKey: new Map(),
       derivedPolytopesByKey: new Map(),
+      dynamicAtlasesByKey: new Map(),
+      hotSwapLedger: new ReservationLedger({ name: 'ulg-polytope-bank-hotswap', maxKeys: 128 }),
+      bankHotSwapHistory: [],
+      retiredHotSwapCount: 0,
       seededAtMs: Date.now(),
       atlasBuffer: null,
       missReadbackBuffer: null,
@@ -570,10 +578,76 @@ function getOrCreateDevicePolytopeState(device) {
 }
 
 /**
+ * Look up a dynamically admitted (hot-swapped) Polytope Atlas entry on `device`.
+ * Returns `null` if not dynamically admitted (does NOT fall back to static JSON).
+ */
+export function lookupDynamicPolytopeRecordOnDevice(device, materialKey) {
+  const key = device ? unwrapWebGpuCacheDevice(device) : null;
+  const state = key ? devicePolytopeState.get(key) : null;
+  const norm = String(materialKey || '').trim().toLowerCase();
+  if (!state || !norm) return null;
+  return state.dynamicAtlasesByKey.get(norm) ?? null;
+}
+
+/**
+ * Strictly fail-closed validation of a Polytope Atlas before dynamic bank
+ * admission. Rejects missing polytopes, unfitted cells (`fit.valid !== true`),
+ * mismatched Chebyshev coefficient counts, or non-finite values.
+ */
+export function validateAdmissiblePolytopeAtlas(atlas, materialKey = null) {
+  const fail = (reason) => {
+    const err = new Error(
+      `Polytope atlas rejected fail-closed for "${materialKey || atlas?.materialKey || 'unknown'}": ${reason}`
+    );
+    err.code = 'ERR_POLYTOPE_ATLAS_INVALID_FAIL_CLOSED';
+    err.reason = reason;
+    throw err;
+  };
+  if (!atlas || typeof atlas !== 'object') fail('atlas-not-object');
+  if (!Array.isArray(atlas.polytopes) || atlas.polytopes.length === 0) {
+    fail('empty-polytopes');
+  }
+  for (let i = 0; i < atlas.polytopes.length; i += 1) {
+    const p = atlas.polytopes[i];
+    if (!p || typeof p !== 'object') fail(`polytope-not-object:${i}`);
+    if (!p.fit || p.fit.valid !== true) fail(`invalid-polytope-fit:${i}`);
+    const degs = p.fit.degrees;
+    if (!Array.isArray(degs) || degs.length < 2 || !(degs[0] >= 0) || !(degs[1] >= 0)) {
+      fail(`invalid-degrees:${i}`);
+    }
+    const expectedLen = (Math.trunc(degs[0]) + 1) * (Math.trunc(degs[1]) + 1);
+    const coeffs = p.fit.coefficients;
+    const isTyped = coeffs instanceof Float32Array;
+    if ((!isTyped && !Array.isArray(coeffs)) || coeffs.length !== expectedLen) {
+      fail(`coeff-length-mismatch:${i}`);
+    }
+    for (let k = 0; k < expectedLen; k += 1) {
+      if (!Number.isFinite(Number(coeffs[k]))) fail(`non-finite-coeff:${i}:${k}`);
+    }
+    if (!Array.isArray(p.axes) || p.axes.length < 2) fail(`invalid-axes:${i}`);
+    if (!Array.isArray(p.inequalities) || p.inequalities.length < 2) fail(`invalid-inequalities:${i}`);
+    for (const ineq of p.inequalities) {
+      if (
+        !ineq
+        || !Array.isArray(ineq.a)
+        || ineq.a.length < 2
+        || !Number.isFinite(Number(ineq.a[0]))
+        || !Number.isFinite(Number(ineq.a[1]))
+        || !Number.isFinite(Number(ineq.b))
+      ) {
+        fail(`non-finite-inequality:${i}`);
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * Pack and upload ONE GPU-resident multi-material Convex Polytope Atlas bank
  * (`ulg.polytope-atlas-bank-gpu-buffer.v1`) on `device` covering every seeded
  * material key & numeric Studio materialId (`thermo0.x`), including any
- * Tier-3 escalated convex polytope cells derived at schedule boundaries.
+ * dynamically admitted unseen-material atlases and Tier-3 escalated convex
+ * polytope cells derived at schedule boundaries.
  */
 export function rebuildFoundationPolytopeBankOnDevice(
   device,
@@ -586,6 +660,21 @@ export function rebuildFoundationPolytopeBankOnDevice(
   const addEntry = (numericId, rawKey) => {
     const id = Number(numericId);
     if (!Number.isFinite(id) || idToEntry.has(id)) return;
+    const norm = String(rawKey || '').trim().toLowerCase();
+    const dyn = norm ? state.dynamicAtlasesByKey.get(norm) : null;
+    if (dyn) {
+      const derived = state.derivedPolytopesByKey.get(dyn.materialKey) ?? [];
+      const polytopes = derived.length > 0 ? [...dyn.polytopes, ...derived] : dyn.polytopes;
+      if (!polytopes.length) return;
+      idToEntry.set(id, {
+        materialId: id,
+        materialKey: dyn.materialKey,
+        accuracyTier: dyn.accuracyTier,
+        polytopes
+      });
+      state.materialIdToKey.set(id, dyn.materialKey);
+      return;
+    }
     const rec = lookupFoundationPolytopeRecord(rawKey);
     if (!rec) return;
     const basePolytopes = hydrateFoundationPolytopes(rec);
@@ -616,12 +705,26 @@ export function rebuildFoundationPolytopeBankOnDevice(
   const allKeys = new Set([
     ...DEFAULT_STUDIO_POLYTOPE_KEYS,
     ...state.seededKeys,
+    ...state.dynamicAtlasesByKey.keys(),
     ...(Array.isArray(materialKeys) ? materialKeys : [])
   ]);
   for (const rawKey of allKeys) {
     const norm = String(rawKey || '').trim().toLowerCase();
     if (!norm) continue;
     addEntry(stableOpticalMaterialId(norm), norm);
+    const dyn = state.dynamicAtlasesByKey.get(norm);
+    if (dyn?.materialKey) {
+      if (Number.isFinite(dyn.materialId)) {
+        addEntry(dyn.materialId, dyn.materialKey);
+      }
+      addEntry(stableOpticalMaterialId(dyn.materialKey), dyn.materialKey);
+      addEntry(stableOpticalMaterialId(dyn.materialKey.toLowerCase()), dyn.materialKey);
+      if (dyn.formula) {
+        addEntry(stableOpticalMaterialId(dyn.formula), dyn.formula);
+        addEntry(stableOpticalMaterialId(dyn.formula.toLowerCase()), dyn.formula);
+      }
+      continue;
+    }
     const rec = lookupFoundationPolytopeRecord(norm);
     if (rec?.materialKey) {
       addEntry(stableOpticalMaterialId(rec.materialKey), rec.materialKey);
@@ -848,10 +951,17 @@ export async function seedStudioFoundationTriadOnDevice(
 export function getFoundationPolytopeDeviceStatus(device) {
   const key = device ? unwrapWebGpuCacheDevice(device) : null;
   const state = key ? devicePolytopeState.get(key) : null;
+  const dynamicKeys = state
+    ? [...new Set([...state.dynamicAtlasesByKey.values()].map((e) => e.materialKey))]
+    : [];
   return Object.freeze({
     schema: ULG_FOUNDATION_POLYTOPE_GPU_BRIDGE_SCHEMA,
     seededCount: state?.seededKeys?.size ?? 0,
     seededMaterials: Object.freeze(state ? [...state.seededKeys] : []),
+    dynamicMaterialCount: dynamicKeys.length,
+    dynamicMaterialKeys: Object.freeze(dynamicKeys),
+    hotSwapCount: state?.bankHotSwapHistory?.length ?? 0,
+    retiredHotSwapCount: state?.retiredHotSwapCount ?? 0,
     polytopeBankGeneration: state?.generation ?? 0,
     polytopeBankMaterialCount: state?.materialCount ?? 0,
     cumulativeHits: state?.cumulativeHits ?? 0,
@@ -873,5 +983,450 @@ export async function hydrateOrBuildCachedPolytopeAtlasWebGpu(device, bundle, op
   return buildMaterialPolytopeAtlasWebGpu(device, bundle, {
     ...options,
     persistentCache
+  });
+}
+
+export const foundationPolytopeBankBatchEvalWgsl = /* wgsl */ `
+${evaluatePolytopeAtlasWgsl}
+
+struct BankQueryParams {
+  query_count: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> polytope_bank: array<f32>;
+@group(0) @binding(1) var<storage, read> queries: array<vec4<f32>>;      // (materialId, T_K, P_Pa, _)
+@group(0) @binding(2) var<storage, read_write> results: array<vec4<f32>>; // (density, margin, phaseCode, hitFlag)
+@group(0) @binding(3) var<storage, read_write> receipt: array<atomic<u32>>;
+@group(0) @binding(4) var<uniform> params: BankQueryParams;
+
+@compute @workgroup_size(64)
+fn eval_polytope_bank_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  if (idx >= params.query_count) { return; }
+  let q = queries[idx];
+  let out = eval_polytope_atlas_bank_2d(&polytope_bank, q.x, q.y, q.z);
+  results[idx] = out;
+  if (out.w >= 0.5) {
+    atomicAdd(&receipt[0u], 1u);
+    let pcode = u32(max(0.0, floor(out.z + 0.5)));
+    if (pcode == 0u) { atomicAdd(&receipt[2u], 1u); }
+    else if (pcode == 1u) { atomicAdd(&receipt[3u], 1u); }
+    else if (pcode == 2u) { atomicAdd(&receipt[4u], 1u); }
+    else { atomicAdd(&receipt[5u], 1u); }
+  } else {
+    atomicAdd(&receipt[1u], 1u);
+  }
+}
+`;
+
+/**
+ * Evaluate a batch of `(materialId | materialKey, temperatureK, pressurePa)`
+ * queries directly against the live GPU-resident multi-material Polytope Atlas
+ * bank (`state.atlasBuffer`) using `eval_polytope_atlas_bank_2d` (zero copy of
+ * the bank buffer, fail-closed `hitFlag == 0` for unseen or out-of-domain states).
+ */
+export async function evaluatePolytopeAtlasBankBatchWebGpu(device, {
+  queries = [],
+  bankBuffer = null
+} = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    throw new TypeError('evaluatePolytopeAtlasBankBatchWebGpu requires a WebGPU GPUDevice');
+  }
+  const binding = getFoundationPolytopeGpuBinding(device);
+  const targetBankBuffer = bankBuffer || binding.atlasBuffer;
+  if (!targetBankBuffer) {
+    throw new Error('No resident Polytope Atlas bank buffer bound on device');
+  }
+  const n = Math.max(1, queries.length);
+  const queryData = new Float32Array(n * 4);
+  const resolvedMeta = [];
+  for (let i = 0; i < queries.length; i += 1) {
+    const q = queries[i] || {};
+    const matKey = q.materialKey != null ? String(q.materialKey) : null;
+    const matId = (q.materialId != null && Number.isFinite(Number(q.materialId)))
+      ? Number(q.materialId)
+      : (matKey ? stableOpticalMaterialId(matKey.trim().toLowerCase()) : 0);
+    const tK = Number(q.temperatureK ?? 0);
+    const pPa = Number(q.pressurePa ?? 101325);
+    queryData[i * 4 + 0] = matId;
+    queryData[i * 4 + 1] = tK;
+    queryData[i * 4 + 2] = pPa;
+    queryData[i * 4 + 3] = 0;
+    resolvedMeta.push({ materialId: matId, materialKey: matKey, temperatureK: tK, pressurePa: pPa });
+  }
+
+  const queryBuf = device.createBuffer({
+    label: 'ulg-polytope-bank-batch-queries',
+    size: queryData.byteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const resultBuf = device.createBuffer({
+    label: 'ulg-polytope-bank-batch-results',
+    size: n * 16,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const receiptBuf = device.createBuffer({
+    label: 'ulg-polytope-bank-batch-receipt',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const paramsBuf = device.createBuffer({
+    label: 'ulg-polytope-bank-batch-params',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readResultsBuf = device.createBuffer({
+    size: n * 16,
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const readReceiptBuf = device.createBuffer({
+    size: 32,
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  });
+
+  device.queue.writeBuffer(queryBuf, 0, queryData);
+  device.queue.writeBuffer(receiptBuf, 0, new Uint32Array(8));
+  device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([queries.length, 0, 0, 0]));
+
+  const compiled = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-foundation-polytope-bank-batch-eval.v1',
+    label: 'ulg-foundation-polytope-bank-batch-eval',
+    code: foundationPolytopeBankBatchEvalWgsl,
+    entryPoint: 'eval_polytope_bank_batch',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform')
+    ]
+  });
+  const bg = createCachedExplicitBindGroup(device, {
+    label: 'ulg-foundation-polytope-bank-batch-eval-bg',
+    layout: compiled.bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: targetBankBuffer } },
+      { binding: 1, resource: { buffer: queryBuf } },
+      { binding: 2, resource: { buffer: resultBuf } },
+      { binding: 3, resource: { buffer: receiptBuf } },
+      { binding: 4, resource: { buffer: paramsBuf } }
+    ]
+  });
+
+  try {
+    const enc = device.createCommandEncoder({ label: 'ulg-foundation-polytope-bank-batch-eval' });
+    const pass = enc.beginComputePass({ label: 'ulg-foundation-polytope-bank-batch-eval-pass' });
+    pass.setPipeline(compiled.pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(Math.max(1, queries.length) / 64));
+    pass.end();
+    enc.copyBufferToBuffer(resultBuf, 0, readResultsBuf, 0, n * 16);
+    enc.copyBufferToBuffer(receiptBuf, 0, readReceiptBuf, 0, 32);
+    device.queue.submit([enc.finish()]);
+
+    await Promise.all([
+      readResultsBuf.mapAsync(GPU_BUFFER_USAGE.MAP_READ),
+      readReceiptBuf.mapAsync(GPU_BUFFER_USAGE.MAP_READ)
+    ]);
+    const rawRes = new Float32Array(readResultsBuf.getMappedRange().slice(0));
+    const rawRec = new Uint32Array(readReceiptBuf.getMappedRange().slice(0));
+    readResultsBuf.unmap();
+    readReceiptBuf.unmap();
+
+    const rows = [];
+    for (let i = 0; i < queries.length; i += 1) {
+      rows.push(Object.freeze({
+        ...resolvedMeta[i],
+        densityKgPerM3: rawRes[i * 4 + 0],
+        margin: rawRes[i * 4 + 1],
+        phaseCode: Math.round(rawRes[i * 4 + 2]),
+        hit: rawRes[i * 4 + 3] >= 0.5
+      }));
+    }
+    return Object.freeze({
+      schema: ULG_POLYTOPE_ATLAS_BANK_GPU_BUFFER_SCHEMA,
+      bankGeneration: binding.generation,
+      materialCount: binding.materialCount,
+      rows: Object.freeze(rows),
+      receipt: Object.freeze({
+        hitCount: rawRec[0],
+        missCount: rawRec[1],
+        solidHits: rawRec[2],
+        liquidHits: rawRec[3],
+        gasHits: rawRec[4],
+        plasmaHits: rawRec[5]
+      })
+    });
+  } finally {
+    queryBuf.destroy();
+    resultBuf.destroy();
+    receiptBuf.destroy();
+    paramsBuf.destroy();
+    readResultsBuf.destroy();
+    readReceiptBuf.destroy();
+  }
+}
+
+/**
+ * Atomically admit a newly derived or OPFS-hydrated Polytope Atlas into the
+ * live GPU-resident multi-material bank (`state.atlasBuffer`) under PeerCompute
+ * `ReservationLedger` CAS fencing.
+ *
+ * Fail-closed guarantees:
+ *   - Rejects invalid/unfitted atlases before acquiring any reservation.
+ *   - Rejects stale epochs (`ERR_POLYTOPE_HOTSWAP_STALE_EPOCH`) or concurrent
+ *     in-flight reservations (`ERR_POLYTOPE_HOTSWAP_BUSY`).
+ *   - Cleanly retires prior epochs and old GPU buffers after atomic swap.
+ */
+export function admitDynamicPolytopeAtlasOnDevice(device, {
+  materialKey,
+  formula = null,
+  atlas,
+  materialId = null,
+  consumerId = 'polytope-hotswap',
+  reservationLedger = null,
+  expectedEpoch = null,
+  cacheStatus = null,
+  cacheBackend = null,
+  cacheKey = null
+} = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    throw new TypeError('admitDynamicPolytopeAtlasOnDevice requires a WebGPU GPUDevice');
+  }
+  const canonicalKey = String(materialKey || atlas?.materialKey || formula || '').trim();
+  if (!canonicalKey) {
+    throw new TypeError('admitDynamicPolytopeAtlasOnDevice requires a non-empty materialKey');
+  }
+  validateAdmissiblePolytopeAtlas(atlas, canonicalKey);
+
+  const state = getOrCreateDevicePolytopeState(device);
+  const ledger = reservationLedger || state.hotSwapLedger;
+  const normKey = canonicalKey.toLowerCase();
+  const ledgerKey = `polytope-bank:${normKey}`;
+  const fence = ledger.fence(ledgerKey);
+
+  if (expectedEpoch != null && fence.epoch !== expectedEpoch) {
+    const err = new Error(
+      `Polytope bank hot-swap rejected: stale epoch ${expectedEpoch} (current ${fence.epoch}) for "${canonicalKey}"`
+    );
+    err.code = 'ERR_POLYTOPE_HOTSWAP_STALE_EPOCH';
+    err.expectedEpoch = expectedEpoch;
+    err.actualEpoch = fence.epoch;
+    throw err;
+  }
+  if (fence.state === 'reserved') {
+    const err = new Error(
+      `Polytope bank hot-swap rejected: key "${ledgerKey}" is already reserved by "${fence.owner}"`
+    );
+    err.code = 'ERR_POLYTOPE_HOTSWAP_BUSY';
+    err.owner = fence.owner;
+    err.epoch = fence.epoch;
+    throw err;
+  }
+  if (fence.state === 'consumed') {
+    const retired = ledger.retire(ledgerKey, { expectedEpoch: fence.epoch });
+    if (!retired.ok) {
+      const err = new Error(
+        `Polytope bank hot-swap failed to retire prior epoch for "${canonicalKey}": ${retired.reason}`
+      );
+      err.code = 'ERR_POLYTOPE_HOTSWAP_RETIRE_FAILED';
+      err.reason = retired.reason;
+      throw err;
+    }
+  }
+
+  const reserveEpoch = ledger.fence(ledgerKey).epoch;
+  const res = ledger.reserve({
+    key: ledgerKey,
+    consumerId: String(consumerId || 'polytope-hotswap'),
+    expectedEpoch: reserveEpoch
+  });
+  if (!res.ok) {
+    const err = new Error(
+      `Polytope bank hot-swap reservation rejected for "${canonicalKey}": ${res.reason}`
+    );
+    err.code = 'ERR_POLYTOPE_HOTSWAP_RESERVATION_REJECTED';
+    err.reason = res.reason;
+    throw err;
+  }
+
+  const resolvedMaterialId = (materialId != null && Number.isFinite(Number(materialId)))
+    ? Number(materialId)
+    : stableOpticalMaterialId(normKey);
+  const aliasKeys = new Set([normKey]);
+  if (atlas?.materialKey) aliasKeys.add(String(atlas.materialKey).trim().toLowerCase());
+  if (formula) aliasKeys.add(String(formula).trim().toLowerCase());
+
+  const prevDynamicSnapshots = new Map();
+  for (const k of aliasKeys) {
+    if (state.dynamicAtlasesByKey.has(k)) {
+      prevDynamicSnapshots.set(k, state.dynamicAtlasesByKey.get(k));
+    }
+  }
+  const prevSeededHadKey = state.seededKeys.has(normKey);
+  const prevMaterialIdHadKey = state.lastMaterialIdByKey.has(normKey);
+  const prevMaterialIdVal = state.lastMaterialIdByKey.get(normKey);
+
+  const entry = Object.freeze({
+    materialKey: canonicalKey,
+    formula: formula ? String(formula) : (atlas?.formula ?? null),
+    family: atlas.family || 'compound',
+    accuracyTier: atlas.accuracyTier || ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    closureHash: String(atlas.closureHash || ''),
+    materialId: resolvedMaterialId,
+    polytopes: Object.freeze([...atlas.polytopes]),
+    packedGpuAtlas: atlas.packedGpuAtlas ?? null,
+    cacheStatus: cacheStatus ?? atlas.cacheStatus ?? null,
+    cacheBackend: cacheBackend ?? atlas.cacheBackend ?? null,
+    cacheKey: cacheKey ?? atlas.cacheKey ?? null,
+    admittedAtMs: Date.now()
+  });
+
+  let bank = null;
+  try {
+    for (const k of aliasKeys) {
+      state.dynamicAtlasesByKey.set(k, entry);
+    }
+    state.seededKeys.add(normKey);
+    state.lastMaterialIdByKey.set(normKey, resolvedMaterialId);
+    bank = rebuildFoundationPolytopeBankOnDevice(device, [...state.seededKeys], {
+      materialIdByKey: state.lastMaterialIdByKey
+    });
+    if (!bank || !state.atlasBuffer) {
+      throw new Error(`Bank rebuild returned empty GPU buffer for "${canonicalKey}"`);
+    }
+  } catch (err) {
+    for (const k of aliasKeys) {
+      if (prevDynamicSnapshots.has(k)) state.dynamicAtlasesByKey.set(k, prevDynamicSnapshots.get(k));
+      else state.dynamicAtlasesByKey.delete(k);
+    }
+    if (!prevSeededHadKey) state.seededKeys.delete(normKey);
+    if (prevMaterialIdHadKey) state.lastMaterialIdByKey.set(normKey, prevMaterialIdVal);
+    else state.lastMaterialIdByKey.delete(normKey);
+    ledger.cancel(res.token);
+    throw err;
+  }
+
+  ledger.attach(res.token, () => {
+    state.retiredHotSwapCount += 1;
+  });
+  const admissionId = `polytope-bank:${normKey}:g${bank.generation}`;
+  const commit = ledger.commit(res.token, { admissionId });
+  if (!commit.ok) {
+    const err = new Error(
+      `Polytope bank hot-swap commit rejected for "${canonicalKey}": ${commit.reason}`
+    );
+    err.code = 'ERR_POLYTOPE_HOTSWAP_COMMIT_REJECTED';
+    err.reason = commit.reason;
+    throw err;
+  }
+
+  const receipt = Object.freeze({
+    schema: ULG_FOUNDATION_POLYTOPE_HOTSWAP_SCHEMA,
+    admitted: true,
+    materialKey: canonicalKey,
+    formula: entry.formula,
+    materialId: resolvedMaterialId,
+    bankGeneration: bank.generation,
+    materialCount: bank.materialCount,
+    packedFloatCount: bank.packedFloatCount,
+    polytopeCount: entry.polytopes.length,
+    reservationEpoch: commit.epoch,
+    reservationId: res.token.reservationId,
+    admissionId: commit.admissionId,
+    cacheStatus: entry.cacheStatus,
+    cacheBackend: entry.cacheBackend,
+    cacheKey: entry.cacheKey,
+    atlasBuffer: state.atlasBuffer
+  });
+  state.bankHotSwapHistory.push(receipt);
+  return receipt;
+}
+
+/**
+ * Full end-to-end Unseen-Material Continuum <-> Quantum Hot-Swap Loop:
+ *   1. Accepts an unseen compound formula (e.g. 'KBr', 'GeO2') or pre-derived
+ *      `ulg.material-property-bundle.v1`, deriving the full Gate 1-2 quantum/
+ *      crystal/EM/MD bundle on WebGPU when passed a formula.
+ *   2. Hydrates from persistent browser OPFS/IndexedDB cache when valid, or
+ *      compiles convex `A x <= b` + GPU Chebyshev fits and persists fail-closed.
+ *   3. Publishes 5-slot Eshkol/MoonLab Triad closures onto `device` (optional,
+ *      default true).
+ *   4. Atomically hot-swaps the live GPU Polytope Atlas bank (`state.atlasBuffer`)
+ *      under PeerCompute `ReservationLedger` CAS fencing so continuum kernels
+ *      immediately resolve the unseen material at Tier-1 speed.
+ */
+export async function hotSwapUnseenMaterialAtlasWebGpu(device, formulaOrBundle, options = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    throw new TypeError('hotSwapUnseenMaterialAtlasWebGpu requires a live WebGPU GPUDevice');
+  }
+  let bundle = null;
+  let derivedVisualData = null;
+  if (typeof formulaOrBundle === 'string') {
+    const derived = await deriveCompoundBundleWebGpu(device, formulaOrBundle, {
+      runLiveMd: options.runLiveMd !== false,
+      mdSteps: options.mdSteps ?? 8,
+      mdCellsPerSide: options.mdCellsPerSide ?? 2,
+      reactionContext: options.reactionContext ?? {
+        source: 'hotSwapUnseenMaterialAtlasWebGpu'
+      }
+    });
+    bundle = derived.bundle;
+    derivedVisualData = derived.visualData ?? null;
+  } else if (formulaOrBundle && typeof formulaOrBundle === 'object') {
+    bundle = formulaOrBundle.bundle && formulaOrBundle.bundle.schema
+      ? formulaOrBundle.bundle
+      : formulaOrBundle;
+  } else {
+    throw new TypeError('hotSwapUnseenMaterialAtlasWebGpu requires a compound formula string or material bundle');
+  }
+
+  const atlas = await hydrateOrBuildCachedPolytopeAtlasWebGpu(device, bundle, {
+    degrees: options.degrees ?? [5, 5],
+    relativeTolerance: options.relativeTolerance ?? 2e-2,
+    maxBisectDepth: options.maxBisectDepth ?? 3,
+    materialIndex: options.materialIndex ?? 0,
+    pressureRangePa: options.pressureRangePa ?? [1e2, 1e10],
+    persistentCache: options.persistentCache || getSharedPolytopeAtlasPersistentCache()
+  });
+
+  let triadStatus = null;
+  if (options.publishTriadClosures !== false) {
+    try {
+      const pub = await publishPolytopeBundleToTriadGpuRegistry(device, bundle, {
+        materialId: options.materialId ?? null
+      });
+      triadStatus = pub.gpuRegistryStatus;
+    } catch {
+      triadStatus = getTriadClosureDeviceStatus(device);
+    }
+  }
+
+  const admission = admitDynamicPolytopeAtlasOnDevice(device, {
+    materialKey: options.materialKey || bundle.materialKey,
+    formula: bundle.formula || (typeof formulaOrBundle === 'string' ? formulaOrBundle : null),
+    atlas,
+    materialId: options.materialId ?? null,
+    consumerId: options.consumerId ?? 'polytope-hotswap',
+    reservationLedger: options.reservationLedger ?? null,
+    expectedEpoch: options.expectedEpoch ?? null,
+    cacheStatus: atlas.cacheStatus,
+    cacheBackend: atlas.cacheBackend,
+    cacheKey: atlas.cacheKey
+  });
+
+  return Object.freeze({
+    schema: ULG_FOUNDATION_POLYTOPE_HOTSWAP_SCHEMA,
+    bundle,
+    visualData: derivedVisualData,
+    atlas,
+    admission,
+    triadStatus,
+    cacheStatus: atlas.cacheStatus,
+    cacheBackend: atlas.cacheBackend,
+    cacheKey: atlas.cacheKey
   });
 }

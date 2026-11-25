@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#050a10" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23050a10'/%3E%3Ccircle cx='32' cy='32' r='22' fill='none' stroke='%2334d399' stroke-width='3.5'/%3E%3Ccircle cx='32' cy='32' r='13' fill='none' stroke='%2356c2ff' stroke-width='2.5' stroke-dasharray='5 3'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%23facc15'/%3E%3C/svg%3E" />
+    <title>ULG — Biophysics &amp; Emergent Life Lab (WebGPU Membranes, Folding, Evolution, Bioenergetics &amp; Morphogenesis)</title>
+    <style>
+      :root {
+        --bg: #04090f;
+        --panel: rgba(8, 15, 24, 0.98);
+        --card: rgba(14, 26, 38, 0.84);
+        --border: rgba(52, 211, 153, 0.24);
+        --accent: #34d399;
+        --cyan: #56c2ff;
+        --violet: #a78bfa;
+        --gold: #facc15;
+        --coral: #fb7185;
+        --text: #e8f5f0;
+        --muted: #8cb2ab;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; width: 100%;
+        background: var(--bg); color: var(--text);
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+      }
+      .shell { display: grid; grid-template-columns: 316px 1fr 318px; grid-template-rows: 44px 1fr; height: 100vh; }
+      .shell.plots-collapsed { grid-template-columns: 316px 1fr 0px; }
+      header {
+        grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
+        padding: 0 12px; background: #07111a; border-bottom: 1px solid var(--border); gap: 8px;
+        position: relative; z-index: 45;
+      }
+      .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; overflow: hidden; }
+      header h1 { font-size: 12.5px; font-weight: 800; margin: 0; letter-spacing: 0.05em; color: var(--accent); white-space: nowrap; }
+      .specimen-pill {
+        display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px;
+        border-radius: 999px; border: 1px solid rgba(52, 211, 153, 0.42);
+        background: rgba(52, 211, 153, 0.12); color: #ecfdf5;
+        font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .specimen-pill .pill-tag {
+        font-family: ui-monospace, monospace; font-size: 10px; padding: 1px 6px;
+        border-radius: 999px; background: rgba(86, 194, 255, 0.22); color: #bae6fd;
+      }
+      .header-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+      .hdr-btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+        background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.38);
+        color: #d1fae5; border-radius: 7px; padding: 4px 9px; font-size: 11px; font-weight: 700;
+        cursor: pointer; min-height: 29px; transition: 0.12s; white-space: nowrap;
+      }
+      .hdr-btn:hover { background: rgba(52, 211, 153, 0.26); border-color: var(--accent); color: #fff; }
+      .hdr-btn.help-btn {
+        width: 30px; height: 30px; padding: 0; border-radius: 999px; font-size: 13px; font-weight: 800;
+        background: rgba(86, 194, 255, 0.20); border-color: rgba(86, 194, 255, 0.55); color: #e0f2fe;
+      }
+      .hdr-btn.mobile-only { display: none; }
+
+      .sidebar, .right-dock {
+        background: var(--panel); padding: 9px; overflow-y: auto;
+        display: flex; flex-direction: column; gap: 7px;
+      }
+      .sidebar { border-right: 1px solid var(--border); }
+      .right-dock { border-left: 1px solid var(--border); }
+      .shell.plots-collapsed .right-dock { display: none; }
+      .sidebar::-webkit-scrollbar, .right-dock::-webkit-scrollbar { width: 5px; }
+      .sidebar::-webkit-scrollbar-thumb, .right-dock::-webkit-scrollbar-thumb { background: rgba(52,211,153,0.28); border-radius: 3px; }
+
+      .acc-group { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+      .acc-group.active-group { border-color: rgba(52, 211, 153, 0.65); }
+      .acc-header {
+        width: 100%; background: transparent; border: none; color: var(--text);
+        padding: 7px 9px; font-size: 11px; font-weight: 700; cursor: pointer;
+        display: flex; align-items: center; justify-content: space-between; text-align: left;
+      }
+      .acc-header:hover { background: rgba(52, 211, 153, 0.08); }
+      .acc-group.active-group > .acc-header { background: rgba(52, 211, 153, 0.14); color: #fff; }
+      .acc-chev { font-size: 10px; color: var(--muted); transition: transform 0.14s; }
+      .acc-group.open > .acc-header .acc-chev { transform: rotate(90deg); color: var(--accent); }
+      .acc-body { display: none; padding: 5px 7px 7px; border-top: 1px solid rgba(52,211,153,0.14); flex-direction: column; gap: 3px; }
+      .acc-group.open > .acc-body { display: flex; }
+      .mode-btn {
+        width: 100%; background: rgba(255,255,255,0.025); border: 1px solid transparent;
+        color: #cbd5e1; border-radius: 6px; padding: 5px 8px; font-size: 11px;
+        cursor: pointer; text-align: left; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      }
+      .mode-btn:hover { background: rgba(52,211,153,0.13); border-color: rgba(52,211,153,0.35); color: #fff; }
+      .mode-btn.active { background: rgba(16,185,129,0.28); border-color: var(--accent); color: #fff; font-weight: 700; }
+      .mode-btn small { font-size: 9.5px; color: var(--muted); font-family: ui-monospace, monospace; }
+      .mode-btn.active small { color: #a7f3d0; }
+
+      .card {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 8px; padding: 8px 9px; font-size: 11px;
+        display: flex; flex-direction: column; gap: 6px;
+      }
+      .card h3 {
+        margin: 0; font-size: 10px; font-weight: 800; color: var(--accent);
+        text-transform: uppercase; letter-spacing: 0.06em;
+        display: flex; justify-content: space-between; align-items: center;
+      }
+      .ctrl-row { display: flex; flex-direction: column; gap: 2px; }
+      .ctrl-head { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); }
+      .ctrl-head b { color: #f8fafc; font-family: ui-monospace, monospace; }
+      input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; margin: 0; }
+      .seq-input {
+        width: 100%; background: #040910; border: 1px solid rgba(52,211,153,0.42);
+        color: #facc15; font-family: ui-monospace, monospace; font-size: 11px;
+        border-radius: 6px; padding: 5px 7px; letter-spacing: 0.04em;
+      }
+      .btn-row { display: flex; gap: 5px; flex-wrap: wrap; }
+      .sm-btn {
+        flex: 1; min-width: 72px; padding: 5px 7px; border-radius: 6px; font-size: 10.5px; font-weight: 700;
+        cursor: pointer; background: rgba(52,211,153,0.14); border: 1px solid rgba(52,211,153,0.38); color: #d1fae5;
+      }
+      .sm-btn:hover { background: rgba(52,211,153,0.28); color: #fff; }
+      .sm-btn.gold { background: rgba(250,204,21,0.18); border-color: rgba(250,204,21,0.55); color: #fef08a; }
+      .sm-btn.coral { background: rgba(251,113,133,0.16); border-color: rgba(251,113,133,0.52); color: #fecdd3; }
+
+      .stage-wrap { position: relative; width: 100%; height: 100%; overflow: hidden; background: #04090f; }
+      #life-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+      #life-canvas:active { cursor: grabbing; }
+      .pick-reticle {
+        position: absolute; pointer-events: none; width: 28px; height: 28px; margin: -14px 0 0 -14px;
+        border: 2px solid #facc15; border-radius: 999px; box-shadow: 0 0 12px rgba(250, 204, 21, 0.85);
+        display: none; z-index: 15;
+      }
+      .pick-card {
+        display: none; pointer-events: auto; max-width: 290px;
+        background: rgba(6, 14, 22, 0.92); border: 1px solid rgba(250, 204, 21, 0.55);
+        border-radius: 8px; padding: 7px 10px; font-size: 10.5px; backdrop-filter: blur(8px);
+      }
+      .pick-card.open { display: flex; flex-direction: column; gap: 4px; }
+      .pick-card-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 800; color: #facc15; }
+      .pick-card-meta { font-family: ui-monospace, monospace; font-size: 10px; color: #e2e8f0; line-height: 1.4; }
+      .hud-top-left {
+        position: absolute; top: 10px; left: 10px; max-width: 400px; pointer-events: none;
+        background: rgba(6, 14, 22, 0.82); border: 1px solid rgba(52, 211, 153, 0.30);
+        border-radius: 8px; padding: 7px 10px; backdrop-filter: blur(8px);
+      }
+      .hud-title { font-size: 12px; font-weight: 800; color: #fff; margin: 0 0 2px; }
+      .hud-sub { font-size: 10.5px; color: var(--muted); line-height: 1.35; margin: 0; }
+      .hud-bottom {
+        position: absolute; bottom: 10px; left: 10px; right: 10px;
+        display: flex; align-items: center; justify-content: space-between; gap: 8px; pointer-events: none;
+      }
+      .hud-badge-bar { display: flex; gap: 6px; flex-wrap: wrap; pointer-events: auto; }
+      .stat-chip {
+        background: rgba(6, 14, 22, 0.85); border: 1px solid rgba(52, 211, 153, 0.30);
+        border-radius: 7px; padding: 4px 8px; font-size: 10.5px; font-family: ui-monospace, monospace;
+        color: #d1fae5; backdrop-filter: blur(6px);
+      }
+      .stat-chip b { color: var(--accent); }
+
+      .plot-card {
+        background: rgba(7, 16, 24, 0.92); border: 1px solid var(--border);
+        border-radius: 8px; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px;
+      }
+      .plot-head { display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 800; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+      .plot-head span:last-child { color: var(--muted); font-family: ui-monospace, monospace; font-weight: 600; text-transform: none; }
+      .plot-canvas { width: 100%; height: 118px; display: block; border-radius: 5px; background: #040910; }
+      .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 10.5px; }
+      .kv span:first-child { color: var(--muted); }
+      .kv span:last-child { font-family: ui-monospace, monospace; color: #e2e8f0; text-align: right; }
+
+      .help-popover {
+        display: none; position: fixed; top: 48px; right: 12px; z-index: 120;
+        width: min(340px, calc(100vw - 20px)); max-height: calc(100dvh - 64px); overflow-y: auto;
+        background: #07131e; border: 1px solid rgba(52, 211, 153, 0.55);
+        border-radius: 11px; padding: 8px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.78);
+        flex-direction: column; gap: 4px;
+      }
+      .help-popover.open { display: flex; }
+      .help-section-lbl { font-size: 9.5px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; padding: 5px 7px 2px; }
+      .help-divider { height: 1px; background: rgba(52, 211, 153, 0.16); margin: 3px 4px; }
+      .help-item {
+        display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; text-decoration: none;
+        cursor: pointer; background: rgba(255,255,255,0.025); border: 1px solid transparent;
+        border-radius: 7px; padding: 7px 9px; color: var(--text);
+      }
+      .help-item:hover { background: rgba(52,211,153,0.14); border-color: rgba(52,211,153,0.42); color: #fff; }
+      .help-item-top { display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; font-weight: 700; }
+      .help-item-top small { font-size: 9.5px; color: var(--accent); font-family: ui-monospace, monospace; }
+      .help-item-desc { font-size: 10px; color: var(--muted); line-height: 1.35; }
+
+      .modal-backdrop {
+        display: none; position: fixed; inset: 0; z-index: 160;
+        background: rgba(3, 8, 12, 0.78); backdrop-filter: blur(5px);
+        align-items: center; justify-content: center; padding: 16px;
+      }
+      .modal-backdrop.open { display: flex; }
+      .modal-panel {
+        width: min(700px, 95vw); max-height: 88vh; overflow-y: auto;
+        background: #07131e; border: 1px solid rgba(52,211,153,0.48);
+        border-radius: 12px; padding: 16px 18px; box-shadow: 0 24px 64px rgba(0,0,0,0.85);
+      }
+      .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+      .modal-head h2 { margin: 0; font-size: 15px; color: var(--accent); }
+      .modal-body { display: flex; flex-direction: column; gap: 10px; font-size: 12px; line-height: 1.5; color: #dcefe8; }
+      .modal-block { background: rgba(12,26,38,0.86); border: 1px solid rgba(52,211,153,0.22); border-radius: 8px; padding: 10px 12px; }
+      .modal-block h4 { margin: 0 0 5px; font-size: 10.5px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.055em; }
+      .modal-block ul { margin: 4px 0 0; padding-left: 18px; }
+      .modal-block code { font-family: ui-monospace, monospace; color: #a7f3d0; font-size: 11px; }
+
+      .error-banner {
+        position: absolute; inset: 20px; z-index: 80; display: none;
+        align-items: center; justify-content: center; text-align: center;
+        background: rgba(10, 18, 26, 0.94); border: 1px solid #f87171; border-radius: 10px; padding: 24px;
+      }
+      .error-banner.visible { display: flex; flex-direction: column; gap: 8px; }
+
+      @media (max-width: 1020px) {
+        .shell { grid-template-columns: 1fr; }
+        .sidebar, .right-dock { display: none; position: fixed; top: 44px; bottom: 0; z-index: 90; width: min(320px, 88vw); }
+        .sidebar.mobile-open { display: flex; left: 0; }
+        .right-dock.mobile-open { display: flex; right: 0; }
+        .hdr-btn.mobile-only { display: inline-flex; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="life-shell" class="shell">
+      <header>
+        <div class="header-left">
+          <button id="mobile-nav-btn" class="hdr-btn mobile-only" type="button">☰ Lab</button>
+          <h1>ULG · BIOPHYSICS &amp; EMERGENT LIFE LAB</h1>
+          <div id="active-pill" class="specimen-pill">
+            <span id="pill-name">Amphiphile Self-Assembly</span>
+            <span id="pill-tag" class="pill-tag">3-Bead GPU MD</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="about-btn" class="hdr-btn" type="button" title="Inspect governing equations, GPU laws, and null-limit experiments">ⓘ About</button>
+          <button id="toggle-plots-btn" class="hdr-btn" type="button" title="Toggle live biophysical plots dock">📊 Plots</button>
+          <button id="help-btn" class="hdr-btn help-btn" type="button" aria-label="Help and Other ULG Flagship Apps">?</button>
+        </div>
+      </header>
+
+      <div id="help-popover" class="help-popover" role="menu">
+        <div class="help-section-lbl">Documentation</div>
+        <button id="menu-about-mode" class="help-item" type="button">
+          <span class="help-item-top"><span>ⓘ About Current Regime</span><small>Equations</small></span>
+          <span class="help-item-desc">Biophysical laws, GPU kernels, and falsifiable null-limit tests for this simulation.</span>
+        </button>
+        <button id="menu-about-lab" class="help-item" type="button">
+          <span class="help-item-top"><span>✦ About ULG Life Lab</span><small>Nodes #20–24</small></span>
+          <span class="help-item-desc">Life emerges strictly from hydrophobic, electrostatic, thermodynamic &amp; active-matter physics.</span>
+        </button>
+        <div class="help-divider"></div>
+        <div class="help-section-lbl">ULG Multiscale Flagship Apps</div>
+        <a class="help-item" href="./organic-lab.html">
+          <span class="help-item-top"><span>Organic Chemistry Lab ↗</span><small>10⁻¹⁰ → 10⁻⁶ m</small></span>
+          <span class="help-item-desc">GPU Hückel π-MOs, chirality R↔S, H-bonds, SN2, Diels–Alder &amp; Frank chiral symmetry breaking.</span>
+        </a>
+        <a class="help-item" href="./elements-lab.html">
+          <span class="help-item-top"><span>Material Physics Lab ↗</span><small>Z = 1..118</small></span>
+          <span class="help-item-desc">Full Periodic Table nuclear, 4-comp Dirac–KS, FDTD optics, reactive MD &amp; Polytope Atlas.</span>
+        </a>
+        <a class="help-item" href="./index.html">
+          <span class="help-item-top"><span>Studio Continuum ↗</span><small>10⁻³ → 10⁺² m</small></span>
+          <span class="help-item-desc">3D WebGPU MLS-MPM fluid, phase change, optics &amp; reactive continuum studio.</span>
+        </a>
+        <a class="help-item" href="./universes.html">
+          <span class="help-item-top"><span>ULG Universes ↗</span><small>10⁺²⁵ → 10⁻¹⁵ m</small></span>
+          <span class="help-item-desc">40-OOM WebGPU explorer from FLRW Cosmic Web &amp; Quasars to Planetary Surface Rovers.</span>
+        </a>
+      </div>
+
+      <aside id="life-sidebar" class="sidebar">
+        <div class="acc-group open active-group" data-group="membranes">
+          <button class="acc-header" type="button"><span>1. Amphiphile Self-Assembly &amp; Protocells</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn active" data-mode="lipid-soup" type="button"><span>Spontaneous Micelle Soup</span><small>ε_hp MD</small></button>
+            <button class="mode-btn" data-mode="protocell-vesicle" type="button"><span>3D Protocell Vesicle</span><small>Bilayer Shell</small></button>
+            <button class="mode-btn" data-mode="lipid-bilayer" type="button"><span>Fluid Lipid Bilayer</span><small>Membrane</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="folding">
+          <button class="acc-header" type="button"><span>2. Biopolymer Folding &amp; Pocket Catalysis</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="amphipathic-helix-bundle" type="button"><span>Helix-Turn-Helix Catalyst</span><small>36-mer</small></button>
+            <button class="mode-btn" data-mode="globular-hydrophobic-core" type="button"><span>Globular Hydrophobic Core</span><small>44-mer</small></button>
+            <button class="mode-btn" data-mode="beta-hairpin-fold" type="button"><span>Antiparallel Hairpin</span><small>28-mer</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="evolution">
+          <button class="acc-header" type="button"><span>3. Template Replication &amp; Eigen Threshold</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="quasispecies-evolution" type="button"><span>Quasispecies &amp; Duplex T_m</span><small>1,024 GPU</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="bioenergetics">
+          <button class="acc-header" type="button"><span>4. Chemiosmosis &amp; Excitable Membranes</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="excitable-spiral" type="button"><span>HH Action-Potential Spirals</span><small>128² + ATP</small></button>
+            <button class="mode-btn" data-mode="excitable-pulse" type="button"><span>Pacemaker Pulse Ring</span><small>128² HH</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="morphogenesis">
+          <button class="acc-header" type="button"><span>5. Turing Morphogenesis &amp; Active Matter</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="turing-spots" type="button"><span>Turing Spots + Chemotaxis</span><small>2K Agents</small></button>
+            <button class="mode-btn" data-mode="turing-labyrinth" type="button"><span>Embryonic Labyrinth Stripes</span><small>2K Agents</small></button>
+            <button class="mode-btn" data-mode="mitosis-division" type="button"><span>Self-Dividing Droplets</span><small>Mitosis RD</small></button>
+          </div>
+        </div>
+
+        <!-- Layer-Specific Dynamic Control Panels -->
+        <div id="ctrl-membrane" class="card">
+          <h3><span>Membrane Thermodynamics</span><span>Node #20</span></h3>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Hydrophobic Coupling ε_hp</span><b id="val-mem-eps">1.85</b></div>
+            <input id="sl-mem-eps" type="range" min="0" max="3.0" step="0.05" value="1.85" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Temperature T</span><b id="val-mem-temp">300 K</b></div>
+            <input id="sl-mem-temp" type="range" min="120" max="750" step="10" value="300" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Osmotic Pressure ΔP_osm</span><b id="val-mem-osm">0.00</b></div>
+            <input id="sl-mem-osm" type="range" min="-1.2" max="1.2" step="0.05" value="0.0" />
+          </div>
+          <div class="btn-row">
+            <button class="sm-btn" id="btn-mem-null" type="button" title="Set hydrophobic coupling ε_hp = 0 to prove dispersion null limit">ε_hp=0 Dissolve</button>
+            <button class="sm-btn" id="btn-mem-reset" type="button">↺ Reset</button>
+          </div>
+        </div>
+
+        <div id="ctrl-fold" class="card" style="display:none;">
+          <h3><span>Biopolymer Folding Controls</span><span>Node #21</span></h3>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Monomer Sequence (H / P / + / −)</span><b id="val-fold-len">36-mer</b></div>
+            <input id="inp-seq" class="seq-input" type="text" value="HPPHH+PHHPPHH-PHPPPHHPPHH+PHHPPHH-PP" />
+            <button class="sm-btn" id="btn-apply-seq" type="button" style="margin-top:4px;">Apply Custom Sequence</button>
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Temperature T (Denature &gt; 650 K)</span><b id="val-fold-temp">300 K</b></div>
+            <input id="sl-fold-temp" type="range" min="100" max="850" step="10" value="300" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Hydrophobic Collapse ε_hp</span><b id="val-fold-eps">1.95</b></div>
+            <input id="sl-fold-eps" type="range" min="0" max="3.0" step="0.05" value="1.95" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Helical Backbone H-Bond ε_hb</span><b id="val-fold-hb">1.45</b></div>
+            <input id="sl-fold-hb" type="range" min="0" max="3.0" step="0.05" value="1.45" />
+          </div>
+          <div class="btn-row">
+            <button class="sm-btn coral" id="btn-fold-denature" type="button">🔥 750 K Denature</button>
+            <button class="sm-btn" id="btn-fold-reset" type="button">↺ Refold 300 K</button>
+          </div>
+        </div>
+
+        <div id="ctrl-evo" class="card" style="display:none;">
+          <h3><span>Replication &amp; Eigen Threshold</span><span>Node #22</span></h3>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Mutation Rate μ (μ_crit ≈ 0.112)</span><b id="val-evo-mu">0.025</b></div>
+            <input id="sl-evo-mu" type="range" min="0" max="0.45" step="0.005" value="0.025" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Selection Pressure β</span><b id="val-evo-beta">2.40</b></div>
+            <input id="sl-evo-beta" type="range" min="0.4" max="5.0" step="0.1" value="2.4" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Strong 3-H-Bond Pair Fraction f_GC</span><b id="val-evo-fgc">0.50</b></div>
+            <input id="sl-evo-fgc" type="range" min="0.05" max="0.95" step="0.05" value="0.50" />
+          </div>
+          <div class="btn-row">
+            <button class="sm-btn coral" id="btn-evo-cat" type="button">⚠ Trigger Error Catastrophe</button>
+            <button class="sm-btn" id="btn-evo-reset" type="button">↺ Reset</button>
+          </div>
+        </div>
+
+        <div id="ctrl-hh" class="card" style="display:none;">
+          <h3><span>Electrophysiology &amp; Chemiosmosis</span><span>Node #23</span></h3>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Na⁺ Conductance g_Na (0 = TTX)</span><b id="val-hh-gna">120 mS</b></div>
+            <input id="sl-hh-gna" type="range" min="0" max="180" step="5" value="120" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>K⁺ Conductance g_K</span><b id="val-hh-gk">36 mS</b></div>
+            <input id="sl-hh-gk" type="range" min="10" max="75" step="1" value="36" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Membrane Voltage Δψ</span><b id="val-hh-psi">150 mV</b></div>
+            <input id="sl-hh-psi" type="range" min="0" max="220" step="5" value="150" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Proton Gradient ΔpH</span><b id="val-hh-dph">1.00</b></div>
+            <input id="sl-hh-dph" type="range" min="0" max="2.5" step="0.05" value="1.0" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Protonophore Uncoupler (DNP)</span><b id="val-hh-leak">0.00</b></div>
+            <input id="sl-hh-leak" type="range" min="0" max="1.0" step="0.05" value="0.0" />
+          </div>
+          <div class="btn-row">
+            <button class="sm-btn gold" id="btn-hh-stim" type="button">⚡ Stimulate</button>
+            <button class="sm-btn coral" id="btn-hh-ttx" type="button">TTX (g_Na=0)</button>
+            <button class="sm-btn" id="btn-hh-reset" type="button">↺ Reset</button>
+          </div>
+        </div>
+
+        <div id="ctrl-morph" class="card" style="display:none;">
+          <h3><span>Turing + Active Chemotaxis</span><span>Node #24</span></h3>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Self-Propulsion Speed v₀</span><b id="val-m-v0">1.35</b></div>
+            <input id="sl-m-v0" type="range" min="0" max="2.6" step="0.05" value="1.35" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Chemotaxis Gradient Gain</span><b id="val-m-chemo">2.20</b></div>
+            <input id="sl-m-chemo" type="range" min="0" max="4.5" step="0.1" value="2.20" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Turing Diffusion Ratio D_u / D_v</span><b id="val-m-ratio">2.00</b></div>
+            <input id="sl-m-ratio" type="range" min="1.0" max="2.5" step="0.05" value="2.00" />
+          </div>
+          <div class="btn-row">
+            <button class="sm-btn coral" id="btn-m-null" type="button">v₀=0 Passive</button>
+            <button class="sm-btn" id="btn-m-reset" type="button">↺ Reseed</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="btn-row">
+            <button id="btn-play" class="sm-btn" type="button">⏸ Pause</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="stage-wrap">
+        <canvas id="life-canvas"></canvas>
+        <div id="pick-reticle" class="pick-reticle"></div>
+        <div class="hud-top-left">
+          <div id="hud-title" class="hud-title">Amphiphile Spontaneous Self-Assembly</div>
+          <p id="hud-sub" class="hud-sub">Click any lipid, residue, replicator, or swimmer to inspect live WebGPU state · Drag to orbit</p>
+        </div>
+        <div class="hud-bottom">
+          <div class="hud-badge-bar">
+            <div class="stat-chip">Step <b id="st-step">0</b></div>
+            <div class="stat-chip"><span id="st-m1-lbl">Metric 1</span> <b id="st-m1-val">—</b></div>
+            <div class="stat-chip"><span id="st-m2-lbl">Metric 2</span> <b id="st-m2-val">—</b></div>
+            <div class="stat-chip"><span id="st-m3-lbl">Metric 3</span> <b id="st-m3-val">—</b></div>
+          </div>
+          <div id="pick-card" class="pick-card">
+            <div class="pick-card-head"><span id="pick-title">Picked Mote</span><button id="pick-close" class="sm-btn" style="flex:0;min-width:24px;padding:1px 5px;" type="button">✕</button></div>
+            <div id="pick-meta" class="pick-card-meta"></div>
+            <div class="btn-row"><button id="pick-zoom" class="sm-btn gold" type="button">🎯 Focus &amp; Zoom</button></div>
+          </div>
+        </div>
+        <div id="error-banner" class="error-banner">
+          <h3 style="margin:0;color:#fca5a5;">WebGPU Initialization Error</h3>
+          <p id="error-text" style="margin:0;color:#cbd5e1;font-size:12px;"></p>
+        </div>
+      </main>
+
+      <aside id="life-dock" class="right-dock">
+        <div class="plot-card">
+          <div class="plot-head"><span id="p1-title">Hydrophobic Coordination</span><span id="p1-sub">live</span></div>
+          <canvas id="plot1" class="plot-canvas" width="296" height="118"></canvas>
+        </div>
+        <div class="plot-card">
+          <div class="plot-head"><span id="p2-title">Order Parameter</span><span id="p2-sub">live</span></div>
+          <canvas id="plot2" class="plot-canvas" width="296" height="118"></canvas>
+        </div>
+        <div class="plot-card">
+          <div class="plot-head"><span id="p3-title">Thermodynamic Curve</span><span id="p3-sub">live</span></div>
+          <canvas id="plot3" class="plot-canvas" width="296" height="118"></canvas>
+        </div>
+        <div class="card">
+          <h3><span>Universal Law Graph Provenance</span><span id="prov-tier">Tier-2</span></h3>
+          <div class="kv"><span>Active Laws</span><span id="prov-laws">—</span></div>
+          <div class="kv"><span>GPU Entities</span><span id="prov-entities">—</span></div>
+          <div class="kv"><span>Key Invariant</span><span id="prov-inv">—</span></div>
+          <div class="kv"><span>Validation Tag</span><span style="color:#fcd34d;">scientificValidation: false</span></div>
+        </div>
+      </aside>
+    </div>
+
+    <div id="about-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h2 id="modal-title">About Biophysics &amp; Emergent Life Lab</h2>
+          <button id="modal-close" class="hdr-btn" type="button">✕ Close</button>
+        </div>
+        <div id="modal-body" class="modal-body"></div>
+      </div>
+    </div>
+
+    <script type="module" src="./src/lifeLabStandalone.js"></script>
+  </body>
+</html>

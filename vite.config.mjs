@@ -532,6 +532,8 @@ export default defineConfig({
       input: {
         index: fileURLToPath(new URL('./index.html', import.meta.url)),
         elementsLab: fileURLToPath(new URL('./elements-lab.html', import.meta.url)),
+        organicLab: fileURLToPath(new URL('./organic-lab.html', import.meta.url)),
+        lifeLab: fileURLToPath(new URL('./life-lab.html', import.meta.url)),
         universes: fileURLToPath(new URL('./universes.html', import.meta.url)),
         peercomputeComputeWorker: resolve(
           peercomputeRoot,

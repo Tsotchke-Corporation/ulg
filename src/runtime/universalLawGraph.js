@@ -72,6 +72,46 @@ import {
   evaluatePlanetarySurfaceActivation,
   registerPlanetarySurfaceVehiclesModule
 } from './astrophysics/planetarySurfaceVehiclesGpu.js';
+import {
+  ORGANIC_MOLECULAR_GRAPH_LAW_ADAPTER,
+  evaluateOrganicGraphActivation,
+  registerOrganicMolecularGraphModule
+} from './organic/organicMolecularGraphGpu.js';
+import {
+  REACTIVE_BOND_ORDER_MD_LAW_ADAPTER,
+  evaluateReactiveBondOrderActivation,
+  registerReactiveBondOrderMdModule
+} from './organic/reactiveBondOrderMdGpu.js';
+import {
+  ACID_BASE_CATALYSIS_LAW_ADAPTER,
+  evaluateAcidBaseCatalysisActivation,
+  registerAcidBaseCatalysisModule
+} from './organic/acidBaseCatalysisGpu.js';
+import {
+  AMPHIPHILE_MEMBRANE_LAW_ADAPTER,
+  evaluateAmphiphileMembraneActivation,
+  registerAmphiphileMembraneModule
+} from './biology/amphiphileMembraneGpu.js';
+import {
+  BIOPOLYMER_FOLDING_LAW_ADAPTER,
+  evaluateBiopolymerFoldingActivation,
+  registerBiopolymerFoldingModule
+} from './biology/biopolymerFoldingGpu.js';
+import {
+  TEMPLATE_REPLICATION_LAW_ADAPTER,
+  evaluateTemplateReplicationActivation,
+  registerTemplateReplicationModule
+} from './biology/templateReplicationGpu.js';
+import {
+  MEMBRANE_BIOENERGETICS_LAW_ADAPTER,
+  evaluateMembraneBioenergeticsActivation,
+  registerMembraneBioenergeticsModule
+} from './biology/membraneBioenergeticsGpu.js';
+import {
+  MORPHOGENESIS_ACTIVE_LAW_ADAPTER,
+  evaluateMorphogenesisActiveActivation,
+  registerMorphogenesisActiveModule
+} from './biology/morphogenesisActiveMatterGpu.js';
 
 export const ULG_UNIVERSAL_LAW_GRAPH_SCHEMA = 'peercompute.ulg.universal-law-graph.v1';
 
@@ -81,7 +121,10 @@ export const FUNDAMENTAL_LAW_FAMILIES = Object.freeze({
   HYDRODYNAMICS: 'hydrodynamics',
   THERMODYNAMICS: 'thermodynamics',
   RIGID_SOLID_MECHANICS: 'rigid-solid-mechanics',
-  NUCLEAR_QUANTUM: 'nuclear-quantum'
+  NUCLEAR_QUANTUM: 'nuclear-quantum',
+  CHEMICAL_BONDING: 'chemical-bonding',
+  SOFT_MATTER_BIOPHYSICS: 'soft-matter-biophysics',
+  REACTION_DIFFUSION_ACTIVE: 'reaction-diffusion-active'
 });
 
 // Additional top-down canonical Law Adapter descriptors for existing Gate 5 & v2 WebGPU engines
@@ -408,6 +451,112 @@ export const UNIVERSAL_LAW_GRAPH_NODES = Object.freeze([
     scaleRangeM: Object.freeze([1e-1, 5e4]),
     adapter: PLANETARY_SURFACE_LAW_ADAPTER,
     evaluateActivation: evaluatePlanetarySurfaceActivation
+  }),
+  Object.freeze({
+    id: 'organic-molecular-graph-hybridization',
+    methodKey: 'organic-molecular-graph-hybridization@1',
+    title: 'Organic Molecular Graph Hybridization (sp/sp²/sp³), GPU Extended-Hückel π-MOs, QEq Charges & 3D CIP Chirality',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.NUCLEAR_QUANTUM,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING
+    ]),
+    scaleRangeM: Object.freeze([1e-10, 1e-8]),
+    adapter: ORGANIC_MOLECULAR_GRAPH_LAW_ADAPTER,
+    evaluateActivation: evaluateOrganicGraphActivation
+  }),
+  Object.freeze({
+    id: 'reactive-bond-order-md',
+    methodKey: 'reactive-bond-order-md@1',
+    title: 'WebGPU Reactive Bond-Order MD, Dihedral Conformations, Directional H-Bonds, SN2 Inversion & Diels-Alder [4+2]',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e-10, 1e-8]),
+    adapter: REACTIVE_BOND_ORDER_MD_LAW_ADAPTER,
+    evaluateActivation: evaluateReactiveBondOrderActivation
+  }),
+  Object.freeze({
+    id: 'acid-base-catalysis-kinetics',
+    methodKey: 'acid-base-catalysis-kinetics@1',
+    title: 'First-Principles Brønsted-Lowry pKa Equilibria, Frank Chiral Symmetry Breaking, BZ Spirals & Prebiotic RAF Networks',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.REACTION_DIFFUSION_ACTIVE
+    ]),
+    scaleRangeM: Object.freeze([1e-9, 1e-3]),
+    adapter: ACID_BASE_CATALYSIS_LAW_ADAPTER,
+    evaluateActivation: evaluateAcidBaseCatalysisActivation
+  }),
+  Object.freeze({
+    id: 'amphiphile-membrane-self-assembly',
+    methodKey: 'amphiphile-membrane-self-assembly@1',
+    title: 'Amphiphile Hydrophobic Self-Assembly, Bilayer Membranes & Osmotic Protocell Vesicles',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM
+    ]),
+    scaleRangeM: Object.freeze([1e-9, 1e-6]),
+    adapter: AMPHIPHILE_MEMBRANE_LAW_ADAPTER,
+    evaluateActivation: evaluateAmphiphileMembraneActivation
+  }),
+  Object.freeze({
+    id: 'biopolymer-folding-catalysis',
+    methodKey: 'biopolymer-folding-catalysis@1',
+    title: 'Heteropolymer Hydrophobic Collapse, Secondary H-Bond Folding, Thermal Denaturation & Electrostatic Pocket Catalysis',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS,
+      FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e-9, 1e-7]),
+    adapter: BIOPOLYMER_FOLDING_LAW_ADAPTER,
+    evaluateActivation: evaluateBiopolymerFoldingActivation
+  }),
+  Object.freeze({
+    id: 'template-replication-evolution',
+    methodKey: 'template-replication-evolution@1',
+    title: 'Complementary H-Bond Duplex Melting, Template Replication, Quasispecies Selection & Eigen Error Threshold',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS,
+      FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e-9, 1e-6]),
+    adapter: TEMPLATE_REPLICATION_LAW_ADAPTER,
+    evaluateActivation: evaluateTemplateReplicationActivation
+  }),
+  Object.freeze({
+    id: 'chemiosmotic-bioenergetics-electrophysiology',
+    methodKey: 'chemiosmotic-bioenergetics-electrophysiology@1',
+    title: 'Mitchell Chemiosmotic Proton-Motive Force, ATP Synthesis & Hodgkin-Huxley Excitable Membrane Spiral Waves',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.REACTION_DIFFUSION_ACTIVE
+    ]),
+    scaleRangeM: Object.freeze([1e-8, 1e-2]),
+    adapter: MEMBRANE_BIOENERGETICS_LAW_ADAPTER,
+    evaluateActivation: evaluateMembraneBioenergeticsActivation
+  }),
+  Object.freeze({
+    id: 'reaction-diffusion-active-matter',
+    methodKey: 'reaction-diffusion-active-matter@1',
+    title: 'Turing Reaction-Diffusion Morphogenesis & Chemotactic Self-Propelled Active-Matter Colonies',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.REACTION_DIFFUSION_ACTIVE,
+      FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e-6, 1e-1]),
+    adapter: MORPHOGENESIS_ACTIVE_LAW_ADAPTER,
+    evaluateActivation: evaluateMorphogenesisActiveActivation
   })
 ]);
 
@@ -488,7 +637,15 @@ export function registerAllTopDownLawModules(registry) {
     registerRelativisticBinaryMergerModule(registry),
     registerRadiativePhotoionizationWindModule(registry),
     registerTidalRocheDisruptionModule(registry),
-    registerPlanetarySurfaceVehiclesModule(registry)
+    registerPlanetarySurfaceVehiclesModule(registry),
+    registerOrganicMolecularGraphModule(registry),
+    registerReactiveBondOrderMdModule(registry),
+    registerAcidBaseCatalysisModule(registry),
+    registerAmphiphileMembraneModule(registry),
+    registerBiopolymerFoldingModule(registry),
+    registerTemplateReplicationModule(registry),
+    registerMembraneBioenergeticsModule(registry),
+    registerMorphogenesisActiveModule(registry)
   ].filter(Boolean);
   return registered;
 }

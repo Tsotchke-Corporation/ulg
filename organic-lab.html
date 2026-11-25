@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#050810" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23050810'/%3E%3Cpolygon points='32,10 51,21 51,43 32,54 13,43 13,21' fill='none' stroke='%2356c2ff' stroke-width='3.5'/%3E%3Ccircle cx='32' cy='32' r='10' fill='none' stroke='%23f472b6' stroke-width='2.5' stroke-dasharray='4 3'/%3E%3C/svg%3E" />
+    <title>ULG — Organic Chemistry Lab (WebGPU π-MOs, Chirality, Reactive MD &amp; Autocatalysis)</title>
+    <style>
+      :root {
+        --bg: #050810;
+        --panel: rgba(9, 14, 26, 0.98);
+        --card: rgba(17, 24, 42, 0.84);
+        --border: rgba(124, 164, 240, 0.22);
+        --accent: #56c2ff;
+        --pink: #f472b6;
+        --violet: #a78bfa;
+        --green: #34d399;
+        --gold: #facc15;
+        --text: #e8eefc;
+        --muted: #8fa4c4;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; width: 100%;
+        background: var(--bg); color: var(--text);
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+      }
+      .shell { display: grid; grid-template-columns: 312px 1fr 318px; grid-template-rows: 44px 1fr; height: 100vh; }
+      .shell.plots-collapsed { grid-template-columns: 312px 1fr 0px; }
+      header {
+        grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
+        padding: 0 12px; background: #080d1a; border-bottom: 1px solid var(--border); gap: 8px;
+        position: relative; z-index: 45;
+      }
+      .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; overflow: hidden; }
+      header h1 { font-size: 12.5px; font-weight: 800; margin: 0; letter-spacing: 0.05em; color: var(--accent); white-space: nowrap; }
+      .specimen-pill {
+        display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px;
+        border-radius: 999px; border: 1px solid rgba(86, 194, 255, 0.38);
+        background: rgba(86, 194, 255, 0.10); color: #f0f9ff;
+        font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .specimen-pill .pill-tag {
+        font-family: ui-monospace, monospace; font-size: 10px; padding: 1px 6px;
+        border-radius: 999px; background: rgba(244, 114, 182, 0.22); color: #fbcfe8;
+      }
+      .header-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+      .hdr-btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+        background: rgba(86, 194, 255, 0.12); border: 1px solid rgba(86, 194, 255, 0.36);
+        color: #e2e8f0; border-radius: 7px; padding: 4px 9px; font-size: 11px; font-weight: 700;
+        cursor: pointer; min-height: 29px; transition: 0.12s; white-space: nowrap;
+      }
+      .hdr-btn:hover { background: rgba(86, 194, 255, 0.25); border-color: var(--accent); color: #fff; }
+      .hdr-btn.help-btn {
+        width: 30px; height: 30px; padding: 0; border-radius: 999px; font-size: 13px; font-weight: 800;
+        background: rgba(124, 77, 255, 0.22); border-color: rgba(167, 139, 250, 0.6); color: #f3e8ff;
+      }
+      .hdr-btn.mobile-only { display: none; }
+
+      .sidebar, .right-dock {
+        background: var(--panel); padding: 9px; overflow-y: auto;
+        display: flex; flex-direction: column; gap: 7px;
+      }
+      .sidebar { border-right: 1px solid var(--border); }
+      .right-dock { border-left: 1px solid var(--border); }
+      .shell.plots-collapsed .right-dock { display: none; }
+      .sidebar::-webkit-scrollbar, .right-dock::-webkit-scrollbar { width: 5px; }
+      .sidebar::-webkit-scrollbar-thumb, .right-dock::-webkit-scrollbar-thumb { background: rgba(124,164,240,0.25); border-radius: 3px; }
+
+      .acc-group { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+      .acc-group.active-group { border-color: rgba(86, 194, 255, 0.62); }
+      .acc-header {
+        width: 100%; background: transparent; border: none; color: var(--text);
+        padding: 7px 9px; font-size: 11px; font-weight: 700; cursor: pointer;
+        display: flex; align-items: center; justify-content: space-between; text-align: left;
+      }
+      .acc-header:hover { background: rgba(86, 194, 255, 0.08); }
+      .acc-group.active-group > .acc-header { background: rgba(86, 194, 255, 0.14); color: #fff; }
+      .acc-chev { font-size: 10px; color: var(--muted); transition: transform 0.14s; }
+      .acc-group.open > .acc-header .acc-chev { transform: rotate(90deg); color: var(--accent); }
+      .acc-body { display: none; padding: 5px 7px 7px; border-top: 1px solid rgba(124,164,240,0.12); flex-direction: column; gap: 3px; }
+      .acc-group.open > .acc-body { display: flex; }
+      .mode-btn {
+        width: 100%; background: rgba(255,255,255,0.025); border: 1px solid transparent;
+        color: #cbd5e1; border-radius: 6px; padding: 5px 8px; font-size: 11px;
+        cursor: pointer; text-align: left; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      }
+      .mode-btn:hover { background: rgba(86,194,255,0.12); border-color: rgba(86,194,255,0.34); color: #fff; }
+      .mode-btn.active { background: rgba(124,77,255,0.28); border-color: #a78bfa; color: #fff; font-weight: 700; }
+      .mode-btn small { font-size: 9.5px; color: var(--muted); font-family: ui-monospace, monospace; }
+      .mode-btn.active small { color: #e9d5ff; }
+
+      .card {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 8px; padding: 8px 9px; font-size: 11px;
+        display: flex; flex-direction: column; gap: 6px;
+      }
+      .card h3 {
+        margin: 0; font-size: 10px; font-weight: 800; color: var(--accent);
+        text-transform: uppercase; letter-spacing: 0.06em;
+        display: flex; justify-content: space-between; align-items: center;
+      }
+      .ctrl-row { display: flex; flex-direction: column; gap: 2px; }
+      .ctrl-head { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); }
+      .ctrl-head b { color: #f8fafc; font-family: ui-monospace, monospace; }
+      input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; margin: 0; }
+      .btn-row { display: flex; gap: 5px; flex-wrap: wrap; }
+      .sm-btn {
+        flex: 1; min-width: 72px; padding: 5px 7px; border-radius: 6px; font-size: 10.5px; font-weight: 700;
+        cursor: pointer; background: rgba(86,194,255,0.12); border: 1px solid rgba(86,194,255,0.35); color: #e0f2fe;
+      }
+      .sm-btn:hover { background: rgba(86,194,255,0.25); color: #fff; }
+      .sm-btn.active { background: rgba(244,114,182,0.26); border-color: var(--pink); color: #fff; }
+      .sm-btn.mirror { background: linear-gradient(90deg, rgba(86,194,255,0.22), rgba(244,114,182,0.24)); border-color: rgba(244,114,182,0.55); }
+      .chk-row { display: flex; align-items: center; justify-content: space-between; font-size: 10.5px; color: #cbd5e1; cursor: pointer; }
+      .chk-row input { accent-color: var(--accent); }
+
+      .stage-wrap { position: relative; width: 100%; height: 100%; overflow: hidden; background: #040710; }
+      #org-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+      #org-canvas:active { cursor: grabbing; }
+      .pick-reticle {
+        position: absolute; pointer-events: none; width: 28px; height: 28px; margin: -14px 0 0 -14px;
+        border: 2px solid #facc15; border-radius: 999px; box-shadow: 0 0 12px rgba(250, 204, 21, 0.85);
+        display: none; z-index: 15;
+      }
+      .pick-card {
+        display: none; pointer-events: auto; max-width: 280px;
+        background: rgba(8, 13, 26, 0.90); border: 1px solid rgba(250, 204, 21, 0.55);
+        border-radius: 8px; padding: 7px 10px; font-size: 10.5px; backdrop-filter: blur(8px);
+      }
+      .pick-card.open { display: flex; flex-direction: column; gap: 4px; }
+      .pick-card-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 800; color: #facc15; }
+      .pick-card-meta { font-family: ui-monospace, monospace; font-size: 10px; color: #e2e8f0; line-height: 1.4; }
+      .hud-top-left {
+        position: absolute; top: 10px; left: 10px; max-width: 380px; pointer-events: none;
+        background: rgba(8, 13, 26, 0.80); border: 1px solid rgba(124, 164, 240, 0.28);
+        border-radius: 8px; padding: 7px 10px; backdrop-filter: blur(8px);
+      }
+      .hud-title { font-size: 12px; font-weight: 800; color: #fff; margin: 0 0 2px; }
+      .hud-sub { font-size: 10.5px; color: var(--muted); line-height: 1.35; margin: 0; }
+      .hud-bottom {
+        position: absolute; bottom: 10px; left: 10px; right: 10px;
+        display: flex; align-items: center; justify-content: space-between; gap: 8px; pointer-events: none;
+      }
+      .hud-badge-bar {
+        display: flex; gap: 6px; flex-wrap: wrap; pointer-events: auto;
+      }
+      .stat-chip {
+        background: rgba(8, 13, 26, 0.84); border: 1px solid rgba(124, 164, 240, 0.28);
+        border-radius: 7px; padding: 4px 8px; font-size: 10.5px; font-family: ui-monospace, monospace;
+        color: #dbeafe; backdrop-filter: blur(6px);
+      }
+      .stat-chip b { color: var(--accent); }
+
+      .plot-card {
+        background: rgba(10, 15, 28, 0.92); border: 1px solid var(--border);
+        border-radius: 8px; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px;
+      }
+      .plot-head { display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 800; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+      .plot-head span:last-child { color: var(--muted); font-family: ui-monospace, monospace; font-weight: 600; text-transform: none; }
+      .plot-canvas { width: 100%; height: 118px; display: block; border-radius: 5px; background: #050914; }
+      .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 10.5px; }
+      .kv span:first-child { color: var(--muted); }
+      .kv span:last-child { font-family: ui-monospace, monospace; color: #e2e8f0; text-align: right; }
+
+      .help-popover {
+        display: none; position: fixed; top: 48px; right: 12px; z-index: 120;
+        width: min(340px, calc(100vw - 20px)); max-height: calc(100dvh - 64px); overflow-y: auto;
+        background: #0a1122; border: 1px solid rgba(167, 139, 250, 0.55);
+        border-radius: 11px; padding: 8px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.78);
+        flex-direction: column; gap: 4px;
+      }
+      .help-popover.open { display: flex; }
+      .help-section-lbl { font-size: 9.5px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; padding: 5px 7px 2px; }
+      .help-divider { height: 1px; background: rgba(124, 164, 240, 0.16); margin: 3px 4px; }
+      .help-item {
+        display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; text-decoration: none;
+        cursor: pointer; background: rgba(255,255,255,0.025); border: 1px solid transparent;
+        border-radius: 7px; padding: 7px 9px; color: var(--text);
+      }
+      .help-item:hover { background: rgba(86,194,255,0.14); border-color: rgba(86,194,255,0.38); color: #fff; }
+      .help-item-top { display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; font-weight: 700; }
+      .help-item-top small { font-size: 9.5px; color: var(--accent); font-family: ui-monospace, monospace; }
+      .help-item-desc { font-size: 10px; color: var(--muted); line-height: 1.35; }
+
+      .modal-backdrop {
+        display: none; position: fixed; inset: 0; z-index: 160;
+        background: rgba(3, 6, 14, 0.78); backdrop-filter: blur(5px);
+        align-items: center; justify-content: center; padding: 16px;
+      }
+      .modal-backdrop.open { display: flex; }
+      .modal-panel {
+        width: min(700px, 95vw); max-height: 88vh; overflow-y: auto;
+        background: #0a1122; border: 1px solid rgba(86,194,255,0.45);
+        border-radius: 12px; padding: 16px 18px; box-shadow: 0 24px 64px rgba(0,0,0,0.85);
+      }
+      .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+      .modal-head h2 { margin: 0; font-size: 15px; color: var(--accent); }
+      .modal-body { display: flex; flex-direction: column; gap: 10px; font-size: 12px; line-height: 1.5; color: #dce7fa; }
+      .modal-block { background: rgba(17,25,44,0.85); border: 1px solid rgba(124,164,240,0.20); border-radius: 8px; padding: 10px 12px; }
+      .modal-block h4 { margin: 0 0 5px; font-size: 10.5px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.055em; }
+      .modal-block ul { margin: 4px 0 0; padding-left: 18px; }
+      .modal-block code { font-family: ui-monospace, monospace; color: #a5f3fc; font-size: 11px; }
+
+      .error-banner {
+        position: absolute; inset: 20px; z-index: 80; display: none;
+        align-items: center; justify-content: center; text-align: center;
+        background: rgba(12, 16, 28, 0.94); border: 1px solid #f87171; border-radius: 10px; padding: 24px;
+      }
+      .error-banner.visible { display: flex; flex-direction: column; gap: 8px; }
+
+      @media (max-width: 1020px) {
+        .shell { grid-template-columns: 1fr; }
+        .sidebar, .right-dock { display: none; position: fixed; top: 44px; bottom: 0; z-index: 90; width: min(320px, 88vw); }
+        .sidebar.mobile-open { display: flex; left: 0; }
+        .right-dock.mobile-open { display: flex; right: 0; }
+        .hdr-btn.mobile-only { display: inline-flex; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="org-shell" class="shell">
+      <header>
+        <div class="header-left">
+          <button id="mobile-nav-btn" class="hdr-btn mobile-only" type="button">☰ Lab</button>
+          <h1>ULG · ORGANIC CHEMISTRY LAB</h1>
+          <div id="active-pill" class="specimen-pill">
+            <span id="pill-name">Benzene (C₆H₆)</span>
+            <span id="pill-tag" class="pill-tag">4n+2 Aromatic</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="about-btn" class="hdr-btn" type="button" title="Inspect governing equations, active WebGPU shaders, and experiments">ⓘ About</button>
+          <button id="toggle-plots-btn" class="hdr-btn" type="button" title="Show or hide the live scientific plot dock">📊 Plots</button>
+          <button id="help-btn" class="hdr-btn help-btn" type="button" aria-label="Help and Other ULG Flagship Apps">?</button>
+        </div>
+      </header>
+
+      <div id="help-popover" class="help-popover" role="menu">
+        <div class="help-section-lbl">Documentation</div>
+        <button id="menu-about-mode" class="help-item" type="button">
+          <span class="help-item-top"><span>ⓘ About Current Experiment</span><small>Equations</small></span>
+          <span class="help-item-desc">Governing quantum/reactive equations and falsifiable experiments for this view.</span>
+        </button>
+        <button id="menu-about-lab" class="help-item" type="button">
+          <span class="help-item-top"><span>✦ About ULG Organic Lab</span><small>Nodes #17–19</small></span>
+          <span class="help-item-desc">Zero molecule-name hacks: hybridization, Hückel π-MOs, QEq, H-bonds &amp; homochirality.</span>
+        </button>
+        <div class="help-divider"></div>
+        <div class="help-section-lbl">ULG Multiscale Flagship Apps</div>
+        <a class="help-item" href="./life-lab.html">
+          <span class="help-item-top"><span>Biophysics &amp; Emergent Life Lab ↗</span><small>10⁻⁹ → 10⁻² m</small></span>
+          <span class="help-item-desc">Amphiphile protocells, biopolymer folding, Eigen evolution, Hodgkin–Huxley &amp; Turing active matter.</span>
+        </a>
+        <a class="help-item" href="./elements-lab.html">
+          <span class="help-item-top"><span>Material Physics Lab ↗</span><small>Z = 1..118</small></span>
+          <span class="help-item-desc">Full Periodic Table nuclear, 4-comp Dirac–KS, FDTD optics, reactive MD &amp; Polytope Atlas.</span>
+        </a>
+        <a class="help-item" href="./index.html">
+          <span class="help-item-top"><span>Studio Continuum ↗</span><small>10⁻³ → 10⁺² m</small></span>
+          <span class="help-item-desc">3D WebGPU MLS-MPM fluid, phase change, optics &amp; reactive continuum studio.</span>
+        </a>
+        <a class="help-item" href="./universes.html">
+          <span class="help-item-top"><span>ULG Universes ↗</span><small>10⁺²⁵ → 10⁻¹⁵ m</small></span>
+          <span class="help-item-desc">40-OOM WebGPU explorer from FLRW Cosmic Web &amp; Quasars to Planetary Surface Rovers.</span>
+        </a>
+      </div>
+
+      <aside id="org-sidebar" class="sidebar">
+        <div class="acc-group open active-group" data-group="aromatic">
+          <button class="acc-header" type="button"><span>1. Conjugation &amp; π-Aromaticity</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn active" data-mode="benzene" type="button"><span>Benzene</span><small>C₆H₆ · 6π</small></button>
+            <button class="mode-btn" data-mode="cyclobutadiene" type="button"><span>Cyclobutadiene</span><small>C₄H₄ · 4π</small></button>
+            <button class="mode-btn" data-mode="naphthalene" type="button"><span>Naphthalene</span><small>C₁₀H₈ · 10π</small></button>
+            <button class="mode-btn" data-mode="butadiene" type="button"><span>1,3-Butadiene</span><small>C₄H₆ · 4π</small></button>
+            <button class="mode-btn" data-mode="adenine" type="button"><span>Adenine (Nucleobase)</span><small>C₅H₅N₅</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="conformational">
+          <button class="acc-header" type="button"><span>2. Conformations, Chirality &amp; Isomers</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="cyclohexane" type="button"><span>Cyclohexane Chair</span><small>C₆H₁₂ · sp³</small></button>
+            <button class="mode-btn" data-mode="butane" type="button"><span>n-Butane Rotor</span><small>C₄H₁₀</small></button>
+            <button class="mode-btn" data-mode="l-alanine" type="button"><span>L-Alanine (S)</span><small>Chiral AA</small></button>
+            <button class="mode-btn" data-mode="d-alanine" type="button"><span>D-Alanine (R)</span><small>Enantiomer</small></button>
+            <button class="mode-btn" data-mode="ethanol" type="button"><span>Ethanol (Protic)</span><small>C₂H₆O</small></button>
+            <button class="mode-btn" data-mode="dimethyl-ether" type="button"><span>Dimethyl Ether</span><small>C₂H₆O Iso</small></button>
+            <button class="mode-btn" data-mode="ethanol-water-hbond" type="button"><span>Ethanol–Water H-Bonds</span><small>D–H···A</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="reactions">
+          <button class="acc-header" type="button"><span>3. Reactive Bond-Order Mechanisms</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="sn2-walden" type="button"><span>SN2 Walden Inversion</span><small>Cl⁻+CH₃Br</small></button>
+            <button class="mode-btn" data-mode="diels-alder" type="button"><span>Diels–Alder [4+2]</span><small>Pericyclic</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="kinetics">
+          <button class="acc-header" type="button"><span>4. Acid-Base &amp; Autocatalytic Networks</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="acetic-acid" type="button"><span>Acetic Acid pKa</span><small>CH₃COOH</small></button>
+            <button class="mode-btn" data-mode="frank-chiral" type="button"><span>Frank Chiral Breaking</span><small>128² L/D</small></button>
+            <button class="mode-btn" data-mode="belousov-zhabotinsky" type="button"><span>BZ Chemical Spirals</span><small>128² RD</small></button>
+            <button class="mode-btn" data-mode="prebiotic-raf" type="button"><span>Prebiotic RAF Network</span><small>128² Cat</small></button>
+          </div>
+        </div>
+
+        <div id="mol-controls-card" class="card">
+          <h3><span>Molecular &amp; Solvent Controls</span><span id="ctrl-scale-lbl">10⁻¹⁰ m</span></h3>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Temperature T</span><b id="val-temp">300 K</b></div>
+            <input id="sl-temp" type="range" min="40" max="1000" step="10" value="300" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Solvent Dielectric ε_r</span><b id="val-er">78.4</b></div>
+            <input id="sl-er" type="range" min="1" max="80" step="0.5" value="78.4" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Solution pH</span><b id="val-ph">7.0</b></div>
+            <input id="sl-ph" type="range" min="0" max="14" step="0.2" value="7.0" />
+          </div>
+          <div id="reaction-ctrl-box" class="ctrl-row" style="display:none;">
+            <div class="ctrl-head"><span>Reaction Drive ξ</span><b id="val-xi">0.00</b></div>
+            <input id="sl-xi" type="range" min="0" max="1" step="0.01" value="0" />
+            <label class="chk-row" style="margin-top:3px;"><span>Auto-Cycle Reaction</span><input id="chk-auto-xi" type="checkbox" checked /></label>
+          </div>
+          <div id="mo-ctrl-box" class="ctrl-row">
+            <div class="ctrl-head"><span>π-MO Orbital</span><b id="val-mo">HOMO</b></div>
+            <div class="btn-row">
+              <button class="sm-btn" id="btn-mo-prev" type="button">◀ Prev MO</button>
+              <button class="sm-btn" id="btn-mo-next" type="button">Next MO ▶</button>
+            </div>
+          </div>
+          <label class="chk-row"><span>Show 3D π-MO Wavefunction Lobes</span><input id="chk-pi" type="checkbox" checked /></label>
+          <label class="chk-row"><span>ESP Partial-Charge Coloring (QEq)</span><input id="chk-esp" type="checkbox" /></label>
+          <div class="btn-row">
+            <button id="btn-mirror" class="sm-btn mirror" type="button" title="Apply exact (x,y,z) -> (-x,y,z) spatial reflection">🪞 Mirror R↔S</button>
+          </div>
+          <div class="btn-row">
+            <button id="btn-play" class="sm-btn" type="button">⏸ Pause</button>
+            <button id="btn-reset" class="sm-btn" type="button">↺ Reset</button>
+          </div>
+        </div>
+
+        <div id="rd-controls-card" class="card" style="display:none;">
+          <h3><span>128×128 Autocatalytic Kinetics</span><span>WebGPU RD</span></h3>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Chiral Antagonism k_inhib</span><b id="val-kinhib">1.85</b></div>
+            <input id="sl-kinhib" type="range" min="0" max="3.0" step="0.05" value="1.85" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Feedstock Flux</span><b id="val-feed">0.20</b></div>
+            <input id="sl-feed" type="range" min="0.02" max="0.45" step="0.01" value="0.20" />
+          </div>
+          <div class="btn-row">
+            <button id="btn-rd-play" class="sm-btn" type="button">⏸ Pause</button>
+            <button id="btn-rd-reset" class="sm-btn" type="button">↺ Reseed</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="stage-wrap">
+        <canvas id="org-canvas"></canvas>
+        <div id="pick-reticle" class="pick-reticle"></div>
+        <div class="hud-top-left">
+          <div id="hud-title" class="hud-title">Benzene (C₆H₆)</div>
+          <p id="hud-sub" class="hud-sub">Click any atom/cell to inspect live WebGPU state · Drag to orbit · Scroll to zoom</p>
+        </div>
+        <div class="hud-bottom">
+          <div class="hud-badge-bar">
+            <div class="stat-chip">Step <b id="st-step">0</b></div>
+            <div class="stat-chip" id="st-metric1-wrap"><span id="st-m1-lbl">Gap</span> <b id="st-m1-val">—</b></div>
+            <div class="stat-chip" id="st-metric2-wrap"><span id="st-m2-lbl">Resonance</span> <b id="st-m2-val">—</b></div>
+            <div class="stat-chip" id="st-metric3-wrap"><span id="st-m3-lbl">Chirality</span> <b id="st-m3-val">—</b></div>
+          </div>
+          <div id="pick-card" class="pick-card">
+            <div class="pick-card-head"><span id="pick-title">Picked Atom</span><button id="pick-close" class="sm-btn" style="flex:0;min-width:24px;padding:1px 5px;" type="button">✕</button></div>
+            <div id="pick-meta" class="pick-card-meta"></div>
+            <div class="btn-row"><button id="pick-zoom" class="sm-btn" type="button">🎯 Focus &amp; Zoom</button></div>
+          </div>
+        </div>
+        <div id="error-banner" class="error-banner">
+          <h3 style="margin:0;color:#fca5a5;">WebGPU Initialization Error</h3>
+          <p id="error-text" style="margin:0;color:#cbd5e1;font-size:12px;"></p>
+        </div>
+      </main>
+
+      <aside id="org-dock" class="right-dock">
+        <div class="plot-card">
+          <div class="plot-head"><span id="p1-title">GPU π-MO Energy Levels</span><span id="p1-sub">eV</span></div>
+          <canvas id="plot1" class="plot-canvas" width="296" height="118"></canvas>
+        </div>
+        <div class="plot-card">
+          <div class="plot-head"><span id="p2-title">Dihedral / Born Profile</span><span id="p2-sub">kJ/mol</span></div>
+          <canvas id="plot2" class="plot-canvas" width="296" height="118"></canvas>
+        </div>
+        <div class="plot-card">
+          <div class="plot-head"><span id="p3-title">Brønsted–Lowry pH Titration</span><span id="p3-sub">Q(pH)</span></div>
+          <canvas id="plot3" class="plot-canvas" width="296" height="118"></canvas>
+        </div>
+        <div class="card">
+          <h3><span>Universal Law Graph Provenance</span><span>Tier-2</span></h3>
+          <div class="kv"><span>Active Laws</span><span id="prov-laws">—</span></div>
+          <div class="kv"><span>Dipole / Charge</span><span id="prov-dipole">—</span></div>
+          <div class="kv"><span>Born Solvation</span><span id="prov-born">—</span></div>
+          <div class="kv"><span>H-Bonds / Bonds</span><span id="prov-bonds">—</span></div>
+          <div class="kv"><span>Validation Tag</span><span style="color:#fcd34d;">scientificValidation: false</span></div>
+        </div>
+      </aside>
+    </div>
+
+    <div id="about-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h2 id="modal-title">About Organic Chemistry Lab</h2>
+          <button id="modal-close" class="hdr-btn" type="button">✕ Close</button>
+        </div>
+        <div id="modal-body" class="modal-body"></div>
+      </div>
+    </div>
+
+    <script type="module" src="./src/organicLabStandalone.js"></script>
+  </body>
+</html>

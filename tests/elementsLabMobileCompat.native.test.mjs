@@ -62,7 +62,7 @@ test('Material Physics Lab mobile compatibility: portrait/landscape layout, draw
       const canvas = document.getElementById('gpu-canvas');
       const rect = canvas.getBoundingClientRect();
       const drawerBtn = document.getElementById('mobile-drawer-btn');
-      const quickBar = document.getElementById('mobile-quick-presets');
+      const helpBtn = document.getElementById('help-menu-btn');
       return {
         innerWidth: window.innerWidth,
         scrollWidth: document.documentElement.scrollWidth,
@@ -72,7 +72,7 @@ test('Material Physics Lab mobile compatibility: portrait/landscape layout, draw
         canvasBackW: canvas.width,
         canvasBackH: canvas.height,
         drawerBtnVisible: getComputedStyle(drawerBtn).display !== 'none',
-        quickBarVisible: getComputedStyle(quickBar).display !== 'none',
+        helpBtnVisible: getComputedStyle(helpBtn).display !== 'none',
         touchAction: getComputedStyle(canvas).touchAction,
         isMobileProfile: window.__ulgElementsLabState.isMobileProfile,
         pointCount: window.__ulgElementsLabState.orbitalCloudStats.pointCount
@@ -82,15 +82,32 @@ test('Material Physics Lab mobile compatibility: portrait/landscape layout, draw
 
     assert.ok(layoutPortrait.scrollWidth <= layoutPortrait.innerWidth + 2, `horizontal overflow: scrollWidth=${layoutPortrait.scrollWidth} > ${layoutPortrait.innerWidth}`);
     assert.ok(layoutPortrait.canvasCssW >= 380, `canvas crushed horizontally: ${layoutPortrait.canvasCssW}px`);
-    assert.ok(layoutPortrait.canvasCssH >= 290, `canvas crushed vertically: ${layoutPortrait.canvasCssH}px`);
-    assert.ok(layoutPortrait.canvasTop < 320, `canvas pushed below fold: top=${layoutPortrait.canvasTop}`);
+    assert.ok(layoutPortrait.canvasCssH >= 740, `with redundant top bars removed and graphs docked off-screen, 3D canvas must claim ~90%+ of mobile screen (>=740px of 844px), got ${layoutPortrait.canvasCssH}px`);
+    assert.ok(layoutPortrait.canvasTop <= 56, `canvas must start immediately below header: top=${layoutPortrait.canvasTop}`);
     assert.ok(layoutPortrait.canvasBackW <= Math.ceil(390 * 1.5) + 8, `mobile DPR not capped: backingW=${layoutPortrait.canvasBackW}`);
     assert.equal(layoutPortrait.drawerBtnVisible, true);
-    assert.equal(layoutPortrait.quickBarVisible, true);
+    assert.equal(layoutPortrait.helpBtnVisible, true);
     assert.equal(layoutPortrait.touchAction, 'none');
     assert.equal(layoutPortrait.isMobileProfile, true);
     assert.equal(layoutPortrait.pointCount, 90000);
     await saveShot(page, '01-mobile-portrait-fe-orbital');
+
+    // Open right-hand Graphs & Data slide-over dock on mobile, capture, then slide it back!
+    await page.click('#data-dock-toggle-btn');
+    await page.waitForTimeout(260);
+    const dockOpened = await page.evaluate(() => ({
+      open: document.body.classList.contains('data-dock-open'),
+      rectLeft: document.getElementById('data-dock').getBoundingClientRect().left,
+      scrollW: document.documentElement.scrollWidth
+    }));
+    console.log('[mobile-data-dock-open]', JSON.stringify(dockOpened));
+    assert.equal(dockOpened.open, true, 'right-hand Graphs & Data dock must open on tap');
+    assert.ok(dockOpened.rectLeft < 100 && dockOpened.scrollW <= 392);
+    await saveShot(page, '01b-mobile-right-data-dock-open');
+    await page.click('#data-dock-close');
+    await page.waitForTimeout(260);
+    const dockClosed = await page.evaluate(() => !document.body.classList.contains('data-dock-open') && document.documentElement.scrollWidth <= 392);
+    assert.equal(dockClosed, true, 'right-hand Graphs & Data dock must slide cleanly back off-screen');
 
     // Open mobile slide-over drawer, capture, then tap Au Gold Color -> verify drawer auto-closes!
     await page.click('#mobile-drawer-btn');
@@ -140,10 +157,11 @@ test('Material Physics Lab mobile compatibility: portrait/landscape layout, draw
     await page.evaluate(() => window.__ulgElementsLabApi.stepPhotonFdtd(110));
     await saveShot(page, '04-mobile-portrait-au-2d-maxwell');
 
-    // Tap H2O quick chip -> Tab 6 Polytope Atlas -> touch probe!
-    await page.click('#mobile-quick-presets [data-hero-compound="H2O"]');
-    await page.waitForFunction(() => window.__ulgElementsLabState?.backfedFormula === 'H2O', null, { timeout: 60_000 });
-    await page.click('.tab-btn[data-tab="polytope"]');
+    // Open left menu drawer -> tap H2O 3D Polytope showcase chip -> touch probe!
+    await page.click('#mobile-drawer-btn');
+    await page.waitForTimeout(240);
+    await page.click('#hero-presets [data-hero-compound="H2O"][data-hero-tab="polytope"]');
+    await page.waitForFunction(() => window.__ulgElementsLabState?.backfedFormula === 'H2O' && window.__ulgElementsLabState?.currentTab === 'polytope', null, { timeout: 60_000 });
     await page.waitForTimeout(200);
     await page.evaluate(() => {
       const c = document.getElementById('gpu-canvas');
@@ -170,8 +188,10 @@ test('Material Physics Lab mobile compatibility: portrait/landscape layout, draw
     // Rotate to Landscape Phone (844x390) and verify clean resize + zero overflow!
     await page.setViewportSize({ width: 844, height: 390 });
     await page.waitForTimeout(250);
-    await page.click('.tab-btn[data-tab="crystal"]');
-    await page.evaluate(() => window.__ulgElementsLabApi.setCrystalViewMode('photon-shell'));
+    await page.evaluate(() => {
+      window.__ulgElementsLabApi.setTab('crystal');
+      window.__ulgElementsLabApi.setCrystalViewMode('photon-shell');
+    });
     await page.waitForTimeout(200);
     const layoutLandscape = await page.evaluate(() => {
       const r = document.getElementById('gpu-canvas').getBoundingClientRect();

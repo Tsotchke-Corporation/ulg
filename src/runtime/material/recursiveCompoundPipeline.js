@@ -125,8 +125,23 @@ export function buildMolecularSeedGeometryBohr(formula) {
       { Z: atomList[1].Z, x: 0.5 * d, y: 0, z: 0 }
     ];
   }
-  // Place heaviest / highest-valence atom at origin and distribute ligands along tetrahedral/VSEPR rays
-  atomList.sort((a, b) => b.Z - a.Z);
+  // Pick central atom by chemistry: least-frequent non-H element (breaking ties by
+  // lower electronegativity / higher bonding valence), so CO2 puts C at origin (O=C=O),
+  // H2O puts O at origin, NH3 puts N at origin, CH4 puts C at origin, SO2 puts S at origin!
+  const freqByZ = new Map();
+  for (const a of atomList) freqByZ.set(a.Z, (freqByZ.get(a.Z) || 0) + 1);
+  atomList.sort((a, b) => {
+    const aH = a.Z === 1 ? 1 : 0;
+    const bH = b.Z === 1 ? 1 : 0;
+    if (aH !== bH) return aH - bH;
+    const fa = freqByZ.get(a.Z) || 99;
+    const fb = freqByZ.get(b.Z) || 99;
+    if (fa !== fb) return fa - fb;
+    const ena = mullikenElectronegativity(a.Z);
+    const enb = mullikenElectronegativity(b.Z);
+    if (Math.abs(ena - enb) > 0.05) return ena - enb;
+    return b.Z - a.Z;
+  });
   const center = atomList[0];
   const ligands = atomList.slice(1);
   const dirs = [
@@ -136,18 +151,217 @@ export function buildMolecularSeedGeometryBohr(formula) {
     [0, -0.5774, -0.8165],
     [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1], [0.577, 0.577, 0.577]
   ];
-  // 2-ligand with lone pairs (e.g. H2O, SO2 -> bent ~104.5 deg) vs linear (CO2 -> 180 deg)
+  // 2-ligand with lone pairs (e.g. H2O, SO2 -> bent ~104.5 deg) vs linear (CO2, BeH2 -> 180 deg)
   const zvCenter = valenceElectronCount(center.Z);
   const useLinear = ligands.length === 2 && (zvCenter === 4 || zvCenter === 2);
   const geom = [{ Z: center.Z, x: 0, y: 0, z: 0 }];
   for (let i = 0; i < ligands.length; i += 1) {
     const lig = ligands[i];
-    const d = Math.max(1.6, (center.r + lig.r) * 0.86);
+    const d = Math.max(1.75, (center.r + lig.r) * 1.15);
     let dir = dirs[i % dirs.length];
     if (useLinear) dir = i === 0 ? [1, 0, 0] : [-1, 0, 0];
     geom.push({ Z: lig.Z, x: dir[0] * d, y: dir[1] * d, z: dir[2] * d });
   }
   return geom;
+}
+
+/**
+ * Construct an authentic multi-species 3D crystal lattice (distinct cation/anion
+ * Wyckoff sites, per-species atomic numbers Z, formal charges, ionic/covalent
+ * radii, and nearest-neighbor coordination bonds) for ANY compound formula &
+ * canonical crystal prototype (`rocksalt-B1`, `cscl-B2`, `zincblende-B3`,
+ * `fluorite-C1`, `rutile-C4`, `corundum-D51`, `molecular-fcc`, `fcc-alloy`).
+ */
+export function buildMultiSpeciesCrystalLattice(formula, {
+  crystalStructure = 'rocksalt-B1',
+  latticeConstantA = 5.2,
+  cellsPerSide = 2,
+  paulingIonicity = 0.65
+} = {}) {
+  const desc = describeIsotopologueFormula(formula);
+  const rawSpecies = desc.elements.map((e) => ({
+    sym: e.symbol,
+    Z: e.Z,
+    count: e.count,
+    en: mullikenElectronegativity(e.Z),
+    rA: Math.max(0.45, Math.min(2.3, shellRadiusBohr(e.Z) * 0.529177))
+  }));
+  if (rawSpecies.length === 0) throw new RangeError(`Cannot build crystal for formula: ${formula}`);
+
+  // Order species by ascending electronegativity: index 0 = cation/electropositive, last = anion/electronegative
+  const ordered = [...rawSpecies].sort((a, b) => a.en - b.en || b.Z - a.Z);
+  const spA = ordered[0];
+  const spB = ordered[ordered.length - 1];
+  const nSp = ordered.length;
+  const formalCharges = ordered.map((sp, idx) => {
+    if (nSp === 1) return 0;
+    if (idx === 0) return Number((paulingIonicity * (ordered.length === 2 ? Math.max(1, spB.count / spA.count) : 1)).toFixed(2));
+    if (idx === nSp - 1) return Number((-paulingIonicity * Math.max(1, spA.count / spB.count)).toFixed(2));
+    return 0;
+  });
+
+  // Canonical fractional Wyckoff motifs: [fx, fy, fz, speciesSlot (0=cation, 1=anion, 2=extra)]
+  let motif;
+  let spaceGroup = 'Fm-3m (225)';
+  let cOverA = 1.0;
+  const proto = String(crystalStructure || 'rocksalt-B1').toLowerCase();
+  if (proto.includes('rocksalt') || proto.includes('b1')) {
+    spaceGroup = 'Fm-3m (225)';
+    motif = [
+      [0, 0, 0, 0], [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0.5, 0],
+      [0.5, 0, 0, 1], [0, 0.5, 0, 1], [0, 0, 0.5, 1], [0.5, 0.5, 0.5, 1]
+    ];
+  } else if (proto.includes('cscl') || proto.includes('b2')) {
+    spaceGroup = 'Pm-3m (221)';
+    motif = [[0, 0, 0, 0], [0.5, 0.5, 0.5, 1]];
+  } else if (proto.includes('zincblende') || proto.includes('b3')) {
+    spaceGroup = 'F-43m (216)';
+    motif = [
+      [0, 0, 0, 0], [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0.5, 0],
+      [0.25, 0.25, 0.25, 1], [0.75, 0.75, 0.25, 1], [0.75, 0.25, 0.75, 1], [0.25, 0.75, 0.75, 1]
+    ];
+  } else if (proto.includes('fluorite') || proto.includes('c1')) {
+    spaceGroup = 'Fm-3m (225)';
+    motif = [
+      [0, 0, 0, 0], [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0.5, 0],
+      [0.25, 0.25, 0.25, 1], [0.75, 0.25, 0.25, 1], [0.25, 0.75, 0.25, 1], [0.25, 0.25, 0.75, 1],
+      [0.75, 0.75, 0.25, 1], [0.75, 0.25, 0.75, 1], [0.25, 0.75, 0.75, 1], [0.75, 0.75, 0.75, 1]
+    ];
+  } else if (proto.includes('rutile') || proto.includes('c4')) {
+    spaceGroup = 'P4_2/mnm (136)';
+    cOverA = 0.65;
+    motif = [
+      [0, 0, 0, 0], [0.5, 0.5, 0.5, 0],
+      [0.305, 0.305, 0, 1], [0.695, 0.695, 0, 1], [0.805, 0.195, 0.5, 1], [0.195, 0.805, 0.5, 1]
+    ];
+  } else if (proto.includes('corundum') || proto.includes('d51')) {
+    spaceGroup = 'R-3c (167)';
+    cOverA = 1.35;
+    // Representative 10-atom Al2O3-type orthorhombic-mapped corundum cell (4 cations + 6 anions)
+    motif = [
+      [0.16, 0.16, 0.15, 0], [0.66, 0.66, 0.35, 0], [0.16, 0.66, 0.65, 0], [0.66, 0.16, 0.85, 0],
+      [0.0, 0.42, 0.25, 1], [0.42, 0.0, 0.25, 1], [0.50, 0.50, 0.08, 1],
+      [0.0, 0.92, 0.75, 1], [0.92, 0.0, 0.75, 1], [0.50, 0.50, 0.58, 1]
+    ];
+  } else {
+    // Molecular FCC / FCC Alloy: tile distinct molecular or alloy sites across FCC sublattices
+    spaceGroup = proto.includes('alloy') ? 'Fm-3m (225)' : 'P1 (molecular crystal)';
+    const molGeom = buildMolecularSeedGeometryBohr(formula);
+    const fccCenters = [[0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.75, 0.25, 0.75], [0.25, 0.75, 0.75]];
+    const invA = 0.529177 / Math.max(2.5, latticeConstantA);
+    motif = [];
+    for (const fc of fccCenters) {
+      if (proto.includes('alloy')) {
+        const spIdx = motif.length % ordered.length;
+        motif.push([fc[0], fc[1], fc[2], spIdx]);
+      } else {
+        for (const atom of molGeom) {
+          const spIdx = Math.max(0, ordered.findIndex((s) => s.Z === atom.Z));
+          motif.push([
+            fc[0] + atom.x * invA * 0.72,
+            fc[1] + atom.y * invA * 0.72,
+            fc[2] + atom.z * invA * 0.72,
+            spIdx
+          ]);
+        }
+      }
+    }
+  }
+
+  const a = Math.max(2.6, Number(latticeConstantA) || 5.2);
+  const c = a * cOverA;
+  const nx = Math.max(1, Math.min(3, Math.trunc(cellsPerSide)));
+  const ny = nx;
+  const nz = nx;
+  const Lx = nx * a;
+  const Ly = ny * a;
+  const Lz = nz * c;
+
+  const atomsOut = [];
+  for (let ix = 0; ix < nx; ix += 1) {
+    for (let iy = 0; iy < ny; iy += 1) {
+      for (let iz = 0; iz < nz; iz += 1) {
+        for (const [fx, fy, fz, rawSlot] of motif) {
+          const spIdx = rawSlot === 1 ? ordered.length - 1 : Math.min(ordered.length - 1, rawSlot);
+          const sp = ordered[spIdx];
+          const x = ((ix + fx + 10) % nx) * a;
+          const y = ((iy + fy + 10) % ny) * a;
+          const z = ((iz + fz + 10) % nz) * c;
+          atomsOut.push({
+            x, y, z,
+            Z: sp.Z,
+            charge: formalCharges[spIdx] ?? 0,
+            rA: sp.rA,
+            spIdx
+          });
+        }
+      }
+    }
+  }
+
+  const atomCount = atomsOut.length;
+  const positions = new Float32Array(atomCount * 4);
+  const speciesMeta = new Float32Array(atomCount * 4);
+  for (let i = 0; i < atomCount; i += 1) {
+    const at = atomsOut[i];
+    positions[i * 4 + 0] = at.x;
+    positions[i * 4 + 1] = at.y;
+    positions[i * 4 + 2] = at.z;
+    positions[i * 4 + 3] = at.rA;
+    speciesMeta[i * 4 + 0] = at.Z;
+    speciesMeta[i * 4 + 1] = at.charge;
+    speciesMeta[i * 4 + 2] = at.rA;
+    speciesMeta[i * 4 + 3] = at.spIdx;
+  }
+
+  // Nearest-neighbor coordination bonds tuned to each prototype's exact Wyckoff NN geometry!
+  //   cscl-B2: NN = a * sqrt(3)/2 = 0.866 a (< 0.94 a < 1.0 a)
+  //   rocksalt-B1: NN = 0.50 a (< 0.58 a < 0.707 a)
+  //   zincblende-B3 / fluorite-C1: NN = a * sqrt(3)/4 = 0.433 a (< 0.52 a)
+  const bondPairs = [];
+  const protoNnFactor = proto.includes('cscl') || proto.includes('b2')
+    ? 0.94
+    : (proto.includes('rocksalt') || proto.includes('b1')
+      ? 0.58
+      : (proto.includes('zincblende') || proto.includes('b3') || proto.includes('fluorite') || proto.includes('c1')
+        ? 0.52
+        : 0.78));
+  const maxBondDist = a * protoNnFactor;
+  for (let i = 0; i < atomCount; i += 1) {
+    for (let j = i + 1; j < atomCount; j += 1) {
+      if (ordered.length >= 2 && !proto.includes('alloy') && atomsOut[i].spIdx === atomsOut[j].spIdx) continue;
+      const d = Math.hypot(
+        atomsOut[i].x - atomsOut[j].x,
+        atomsOut[i].y - atomsOut[j].y,
+        atomsOut[i].z - atomsOut[j].z
+      );
+      if (d > 0.55 && d <= maxBondDist) {
+        bondPairs.push(i, j);
+      }
+    }
+  }
+
+  const speciesLegend = ordered.map((sp, idx) => Object.freeze({
+    Z: sp.Z,
+    symbol: sp.sym,
+    formalCharge: formalCharges[idx] ?? 0,
+    radiusA: sp.rA,
+    count: atomsOut.filter((at) => at.spIdx === idx).length
+  }));
+
+  return Object.freeze({
+    formula: desc.canonicalFormula,
+    prototype: crystalStructure,
+    spaceGroup,
+    latticeConstantA: a,
+    boxLengthsA: Object.freeze([Lx, Ly, Lz]),
+    atomCount,
+    positions,
+    speciesMeta,
+    bonds: new Uint32Array(bondPairs),
+    bondCount: bondPairs.length / 2,
+    speciesLegend: Object.freeze(speciesLegend)
+  });
 }
 
 /**
@@ -214,13 +428,13 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   const molarMassKg = molarMassU * 1e-3;
   const molMassKg = molarMassKg / AVOGADRO;
 
-  // ---- Layer 1 (GPU Molecular Electronic Structure for Molecular / Light Species) ----
+  // ---- Layer 1 (GPU Molecular Electronic Structure across ALL Z = 1..118!) ----
   let molQm = null;
-  const canRunRhf = totalAtoms <= 10 && species.every((s) => s.Z <= 36) && (totalZ % 2 === 0);
+  const canRunRhf = totalAtoms <= 10 && (totalZ % 2 === 0);
   if (device && typeof device.createBuffer === 'function' && canRunRhf) {
     const geom = buildMolecularSeedGeometryBohr(cleanFormula);
     try {
-      molQm = await solveMoleculeRhfWebGpu(device, geom, { maxScf: 25, volDim: 20 });
+      molQm = await solveMoleculeRhfWebGpu(device, geom, { maxScf: 25, volDim: 20, basisName: 'auto' });
     } catch {
       molQm = null;
     }
@@ -460,11 +674,14 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     },
     atomic: {
       molecularRhfSolvedOnGpu: Boolean(molQm),
+      basisUsed: molQm?.basisUsed ?? null,
       totalEnergyHa: molQm?.totalEnergyHa ?? null,
       homoLumoGapEv: molQm?.homoLumoGapEv ?? bandGapEv,
       dipoleDebye: molQm?.dipoleDebye ?? 0,
+      dipoleVecDebye: molQm?.dipoleVecDebye ?? null,
       paulingIonicity,
-      mullikenCharges: molQm?.mullikenCharges ?? null
+      mullikenCharges: molQm?.mullikenCharges ?? null,
+      bonds: molQm?.bonds ?? null
     },
     electromagnetic: {
       isMetal,
@@ -524,6 +741,13 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     }
   });
 
+  const multiSpeciesCrystal = buildMultiSpeciesCrystalLattice(cleanFormula, {
+    crystalStructure,
+    latticeConstantA: mdConfig.latticeConstantA,
+    cellsPerSide: 2,
+    paulingIonicity
+  });
+
   return Object.freeze({
     schema: ULG_RECURSIVE_COMPOUND_PIPELINE_SCHEMA,
     bundle,
@@ -531,7 +755,8 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       molQm,
       optics,
       mdTelemetry,
-      mdConfig
+      mdConfig,
+      multiSpeciesCrystal
     })
   });
 }

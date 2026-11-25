@@ -6,12 +6,12 @@
     <meta name="theme-color" content="#050810" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23050810'/%3E%3Cellipse cx='32' cy='32' rx='24' ry='10' fill='none' stroke='%237c4dff' stroke-width='3' transform='rotate(35 32 32)'/%3E%3Cellipse cx='32' cy='32' rx='24' ry='10' fill='none' stroke='%2356c2ff' stroke-width='3' transform='rotate(-35 32 32)'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%23facc15'/%3E%3C/svg%3E" />
-    <title>ULG — First-Principles Material Physics Lab, Photon–Shell Optics &amp; Polytope Atlas</title>
+    <title>ULG — First-Principles Material Physics Lab, Chemistry &amp; 3D Polytope Atlas</title>
     <style>
       :root {
         --bg: #050810;
-        --panel: rgba(11, 16, 28, 0.96);
-        --card: rgba(20, 27, 44, 0.72);
+        --panel: rgba(9, 14, 26, 0.98);
+        --card: rgba(18, 25, 42, 0.78);
         --border: rgba(124, 164, 240, 0.22);
         --accent: #56c2ff;
         --accent2: #ff9c54;
@@ -29,23 +29,177 @@
         font-family: Inter, system-ui, -apple-system, sans-serif;
         overflow: hidden;
       }
-      .shell { display: grid; grid-template-columns: 356px 1fr; grid-template-rows: 46px 1fr; height: 100vh; }
+      .shell { display: grid; grid-template-columns: 336px 1fr; grid-template-rows: 44px 1fr; height: 100vh; }
       header {
         grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
-        padding: 0 14px; background: #090e1a; border-bottom: 1px solid var(--border); gap: 10px;
+        padding: 0 12px; background: #080d19; border-bottom: 1px solid var(--border); gap: 8px;
+        position: relative; z-index: 45;
       }
-      header h1 { font-size: 13px; font-weight: 700; margin: 0; letter-spacing: 0.04em; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .nav-links { display: flex; gap: 7px; font-size: 11px; flex-shrink: 0; }
-      .nav-links a {
-        color: var(--text); text-decoration: none; padding: 4px 9px; border-radius: 6px;
-        border: 1px solid var(--border); background: rgba(255,255,255,0.03);
+      .header-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }
+      header h1 { font-size: 12.5px; font-weight: 800; margin: 0; letter-spacing: 0.045em; color: var(--accent); white-space: nowrap; flex-shrink: 0; }
+      .header-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+      .hdr-btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+        background: rgba(86, 194, 255, 0.12); border: 1px solid rgba(86, 194, 255, 0.36);
+        color: #e2e8f0; border-radius: 7px; padding: 4px 9px; font-size: 11px; font-weight: 700;
+        cursor: pointer; min-height: 30px; transition: 0.12s; white-space: nowrap;
       }
-      .nav-links a:hover { border-color: var(--accent); color: var(--accent); }
+      .hdr-btn:hover { background: rgba(86, 194, 255, 0.25); border-color: var(--accent); color: #fff; }
+      .hdr-btn.green { background: rgba(52, 211, 153, 0.15); border-color: rgba(52, 211, 153, 0.48); color: #d1fae5; }
+      .hdr-btn.green:hover { background: rgba(52, 211, 153, 0.28); color: #fff; }
+      .hdr-btn.active-hdr { background: rgba(124, 77, 255, 0.32); border-color: #c4b5fd; color: #fff; }
+      .hdr-btn.help-btn {
+        width: 30px; height: 30px; padding: 0; border-radius: 999px;
+        font-size: 13px; font-weight: 800;
+        background: rgba(124, 77, 255, 0.20); border-color: rgba(167, 139, 250, 0.62); color: #f3e8ff;
+      }
+      .hdr-btn.help-btn:hover { background: rgba(124, 77, 255, 0.38); border-color: #ddd6fe; color: #fff; }
+
+      /* Floating `?` Help, GitHub & Other ULG Demos Popover Menu */
+      .help-popover {
+        display: none; position: fixed; top: 48px; right: 12px; z-index: 110;
+        width: min(332px, calc(100vw - 20px)); max-height: calc(100dvh - 64px); overflow-y: auto;
+        background: #0a1122; border: 1px solid rgba(167, 139, 250, 0.55);
+        border-radius: 11px; padding: 8px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.78);
+        flex-direction: column; gap: 4px;
+      }
+      .help-popover.open { display: flex; }
+      .help-section-lbl {
+        font-size: 9.5px; font-weight: 800; color: var(--muted); text-transform: uppercase;
+        letter-spacing: 0.06em; padding: 5px 7px 2px;
+      }
+      .help-divider { height: 1px; background: rgba(124, 164, 240, 0.16); margin: 3px 4px; }
+      .help-item {
+        display: flex; flex-direction: column; gap: 2px; width: 100%;
+        text-align: left; text-decoration: none; cursor: pointer;
+        background: rgba(255, 255, 255, 0.025); border: 1px solid transparent;
+        border-radius: 7px; padding: 7px 9px; color: var(--text); transition: 0.12s;
+      }
+      .help-item:hover { background: rgba(86, 194, 255, 0.14); border-color: rgba(86, 194, 255, 0.38); color: #fff; }
+      .help-item-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11.5px; font-weight: 700; }
+      .help-item-top small { font-size: 9.5px; color: var(--accent); font-family: ui-monospace, monospace; font-weight: 600; }
+      .help-item-desc { font-size: 10.5px; color: var(--muted); line-height: 1.35; }
+      .help-triad-row { display: flex; flex-wrap: wrap; gap: 5px; padding: 3px 6px 4px; }
+      .help-triad-row a {
+        font-size: 10px; color: #c4b5fd; text-decoration: none; padding: 3px 7px;
+        border-radius: 999px; border: 1px solid rgba(167, 139, 250, 0.35); background: rgba(124, 77, 255, 0.12);
+      }
+      .help-triad-row a:hover { border-color: #ddd6fe; color: #fff; background: rgba(124, 77, 255, 0.28); }
+
+      /* About ULG & Per-Simulation Explanation Modal */
+      .about-modal-panel { width: min(740px, 95vw); }
+      .about-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+      .about-body { display: flex; flex-direction: column; gap: 10px; font-size: 12px; line-height: 1.55; color: #dce7fa; }
+      .about-hero-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      .about-block {
+        background: rgba(17, 25, 44, 0.85); border: 1px solid rgba(124, 164, 240, 0.20);
+        border-radius: 8px; padding: 10px 12px;
+      }
+      .about-block h4 {
+        margin: 0 0 5px; font-size: 10.5px; font-weight: 800; color: var(--accent);
+        text-transform: uppercase; letter-spacing: 0.055em;
+      }
+      .about-block p { margin: 0; color: #dbe7fc; }
+      .about-block ul { margin: 4px 0 0; padding-left: 17px; display: flex; flex-direction: column; gap: 4px; }
+      .about-block li { color: #cbd5e1; }
+      .about-links-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+      .about-links-row a {
+        text-decoration: none; font-size: 11px; font-weight: 700; color: #e0f2fe;
+        padding: 5px 10px; border-radius: 7px; border: 1px solid rgba(86, 194, 255, 0.45);
+        background: rgba(86, 194, 255, 0.14);
+      }
+      .about-links-row a:hover { background: rgba(86, 194, 255, 0.28); color: #fff; }
+      .about-sim-btn {
+        width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+        background: rgba(86, 194, 255, 0.11) !important; border-color: rgba(86, 194, 255, 0.42) !important;
+        color: #e0f2fe !important; font-size: 10.5px !important; padding: 4px 7px !important;
+      }
+      .about-sim-btn:hover { background: rgba(86, 194, 255, 0.24) !important; color: #fff !important; }
+
+      /* Instant Desktop Hover Tooltip */
+      .ulg-tooltip {
+        position: fixed; z-index: 200; pointer-events: none;
+        max-width: 290px; padding: 6px 9px; border-radius: 7px;
+        background: rgba(7, 12, 26, 0.96); border: 1px solid rgba(167, 139, 250, 0.55);
+        color: #f1f5f9; font-size: 11px; line-height: 1.4; font-weight: 500;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.75);
+        opacity: 0; transform: translateY(3px); transition: opacity 0.12s ease, transform 0.12s ease;
+      }
+      .ulg-tooltip.visible { opacity: 1; transform: translateY(0); }
+
+      /* Hierarchical Left-Side Accordion Sidebar */
       .sidebar {
         background: var(--panel); border-right: 1px solid var(--border);
-        padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 9px;
+        padding: 9px; overflow-y: auto; display: flex; flex-direction: column; gap: 7px;
       }
-      .hero-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+      .sidebar::-webkit-scrollbar { width: 6px; }
+      .sidebar::-webkit-scrollbar-thumb { background: rgba(124,164,240,0.22); border-radius: 3px; }
+
+      .specimen-picker-card {
+        background: linear-gradient(155deg, rgba(24, 34, 58, 0.92), rgba(14, 20, 36, 0.94));
+        border: 1px solid rgba(86, 194, 255, 0.34);
+        border-radius: 9px; padding: 8px 9px; display: flex; flex-direction: column; gap: 6px;
+      }
+      .specimen-top-row { display: flex; align-items: center; gap: 8px; }
+      .element-tile-mini {
+        width: 46px; height: 46px; border-radius: 7px; flex-shrink: 0;
+        background: rgba(86, 194, 255, 0.16); border: 1.5px solid var(--accent);
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        cursor: pointer; transition: 0.14s;
+      }
+      .element-tile-mini:hover { background: rgba(86, 194, 255, 0.30); transform: translateY(-1px); }
+      .element-tile-mini .z-num { font-size: 9px; color: var(--muted); line-height: 1; }
+      .element-tile-mini .sym { font-size: 18px; font-weight: 800; color: #fff; line-height: 1.05; }
+      .specimen-meta { flex: 1; min-width: 0; }
+      .specimen-meta .name-line { font-size: 12.5px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .specimen-meta .sub-line { font-size: 10px; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #open-pt-btn {
+        width: 100%; padding: 6px 10px; border-radius: 7px; cursor: pointer;
+        background: linear-gradient(90deg, rgba(86,194,255,0.22), rgba(124,77,255,0.24));
+        border: 1px solid rgba(86,194,255,0.55); color: #f0f9ff;
+        font-size: 11.5px; font-weight: 700; letter-spacing: 0.02em;
+        display: flex; align-items: center; justify-content: space-between;
+      }
+      #open-pt-btn:hover { background: linear-gradient(90deg, rgba(86,194,255,0.34), rgba(124,77,255,0.36)); }
+
+      /* Accordion Groups */
+      .acc-list { display: flex; flex-direction: column; gap: 5px; }
+      .acc-group {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 8px; overflow: hidden; transition: border-color 0.14s;
+      }
+      .acc-group.active-group { border-color: rgba(86, 194, 255, 0.62); }
+      .acc-header {
+        width: 100%; background: transparent; border: none; color: var(--text);
+        padding: 8px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+        display: flex; align-items: center; justify-content: space-between; gap: 6px;
+        text-align: left; letter-spacing: 0.02em;
+      }
+      .acc-header:hover { background: rgba(86, 194, 255, 0.08); }
+      .acc-group.active-group > .acc-header { background: rgba(86, 194, 255, 0.14); color: #fff; }
+      .acc-header .acc-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+      .acc-header .acc-scale { font-size: 9px; font-family: ui-monospace, monospace; color: var(--muted); font-weight: 500; }
+      .acc-header .acc-chev { font-size: 10px; color: var(--muted); transition: transform 0.16s ease; flex-shrink: 0; }
+      .acc-group.open > .acc-header .acc-chev { transform: rotate(90deg); color: var(--accent); }
+      .acc-body {
+        display: none; padding: 5px 8px 8px; border-top: 1px solid rgba(124,164,240,0.12);
+        flex-direction: column; gap: 4px;
+      }
+      .acc-group.open > .acc-body { display: flex; }
+      .acc-item-btn {
+        width: 100%; background: rgba(255,255,255,0.025); border: 1px solid transparent;
+        color: #cbd5e1; border-radius: 6px; padding: 5px 8px; font-size: 11px;
+        cursor: pointer; text-align: left; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+        transition: 0.1s;
+      }
+      .acc-item-btn:hover { background: rgba(86,194,255,0.12); border-color: rgba(86,194,255,0.32); color: #fff; }
+      .acc-item-btn.active {
+        background: rgba(124,77,255,0.28); border-color: #a78bfa; color: #fff; font-weight: 700;
+      }
+      .acc-item-btn small { font-size: 9px; color: var(--muted); font-family: ui-monospace, monospace; }
+      .acc-item-btn.active small { color: #e9d5ff; }
+
+      .hero-chips { display: flex; flex-wrap: wrap; gap: 4px; }
       .chip {
         background: rgba(86, 194, 255, 0.10); border: 1px solid rgba(86, 194, 255, 0.30);
         color: #dbeafe; border-radius: 999px; padding: 3px 8px; font-size: 10px;
@@ -54,22 +208,8 @@
       .chip:hover { background: rgba(86, 194, 255, 0.26); border-color: var(--accent); }
       .chip.gold { background: rgba(250, 204, 21, 0.16); border-color: rgba(250, 204, 21, 0.55); color: #fef08a; }
       .chip.react { background: rgba(124, 77, 255, 0.16); border-color: rgba(167, 139, 250, 0.5); color: #e9d5ff; }
-      .pt-grid {
-        display: grid; grid-template-columns: repeat(9, 1fr); gap: 2.5px;
-        max-height: 205px; overflow-y: auto; padding-right: 2px;
-      }
-      .el-btn {
-        background: rgba(255,255,255,0.04); border: 1px solid rgba(140,180,255,0.16);
-        color: var(--text); border-radius: 4px; padding: 2.5px 1px; font-size: 9.5px;
-        cursor: pointer; text-align: center; line-height: 1.1;
-      }
-      .el-btn:hover { border-color: rgba(86,194,255,0.65); background: rgba(86,194,255,0.14); }
-      .el-btn.active { background: rgba(86,194,255,0.30); border-color: var(--accent); font-weight: 700; color: #fff; }
-      .el-btn.metal-d { border-color: rgba(250, 204, 21, 0.24); }
-      .el-btn.noble { border-color: rgba(167, 139, 250, 0.35); }
-      .el-btn.halogen { border-color: rgba(52, 211, 153, 0.30); }
-      .el-btn.alkali { border-color: rgba(251, 146, 60, 0.34); }
-      .el-btn small { display: block; font-size: 7.5px; color: var(--muted); }
+      .chip.green { background: rgba(52, 211, 153, 0.16); border-color: rgba(52, 211, 153, 0.5); color: #d1fae5; }
+
       .card {
         background: var(--card); border: 1px solid var(--border);
         border-radius: 8px; padding: 9px 10px; font-size: 11.5px;
@@ -78,54 +218,96 @@
       .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.045); font-size: 11px; }
       .kv span:first-child { color: var(--muted); }
       .kv span:last-child { text-align: right; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10.5px; }
+
+      /* Main Stage (100% dedicated to 3D WebGPU viewport + collapsible right data dock!) */
       .main { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-      .specimen-bar {
-        display: flex; align-items: center; justify-content: space-between; gap: 8px;
-        padding: 5px 12px; background: #0a1020; border-bottom: 1px solid rgba(124,164,240,0.16);
-        font-size: 11px; flex-wrap: wrap;
-      }
       .specimen-pill {
         display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
         border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,0.04);
-        font-weight: 600;
+        color: var(--text); font-size: 11px; font-weight: 600; cursor: pointer;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 44vw; transition: 0.12s;
       }
+      .specimen-pill:hover { border-color: var(--accent); background: rgba(86, 194, 255, 0.14); }
       .specimen-pill.backfed { border-color: rgba(192,132,252,0.7); background: rgba(124,77,255,0.22); color: #f3e8ff; }
-      .swatch { display: inline-block; width: 13px; height: 13px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.45); vertical-align: middle; }
-      .tabs {
-        display: flex; gap: 5px; padding: 6px 12px; background: #090f1d; border-bottom: 1px solid var(--border);
-        flex-wrap: wrap;
+      .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.45); vertical-align: middle; flex-shrink: 0; }
+      .sidebar-speed-box {
+        border-top: 1px solid rgba(124,164,240,0.14); padding-top: 6px; margin-top: 2px;
+        display: flex; flex-direction: column; gap: 4px;
       }
-      .tab-btn {
-        background: rgba(255,255,255,0.04); border: 1px solid var(--border); color: var(--text);
-        padding: 5px 10px; border-radius: 6px; font-size: 11.5px; cursor: pointer; font-weight: 500;
+      .sidebar-speed-box .speed-head {
+        display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: var(--muted);
       }
-      .tab-btn:hover { border-color: rgba(86,194,255,0.6); }
-      .tab-btn.active { background: rgba(86,194,255,0.22); border-color: var(--accent); color: #fff; font-weight: 700; }
-      .sim-controls {
-        display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-        padding: 6px 12px; background: rgba(12, 17, 30, 0.98); border-bottom: 1px solid var(--border);
-        font-size: 11px; min-height: 36px;
+      .sidebar-speed-box .speed-head b { color: #e9d5ff; font-family: ui-monospace, monospace; }
+      .sidebar-speed-box .speed-chips { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+      .sidebar-speed-box .speed-chips .chip { padding: 2px 6px; font-size: 9.5px; }
+      .sidebar-speed-box .speed-chips .chip.active-speed {
+        background: rgba(124, 77, 255, 0.42); border-color: #c4b5fd; color: #fff;
       }
-      .ctrl-group {
-        display: inline-flex; align-items: center; gap: 5px;
-        background: rgba(255,255,255,0.035); border: 1px solid rgba(140,180,255,0.16);
-        border-radius: 6px; padding: 3px 7px;
+
+      /* Per-simulation controls mounted directly inside the active accordion section */
+      .acc-sim-controls {
+        display: flex; flex-direction: column; gap: 5px;
+        margin: 1px 0 4px 4px; padding: 6px 7px;
+        border-left: 2px solid rgba(167, 139, 250, 0.72);
+        background: rgba(7, 12, 24, 0.88);
+        border-radius: 0 7px 7px 0;
+        font-size: 11px;
       }
-      .ctrl-group label { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
-      .ctrl-group input[type="range"] { width: 82px; accent-color: var(--violet); padding: 0; border: none; background: transparent; }
-      .ctrl-group input[type="color"] { width: 22px; height: 18px; padding: 0; border: 1px solid var(--border); background: transparent; cursor: pointer; }
-      .ctrl-group input[type="checkbox"] { accent-color: var(--violet); margin: 0; cursor: pointer; }
-      .viewport-wrap { flex: 1; position: relative; display: grid; grid-template-columns: 1fr 346px; min-height: 0; }
+      .acc-sim-controls .ctrl-group {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 4px 5px;
+        width: 100%;
+        background: rgba(255,255,255,0.032); border: 1px solid rgba(140,180,255,0.14);
+        border-radius: 6px; padding: 5px 6px;
+      }
+      .acc-sim-controls .ctrl-row {
+        display: flex; align-items: center; gap: 5px; width: 100%; flex-wrap: wrap;
+      }
+      .acc-sim-controls .ctrl-group label {
+        color: var(--muted); font-size: 10px; white-space: nowrap;
+        display: inline-flex; align-items: center; gap: 3px;
+      }
+      .acc-sim-controls .ctrl-group input[type="range"] {
+        flex: 1 1 74px; min-width: 56px; width: auto !important;
+        accent-color: var(--violet); padding: 0; border: none; background: transparent;
+      }
+      .acc-sim-controls .ctrl-group select {
+        flex: 1 1 88px; min-width: 0; max-width: 100%;
+        font-size: 10.5px; padding: 3px 5px;
+      }
+      .acc-sim-controls .ctrl-group button.action {
+        padding: 3px 7px; font-size: 10.5px; line-height: 1.25;
+      }
+      .acc-sim-controls .ctrl-group input[type="color"] { width: 22px; height: 18px; padding: 0; border: 1px solid var(--border); background: transparent; cursor: pointer; }
+      .acc-sim-controls .ctrl-group input[type="checkbox"] { accent-color: var(--violet); margin: 0; cursor: pointer; }
+
+      .viewport-wrap {
+        flex: 1; position: relative; display: grid; grid-template-columns: 1fr 346px; min-height: 0;
+        transition: grid-template-columns 0.2s ease;
+      }
+      body.data-dock-collapsed .viewport-wrap { grid-template-columns: 1fr 0px; }
       .canvas-stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: #020408; }
       #gpu-canvas { width: 100%; height: 100%; display: block; background: #020408; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
       #gpu-canvas:active { cursor: grabbing; }
-      #canvas-reset-view-btn {
+      .canvas-top-right {
         position: absolute; top: 9px; right: 10px; z-index: 6;
-        background: rgba(7, 12, 24, 0.82); color: var(--text); border: 1px solid rgba(124, 164, 240, 0.34);
+        display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+      }
+      .canvas-top-right-row { display: flex; align-items: center; gap: 6px; }
+      #canvas-reset-view-btn, #canvas-about-sim-btn {
+        background: rgba(7, 12, 24, 0.84); color: var(--text); border: 1px solid rgba(124, 164, 240, 0.36);
         border-radius: 6px; padding: 4px 8px; font-size: 10.5px; font-weight: 600; cursor: pointer;
         backdrop-filter: blur(4px);
       }
-      #canvas-reset-view-btn:hover { border-color: var(--accent); color: var(--accent); }
+      #canvas-reset-view-btn:hover, #canvas-about-sim-btn:hover { border-color: var(--accent); color: var(--accent); }
+      #canvas-about-sim-btn { border-color: rgba(167, 139, 250, 0.45); color: #e9d5ff; }
+      .dock-reopen-tab {
+        display: none;
+        background: rgba(18, 25, 48, 0.90); color: #e0f2fe; border: 1px solid rgba(86, 194, 255, 0.55);
+        border-radius: 6px; padding: 4px 9px; font-size: 10.5px; font-weight: 700; cursor: pointer;
+        backdrop-filter: blur(4px); align-items: center; gap: 4px;
+      }
+      .dock-reopen-tab:hover { background: rgba(86, 194, 255, 0.26); color: #fff; }
+      body.data-dock-collapsed .dock-reopen-tab { display: inline-flex; }
       #webgpu-fallback {
         display: none; position: absolute; inset: 0; z-index: 12;
         background: rgba(5, 8, 16, 0.94); padding: 20px;
@@ -135,7 +317,7 @@
       #webgpu-fallback h2 { margin: 0; font-size: 15px; color: var(--gold); }
       #webgpu-fallback p { margin: 0; max-width: 440px; font-size: 12.5px; line-height: 1.5; color: var(--text); opacity: 0.9; }
       #gpu-hud {
-        position: absolute; top: 9px; left: 12px; right: 92px; pointer-events: none;
+        position: absolute; top: 9px; left: 12px; right: 162px; pointer-events: none;
         display: flex; flex-direction: column; gap: 3px;
         text-shadow: 0 1px 5px rgba(0, 0, 0, 0.96);
         background: rgba(5, 9, 18, 0.72); border: 1px solid rgba(124, 164, 240, 0.18);
@@ -148,16 +330,38 @@
         display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; flex-wrap: wrap;
       }
       .live-meter {
-        background: rgba(7, 12, 24, 0.86); border: 1px solid rgba(124, 164, 240, 0.30);
+        background: rgba(7, 12, 24, 0.88); border: 1px solid rgba(124, 164, 240, 0.30);
         border-radius: 7px; padding: 5px 9px; font-family: ui-monospace, SFMono-Regular, monospace;
         font-size: 10.5px; color: #e2e8f0; backdrop-filter: blur(4px);
       }
-      .live-meter.fail-closed { border-color: rgba(248, 113, 113, 0.85); color: #fecaca; background: rgba(55, 12, 18, 0.9); }
+      .live-meter.fail-closed { border-color: rgba(248, 113, 113, 0.85); color: #fecaca; background: rgba(55, 12, 18, 0.92); }
       .plot-pane {
         background: rgba(8,13,24,0.98); border-left: 1px solid var(--border);
-        padding: 9px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+        display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+        transition: transform 0.22s ease, opacity 0.18s ease;
       }
-      canvas.plot { width: 100%; height: 138px; background: #060b14; border: 1px solid var(--border); border-radius: 6px; display: block; }
+      body.data-dock-collapsed .plot-pane {
+        transform: translateX(100%); opacity: 0; pointer-events: none; border-left: none;
+      }
+      .dock-header {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 7px 10px; border-bottom: 1px solid var(--border);
+        background: rgba(6, 10, 20, 0.96); flex-shrink: 0;
+      }
+      .dock-header span { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: 0.045em; }
+      #data-dock-close {
+        background: rgba(86, 194, 255, 0.14); border: 1px solid rgba(86, 194, 255, 0.45);
+        color: #e0f2fe; border-radius: 6px; padding: 3px 9px; font-size: 10.5px; font-weight: 700;
+        cursor: pointer;
+      }
+      #data-dock-close:hover { background: rgba(86, 194, 255, 0.28); color: #fff; }
+      .dock-scroll {
+        flex: 1; overflow-y: auto; padding: 9px; display: flex; flex-direction: column; gap: 8px; min-height: 0;
+      }
+      .dock-scroll::-webkit-scrollbar { width: 6px; }
+      .dock-scroll::-webkit-scrollbar-thumb { background: rgba(124,164,240,0.22); border-radius: 3px; }
+      canvas.plot { width: 100%; height: 138px; background: #060b14; border: 1px solid var(--border); border-radius: 6px; display: block; touch-action: manipulation; }
+
       .badge {
         display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px;
         background: rgba(255,156,84,0.18); border: 1px solid rgba(255,156,84,0.5); color: var(--accent2);
@@ -171,67 +375,145 @@
       }
       button.action { background: rgba(86,194,255,0.18); border-color: var(--accent); cursor: pointer; font-weight: 600; }
       button.action:hover { background: rgba(86,194,255,0.32); }
-      button.action.active-toggle { background: rgba(124,77,255,0.36); border-color: #a78bfa; color: #fff; }
+      button.action.active-toggle { background: rgba(124,77,255,0.38); border-color: #a78bfa; color: #fff; }
       button.action.gold-btn { background: rgba(250,204,21,0.20); border-color: var(--gold); color: #fef08a; }
+      button.action.danger-btn { background: rgba(248,113,113,0.22); border-color: #f87171; color: #fee2e2; }
       button.action.backfeed-btn { background: linear-gradient(90deg, rgba(124,77,255,0.35), rgba(52,211,153,0.30)); border-color: var(--green); color: #ecfdf5; width: 100%; padding: 6px 9px; margin-top: 5px; }
       .product-card {
         background: rgba(124,77,255,0.09); border: 1px solid rgba(167,139,250,0.35);
-        border-radius: 6px; padding: 6px 8px; margin-top: 6px; font-size: 11px;
+        border-radius: 6px; padding: 6px 8px; margin-top: 5px; font-size: 11px;
       }
+
+      /* ===================================================================== */
+      /* Real 18-Column Authentic IUPAC Periodic Table Picker Modal (#pt-modal) */
+      /* ===================================================================== */
+      .pt-modal {
+        display: none; position: fixed; inset: 0; z-index: 120;
+        background: rgba(3, 6, 14, 0.84); backdrop-filter: blur(8px);
+        align-items: center; justify-content: center; padding: 14px;
+      }
+      .pt-modal.open { display: flex; }
+      .pt-modal-panel {
+        width: min(1240px, 97vw); max-height: 94vh; overflow-y: auto;
+        background: #0a101f; border: 1px solid rgba(86,194,255,0.45);
+        border-radius: 12px; padding: 14px 16px;
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75);
+        display: flex; flex-direction: column; gap: 10px;
+      }
+      .pt-modal-head {
+        display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+        border-bottom: 1px solid var(--border); padding-bottom: 8px;
+      }
+      .pt-modal-head h2 { margin: 0; font-size: 14px; color: var(--accent); letter-spacing: 0.04em; }
+      .pt-toolbar {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      }
+      .pt-toolbar input[type="search"] {
+        width: 190px; background: #0d1628; color: #fff; border: 1px solid var(--border);
+        border-radius: 6px; padding: 5px 9px; font-size: 12px;
+      }
+      .pt-scroll-wrap { overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+      .iupac-grid {
+        display: grid;
+        grid-template-columns: repeat(18, minmax(46px, 1fr));
+        grid-template-rows: repeat(7, 50px) 10px repeat(2, 50px);
+        gap: 3px;
+        min-width: 880px;
+      }
+      .pt-cell {
+        position: relative; border-radius: 5px; padding: 3px 2px;
+        border: 1px solid rgba(148,163,184,0.22);
+        background: rgba(255,255,255,0.035); color: var(--text);
+        cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        transition: transform 0.1s, border-color 0.12s, background 0.12s;
+      }
+      .pt-cell:hover { transform: scale(1.08); z-index: 4; border-color: #fff; background: rgba(86,194,255,0.24); }
+      .pt-cell.active { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); background: rgba(86,194,255,0.34); }
+      .pt-cell.dimmed { opacity: 0.18; }
+      .pt-cell .c-z { position: absolute; top: 2px; left: 4px; font-size: 8px; color: rgba(226,232,240,0.75); }
+      .pt-cell .c-sym { font-size: 14px; font-weight: 800; line-height: 1.05; margin-top: 3px; }
+      .pt-cell .c-name { font-size: 7.5px; color: rgba(226,232,240,0.78); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pt-placeholder {
+        border-radius: 5px; border: 1px dashed rgba(244,114,182,0.45);
+        background: rgba(244,114,182,0.06); color: #fbcfe8;
+        font-size: 9px; font-weight: 700; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; text-align: center;
+      }
+      .pt-fam-alkali { border-color: rgba(251,146,60,0.52); background: rgba(251,146,60,0.12); }
+      .pt-fam-alkaline-earth { border-color: rgba(250,204,21,0.48); background: rgba(250,204,21,0.10); }
+      .pt-fam-transition { border-color: rgba(96,165,250,0.42); background: rgba(96,165,250,0.09); }
+      .pt-fam-post-transition { border-color: rgba(56,189,248,0.42); background: rgba(56,189,248,0.09); }
+      .pt-fam-metalloid { border-color: rgba(45,212,191,0.48); background: rgba(45,212,191,0.11); }
+      .pt-fam-nonmetal { border-color: rgba(52,211,153,0.52); background: rgba(52,211,153,0.12); }
+      .pt-fam-halogen { border-color: rgba(74,222,128,0.54); background: rgba(74,222,128,0.14); }
+      .pt-fam-noble { border-color: rgba(192,132,252,0.55); background: rgba(192,132,252,0.14); }
+      .pt-fam-lanthanide { border-color: rgba(244,114,182,0.48); background: rgba(244,114,182,0.11); }
+      .pt-fam-actinide { border-color: rgba(251,113,133,0.52); background: rgba(251,113,133,0.12); }
+
+      .pt-legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 10px; color: var(--muted); padding-top: 2px; }
+      .pt-legend span { display: inline-flex; align-items: center; gap: 4px; }
+      .pt-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+      .pt-hover-info {
+        display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+        background: rgba(20, 29, 48, 0.85); border: 1px solid var(--border); border-radius: 7px;
+        padding: 6px 10px; font-size: 11px;
+      }
+
       /* Mobile-only controls hidden on desktop >= 1120px */
       .mobile-only { display: none; }
       .drawer-backdrop { display: none; }
       .drawer-header { display: none; }
       .mobile-quick-bar { display: none; }
-      canvas.plot { touch-action: manipulation; }
 
-      /* Tablet & Mobile Responsive Shell (<= 1119px) */
+      /* Tablet & Mobile Responsive Shell (<= 1119px): ~95% full-screen 3D canvas + slide-over Left Menu & Right Graphs Dock! */
       @media (max-width: 1119px) {
         html, body {
-          height: auto; min-height: 100dvh; overflow-y: auto; overflow-x: hidden;
+          height: 100dvh; overflow: hidden;
           -webkit-tap-highlight-color: transparent;
         }
         .shell {
-          display: flex; flex-direction: column; height: auto; min-height: 100dvh;
+          display: flex; flex-direction: column; height: 100dvh; overflow: hidden;
           padding-bottom: env(safe-area-inset-bottom, 0px);
         }
         header {
-          position: sticky; top: 0; z-index: 40;
-          min-height: 46px; height: auto; flex-wrap: nowrap;
-          padding: calc(6px + env(safe-area-inset-top, 0px)) max(10px, env(safe-area-inset-right, 10px)) 6px max(10px, env(safe-area-inset-left, 10px));
-          gap: 8px;
+          position: relative; z-index: 45; flex-shrink: 0;
+          min-height: 44px; height: auto; flex-wrap: nowrap;
+          padding: calc(5px + env(safe-area-inset-top, 0px)) max(8px, env(safe-area-inset-right, 8px)) 5px max(8px, env(safe-area-inset-left, 8px));
+          gap: 6px;
         }
-        header h1 { font-size: 12px; flex: 1; min-width: 0; }
-        .mobile-only { display: inline-flex; align-items: center; gap: 5px; }
+        header h1 { display: none; }
+        .mobile-only { display: inline-flex; align-items: center; gap: 4px; }
         #mobile-drawer-btn {
           background: rgba(86,194,255,0.20); border: 1px solid var(--accent); color: #fff;
-          border-radius: 7px; padding: 6px 10px; font-size: 11.5px; font-weight: 700;
-          cursor: pointer; flex-shrink: 0; min-height: 34px;
+          border-radius: 7px; padding: 5px 9px; font-size: 11px; font-weight: 700;
+          cursor: pointer; flex-shrink: 0; min-height: 32px;
         }
-        .nav-links {
-          overflow-x: auto; max-width: 48vw; scrollbar-width: none; -webkit-overflow-scrolling: touch;
-        }
-        .nav-links::-webkit-scrollbar { display: none; }
-        .nav-links a { white-space: nowrap; padding: 5px 8px; font-size: 10.5px; }
+        .specimen-pill { max-width: 48vw; font-size: 10.5px; padding: 4px 8px; }
 
-        /* Slide-over Periodic Table / Chemistry / Bundle Drawer */
+        /* Shared Backdrop for Left Menu Drawer & Right Graphs/Data Docking Popout */
         .drawer-backdrop {
           display: block; position: fixed; inset: 0; z-index: 55;
           background: rgba(2, 6, 14, 0.72); backdrop-filter: blur(3px);
           opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
         }
-        body.drawer-open { overflow: hidden; }
-        body.drawer-open .drawer-backdrop { opacity: 1; pointer-events: auto; }
+        body.drawer-open .drawer-backdrop,
+        body.data-dock-open .drawer-backdrop { opacity: 1; pointer-events: auto; }
+
+        /* Left Slide-Over Accordion & Controls Drawer */
         .sidebar {
           position: fixed; top: 0; bottom: 0; left: 0; z-index: 60;
-          width: min(92vw, 396px); max-width: 100vw;
+          width: min(92vw, 390px); max-width: 100vw;
           border-right: 1px solid rgba(124,164,240,0.38);
           box-shadow: 8px 0 32px rgba(0, 0, 0, 0.7);
-          transform: translateX(-105%); transition: transform 0.22s ease;
+          transform: translateX(-105%); visibility: hidden; pointer-events: none;
+          transition: transform 0.22s ease, visibility 0s linear 0.22s;
           padding: calc(10px + env(safe-area-inset-top, 0px)) 10px calc(24px + env(safe-area-inset-bottom, 0px)) 10px;
           -webkit-overflow-scrolling: touch;
         }
-        body.drawer-open .sidebar { transform: translateX(0); }
+        body.drawer-open .sidebar {
+          transform: translateX(0); visibility: visible; pointer-events: auto;
+          transition: transform 0.22s ease, visibility 0s linear 0s;
+        }
         .drawer-header {
           display: flex; align-items: center; justify-content: space-between; gap: 8px;
           padding-bottom: 6px; border-bottom: 1px solid var(--border);
@@ -241,201 +523,340 @@
           background: rgba(124,77,255,0.28); border: 1px solid #a78bfa; color: #fff;
           border-radius: 6px; padding: 6px 12px; font-size: 11.5px; font-weight: 700; cursor: pointer; min-height: 34px;
         }
-        .pt-grid { max-height: 250px; gap: 3px; }
-        .el-btn { min-height: 34px; font-size: 10.5px; padding: 3px 2px; }
-        .el-btn small { font-size: 8px; }
 
-        /* Main flow: Quick Presets -> Tabs -> Sim Controls -> Full-Width WebGPU Stage -> Plots */
-        .main { height: auto; overflow: visible; }
-        .specimen-bar { padding: 6px 10px; gap: 6px; }
-        #specimen-backfeed-hint { display: none; }
-        .mobile-quick-bar {
-          display: flex; align-items: center; gap: 5px; padding: 5px 10px;
-          background: #080d1a; border-bottom: 1px solid rgba(124,164,240,0.14);
-          overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none;
-        }
-        .mobile-quick-bar::-webkit-scrollbar { display: none; }
-        .mobile-quick-bar .chip { flex-shrink: 0; padding: 5px 10px; font-size: 11px; min-height: 30px; }
+        /* Main Stage fills 100% of remaining mobile height (~95% of screen!) */
+        .main { flex: 1; min-height: 0; height: auto; overflow: hidden; display: flex; flex-direction: column; }
+        .acc-sim-controls .ctrl-group { padding: 6px; gap: 6px; }
+        .acc-sim-controls .ctrl-group button.action { min-height: 30px; padding: 5px 9px; font-size: 11px; }
+        .acc-sim-controls .ctrl-group input[type="range"] { height: 24px; }
 
-        .tabs {
-          flex-wrap: nowrap; overflow-x: auto; padding: 6px 10px; gap: 6px;
-          -webkit-overflow-scrolling: touch; scrollbar-width: none; scroll-snap-type: x proximity;
-        }
-        .tabs::-webkit-scrollbar { display: none; }
-        .tab-btn {
-          flex-shrink: 0; white-space: nowrap; min-height: 36px; padding: 6px 12px;
-          font-size: 12px; scroll-snap-align: start;
-        }
-        .sim-controls {
-          padding: 6px 10px; gap: 6px; min-height: 40px;
-          overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none;
-        }
-        .sim-controls::-webkit-scrollbar { display: none; }
-        .ctrl-group { flex-shrink: 0; padding: 4px 8px; gap: 6px; }
-        .ctrl-group button.action { min-height: 30px; padding: 5px 9px; font-size: 11.5px; }
-        .ctrl-group input[type="range"] { width: 92px; height: 26px; }
-
-        .viewport-wrap { display: flex; flex-direction: column; flex: none; }
+        .viewport-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
         .canvas-stage {
-          width: 100%; height: clamp(320px, 54dvh, 490px); min-height: 300px; flex-shrink: 0;
+          width: 100%; flex: 1; min-height: 220px; height: auto;
         }
+        .dock-reopen-tab { display: none !important; }
         #gpu-hud {
-          top: 7px; left: 8px; right: 86px; padding: 5px 8px; max-width: calc(100% - 94px);
+          top: 7px; left: 8px; right: 148px; padding: 5px 8px; max-width: calc(100% - 156px);
         }
         #gpu-hud-title { font-size: 11px; line-height: 1.25; }
         #gpu-hud-sub { font-size: 9.5px; line-height: 1.25; }
         #gpu-overlay-bottom { bottom: 7px; left: 8px; right: 8px; gap: 5px; }
         .live-meter { font-size: 9.5px; padding: 4px 7px; max-width: 100%; overflow-wrap: anywhere; }
 
-        .plot-pane {
-          border-left: none; border-top: 1px solid var(--border);
-          overflow-y: visible; padding: 10px;
-          display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px;
+        /* Right-Hand Slide-Out Graphs & Data Docking Popout on Mobile/Tablet! */
+        .plot-pane,
+        body.data-dock-collapsed .plot-pane {
+          position: fixed; top: 0; bottom: 0; right: 0; z-index: 60;
+          width: min(92vw, 390px); max-width: 100vw; opacity: 1;
+          border-left: 1px solid rgba(124,164,240,0.42);
+          box-shadow: -8px 0 32px rgba(0, 0, 0, 0.72);
+          transform: translateX(105%); visibility: hidden; pointer-events: none;
+          transition: transform 0.22s ease, visibility 0s linear 0.22s;
+          padding-top: env(safe-area-inset-top, 0px);
+          padding-bottom: env(safe-area-inset-bottom, 0px);
         }
-        canvas.plot { height: 152px; }
+        body.data-dock-open .plot-pane {
+          transform: translateX(0); visibility: visible; pointer-events: auto;
+          transition: transform 0.22s ease, visibility 0s linear 0s;
+        }
+        .dock-header { padding: 10px 10px 8px; }
+        #data-dock-close { min-height: 32px; padding: 5px 11px; font-size: 11.5px; }
+        .dock-scroll { -webkit-overflow-scrolling: touch; padding: 9px 10px 24px; }
+        canvas.plot { height: 146px; }
       }
 
-      /* Phone Portrait & Small Screens (<= 767px) */
       @media (max-width: 767px) {
-        header h1 { font-size: 11px; }
-        .nav-links { display: none; }
-        .pt-grid { grid-template-columns: repeat(6, 1fr); }
-        /* Prevent iOS Safari auto-zoom on form focus */
-        input[type="text"], input[type="number"], select { font-size: 16px; min-height: 36px; }
-        .ctrl-group select { font-size: 13px; min-height: 30px; }
-        .plot-pane { grid-template-columns: 1fr; }
-        .canvas-stage { height: clamp(300px, 52dvh, 430px); }
-        .specimen-pill { font-size: 10.5px; padding: 3px 8px; }
+        .hdr-btn .hdr-lbl { display: none; }
+        .hdr-btn { padding: 5px 8px; }
+        input[type="text"], input[type="number"], input[type="search"], select { font-size: 16px; min-height: 36px; }
+        .acc-sim-controls .ctrl-group select { font-size: 13px; min-height: 30px; }
+        .pt-modal { padding: 6px; }
+        .pt-modal-panel { padding: 10px; max-height: 96dvh; }
       }
 
-      /* Landscape Phones (short height) */
-      @media (max-width: 1119px) and (max-height: 520px) {
-        .canvas-stage { height: clamp(230px, 66dvh, 340px); min-height: 220px; }
+      @media (max-width: 1119px) and (max-height: 500px) {
+        header { min-height: 38px; padding-top: 3px; padding-bottom: 3px; }
+        #mobile-drawer-btn, .hdr-btn { min-height: 28px; padding: 3px 8px; font-size: 10.5px; }
+        .canvas-stage { min-height: 220px; }
       }
     </style>
   </head>
   <body>
     <div class="shell">
       <header>
-        <button id="mobile-drawer-btn" class="mobile-only" type="button" aria-label="Open Elements and Chemistry Drawer">⚛ Elements &amp; Chem</button>
-        <h1>ULG — FIRST-PRINCIPLES MATERIAL PHYSICS LAB, PHOTON–SHELL OPTICS &amp; POLYTOPE ATLAS</h1>
-        <div class="nav-links">
-          <a href="./index.html">Studio Continuum</a>
-          <a href="./cosmic-quantum.html">Cosmic ↔ Quantum</a>
-          <a href="./stellar-genesis.html">Stellar Genesis</a>
-          <a href="./supergalactic.html">Supergalactic TreePM ↗</a>
+        <div class="header-left">
+          <button id="mobile-drawer-btn" class="mobile-only" type="button" aria-label="Open Navigation, Controls &amp; Chemistry Menu" title="Open left menu: Periodic Table, simulation accordion, speed controls &amp; chemistry">☰ Menu</button>
+          <h1 title="ULG First-Principles Material Physics Lab — live WebGPU nuclear, atomic, optical, MD, chemistry &amp; 3D polytope workbench">ULG MATERIAL PHYSICS LAB</h1>
+          <button id="active-specimen-pill" class="specimen-pill" type="button" title="Active element or backfed compound — click to open the 18-column IUPAC Periodic Table">Loading Fe-56…</button>
+        </div>
+        <div class="header-actions">
+          <button id="share-link-btn" class="hdr-btn green" type="button" title="Copy a direct shareable link encoding the current element/compound, simulation view, parameters, speed &amp; 3D camera">🔗<span class="hdr-lbl"> Share</span></button>
+          <button id="data-dock-toggle-btn" class="hdr-btn" type="button" title="Show or hide the right-hand Live Graphs &amp; Data docking panel">📊<span class="hdr-lbl"> Data</span></button>
+          <button id="help-menu-btn" class="hdr-btn help-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Help, About ULG, GitHub and Other Demos" title="Help, About ULG, GitHub repository &amp; links to other ULG multiscale demos">?</button>
         </div>
       </header>
+
+      <!-- `?` Help, About ULG, GitHub & Other Demos Popover Menu -->
+      <div id="help-menu-popover" class="help-popover" role="menu" aria-label="Help, About ULG, GitHub and Demos">
+        <div class="help-section-lbl">Documentation</div>
+        <button id="menu-about-sim" class="help-item" type="button" role="menuitem" title="Read what the active simulation is showing, what equations run on your GPU, and why it exists in ULG">
+          <span class="help-item-top"><span>ⓘ About Current Simulation</span><small id="menu-about-sim-badge">Active</small></span>
+          <span class="help-item-desc" id="menu-about-sim-desc">Explain the physics, GPU equations, and interactive experiments for this view.</span>
+        </button>
+        <button id="menu-about-ulg" class="help-item" type="button" role="menuitem" title="Learn what Universal Law Graph (ULG) and this Material Physics Lab are">
+          <span class="help-item-top"><span>✦ About ULG &amp; This Lab</span><small>40-OOM Engine</small></span>
+          <span class="help-item-desc">First-principles browser-native WebGPU physics spanning nuclei (10⁻¹⁵ m) to cosmic web (10⁺²⁵ m).</span>
+        </button>
+        <div class="help-divider"></div>
+        <div class="help-section-lbl">Other ULG Multiscale Demos</div>
+        <a class="help-item" href="./index.html" role="menuitem" title="Open ULG Studio Continuum — macroscopic 3D WebGPU MLS-MPM fluids, phase transitions, refraction &amp; reactions">
+          <span class="help-item-top"><span>Studio Continuum</span><small>10⁻³ → 10⁺² m</small></span>
+          <span class="help-item-desc">3D WebGPU MLS-MPM fluid, phase change, optics &amp; reactive continuum studio.</span>
+        </a>
+        <a class="help-item" href="./cosmic-quantum.html" role="menuitem" title="Open Cosmic ↔ Quantum — unified 40-order-of-magnitude scale explorer">
+          <span class="help-item-top"><span>Cosmic ↔ Quantum</span><small>10⁻¹⁵ → 10⁺²⁵ m</small></span>
+          <span class="help-item-desc">Unified scale explorer linking quantum closures to planetary, galactic &amp; cosmic regimes.</span>
+        </a>
+        <a class="help-item" href="./stellar-genesis.html" role="menuitem" title="Open Stellar Genesis — live WebGPU thermonuclear fusion and Lane-Emden stellar structure">
+          <span class="help-item-top"><span>Stellar Genesis</span><small>10⁺⁸ → 10⁺¹¹ m</small></span>
+          <span class="help-item-desc">Live GPU nuclear fusion networks, Lane–Emden hydrostatic structure &amp; stellar heating.</span>
+        </a>
+        <a class="help-item" href="./supergalactic.html" role="menuitem" title="Open Supergalactic TreePM — live 3D-FFT FLRW cosmology, GPU P(k) &amp; WebRTC">
+          <span class="help-item-top"><span>Supergalactic TreePM ↗</span><small>10⁺²² → 10⁺²⁵ m</small></span>
+          <span class="help-item-desc">1-submit FLRW 3D-FFT TreePM cosmic web, live GPU P(k) &amp; PeerCompute WebRTC.</span>
+        </a>
+        <div class="help-divider"></div>
+        <div class="help-section-lbl">Source Code &amp; Triad</div>
+        <a id="github-ulg-link" class="help-item" href="https://github.com/Tsotchke-Corporation/ulg" target="_blank" rel="noopener noreferrer" role="menuitem" title="Open the Universal Law Graph (ULG) source code repository on GitHub">
+          <span class="help-item-top"><span>↗ GitHub — ULG Repository</span><small>Tsotchke-Corp</small></span>
+          <span class="help-item-desc">github.com/Tsotchke-Corporation/ulg</span>
+        </a>
+        <div class="help-triad-row">
+          <a href="https://github.com/MetaverseJS/peercompute" target="_blank" rel="noopener noreferrer" title="PeerCompute distributed WebGPU scheduling &amp; peer fabric on GitHub">PeerCompute ↗</a>
+          <a href="https://github.com/tsotchke/eshkol" target="_blank" rel="noopener noreferrer" title="Eshkol mathematical &amp; higher-order AD closure compiler on GitHub">Eshkol ↗</a>
+          <a href="https://github.com/tsotchke/moonlab" target="_blank" rel="noopener noreferrer" title="Moonlab quantum simulator &amp; reference engine on GitHub">Moonlab ↗</a>
+        </div>
+      </div>
 
       <div id="drawer-backdrop" class="drawer-backdrop" aria-hidden="true"></div>
       <aside id="lab-sidebar" class="sidebar">
         <div class="drawer-header">
-          <span>ELEMENTS, ISOTOPES &amp; CHEMISTRY</span>
-          <button id="mobile-drawer-close" type="button">✕ View Sim</button>
-        </div>
-        <div class="card mobile-only" style="flex-direction:column;gap:6px;align-items:stretch;">
-          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;">ULG Scale Apps</div>
-          <div class="hero-chips" style="margin-bottom:0;">
-            <a class="chip" href="./index.html" style="text-decoration:none;">Studio Continuum</a>
-            <a class="chip" href="./cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum</a>
-            <a class="chip" href="./stellar-genesis.html" style="text-decoration:none;">Stellar Genesis</a>
-            <a class="chip" href="./supergalactic.html" style="text-decoration:none;">Supergalactic TreePM ↗</a>
-          </div>
-        </div>
-        <div class="card">
-          <h3>
-            <span>Periodic Table &amp; Isotopes (Z = 1..118)</span>
-            <span id="status-badge" class="badge">booting…</span>
-          </h3>
-          <div class="hero-chips" id="hero-presets">
-            <button class="chip gold" data-hero-z="79" data-hero-tab="crystal" title="Inspect relativistic 5d→6p Gold color in live Maxwell Photon–Shell simulation!">Au Gold Color</button>
-            <button class="chip" data-hero-z="47" data-hero-tab="crystal">Ag Silver</button>
-            <button class="chip" data-hero-z="29" data-hero-tab="crystal">Cu Copper</button>
-            <button class="chip" data-hero-z="26" data-hero-tab="atomic">Fe Orbital</button>
-            <button class="chip" data-hero-z="26" data-hero-tab="crystal" data-hero-cview="spin-llg">Fe Magnet</button>
-            <button class="chip" data-hero-z="82" data-hero-tab="crystal" data-hero-cview="transport">Pb Supercond</button>
-            <button class="chip" data-hero-z="6" data-hero-tab="crystal">C Diamond</button>
-            <button class="chip" data-hero-z="14" data-hero-tab="crystal" data-hero-cview="transport">Si Semi</button>
-            <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear">²³⁵U Fission</button>
-            <button class="chip react" data-hero-compound="H2O" data-hero-tab="crystal">H₂O n(λ)</button>
-            <button class="chip react" data-hero-react="Na|H2O">Na + H₂O ⚡</button>
-          </div>
-          <div class="row" style="margin-bottom:6px;">
-            <label style="font-size:10.5px;color:var(--muted);">Z</label>
-            <input id="z-input" type="number" min="1" max="118" value="26" style="width:52px;" />
-            <label style="font-size:10.5px;color:var(--muted);">A</label>
-            <input id="a-input" type="number" min="1" max="310" placeholder="A*" title="Mass number A (blank = valley of stability A*)" style="width:58px;" />
-            <button id="reset-a-btn" class="action" title="Reset to valley-of-stability mass number A*">A*</button>
-            <button id="solve-z-btn" class="action" style="flex:1;">Solve GPU</button>
-          </div>
-          <div id="pt-grid" class="pt-grid"></div>
+          <span>ULG LAB NAVIGATION &amp; CONTROLS</span>
+          <button id="mobile-drawer-close" type="button" title="Close menu and return to full-screen 3D simulation">✕ View Sim</button>
         </div>
 
-        <div class="card">
-          <h3>Chemistry Combiner → Compound Backfeed</h3>
-          <div class="row" style="margin-bottom:5px;">
-            <input id="reactant-a" type="text" value="Na" placeholder="A (e.g. Na)" style="width:74px;" />
-            <span style="color:var(--muted);font-weight:700;">+</span>
-            <input id="reactant-b" type="text" value="H2O" placeholder="B (e.g. H2O)" style="flex:1;" />
-            <button id="run-reaction-btn" class="action">React</button>
+        <!-- Pinned Active Element / Isotope Picker Card -->
+        <div class="specimen-picker-card">
+          <div class="specimen-top-row">
+            <button id="element-tile-btn" class="element-tile-mini" type="button" title="Click to open the full 18-column IUPAC Periodic Table picker (Z = 1..118)">
+              <span id="tile-z" class="z-num">26</span>
+              <span id="tile-sym" class="sym">Fe</span>
+            </button>
+            <div class="specimen-meta">
+              <div class="name-line" id="tile-name">Iron (Fe-56)</div>
+              <div class="sub-line" id="tile-sub">Transition Metal · 55.845 u</div>
+            </div>
+            <span id="status-badge" class="badge" title="Live WebGPU derivation &amp; solver status">booting…</span>
           </div>
-          <div class="hero-chips" id="reaction-presets" style="margin-bottom:6px;">
-            <button class="chip react" data-rxn="Na|H2O">Na+H₂O</button>
-            <button class="chip react" data-rxn="H2|O2">H₂+O₂</button>
-            <button class="chip react" data-rxn="Na|Cl2">Na+Cl₂</button>
-            <button class="chip react" data-rxn="Fe|O2">Fe+O₂</button>
-            <button class="chip react" data-rxn="Cs|F2">Cs+F₂</button>
-            <button class="chip react" data-rxn="Al|O2">Al+O₂</button>
-            <button class="chip react" data-rxn="C|O2">C+O₂</button>
-            <button class="chip react" data-rxn="Si|O2">Si+O₂</button>
-          </div>
+          <button id="open-pt-btn" type="button" title="Open interactive 18-column IUPAC Periodic Table with search, family filters &amp; isotope selection">
+            <span>⊞ Open Periodic Table (Z = 1..118)</span>
+            <span style="opacity:0.75;font-size:10px;">IUPAC 18-Col</span>
+          </button>
           <div class="row">
-            <input id="compound-input" type="text" value="H2O" placeholder="Formula: H2O, D2O, NaCl, 235UF6" style="flex:1;" />
-            <button id="solve-compound-btn" class="action">Derive</button>
+            <label style="font-size:10px;color:var(--muted);" title="Atomic number Z (number of protons, 1–118)">Z</label>
+            <input id="z-input" type="number" min="1" max="118" value="26" style="width:50px;" title="Atomic number Z (1 = Hydrogen .. 118 = Oganesson)" />
+            <label style="font-size:10px;color:var(--muted);" title="Isotope mass number A = Z + N (total nucleons)">A</label>
+            <input id="a-input" type="number" min="1" max="310" placeholder="A*" title="Isotope mass number A = protons + neutrons (leave blank for valley-of-stability A*)" style="width:56px;" />
+            <button id="reset-a-btn" class="action" title="Reset mass number A to the most stable isotope A* for this element">A*</button>
+            <button id="solve-z-btn" class="action" style="flex:1;" title="Run the complete 5-domain first-principles WebGPU derivation for this (Z, A) isotope">Solve GPU</button>
           </div>
-          <div id="reaction-results"></div>
+          <div class="sidebar-speed-box">
+            <div class="speed-head">
+              <span title="Controls physical timestep (dt) scaling for MD, LLG &amp; transport and exact CFL step pacing for FDTD &amp; TDSE">⏱ Sim Speed &amp; Timestep (dt)</span>
+              <b id="sidebar-speed-lbl">1.00×</b>
+            </div>
+            <div class="row">
+              <input id="sidebar-sim-speed" type="range" min="0.05" max="2.0" step="0.05" value="1.0" style="flex:1;padding:0;border:none;background:transparent;accent-color:var(--violet);" aria-label="Simulation speed and timestep scale" title="Drag to slow down (0.05× slow-motion / finer dt) or speed up (up to 2.0×) live GPU simulations" />
+              <button id="sidebar-step-once-btn" class="action" type="button" title="Pause continuous playback and advance the active GPU simulation by exactly 1 physics step">⏭ +1</button>
+            </div>
+            <div class="speed-chips" id="speed-preset-chips">
+              <button class="chip" type="button" data-speed-preset="0.1" title="Ultra slow-motion (0.1× speed / 10× finer physical dt)">0.1×</button>
+              <button class="chip" type="button" data-speed-preset="0.25" title="Slow-motion (0.25× speed / 4× finer physical dt)">0.25×</button>
+              <button class="chip" type="button" data-speed-preset="0.5" title="Half speed (0.5× speed / 2× finer physical dt)">0.5×</button>
+              <button class="chip active-speed" type="button" data-speed-preset="1" title="Normal real-time simulation speed (1.0×)">1×</button>
+              <button class="chip" type="button" data-speed-preset="2" title="Double simulation speed (2.0×)">2×</button>
+            </div>
+          </div>
         </div>
 
-        <div id="bundle-readout" class="card">
-          <h3>5-Domain Material Bundle</h3>
-          <div style="color:var(--muted)">Select an element or compound to run live WebGPU derivation.</div>
-        </div>
+        <!-- Hierarchical Collapsible Left-Side Accordion Menu -->
+        <nav id="accordion-nav" class="acc-list" aria-label="Physics Scales and Simulations">
+          <!-- Quick Showcases -->
+          <div class="acc-group open" data-acc-group="showcases">
+            <button class="acc-header" type="button" title="One-click curated physics showcases across elements, alloys, compounds, reactions &amp; polytopes">
+              <span class="acc-left"><span>★ Quick Showcases</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <div class="hero-chips" id="hero-presets">
+                <button class="chip gold" data-hero-z="79" data-hero-tab="crystal" title="Gold (Z=79): watch relativistic 5d–6s contraction absorb blue light and reflect metallic gold">Au Gold Color</button>
+                <button class="chip gold" data-hero-z="55" data-hero-tab="crystal" title="Cesium (Z=55): pale golden alkali metal from low screened Drude plasma edge (~2.7 eV)">Cs Pale Gold</button>
+                <button class="chip" data-hero-z="47" data-hero-tab="crystal" title="Silver (Z=47): UV interband gap reflects red, green, and blue equally">Ag Silver</button>
+                <button class="chip" data-hero-z="29" data-hero-tab="crystal" title="Copper (Z=29): 3d→4p absorption edge reflects warm reddish-copper">Cu Copper</button>
+                <button class="chip" data-hero-z="26" data-hero-tab="atomic" title="Iron (Z=26): 240,000-point live WebGPU 3d Dirac–KS orbital probability cloud">Fe Orbital</button>
+                <button class="chip" data-hero-z="26" data-hero-tab="crystal" data-hero-cview="spin-llg" title="Iron (Z=26): 3D stochastic LLG ferromagnetic domains, hysteresis M(B) &amp; Curie T_C">Fe Magnet</button>
+                <button class="chip" data-hero-z="82" data-hero-tab="crystal" data-hero-cview="transport" title="Lead (Z=82): cryogenic BCS superconducting Cooper-pair condensate (ρ = 0 Ω·m)">Pb Supercond</button>
+                <button class="chip" data-hero-z="14" data-hero-tab="crystal" data-hero-cview="transport" title="Silicon (Z=14): semiconductor thermal carrier activation across band gap">Si Semi</button>
+                <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear" title="Uranium-235: 3D Bohr–Wheeler quadrupole fission saddle &amp; scission">²³⁵U Fission</button>
+                <button class="chip react" data-hero-compound="H2O" data-hero-tab="compound" data-hero-chem="molecule" title="Water (H₂O): 3D GPU RHF bonds, Mulliken MEP charges &amp; electric dipole μ">H₂O 3D Bonds</button>
+                <button class="chip react" data-hero-compound="NaCl" data-hero-tab="crystal" data-hero-cview="lattice" title="Salt (NaCl): 3D multi-species ionic crystal cell with Na⁺/Cl⁻ coordination">NaCl Crystal</button>
+                <button class="chip react" data-hero-react="Na|H2O" title="Run GPU stoichiometric discovery, CI-NEB barrier &amp; reactive MD for Na + H₂O">Na + H₂O ⚡</button>
+                <button class="chip react" data-hero-react="HCl|NaOH" title="Run GPU acid-base neutralization pathway HCl + NaOH → NaCl + H₂O">HCl + NaOH</button>
+                <button class="chip react" data-hero-react="CH4|O2" title="Run GPU combustion stoichiometry &amp; exothermic reactive MD for CH₄ + O₂">CH₄ + O₂ 🔥</button>
+                <button class="chip green" data-hero-compound="H2O" data-hero-tab="polytope" title="Water (H₂O): orbitable 3D (T, P, ρ) Convex Polytope phase surface">H₂O 3D Polytope</button>
+              </div>
+              <div id="specimen-history" class="hero-chips" style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(124,164,240,0.12);" title="Recently solved elements and backfed compounds"></div>
+            </div>
+          </div>
+
+          <!-- 1. Nuclear -->
+          <div class="acc-group open active-group" data-acc-group="nuclear" data-acc-tab="nuclear">
+            <button class="acc-header" type="button" data-acc-tab="nuclear" title="10⁻¹⁵ m Nuclear Physics: Fermi density, α-tunneling TDSE, 3D fission &amp; Bateman decay">
+              <span class="acc-left"><span>1. Nuclear Physics</span><span class="acc-scale">10⁻¹⁵ m</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <button class="acc-item-btn active" data-nav-tab="nuclear" data-nav-sub="tdse" title="3D Woods–Saxon nuclear density &amp; live 1D symplectic Visscher quantum α-tunneling TDSE"><span>Fermi Density &amp; α-TDSE</span><small>1D Visscher</small></button>
+              <div id="sim-controls" class="acc-sim-controls"></div>
+              <button class="acc-item-btn" data-nav-tab="nuclear" data-nav-sub="fission" title="3D Bohr–Wheeler liquid-drop quadrupole deformation, saddle point β* &amp; scission"><span>3D Bohr–Wheeler Fission</span><small>β₂ Scission</small></button>
+              <button class="acc-item-btn" data-nav-tab="nuclear" data-nav-sub="bateman" title="Nucleon-conserving parent → daughter radioactive decay chain population curves"><span>Bateman Decay Chain</span><small>Exact Ledger</small></button>
+            </div>
+          </div>
+
+          <!-- 2. Atomic QM -->
+          <div class="acc-group" data-acc-group="atomic" data-acc-tab="atomic">
+            <button class="acc-header" type="button" data-acc-tab="atomic" title="10⁻¹⁰ m Relativistic Atomic QM: GPU Dirac–KS eigenstates, Stark polarization &amp; ΔSCF ionization">
+              <span class="acc-left"><span>2. Atomic &amp; Relativistic QM</span><span class="acc-scale">10⁻¹⁰ m</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <button class="acc-item-btn" data-nav-tab="atomic" data-nav-sub="cloud" title="Up to 500K-point GPU Monte Carlo 3D Dirac–KS orbital |ψ_{n,l,m}|² cloud with Stark &amp; ΔSCF"><span>3D Dirac–KS Orbital Cloud</span><small>240K pts</small></button>
+              <button class="acc-item-btn" data-nav-tab="atomic" data-nav-sub="volume" title="3D GPU volumetric raymarch of total atomic charge &amp; unpaired spin density"><span>Volumetric Spin Density</span><small>Raymarch</small></button>
+            </div>
+          </div>
+
+          <!-- 3. Solids, Optics & Magnetism -->
+          <div class="acc-group" data-acc-group="crystal" data-acc-tab="crystal">
+            <button class="acc-header" type="button" data-acc-tab="crystal" title="10⁻⁹ m Condensed Matter: Maxwell FDTD optics, 3D crystals, Bloch bands, 3D Maxwell-KS, LLG magnetism &amp; BCS">
+              <span class="acc-left"><span>3. Solids, Optics &amp; Spin</span><span class="acc-scale">10⁻⁹ m</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <button class="acc-item-btn" data-nav-tab="crystal" data-nav-sub="photon-shell" title="2D 128×128 symplectic Maxwell–ADE-FDTD optical slab showing metallic color &amp; Snell refraction"><span>2D Maxwell Optical Slab</span><small>Snell / Au</small></button>
+              <button class="acc-item-btn" data-nav-tab="crystal" data-nav-sub="lattice" title="3D multi-species Wyckoff crystal unit cell with species radii, charges &amp; coordination bonds"><span>3D Multi-Species Crystal</span><small>Unit Cell</small></button>
+              <button class="acc-item-btn" data-nav-tab="crystal" data-nav-sub="bloch" title="3D periodic Bloch charge density via WebGPU 3D FFT, band dispersion E(k) &amp; Fermi level"><span>3D Bloch Bands &amp; Fermi</span><small>3D FFT</small></button>
+              <button class="acc-item-btn" data-nav-tab="crystal" data-nav-sub="tdks-atom" title="Live 3D vector Maxwell Yee FDTD coupled self-consistently to a 180K-pt 3D Dirac–KS orbital"><span>Atom TD-KS ↔ Photon</span><small>3D Maxwell-KS</small></button>
+              <button class="acc-item-btn" data-nav-tab="crystal" data-nav-sub="spin-llg" title="3D WebGPU stochastic Landau–Lifshitz–Gilbert spin lattice: ferromagnetism, T_C &amp; AFM"><span>3D Spin Lattice (LLG)</span><small>Ferro / AFM</small></button>
+              <button class="acc-item-btn" data-nav-tab="crystal" data-nav-sub="transport" title="3D Drude–Boltzmann electron-phonon scattering, semiconductors &amp; BCS Cooper pairs"><span>3D e⁻ Transport &amp; BCS</span><small>Drude / T_c</small></button>
+            </div>
+          </div>
+
+          <!-- 4. MD & Mechanics -->
+          <div class="acc-group" data-acc-group="md" data-acc-tab="md">
+            <button class="acc-header" type="button" data-acc-tab="md" title="10⁻⁸ m Live WebGPU Molecular Dynamics: melting, phonons, elasticity, acoustics &amp; NEMD transport">
+              <span class="acc-left"><span>4. MD, Mechanics &amp; NEMD</span><span class="acc-scale">10⁻⁸ m</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <button class="acc-item-btn" data-nav-tab="md" data-nav-sub="equilibrium" title="Live Velocity-Verlet MD crystal/liquid/vapor equilibrium, g(r) RDF, MSD &amp; phonon VDOS"><span>Equilibrium &amp; Phonons</span><small>g(r) / VDOS</small></button>
+              <button class="acc-item-btn" data-nav-tab="md" data-nav-sub="strain" title="Uniaxial &amp; shear affine strain stress tensor measuring K, G &amp; Poisson's ratio ν"><span>Stress–Strain Tensor</span><small>K, G, ν</small></button>
+              <button class="acc-item-btn" data-nav-tab="md" data-nav-sub="acoustic" title="3:1 elongated crystal bar propagating longitudinal (P) and transverse (S) sound waves"><span>Acoustic Crystal Bar</span><small>v_L / v_T</small></button>
+              <button class="acc-item-btn" data-nav-tab="md" data-nav-sub="shear" title="Non-equilibrium Couette boundary shear measuring dynamic viscosity η"><span>Couette Shear Viscosity</span><small>η NEMD</small></button>
+              <button class="acc-item-btn" data-nav-tab="md" data-nav-sub="thermal" title="Dual hot/cold slab thermostat gradient measuring phonon thermal conductivity κ_ph"><span>Hot/Cold Thermal Flow</span><small>κ_ph NEMD</small></button>
+              <button class="acc-item-btn" data-nav-tab="md" data-nav-sub="surface" title="Condensed slab between vacuum gaps measuring Kirkwood–Buff surface tension γ"><span>Free-Surface Vacuum Slab</span><small>γ Tension</small></button>
+            </div>
+          </div>
+
+          <!-- 5. Chemistry & Reactions -->
+          <div class="acc-group open" data-acc-group="compound" data-acc-tab="compound">
+            <button class="acc-header" type="button" data-acc-tab="compound" title="Quantum Chemistry &amp; Reactions (Z=1..118): GPU RHF bonds, CI-NEB barriers, vibrations &amp; reactive MD">
+              <span class="acc-left"><span>5. Chemistry &amp; Reactions</span><span class="acc-scale">Z=1..118</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <button class="acc-item-btn" data-nav-tab="compound" data-nav-sub="molecule" title="3D GPU RHF molecule with exact Wiberg bond orders, Mulliken MEP &amp; electric dipole μ"><span>3D Molecule, Bonds &amp; MEP</span><small>Wiberg / μ</small></button>
+              <button class="acc-item-btn" data-nav-tab="compound" data-nav-sub="reaction-path" title="Multi-molecule GPU CI-NEB reaction pathway A+B → TS‡ → C+D with activation barrier E_a"><span>Reaction Path (A+B → TS‡)</span><small>GPU CI-NEB</small></button>
+              <button class="acc-item-btn" data-nav-tab="compound" data-nav-sub="vibrations" title="GPU RHF geometry optimization, Eckart-projected Hessian normal modes &amp; IR/Raman spectra"><span>Geom Opt &amp; Vibrations</span><small>IR / Raman</small></button>
+              <button class="acc-item-btn" data-nav-tab="compound" data-nav-sub="reactive-md" title="3D GPU multi-species reactive collision chamber with ignition spark, catalyst &amp; heating"><span>3D Reactive MD Chamber</span><small>Kinetics</small></button>
+
+              <div style="margin-top:4px;padding-top:6px;border-top:1px solid rgba(124,164,240,0.14);display:flex;flex-direction:column;gap:5px;">
+                <div style="font-size:10px;color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">Reaction Combiner → Backfeed</div>
+                <div class="row">
+                  <input id="reactant-a" type="text" value="Na" placeholder="A (e.g. Na)" style="width:68px;" title="Reactant A chemical symbol or formula (e.g. Na, HCl, CH4, Cs)" />
+                  <span style="color:var(--muted);font-weight:700;">+</span>
+                  <input id="reactant-b" type="text" value="H2O" placeholder="B (e.g. H2O)" style="flex:1;" title="Reactant B chemical symbol or formula (e.g. H2O, NaOH, O2, Cl2)" />
+                  <button id="run-reaction-btn" class="action" title="Discover balanced reaction products, solve GPU CI-NEB barrier &amp; seed 3D Reactive MD">React</button>
+                </div>
+                <div class="hero-chips" id="reaction-presets">
+                  <button class="chip react" data-rxn="Na|H2O" title="Alkali metal + water: 2 Na + 2 H₂O → 2 NaOH + H₂">Na+H₂O</button>
+                  <button class="chip react" data-rxn="HCl|NaOH" title="Acid-base neutralization: HCl + NaOH → NaCl + H₂O">HCl+NaOH</button>
+                  <button class="chip react" data-rxn="HCl|NH3" title="Gas-phase proton transfer: HCl + NH₃ → NH₄Cl">HCl+NH₃</button>
+                  <button class="chip react" data-rxn="CH4|O2" title="Hydrocarbon combustion: CH₄ + 2 O₂ → CO₂ + 2 H₂O">CH₄+O₂</button>
+                  <button class="chip react" data-rxn="H2|O2" title="Hydrogen combustion: 2 H₂ + O₂ → 2 H₂O">H₂+O₂</button>
+                  <button class="chip react" data-rxn="Zn|HCl" title="Metal-acid displacement: Zn + 2 HCl → ZnCl₂ + H₂">Zn+HCl</button>
+                  <button class="chip react" data-rxn="Al|Fe2O3" title="Thermite redox reaction: 2 Al + Fe₂O₃ → Al₂O₃ + 2 Fe">Al+Fe₂O₃</button>
+                  <button class="chip react" data-rxn="CuO|H2" title="Metal oxide reduction: CuO + H₂ → Cu + H₂O">CuO+H₂</button>
+                  <button class="chip react" data-rxn="N2|H2" title="Haber–Bosch ammonia synthesis: N₂ + 3 H₂ → 2 NH₃">N₂+H₂</button>
+                  <button class="chip react" data-rxn="Na|Cl2" title="Ionic halide synthesis: 2 Na + Cl₂ → 2 NaCl">Na+Cl₂</button>
+                </div>
+                <div class="row">
+                  <input id="compound-input" type="text" value="H2O" placeholder="Formula: H2O, D2O, CO2, NaCl" style="flex:1;" title="Enter any chemical formula (e.g. H2O, D2O, CO2, NaCl, NH3, CsF) to derive on WebGPU" />
+                  <button id="solve-compound-btn" class="action" title="Derive full quantum structure, properties, MD &amp; Polytope Atlas for this compound and activate it">Derive</button>
+                </div>
+                <div id="reaction-results"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 6. Convex Polytope Atlas -->
+          <div class="acc-group" data-acc-group="polytope" data-acc-tab="polytope">
+            <button class="acc-header" type="button" data-acc-tab="polytope" title="Fail-closed A x ≤ b Convex Polytope Phase Atlas &amp; GPU Chebyshev EOS surrogates">
+              <span class="acc-left"><span>6. Convex Polytope Atlas</span><span class="acc-scale">A x ≤ b</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <button class="acc-item-btn" data-nav-tab="polytope" data-nav-sub="3d-surface" title="Orbitable 3D (log₁₀T, log₁₀P, log₁₀ρ) GPU phase relief surface with Clausius–Clapeyron cliffs"><span>3D Phase Surface (T,P,ρ)</span><small>GPU Mesh</small></button>
+              <button class="acc-item-btn" data-nav-tab="polytope" data-nav-sub="2d-facets" title="Top-down exact 2D half-space facet map (A x ≤ b) with live cursor GPU probe"><span>2D Exact Facet Map</span><small>Contours</small></button>
+              <button class="acc-item-btn" data-nav-tab="polytope" data-nav-sub="residual-map" title="Pixel-by-pixel Chebyshev surrogate vs EOS relative error (%) verification heatmap"><span>Chebyshev Residual Map</span><small>Error %</small></button>
+            </div>
+          </div>
+
+          <!-- 7. Collapsible 5-Domain Bundle Inspector -->
+          <div class="acc-group" data-acc-group="bundle">
+            <button class="acc-header" type="button" title="Inspect all derived numerical properties across Nuclear, Atomic, EM/Optical, Mechanical &amp; Thermodynamic domains">
+              <span class="acc-left"><span>▤ 5-Domain Bundle Inspector</span></span>
+              <span class="acc-chev">▸</span>
+            </button>
+            <div class="acc-body">
+              <div id="bundle-readout" style="font-size:11px;">
+                <div style="color:var(--muted)">Select an element or compound to run live WebGPU derivation.</div>
+              </div>
+            </div>
+          </div>
+        </nav>
       </aside>
 
       <main class="main">
-        <div class="specimen-bar" id="specimen-bar">
-          <div class="row" style="gap:8px;flex-wrap:wrap;">
-            <span id="active-specimen-pill" class="specimen-pill">Loading Fe-56…</span>
-            <span id="specimen-backfeed-hint" style="color:var(--muted);font-size:10.5px;">All 6 tabs run live GPU physics on the active specimen</span>
-          </div>
-          <div id="specimen-history" class="row" style="gap:4px;flex-wrap:wrap;"></div>
-        </div>
-
-        <div class="mobile-quick-bar" id="mobile-quick-presets">
-          <button class="chip gold" data-hero-z="79" data-hero-tab="crystal">Au Gold Color</button>
-          <button class="chip" data-hero-z="26" data-hero-tab="crystal" data-hero-cview="spin-llg">Fe Magnet</button>
-          <button class="chip" data-hero-z="82" data-hero-tab="crystal" data-hero-cview="transport">Pb Supercond</button>
-          <button class="chip" data-hero-z="26" data-hero-tab="atomic">Fe Orbital</button>
-          <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear">²³⁵U Fission</button>
-          <button class="chip react" data-hero-compound="H2O" data-hero-tab="crystal">H₂O n(λ)</button>
-          <button class="chip react" data-hero-react="Na|H2O">Na + H₂O ⚡</button>
-        </div>
-
-        <div class="tabs">
-          <button class="tab-btn active" data-tab="nuclear">1. Nuclear, TDSE &amp; Fission</button>
-          <button class="tab-btn" data-tab="atomic">2. Dirac–KS, Stark &amp; ΔSCF</button>
-          <button class="tab-btn" data-tab="crystal">3. Optics, Magnetism &amp; Transport</button>
-          <button class="tab-btn" data-tab="md">4. MD, Mechanics &amp; NEMD</button>
-          <button class="tab-btn" data-tab="compound">5. Chemistry, CI-NEB &amp; Backfeed</button>
-          <button class="tab-btn" data-tab="polytope">6. Convex Polytope Atlas</button>
-        </div>
-
-        <div id="sim-controls" class="sim-controls"></div>
-
         <div class="viewport-wrap">
           <div class="canvas-stage">
             <canvas id="gpu-canvas"></canvas>
-            <button id="canvas-reset-view-btn" type="button" title="Reset 3D camera (or double-tap viewport)">⟲ Reset</button>
+            <div class="canvas-top-right">
+              <div class="canvas-top-right-row">
+                <button id="canvas-about-sim-btn" type="button" title="Explain what this simulation is showing, what equations run on WebGPU, and why it exists in ULG">ⓘ About</button>
+                <button id="canvas-reset-view-btn" type="button" title="Reset 3D camera orbit &amp; zoom (or double-tap viewport)">⟲ Reset</button>
+              </div>
+              <button id="dock-reopen-tab" class="dock-reopen-tab" type="button" title="Expand the right-hand Live Graphs &amp; Data panel">📊 Data ⇤</button>
+            </div>
             <div id="gpu-hud">
               <div id="gpu-hud-title">WebGPU 3D Scientific Viewport</div>
               <div id="gpu-hud-sub">Direct GPU storage-buffer rendering (drag to orbit, pinch/scroll to zoom)</div>
@@ -443,31 +864,100 @@
             <div id="gpu-overlay-bottom"></div>
             <div id="webgpu-fallback" role="alert">
               <h2 id="webgpu-fallback-title">WebGPU Required for Live Physics Simulations</h2>
-              <p id="webgpu-fallback-msg">This lab runs real-time Dirac–KS, TD-KS, 2D Maxwell–FDTD, MD, and Polytope Atlas compute shaders on your GPU. Open in Chrome 121+ (Android/Desktop) or Safari 26+ (iOS/macOS) over HTTPS with WebGPU enabled.</p>
-              <button id="webgpu-reload-btn" class="action" type="button">Retry WebGPU</button>
+              <p id="webgpu-fallback-msg">This lab runs real-time Dirac–KS, TD-KS, 2D Maxwell–FDTD, GPU RHF Chemistry, MD, and 3D Polytope Atlas compute shaders on your GPU. Open in Chrome 121+ (Android/Desktop) or Safari 26+ (iOS/macOS) over HTTPS with WebGPU enabled.</p>
+              <button id="webgpu-reload-btn" class="action" type="button" title="Reload page and retry WebGPU device initialization">Retry WebGPU</button>
             </div>
           </div>
-          <section class="plot-pane">
-            <div class="card">
-              <h3 id="plot1-title">Chart of Nuclides / Live Diagnostic</h3>
-              <canvas id="plot1" class="plot" width="324" height="138"></canvas>
+          <aside id="data-dock" class="plot-pane" aria-label="Live Graphs and Data">
+            <div class="dock-header">
+              <span>📊 LIVE GRAPHS &amp; DATA</span>
+              <button id="data-dock-close" type="button" title="Slide the Graphs &amp; Data panel away to maximize the 3D simulation viewport">⇥ Hide</button>
             </div>
-            <div class="card">
-              <h3 id="plot2-title">WKB Barrier &amp; TDSE / Bands / RDF / Polytopes</h3>
-              <canvas id="plot2" class="plot" width="324" height="138"></canvas>
+            <div class="dock-scroll">
+              <div class="card">
+                <h3 id="plot1-title">Chart of Nuclides / Live Diagnostic</h3>
+                <canvas id="plot1" class="plot" width="324" height="138"></canvas>
+              </div>
+              <div class="card">
+                <h3 id="plot2-title">WKB Barrier &amp; TDSE / Bonds / Vibrations / Polytopes</h3>
+                <canvas id="plot2" class="plot" width="324" height="138"></canvas>
+              </div>
+              <div id="plot3-card" class="card">
+                <h3 id="plot3-title">Optics / Kinetics / Arrhenius / MD</h3>
+                <canvas id="plot3" class="plot" width="324" height="128"></canvas>
+              </div>
+              <div id="g7-card" class="card">
+                <h3>Accuracy Tier &amp; Offline G7 Advisory</h3>
+                <div style="color:var(--muted)">scientificValidation: false (first-principles GPU derivation)</div>
+              </div>
             </div>
-            <div id="plot3-card" class="card">
-              <h3 id="plot3-title">Photon–Shell Absorption / UV-Vis / Angular / MD</h3>
-              <canvas id="plot3" class="plot" width="324" height="128"></canvas>
-            </div>
-            <div id="g7-card" class="card">
-              <h3>Accuracy Tier &amp; Offline G7 Advisory</h3>
-              <div style="color:var(--muted)">scientificValidation: false (first-principles GPU derivation)</div>
-            </div>
-          </section>
+          </aside>
         </div>
       </main>
     </div>
+
+    <!-- About ULG & Per-Simulation Explanation Modal -->
+    <div id="about-modal" class="pt-modal" role="dialog" aria-modal="true" aria-labelledby="about-modal-title">
+      <div class="pt-modal-panel about-modal-panel">
+        <div class="pt-modal-head">
+          <h2 id="about-modal-title">About This Simulation</h2>
+          <div class="about-tabs">
+            <button id="about-tab-sim" class="action active-toggle" type="button" title="View documentation for the currently active simulation">This Simulation</button>
+            <button id="about-tab-ulg" class="action" type="button" title="Learn about Universal Law Graph (ULG) and the Material Physics Lab">About ULG &amp; Triad</button>
+            <button id="about-modal-close" class="action" type="button" title="Close documentation dialog">✕ Close</button>
+          </div>
+        </div>
+        <div id="about-modal-body" class="about-body"></div>
+      </div>
+    </div>
+
+    <!-- Floating Desktop Hover Tooltip -->
+    <div id="ulg-tooltip" class="ulg-tooltip" role="tooltip" aria-hidden="true"></div>
+
+    <!-- Real 18-Column Authentic IUPAC Periodic Table Picker Modal -->
+    <div id="pt-modal" class="pt-modal" role="dialog" aria-modal="true" aria-labelledby="pt-modal-title">
+      <div class="pt-modal-panel">
+        <div class="pt-modal-head">
+          <h2 id="pt-modal-title">IUPAC Periodic Table of Elements (Z = 1..118)</h2>
+          <div class="pt-toolbar">
+            <input id="pt-search" type="search" placeholder="Search symbol, name, or Z…" aria-label="Search elements" />
+            <select id="pt-action-mode" title="What happens when you click an element">
+              <option value="solve">Click Action: Solve Element on GPU</option>
+              <option value="reactant-a">Click Action: Set Reactant A</option>
+              <option value="reactant-b">Click Action: Set Reactant B</option>
+            </select>
+            <button id="pt-modal-close" class="action" type="button">✕ Close</button>
+          </div>
+        </div>
+
+        <div class="hero-chips" id="pt-filter-chips">
+          <button class="chip active-filter" data-pt-filter="all">All 118</button>
+          <button class="chip" data-pt-filter="ferromagnet">Ferromagnets</button>
+          <button class="chip" data-pt-filter="superconductor">Superconductors</button>
+          <button class="chip" data-pt-filter="reactive-metal">Reactive Metals</button>
+          <button class="chip" data-pt-filter="halogen">Halogens</button>
+          <button class="chip" data-pt-filter="noble">Noble Gases</button>
+          <button class="chip" data-pt-filter="nonmetal">Nonmetals</button>
+          <button class="chip" data-pt-filter="lanthanide">Lanthanides</button>
+          <button class="chip" data-pt-filter="actinide">Actinides</button>
+        </div>
+
+        <div class="pt-hover-info" id="pt-hover-info">
+          <span id="pt-hover-text"><b>Fe (Z=26) · Iron</b> — Transition Metal · 55.845 u · Click any tile to derive all 5 physics domains on WebGPU</span>
+          <div class="row">
+            <label style="font-size:10.5px;color:var(--muted);">Isotope A:</label>
+            <input id="pt-modal-a" type="number" min="1" max="310" placeholder="A* (stable)" style="width:82px;" />
+          </div>
+        </div>
+
+        <div class="pt-scroll-wrap">
+          <div id="iupac-pt-grid" class="iupac-grid"></div>
+        </div>
+
+        <div class="pt-legend" id="pt-legend"></div>
+      </div>
+    </div>
+
     <script type="module" src="./src/demos/elementsLabDemo.js"></script>
   </body>
 </html>

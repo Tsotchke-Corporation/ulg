@@ -324,7 +324,8 @@ export function createSpinLatticeSessionWebGpu(device, electromagnetic = {}, mec
 
   initSpins({ orderedBias: spinParams.magneticPhase === 'ferromagnetic' ? 0.35 : 0.0 });
 
-  function writeUniform(uBuf, sIdx, collectObs) {
+  function writeUniform(uBuf, sIdx, collectObs, dtScale = 1.0) {
+    const safeDtScale = Math.max(0.05, Math.min(1.0, Number(dtScale) || 1.0));
     const eRef = spinParams.refEnergyEv;
     const jNorm = spinParams.exchangeJEv / eRef;
     const kNorm = spinParams.anisotropyEv / eRef;
@@ -336,7 +337,7 @@ export function createSpinLatticeSessionWebGpu(device, electromagnetic = {}, mec
     const tempNorm = (KB_EV_PER_K * curTempK) / eRef;
     // Clamp dt for unconditional Heun sLLG numerical stability at any T or B
     const hScale = Math.max(1.0, 6.0 * Math.abs(jNorm) + Math.abs(bzNorm) + 2.0 * Math.abs(kNorm));
-    const dtDim = Math.min(0.095, 0.26 / hScale);
+    const dtDim = Math.min(0.095, 0.26 / hScale) * safeDtScale;
 
     const ab = new ArrayBuffer(48);
     new Uint32Array(ab, 0, 4).set([nx, ny, nz, sIdx >>> 0]);
@@ -345,13 +346,13 @@ export function createSpinLatticeSessionWebGpu(device, electromagnetic = {}, mec
     device.queue.writeBuffer(uBuf, 0, ab);
   }
 
-  function stepSync(numSteps = 8, { temperatureK: nextT = null, fieldBZTesla: nextB = null, collectObsOnLast = false } = {}) {
+  function stepSync(numSteps = 8, { temperatureK: nextT = null, fieldBZTesla: nextB = null, collectObsOnLast = false, dtScale = 1.0 } = {}) {
     if (destroyed) return;
     if (nextT != null && Number.isFinite(Number(nextT))) curTempK = Math.max(1, Number(nextT));
     if (nextB != null && Number.isFinite(Number(nextB))) curBZTesla = Number(nextB);
     const steps = Math.max(1, Math.min(MAX_BATCH, Math.trunc(numSteps)));
     for (let s = 0; s < steps; s += 1) {
-      writeUniform(uPool[s], stepIndex + s, collectObsOnLast && s === steps - 1);
+      writeUniform(uPool[s], stepIndex + s, collectObsOnLast && s === steps - 1, dtScale);
     }
     const wg = Math.ceil(count / 64);
     const enc = device.createCommandEncoder({ label: 'ulg-spin-llg-batch' });
@@ -436,12 +437,12 @@ export function createSpinLatticeSessionWebGpu(device, electromagnetic = {}, mec
     }
   }
 
-  async function stepBatch(numSteps = 16, { temperatureK: nextT = null, fieldBZTesla: nextB = null, readObs = true, nonBlocking = false } = {}) {
+  async function stepBatch(numSteps = 16, { temperatureK: nextT = null, fieldBZTesla: nextB = null, readObs = true, nonBlocking = false, dtScale = 1.0 } = {}) {
     let rem = Math.max(1, Math.trunc(numSteps));
     while (rem > 0) {
       const chunk = Math.min(MAX_BATCH, rem);
       const isLast = rem === chunk;
-      stepSync(chunk, { temperatureK: nextT, fieldBZTesla: nextB, collectObsOnLast: readObs && isLast });
+      stepSync(chunk, { temperatureK: nextT, fieldBZTesla: nextB, collectObsOnLast: readObs && isLast, dtScale });
       rem -= chunk;
     }
     return readObs ? readTelemetry({ nonBlocking }) : null;

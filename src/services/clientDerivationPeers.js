@@ -1036,6 +1036,10 @@ export function startLiveClientDerivationPeerMesh({
 
   const unsubscribeDiscovery = discoveryTransport.onMessage((message) => {
     if (stopped || !message || typeof message !== 'object') return;
+    if (message.type === 'peer-disconnect' && message.peerId) {
+      remotePresence.delete(message.peerId);
+      return;
+    }
     if (message.type !== 'presence' || !message.from || message.from === peerId) return;
     if (message.alive) {
       remotePresence.set(message.from, { alive: true, at: nowMs() });

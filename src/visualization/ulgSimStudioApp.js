@@ -237,9 +237,7 @@ export function mountUlgSimStudioApp({
         <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
           <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Configure &amp; Launch</button>
           <a id="ulg-empty-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
-          <a id="ulg-empty-cq-link" class="ulg-btn ulg-btn-subtle" href="./cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
-          <a id="ulg-empty-sg-link" class="ulg-btn ulg-btn-subtle" href="./stellar-genesis.html" style="text-decoration:none;">Stellar Genesis ↗</a>
-          <a id="ulg-empty-cosmo-link" class="ulg-btn ulg-btn-subtle" href="./supergalactic.html" style="text-decoration:none;">Supergalactic TreePM ↗</a>
+          <a id="ulg-empty-universes-link" class="ulg-btn ulg-btn-subtle" href="./universes.html" style="text-decoration:none;">ULG Universes (40-OOM) ↗</a>
         </div>
       </div>
     </div>
@@ -313,9 +311,7 @@ export function mountUlgSimStudioApp({
             <button id="ulg-stop-btn" class="ulg-btn ulg-btn-subtle ulg-btn-danger" type="button" hidden>Unload</button>
             <button id="ulg-diagnostics-toggle" class="ulg-btn ulg-btn-subtle" type="button" aria-expanded="false">Diagnostics</button>
             <a id="ulg-elements-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
-            <a id="ulg-cosmic-quantum-link" class="ulg-btn ulg-btn-subtle" href="./cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
-            <a id="ulg-stellar-genesis-link" class="ulg-btn ulg-btn-subtle" href="./stellar-genesis.html" style="text-decoration:none;">Stellar Genesis ↗</a>
-            <a id="ulg-supergalactic-link" class="ulg-btn ulg-btn-subtle" href="./supergalactic.html" style="text-decoration:none;">Supergalactic TreePM ↗</a>
+            <a id="ulg-universes-link" class="ulg-btn ulg-btn-subtle" href="./universes.html" style="text-decoration:none;">ULG Universes (40-OOM) ↗</a>
           </div>
           <div class="ulg-footer-group">
             <label class="ulg-autoplay-label">

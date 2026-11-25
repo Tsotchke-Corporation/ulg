@@ -9,9 +9,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..');
 const REQUIRED_SERVICE_ASSETS = Object.freeze([
   'elements-lab.html',
-  'supergalactic.html',
-  'cosmic-quantum.html',
-  'stellar-genesis.html',
+  'universes.html',
   'plan/background-1.jpeg',
   'plan/background-2.jpg',
   'plan/background-3.jpg',

@@ -106,7 +106,11 @@ test('Gate 5D & Flagship Labs native Vulkan proof: 1-submit GPU Zel\'dovich FLRW
     const labErrors = [];
     labPage.on('pageerror', (e) => labErrors.push(String(e).slice(0, 300)));
     await labPage.goto(`${BASE_URL}elements-lab.html?z=26`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await labPage.waitForFunction(() => Boolean(window.__ulgElementsLabState?.bundle), null, { timeout: 60_000 });
+    await labPage.waitForFunction(
+      () => Boolean(window.__ulgElementsLabState?.bundle) && (window.__ulgElementsLabState?.atlasPolytopeCount ?? 0) >= 4,
+      null,
+      { timeout: 60_000 }
+    );
     const labState = await labPage.evaluate(() => window.__ulgElementsLabState);
     assert.deepEqual(labErrors, []);
     assert.equal(labState.bundle.symbol, 'Fe');
@@ -114,48 +118,37 @@ test('Gate 5D & Flagship Labs native Vulkan proof: 1-submit GPU Zel\'dovich FLRW
     assert.ok(labState.atlasPolytopeCount >= 4);
     await labCtx.close();
 
-    // 3. Live headless Vulkan load of supergalactic.html (locked camera default + live GPU P(k))
+    // 3. Live headless Vulkan load of universes.html L0 Cosmic Web (locked camera default + live GPU P(k))
     const sgCtx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
     const sgPage = await sgCtx.newPage();
     const sgErrors = [];
     sgPage.on('pageerror', (e) => sgErrors.push(String(e).slice(0, 300)));
-    await sgPage.goto(`${BASE_URL}supergalactic.html`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await sgPage.waitForFunction(() => (window.__ulgSupergalacticState?.stepIndex ?? 0) >= 5, null, { timeout: 60_000 });
-    const sgState = await sgPage.evaluate(() => window.__ulgSupergalacticState);
+    await sgPage.goto(`${BASE_URL}universes.html?level=0`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await sgPage.waitForFunction(() => (window.__ulgUniversesDemo?.getState?.()?.cosmicWebSteps ?? 0) >= 5, null, { timeout: 60_000 });
+    const sgState = await sgPage.evaluate(() => window.__ulgUniversesDemo.getState());
     assert.deepEqual(sgErrors, []);
-    assert.equal(sgState.cameraAutoSpin, false, 'supergalactic.html must default to locked camera (cameraAutoSpin: false)');
+    assert.equal(sgState.cameraAutoSpin, false, 'universes.html must default to locked camera (cameraAutoSpin: false)');
     assert.equal(sgState.submitsPerStep, 1);
     assert.equal(sgState.gpuErrorCount, 0);
-    assert.ok(sgState.stepIndex >= 5);
+    assert.ok(sgState.cosmicWebSteps >= 5);
     assert.ok(sgState.sigmaDensity > 0);
     assert.ok(sgState.powerSpectrumPk.kBins.length >= 6);
-    await sgCtx.close();
 
-    // 4. B7 regression test: cosmic-quantum.html stepping supergalactic-cosmic stop with ZERO crashes!
-    const cqCtx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
-    const cqPage = await cqCtx.newPage();
-    const cqErrors = [];
-    cqPage.on('pageerror', (e) => cqErrors.push(String(e).slice(0, 300)));
-    await cqPage.goto(`${BASE_URL}cosmic-quantum.html`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await cqPage.waitForFunction(() => Boolean(window.__ulgCosmicQuantumDemo?.getState?.().ready), null, { timeout: 60_000 });
-    await cqPage.evaluate(() => {
-      window.__ulgCosmicQuantumDemo.setLog10Span(26.5);
-    });
-    await cqPage.waitForFunction(() => {
-      const st = window.__ulgCosmicQuantumDemo?.getState?.();
-      return st?.primaryRegimeId === 'supergalactic-cosmic' && (st?.cosmicWebSteps ?? 0) >= 3;
-    }, null, { timeout: 60_000 });
-    const cqState = await cqPage.evaluate(() => ({
-      ...window.__ulgCosmicQuantumDemo.getState(),
-      gpuErrors: (globalThis.__ulgWebGpuUncapturedErrors || []).filter((e) => e.label === 'cosmic-quantum-demo')
+    // 4. Dive into L1 Galaxy & verify canonical SchroederScaleAtlas multipole gravity with 0 GPU/page errors
+    await sgPage.evaluate(() => window.__ulgUniversesDemo.setLevel(1, { instant: true }));
+    await sgPage.waitForFunction(() => (window.__ulgUniversesDemo?.getState?.()?.galacticSteps ?? 0) >= 3, null, { timeout: 60_000 });
+    const galState = await sgPage.evaluate(() => ({
+      ...window.__ulgUniversesDemo.getState(),
+      uncaptured: (globalThis.__ulgWebGpuUncapturedErrors || []).filter((e) => e.label === 'ulg-universes-demo')
     }));
-    assert.deepEqual(cqErrors, [], `cosmic-quantum.html supergalactic-cosmic crashed with page errors: ${cqErrors.join('; ')}`);
-    assert.deepEqual(cqState.gpuErrors, [], `cosmic-quantum.html supergalactic-cosmic emitted WebGPU uncaptured errors: ${JSON.stringify(cqState.gpuErrors)}`);
-    assert.equal(cqState.primaryRegimeId, 'supergalactic-cosmic');
-    assert.equal(cqState.cameraAutoSpin, false);
-    assert.ok(cqState.cosmicWebSteps >= 3, `Expected >= 3 supergalactic-cosmic steps, got ${cqState.cosmicWebSteps}`);
-    assert.equal(cqState.galacticGravityMode, 'webgpu-schroeder-scale-atlas-multipole');
-    await cqCtx.close();
+    assert.deepEqual(sgErrors, [], `universes.html crashed with page errors: ${sgErrors.join('; ')}`);
+    assert.deepEqual(galState.uncaptured, [], `universes.html emitted WebGPU uncaptured errors: ${JSON.stringify(galState.uncaptured)}`);
+    assert.equal(galState.level, 1);
+    assert.equal(galState.scaleId, 'galaxy');
+    assert.equal(galState.cameraAutoSpin, false);
+    assert.ok(galState.galacticSteps >= 3);
+    assert.equal(galState.galacticGravityMode, 'webgpu-schroeder-scale-atlas-multipole');
+    await sgCtx.close();
   } finally {
     await browser.close();
   }

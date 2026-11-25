@@ -1,0 +1,1 @@
+import"./src-saU47wTT.js";import"./wgsl-Bxz3tsP4.js";import{Gs as e}from"./sphGpuBuffers-UjcvcP47.js";export{e as createResidentProductMassHandleFromPlacementRead};

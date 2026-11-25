@@ -2,6 +2,39 @@ import { schroederPhaseSlotCaloricWgsl } from './schroederPhaseSlotCaloricWgsl.j
 import { createSchroederPhaseSlotLedgerStage } from './schroederPhaseSlotLedgerGpu.js';
 import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  generateRepresentedVolumeWgsl,
+  generateVec4LaneAccessorsWgsl
+} from '../../../ulg-gpu-abi/src/index.js';
+import { getCanonicalLawAdapterDescriptor } from './lawDagEpochScheduler.js';
+import { createGpuResourceLeaseScope } from './gpuResourceLease.js';
+
+export const SCHROEDER_PHASE_SLOT_LAW_ADAPTER_DESCRIPTOR =
+  getCanonicalLawAdapterDescriptor('phase-slot-refinement');
+
+const PHASE_SLOT_MECHANICS_ACCESSORS_WGSL = [
+  generateVec4LaneAccessorsWgsl({
+    layout: MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+    layoutName: 'MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT',
+    bufferName: 'source_mechanics',
+    prefix: 'psm_src_mech',
+    fields: [
+      'volumeRatioJ',
+      'restVolumeM3',
+      'solidFlag',
+      'status',
+      'eosModelId',
+      'constitutiveStatus',
+      'phaseVolumeReferenceMassKg'
+    ],
+    includeWriters: false
+  }),
+  generateRepresentedVolumeWgsl({
+    mechanicsLayout: MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+    bufferName: 'source_mechanics'
+  })
+].join('\n\n');
 
 // Fixed phase-carrier v2 storage. This stage produces a private candidate;
 // PeerCompute adoption and constitutive refresh remain the caller's owners.
@@ -24,6 +57,8 @@ struct Params {
 @group(0) @binding(9) var<storage, read_write> out_mechanics: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read_write> evidence: array<atomic<u32>>;
 @group(0) @binding(11) var<uniform> params: Params;
+
+${PHASE_SLOT_MECHANICS_ACCESSORS_WGSL}
 
 fn finite(v: f32) -> bool { return (bitcast<u32>(v) & 0x7f800000u) != 0x7f800000u; }
 fn finite4(v: vec4<f32>) -> bool { return finite(v.x) && finite(v.y) && finite(v.z) && finite(v.w); }
@@ -54,17 +89,17 @@ fn fluid_source(row: u32) -> bool {
   let s0 = source_state[i * 2u]; let s1 = source_state[i * 2u + 1u];
   let t0 = source_thermo[i * 3u]; let t1 = source_thermo[i * 3u + 1u];
   let t2 = source_thermo[i * 3u + 2u];
-  let m4 = source_mechanics[i * 8u + 4u];
+  let rep_vol = represented_volume_from_mechanics(i);
   if (!finite4(s0) || !finite4(s1) || !finite4(t0) || !finite4(t2)
       || s0.w <= 0.0 || t0.y != expected_phase || t0.z <= 0.0 || t0.w <= 0.0
       || any(t1 != expected_fractions) || t2.z != 1.0
       || t2.x < 0.0 || t2.y < 0.0 || t2.w < 0.0
-      || !finite4(m4) || m4.z <= 0.0 || m4.w <= 0.0
-      || !finite(m4.z * m4.w) || !finite(determinant(i))
-      || abs(determinant(i) - m4.z) > 2e-4 * max(1.0, m4.z)
-      || source_mechanics[i * 8u + 5u].x != 0.0
-      || source_mechanics[i * 8u + 5u].y != 1.0
-      || source_mechanics[i * 8u + 6u].w != 1.0) { return false; }
+      || rep_vol.valid != 1u || !finite(rep_vol.j) || !finite(rep_vol.v0_m3)
+      || !finite(rep_vol.current_m3) || !finite(determinant(i))
+      || abs(determinant(i) - rep_vol.j) > 2e-4 * max(1.0, rep_vol.j)
+      || psm_src_mech_solid_flag(i) != 0.0
+      || psm_src_mech_status(i) != 1.0
+      || psm_src_mech_constitutive_status(i) != 1.0) { return false; }
   for (var r = 0u; r < 8u; r++) {
     if (!finite4(source_mechanics[i * 8u + r])) { return false; }
   }
@@ -324,16 +359,33 @@ export function createSchroederPhaseSlotMaterializer(device, {
     throw new RangeError('Phase-slot materialization exceeds resident device buffer or dispatch limits');
   }
   const owned = [];
-  const make = (label, bytes, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST) => {
+  const transientLeaseScope = createGpuResourceLeaseScope({ scopeId: 'schroeder-phase-slot-materializer' });
+  const transientLeases = new Map();
+  const make = (label, bytes, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST, isTransient = false) => {
     const b = tagWebGpuBufferDevice(device.createBuffer({ label: `ulg-phase-slot-${label}`, size: bytes, usage }), device);
-    owned.push(b); return b;
+    owned.push(b);
+    if (isTransient) {
+      transientLeases.set(b, transientLeaseScope.issue(b, {
+        label: `phase-slot-transient:${label}`,
+        producer: 'phase-slot-refinement'
+      }));
+    }
+    return b;
   };
   let ledgerStage = null;
   let destroyed = false;
   let encoded = false;
   const retired = new Set();
   const destroyBuffer = (buffer) => {
-    if (!retired.has(buffer)) { buffer.destroy(); retired.add(buffer); }
+    if (!retired.has(buffer)) {
+      const lease = transientLeases.get(buffer);
+      if (lease) {
+        transientLeaseScope.release(lease, { by: 'phase-slot-materializer', allowAlreadyReleased: true });
+        transientLeases.delete(buffer);
+      }
+      buffer.destroy();
+      retired.add(buffer);
+    }
   };
   const destroy = () => {
     if (destroyed) return;
@@ -341,17 +393,18 @@ export function createSchroederPhaseSlotMaterializer(device, {
     let firstError = null;
     for (const b of owned) { try { destroyBuffer(b); } catch (error) { firstError ??= error; } }
     if (firstError) throw firstError;
+    transientLeaseScope.assertDrained({ requireAllReleased: true });
     destroyed = true;
   };
   try {
     const stateBuffer = make('state', particleCount * 32);
     const thermoBuffer = make('thermo', particleCount * 48);
     const mechanicsBuffer = make('mechanics', particleCount * 128);
-    const preparationBuffer = make('preparation', rows * 128);
+    const preparationBuffer = make('preparation', rows * 128, undefined, true);
     const evidenceBuffer = make('evidence', 32);
-    const segmentBuffer = make('segments', segments.byteLength);
+    const segmentBuffer = make('segments', segments.byteLength, undefined, true);
     device.queue.writeBuffer(segmentBuffer, 0, segments);
-    const paramsBuffer = make('params', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    const paramsBuffer = make('params', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, true);
     const params = new ArrayBuffer(48);
     new Uint32Array(params).set([particleCount, capacity, first, spares, rows, segments.length / 12, admissionApproved === true ? 1 : 0, 0]);
     new Float32Array(params).set([...boxDimsM, 0], 8);

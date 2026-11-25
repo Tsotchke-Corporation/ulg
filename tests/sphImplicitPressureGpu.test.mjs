@@ -98,9 +98,10 @@ test('WGSL mirrors the packed Tait EOS and wall bands', () => {
   // Tait exponent and liquid-only admission matching P2G.
   assert.match(sphImplicitPressureWgsl, /if \(ratio < 0\.9999\) \{ return 0\.0; \}/);
   assert.match(sphImplicitPressureWgsl, /pow\(ratio, 6\.0\)/);
-  assert.match(sphImplicitPressureWgsl, /row6\.z > 0\.5 && row6\.z < 1\.5/);
-  assert.match(sphImplicitPressureWgsl, /row5\.x > 0\.5 && row5\.w > 0\.0/);
-  assert.match(sphImplicitPressureWgsl, /sph_thermo\[particle_index \* 3u\]\.w/);
+  assert.match(sphImplicitPressureWgsl, /ip_mech_eos_model_id\(particle_index\)/);
+  assert.match(sphImplicitPressureWgsl, /ip_mech_solid_flag\(particle_index\) > 0\.5 && ip_mech_effective_bulk_modulus_pa\(particle_index\) > 0\.0/);
+  assert.match(sphImplicitPressureWgsl, /ip_thermo_rest_density_kg_per_m3\(particle_index\)/);
+  assert.match(sphImplicitPressureWgsl, /represented_volume_from_mechanics\(particle_index\)/);
   // Every reduction kernel reaches the workgroup barrier from uniform control flow.
   for (const name of ['ip_cg_init', 'ip_cg_apply', 'ip_cg_update_xr', 'ip_particle_kv_max',
     'ip_reduce_scale', 'ip_reduce_rz', 'ip_reduce_alpha', 'ip_reduce_beta', 'ip_cg_update_p', 'ip_reduce_pscale']) {

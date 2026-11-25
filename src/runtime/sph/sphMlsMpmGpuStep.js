@@ -1,6 +1,23 @@
 import { splitSpareReservesEqual } from './schroederSplitSpareReserve.js';
 import { retainedSchroederPhaseSlotRefinementBuffers } from './schroederPhaseSlotRefinementGpu.js';
 import { validateLawAdapterSchedule } from './lawAdapterContract.js';
+import {
+  createLawDagEpochScheduler,
+  getCanonicalLawAdapterDescriptor
+} from './lawDagEpochScheduler.js';
+
+export { createLawDagEpochScheduler, getCanonicalLawAdapterDescriptor };
+
+export function createCanonicalMlsMpmLawDagEpochScheduler(options = {}) {
+  return createLawDagEpochScheduler({
+    epochId: options.epochId ?? 'mls-mpm-ss-epoch',
+    epochGeneration: options.epochGeneration ?? 1,
+    requireCanonicalSsAuthority: options.requireCanonicalSsAuthority ?? true,
+    requireExtendedMetadata: options.requireExtendedMetadata ?? true,
+    ...(options.stages ? { stages: options.stages } : {}),
+    ...(options.requiredStageOrder ? { requiredStageOrder: options.requiredStageOrder } : {})
+  });
+}
 
 const phaseSlotOwnershipRollbacks = new WeakMap();
 

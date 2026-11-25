@@ -35,6 +35,57 @@ import {
 import { packResponseFunctionsForGpu, responseFunctionGpuWgsl } from '../material/responseFunctionGpu.js';
 import { createCachedExplicitBindGroup } from '../webgpuComputeLayout.js';
 import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
+import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  generateRepresentedVolumeWgsl,
+  generateVec4LaneAccessorsWgsl
+} from '../../../ulg-gpu-abi/src/index.js';
+import { assertBindGroupMatchesLawDescriptor } from './lawAdapterContract.js';
+import { getCanonicalLawAdapterDescriptor } from './lawDagEpochScheduler.js';
+import { createGpuResourceLeaseScope } from './gpuResourceLease.js';
+
+export const SPH_IMPLICIT_PRESSURE_LAW_ADAPTER_DESCRIPTOR =
+  getCanonicalLawAdapterDescriptor('implicit-pressure-solve');
+export const SPH_IMPLICIT_PRESSURE_RESOURCE_BINDING_TABLE = Object.freeze({
+  'sph-particle-state': 1,
+  'sph-thermo-phase': 2,
+  'mls-mpm-mechanics': 3,
+  'mls-mpm-grid-velocity': 4,
+  'implicit-pressure-cg-scratch': 6
+});
+
+const SPH_IMPLICIT_PRESSURE_LANE_ACCESSORS_WGSL = [
+  generateVec4LaneAccessorsWgsl({
+    layout: SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+    layoutName: 'SPH_GPU_PARTICLE_STATE_ROW_LAYOUT',
+    bufferName: 'sph_state',
+    prefix: 'ip_state',
+    fields: ['massKg'],
+    includeWriters: false
+  }),
+  generateVec4LaneAccessorsWgsl({
+    layout: SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+    layoutName: 'SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT',
+    bufferName: 'sph_thermo',
+    prefix: 'ip_thermo',
+    fields: ['restDensityKgPerM3'],
+    includeWriters: false
+  }),
+  generateVec4LaneAccessorsWgsl({
+    layout: MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+    layoutName: 'MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT',
+    bufferName: 'mls_mechanics',
+    prefix: 'ip_mech',
+    fields: ['solidFlag', 'effectiveBulkModulusPa', 'soundSpeedMPerS', 'eosModelId'],
+    includeWriters: false
+  }),
+  generateRepresentedVolumeWgsl({
+    mechanicsLayout: MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+    bufferName: 'mls_mechanics'
+  })
+].join('\n\n');
 
 // The Eshkol-derived Tait stiffness as an A4 response function, packed once
 // into the resident GPU response table (responseFunctionGpu.js, rf_eval).
@@ -196,11 +247,18 @@ export async function runSphImplicitPressureEnvelopeWatchWebGpu(device, {
     Math.fround(dtS), Math.fround(1 / gridSpacingM), Math.fround(soundSpeedMPerS), Math.fround(Math.max(1, gamma - 1)),
     Math.fround(maxAcousticCfl), Math.fround(maxAdvectiveCfl), Math.fround(maxLinearizationError), 0
   ], 4);
+  const leaseScope = createGpuResourceLeaseScope({ scopeId: 'sph-implicit-pressure-envelope-watch' });
   const pBuf = device.createBuffer({ size: 48, usage: 0x40 | 0x08 });
   const vmData = nodeVelocityMassRows instanceof Float32Array ? nodeVelocityMassRows : new Float32Array(nodeVelocityMassRows);
   const vmBuf = device.createBuffer({ size: Math.max(16, vmData.byteLength), usage: 0x80 | 0x08 });
   const rcBuf = device.createBuffer({ size: 24, usage: 0x80 | 0x04 | 0x08 });
   const readBuf = device.createBuffer({ size: 24, usage: 0x01 | 0x08 });
+  const leases = [
+    leaseScope.issue(pBuf, { label: 'ip-ew-params', producer: 'implicit-pressure-envelope-watch', onRelease: (b) => b.destroy() }),
+    leaseScope.issue(vmBuf, { label: 'ip-ew-vel-mass', producer: 'implicit-pressure-envelope-watch', onRelease: (b) => b.destroy() }),
+    leaseScope.issue(rcBuf, { label: 'ip-ew-receipt', producer: 'implicit-pressure-envelope-watch', onRelease: (b) => b.destroy() }),
+    leaseScope.issue(readBuf, { label: 'ip-ew-readback', producer: 'implicit-pressure-envelope-watch', onRelease: (b) => b.destroy() })
+  ];
   device.queue.writeBuffer(pBuf, 0, paramsBytes);
   device.queue.writeBuffer(vmBuf, 0, vmData);
   device.queue.writeBuffer(rcBuf, 0, new Uint32Array(6));
@@ -234,7 +292,8 @@ export async function runSphImplicitPressureEnvelopeWatchWebGpu(device, {
       fallbackRequired: words[5] === 1
     });
   } finally {
-    for (const b of [pBuf, vmBuf, rcBuf, readBuf]) b.destroy();
+    for (const lease of leases) leaseScope.release(lease, { by: 'implicit-pressure-envelope-watch-finally' });
+    leaseScope.assertDrained({ requireAllReleased: true });
   }
 }
 // The operator's stiffness K is evaluated from the Eshkol-derived response
@@ -414,21 +473,22 @@ fn ip_grid_index(i: i32, j: i32, k: i32) -> u32 {
 
 ${responseFunctionGpuWgsl('rf_table')}
 
+${SPH_IMPLICIT_PRESSURE_LANE_ACCESSORS_WGSL}
+
 // K V theta of a particle on the implicit operator: Tait liquids only, the
 // same density, rest density, sound speed and cavitation floor as P2G's
 // packed_pressure; solids, gas and invalid volumes contribute nothing.
+// Reads canonical ABI lanes via generated vec4 accessors + paired RepresentedVolume.
 fn ip_particle_weight(particle_index: u32) -> f32 {
-  let mb = particle_index * 8u;
-  let row4 = mls_mechanics[mb + 4u];
-  let row5 = mls_mechanics[mb + 5u];
-  let row6 = mls_mechanics[mb + 6u];
-  let volume = select(0.0, row4.w * row4.z, row4.w > 0.0 && row4.z > 0.0);
+  let rep_vol = represented_volume_from_mechanics(particle_index);
+  let volume = select(0.0, rep_vol.current_m3, rep_vol.valid == 1u);
   if (!(volume > 0.0)) { return 0.0; }
-  if (row5.x > 0.5 && row5.w > 0.0) { return 0.0; }
-  if (!(row6.z > 0.5 && row6.z < 1.5)) { return 0.0; }
-  let c = row6.y;
-  let rho0 = sph_thermo[particle_index * 3u].w;
-  let mass = sph_state[particle_index * 2u].w;
+  if (ip_mech_solid_flag(particle_index) > 0.5 && ip_mech_effective_bulk_modulus_pa(particle_index) > 0.0) { return 0.0; }
+  let eos_model = ip_mech_eos_model_id(particle_index);
+  if (!(eos_model > 0.5 && eos_model < 1.5)) { return 0.0; }
+  let c = ip_mech_sound_speed_m_per_s(particle_index);
+  let rho0 = ip_thermo_rest_density_kg_per_m3(particle_index);
+  let mass = ip_state_mass_kg(particle_index);
   if (!(c > 0.0) || !(rho0 > 0.0) || !(mass > 0.0)) { return 0.0; }
   let rho = mass / volume;
   let ratio = rho / rho0;
@@ -1050,18 +1110,27 @@ function implicitPressurePipelines(device) {
   let cached = pipelineCache.get(keyDevice);
   if (cached) return cached;
   const module = keyDevice.createShaderModule({ label: 'ulg-sph-implicit-pressure', code: sphImplicitPressureWgsl });
+  const layoutEntries = [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+    { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+    ...[4, 5, 6, 7, 8, 9, 10, 11].map((binding) => ({
+      binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' }
+    })),
+    { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }
+  ];
+  // Enforce canonical Law Adapter Contract on declared physics bindings once per device.
+  const declaredBindingSet = new Set([0, ...Object.values(SPH_IMPLICIT_PRESSURE_RESOURCE_BINDING_TABLE)]);
+  assertBindGroupMatchesLawDescriptor(
+    SPH_IMPLICIT_PRESSURE_LAW_ADAPTER_DESCRIPTOR,
+    SPH_IMPLICIT_PRESSURE_RESOURCE_BINDING_TABLE,
+    layoutEntries.filter((e) => declaredBindingSet.has(e.binding)),
+    { uniformBindings: [0] }
+  );
   const layout = keyDevice.createBindGroupLayout({
     label: 'ulg-sph-implicit-pressure-layout',
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      ...[4, 5, 6, 7, 8, 9, 10, 11].map((binding) => ({
-        binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' }
-      })),
-      { binding: 12, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }
-    ]
+    entries: layoutEntries
   });
   const pipelineLayout = keyDevice.createPipelineLayout({ bindGroupLayouts: [layout] });
   const pipelines = Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint, keyDevice.createComputePipeline({

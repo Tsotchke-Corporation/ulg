@@ -162,6 +162,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     runtime: {
       reactionActivationPolicy:
         SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+      exactEnergyLedger: '1',
+      dynamicHierarchyLod: '1',
       wallModel: 'infinite-fixed-temperature-reservoir',
       cameraPositionNormalized: '0.80,0.44,1.60',
       cameraTargetNormalized: '0.50,0.34,0.50'
@@ -217,6 +219,8 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     runtime: {
       reactionActivationPolicy:
         SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+      exactEnergyLedger: '1',
+      dynamicHierarchyLod: '1',
       sceneLengthScale: '0.014',
       wallModel: 'adiabatic',
       ss: '1',
@@ -276,6 +280,7 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     runtime: {
       reactionActivationPolicy:
         SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+      dynamicHierarchyLod: '1',
       sdt: '0.001',
       cfl: '0.6',
       cflSafety: '0.4',
@@ -339,6 +344,7 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     runtime: {
       reactionActivationPolicy:
         SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
+      dynamicHierarchyLod: '1',
       sdt: '0.0002',
       cfl: '0.8',
       cflSafety: '0.2',

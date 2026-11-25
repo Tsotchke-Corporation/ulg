@@ -1304,6 +1304,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'blob',
   'sdt',
   'exactEnergyLedger',
+  'dynamicHierarchyLod',
   'thermalDormancyK',
   'reactionDormancy',
   'thermalPotential',
@@ -8001,6 +8002,12 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialScenarioRuntime.exactEnergyLedger
     ?? ''
   ) === '1';
+  const initialDynamicHierarchyLod = String(
+    initialHash.get('dynamicHierarchyLod')
+    ?? initialQuery.get('dynamicHierarchyLod')
+    ?? initialScenarioRuntime.dynamicHierarchyLod
+    ?? ''
+  ) === '1';
   const numericUrlOption = (key, { min = 0, max = 10 } = {}) => {
     const raw = initialHash.get(key) ?? initialQuery.get(key) ?? initialScenarioRuntime[key];
     // Absent params must stay null: Number(null) is 0, which silently
@@ -9589,6 +9596,7 @@ export async function mountSphPhaseDemoOverlay({
         : {}),
       ...(initialSimDtS != null ? { dt: initialSimDtS } : {}),
       ...(initialExactEnergyLedger ? { exactEnergyLedger: true } : {}),
+      ...(initialDynamicHierarchyLod ? { dynamicHierarchyLod: true } : {}),
       ...(initialThermalDormancyK != null ? { thermalDormancyK: initialThermalDormancyK } : {}),
       ...(initialReactionDormancy ? { reactionDormancy: true } : {}),
       thermalPotentialEnabled: initialThermalPotential,

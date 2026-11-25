@@ -11072,19 +11072,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       || baseMechanicsOptions.hierarchyConfig?.enableLevelChainMechanics === true
       || baseEpochOptions.enableLevelChainMechanics === true
     );
+    const dynamicLodRequested =
+      schedule.dynamicHierarchyLod === true
+      || baseMechanicsOptions.dynamicHierarchyLod === true;
     if (
-      chainModeActive
+      (chainModeActive || dynamicLodRequested)
       && !record.dynamicHierarchyLodController
       && schedule.dynamicHierarchyLod !== false
       && baseMechanicsOptions.dynamicHierarchyLod !== false
     ) {
-      const configuredCount = Math.max(2, chainConfigMaxLevel - chainConfigMinLevel + 1);
+      const configuredCount = chainModeActive
+        ? Math.max(2, chainConfigMaxLevel - chainConfigMinLevel + 1)
+        : Math.max(1, chainConfigMaxLevel - chainConfigMinLevel + 1);
       const requestedMinLevels = Number.isInteger(schedule.dynamicHierarchyLodMinLevels)
         ? schedule.dynamicHierarchyLodMinLevels
         : (Number.isInteger(baseMechanicsOptions.dynamicHierarchyLodMinLevels)
             ? baseMechanicsOptions.dynamicHierarchyLodMinLevels
             : configuredCount);
-      const minActiveLevelCount = Math.max(2, Math.min(configuredCount, requestedMinLevels));
+      const minActiveLevelCount = Math.max(chainModeActive ? 2 : 1, Math.min(configuredCount, requestedMinLevels));
       const maxActiveLevelCount = Math.min(16, Math.max(configuredCount + 1, 4));
       record.dynamicHierarchyLodController = createDynamicHierarchyLodController({
         initialActiveLevelCount: configuredCount,

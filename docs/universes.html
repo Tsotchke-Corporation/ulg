@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <link rel="icon" href="data:," />
+  <title>ULG Universes — 40-Order-of-Magnitude First-Principles WebGPU Cosmos</title>
+  <style>
+    :root {
+      --bg: #03060d;
+      --panel: rgba(7, 13, 25, 0.80);
+      --panel-strong: rgba(8, 15, 29, 0.94);
+      --border: rgba(112, 168, 255, 0.24);
+      --border-hi: rgba(96, 200, 255, 0.62);
+      --text: #e6f0ff;
+      --muted: #8ea5c7;
+      --accent: #38bdf8;
+      --accent-2: #a78bfa;
+      --gold: #fbbf24;
+      --green: #34d399;
+      --rose: #fb7185;
+      --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+
+    #uv-canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      cursor: grab;
+      touch-action: none;
+    }
+    #uv-canvas:active { cursor: grabbing; }
+
+    /* Subtle HUD reticle overlay canvas for crisp target callouts & selection brackets */
+    #uv-reticle-canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      z-index: 4;
+    }
+
+    /* Glass panels */
+    .uv-glass {
+      background: var(--panel);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid var(--border);
+      box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+    }
+
+    /* Top Bar */
+    .uv-topbar {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      z-index: 20;
+      pointer-events: none;
+    }
+    .uv-topbar > * { pointer-events: auto; }
+
+    .uv-brand-strip {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-width: calc(100vw - 340px);
+    }
+
+    .uv-brand-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 12px;
+      width: fit-content;
+    }
+
+    .uv-brand-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: linear-gradient(95deg, #e0f2fe, #38bdf8 55%, #c084fc);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      white-space: nowrap;
+    }
+
+    .uv-status-metrics {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .uv-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
+      flex-shrink: 0;
+    }
+    .uv-dot.paused { background: var(--gold); box-shadow: 0 0 8px var(--gold); }
+    .uv-dot.busy { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+    .uv-scale-rail {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      max-width: 100%;
+    }
+    .uv-scale-rail::-webkit-scrollbar { display: none; }
+
+    .uv-rung-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: rgba(15, 25, 45, 0.55);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      line-height: 1.15;
+      padding: 5px 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 1px;
+      white-space: nowrap;
+      transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+    }
+    .uv-rung-btn:hover {
+      background: rgba(30, 52, 88, 0.72);
+      color: var(--text);
+      border-color: rgba(112, 168, 255, 0.35);
+    }
+    .uv-rung-btn.active {
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(167, 139, 250, 0.22));
+      border-color: var(--border-hi);
+      color: #ffffff;
+      box-shadow: 0 0 14px rgba(56, 189, 248, 0.24);
+    }
+    .uv-rung-exp {
+      font-size: 9.5px;
+      opacity: 0.78;
+      color: var(--accent);
+    }
+    .uv-rung-btn.active .uv-rung-exp { opacity: 1; color: #bae6fd; }
+
+    /* Top-right compact button cluster */
+    .uv-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .uv-btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 7px 11px;
+      border-radius: 9px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 140ms ease;
+      white-space: nowrap;
+    }
+    .uv-btn:hover {
+      border-color: var(--border-hi);
+      background: rgba(18, 32, 58, 0.90);
+    }
+    .uv-btn.active {
+      border-color: var(--accent);
+      background: rgba(14, 116, 144, 0.38);
+      color: #e0f2fe;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.28);
+    }
+    .uv-btn.primary {
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.85), rgba(99, 102, 241, 0.82));
+      border-color: rgba(186, 230, 253, 0.65);
+      color: #ffffff;
+      box-shadow: 0 4px 18px rgba(14, 165, 233, 0.35);
+    }
+    .uv-btn.primary:hover {
+      filter: brightness(1.12);
+      transform: translateY(-1px);
+    }
+    .uv-btn.primary:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+      filter: none;
+    }
+    .uv-btn.subtle {
+      background: rgba(15, 23, 42, 0.72);
+      font-size: 11.5px;
+      padding: 6px 10px;
+    }
+    .uv-btn.icon-only {
+      padding: 7px 9px;
+      min-width: 32px;
+      justify-content: center;
+    }
+
+    /* Drawers (Config / Sim / Help) */
+    .uv-drawer {
+      position: fixed;
+      top: 56px;
+      right: 12px;
+      width: 318px;
+      max-width: calc(100vw - 24px);
+      max-height: calc(100vh - 82px);
+      overflow-y: auto;
+      padding: 12px 14px;
+      z-index: 30;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .uv-drawer.open { display: flex; }
+
+    .uv-drawer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+      padding-bottom: 7px;
+    }
+    .uv-drawer-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #bae6fd;
+    }
+
+    .uv-section-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .uv-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    .uv-row input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .uv-row input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .uv-row select, .uv-row input[type="text"] {
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 7px;
+      padding: 4px 7px;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .uv-seg-group {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .uv-seg-btn {
+      flex: 1;
+      min-width: 52px;
+      appearance: none;
+      border: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.65);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 5px 7px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all 120ms ease;
+    }
+    .uv-seg-btn:hover { color: var(--text); border-color: var(--border-hi); }
+    .uv-seg-btn.active {
+      background: rgba(56, 189, 248, 0.24);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+
+    /* Bottom-Left Target Analysis & Live Plot Card */
+    .uv-inspector {
+      position: fixed;
+      left: 12px;
+      bottom: 12px;
+      width: 364px;
+      max-width: calc(100vw - 24px);
+      z-index: 20;
+      padding: 12px 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform 180ms ease;
+    }
+    .uv-inspector.collapsed .uv-inspector-body { display: none; }
+
+    .uv-inspector-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .uv-target-kicker {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    .uv-target-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: #ffffff;
+      line-height: 1.2;
+    }
+    .uv-target-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    .uv-inspector-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .uv-spec-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .uv-spec-label {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+    }
+    #uv-spectrograph-canvas {
+      width: 100%;
+      height: 22px;
+      border-radius: 5px;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      background: #04070e;
+      display: block;
+    }
+
+    .uv-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 5px 8px;
+    }
+    .uv-stat-cell {
+      background: rgba(10, 18, 34, 0.68);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 7px;
+      padding: 5px 7px;
+    }
+    .uv-stat-k {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .uv-stat-v {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .uv-plot-box {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    #uv-plot-canvas {
+      width: 100%;
+      height: 86px;
+      border-radius: 7px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(4, 9, 18, 0.88);
+      display: block;
+    }
+
+    .uv-inspector-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .uv-inspector-actions .uv-btn.primary { flex: 1; justify-content: center; }
+
+    .uv-provenance-foot {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: rgba(148, 163, 184, 0.78);
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      border-top: 1px solid rgba(148, 163, 184, 0.12);
+      padding-top: 5px;
+    }
+
+    /* Bottom-Right Breadcrumb & Controls Hint */
+    .uv-bottom-right {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      z-index: 15;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+      pointer-events: none;
+    }
+    .uv-bottom-right > * { pointer-events: auto; }
+
+    .uv-breadcrumb {
+      padding: 6px 10px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--muted);
+      max-width: min(440px, calc(100vw - 410px));
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .uv-breadcrumb strong { color: #e0f2fe; font-weight: 600; }
+
+    .uv-hint-pill {
+      padding: 5px 10px;
+      font-size: 10.5px;
+      color: rgba(168, 189, 218, 0.85);
+      border-radius: 999px;
+    }
+
+    /* Hyperdrive Warp Transition Banner */
+    #uv-warp-overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 25;
+      opacity: 0;
+      transition: opacity 220ms ease;
+    }
+    #uv-warp-overlay.active { opacity: 1; }
+    .uv-warp-card {
+      padding: 14px 26px;
+      text-align: center;
+      border-color: rgba(56, 189, 248, 0.65);
+      background: rgba(4, 12, 28, 0.72);
+      box-shadow: 0 0 40px rgba(56, 189, 248, 0.35);
+    }
+    .uv-warp-kicker {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: #7dd3fc;
+    }
+    .uv-warp-title {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: #ffffff;
+      margin-top: 3px;
+    }
+    .uv-warp-sub {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #cbd5e1;
+      margin-top: 4px;
+    }
+
+    /* Help Menu & Modal */
+    .uv-help-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 8px 9px;
+      border-radius: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      background: rgba(15, 23, 42, 0.65);
+      color: var(--text);
+      text-decoration: none;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    .uv-help-item:hover {
+      border-color: var(--border-hi);
+      background: rgba(24, 42, 74, 0.85);
+    }
+    .uv-help-item-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: #f8fafc;
+    }
+    .uv-help-item-top small {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--accent);
+    }
+    .uv-help-item-desc {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .uv-triad-links {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .uv-triad-links a {
+      flex: 1;
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: #bae6fd;
+      text-decoration: none;
+      padding: 5px 6px;
+      border-radius: 7px;
+      border: 1px solid rgba(112, 168, 255, 0.25);
+      background: rgba(15, 23, 42, 0.72);
+    }
+    .uv-triad-links a:hover { border-color: var(--accent); color: #ffffff; }
+
+    /* Modal Backdrop */
+    #uv-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 14, 0.76);
+      backdrop-filter: blur(8px);
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #uv-modal-backdrop.open { display: flex; }
+    .uv-modal {
+      width: 620px;
+      max-width: 100%;
+      max-height: 86vh;
+      overflow-y: auto;
+      padding: 18px 20px;
+      background: var(--panel-strong);
+      border: 1px solid var(--border-hi);
+      border-radius: 14px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75);
+      user-select: text;
+    }
+    .uv-modal h2 {
+      margin: 0 0 4px 0;
+      font-size: 18px;
+      color: #ffffff;
+    }
+    .uv-modal-sub {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+    .uv-modal p, .uv-modal li {
+      font-size: 13px;
+      line-height: 1.55;
+      color: #cbd5e1;
+    }
+    .uv-modal code {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      background: rgba(30, 41, 59, 0.85);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: #7dd3fc;
+    }
+    .uv-eq-box {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      background: rgba(5, 11, 22, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 8px;
+      padding: 9px 11px;
+      color: #e0f2fe;
+      margin: 10px 0;
+      white-space: pre-wrap;
+    }
+
+    /* WebGPU Fallback */
+    #uv-webgpu-fallback {
+      position: fixed;
+      inset: 0;
+      background: rgba(3, 6, 13, 0.94);
+      z-index: 60;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #uv-webgpu-fallback.visible { display: flex; }
+    .uv-fallback-card {
+      max-width: 480px;
+      padding: 22px;
+      text-align: center;
+    }
+
+    @media (max-width: 820px) {
+      .uv-brand-strip { max-width: calc(100vw - 24px); }
+      .uv-topbar { flex-direction: column; align-items: stretch; gap: 6px; }
+      .uv-actions { justify-content: flex-end; }
+      .uv-bottom-right { display: none; }
+      .uv-inspector { width: calc(100vw - 24px); bottom: 10px; left: 12px; padding: 10px; }
+      .uv-drawer { top: 108px; }
+    }
+  </style>
+  <script type="module" crossorigin src="./assets/universes-DK-SPN52.js"></script>
+</head>
+<body>
+  <canvas id="uv-canvas"></canvas>
+  <canvas id="uv-reticle-canvas"></canvas>
+
+  <!-- Top Navigation & 40-OOM Scale Ladder -->
+  <header class="uv-topbar">
+    <div class="uv-brand-strip">
+      <div class="uv-brand-pill uv-glass">
+        <span class="uv-dot" id="uv-status-dot"></span>
+        <span class="uv-brand-title">ULG Universes</span>
+        <span class="uv-status-metrics">
+          <span id="uv-scale-badge" title="Current physical length scale span">10⁺²⁵ m</span>
+          <span>·</span>
+          <span id="uv-fps-badge" title="Live WebGPU render cadence and active compute steps">WebGPU</span>
+        </span>
+      </div>
+      <nav class="uv-scale-rail uv-glass" id="uv-scale-rail" aria-label="40-Order-of-Magnitude Scale Ladder"></nav>
+    </div>
+
+    <div class="uv-actions">
+      <button id="uv-autopilot-btn" class="uv-btn" type="button" title="Toggle hands-free Autopilot tour from the Cosmic Web (10²⁵ m) down to the Atomic Nucleus (10⁻¹⁵ m)">▶ Tour</button>
+      <button id="uv-sim-btn" class="uv-btn" type="button" title="Open Simulation controls: pause, time scale, Big Bang, reseed, and active-scale physics settings">🎛 Sim</button>
+      <button id="uv-config-btn" class="uv-btn" type="button" title="Open Visual &amp; Engine Config: quality, Schwarzschild lensing, orbit trails, Retro CRT, and PeerCompute mesh">⚙ Config</button>
+      <button id="uv-help-btn" class="uv-btn icon-only" type="button" title="Help, equations for this scale, other ULG labs, and GitHub links">?</button>
+    </div>
+  </header>
+
+  <!-- Collapsible Sim Controls Drawer -->
+  <aside id="uv-sim-drawer" class="uv-drawer uv-glass" aria-label="Simulation Controls">
+    <div class="uv-drawer-head">
+      <span class="uv-drawer-title">Simulation Control</span>
+      <button class="uv-btn subtle icon-only" data-close-drawer="uv-sim-drawer" type="button" title="Close Simulation drawer">✕</button>
+    </div>
+
+    <div class="uv-seg-group">
+      <button id="uv-pause-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Pause or resume live WebGPU physics integration">⏸ Pause</button>
+      <button id="uv-orbit-up-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Ascend one scale level upward toward the Cosmic Web">↑ Orbit Up</button>
+    </div>
+
+    <div class="uv-row" title="Adjust real-time physical integration speed multiplier">
+      <span>Time Scale</span>
+      <input id="uv-timescale-slider" type="range" min="0.1" max="3.0" step="0.05" value="1.0" />
+      <span id="uv-timescale-val" style="font-family:var(--mono);font-size:11px;min-width:34px;text-align:right;">1.0×</span>
+    </div>
+
+    <div class="uv-seg-group">
+      <button id="uv-bigbang-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Reset the universe to early cosmology (a = 0.05, z = 19) and re-run GPU Zel'dovich evolution">✦ Big Bang</button>
+      <button id="uv-reseed-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Generate a brand-new seeded cosmos across all 8 scales">🎲 Reseed</button>
+    </div>
+
+    <div class="uv-section-label">Active Scale Physics</div>
+    <div id="uv-scale-controls" style="display:flex;flex-direction:column;gap:8px;"></div>
+  </aside>
+
+  <!-- Collapsible Visual & Engine Config Drawer -->
+  <aside id="uv-config-drawer" class="uv-drawer uv-glass" aria-label="Configuration">
+    <div class="uv-drawer-head">
+      <span class="uv-drawer-title">Engine &amp; Visual Config</span>
+      <button class="uv-btn subtle icon-only" data-close-drawer="uv-config-drawer" type="button" title="Close Config drawer">✕</button>
+    </div>
+
+    <div class="uv-section-label">GPU Particle / Sample Quality</div>
+    <div class="uv-seg-group" id="uv-quality-group" title="Adjust live WebGPU particle counts across Cosmic Web, Galaxy Scale-Atlas, Hydro Plasma, MD, and Quantum Orbital Cloud">
+      <button class="uv-seg-btn" data-quality="low" type="button">LOW</button>
+      <button class="uv-seg-btn active" data-quality="med" type="button">MED</button>
+      <button class="uv-seg-btn" data-quality="high" type="button">HIGH</button>
+      <button class="uv-seg-btn" data-quality="ultra" type="button">ULTRA</button>
+    </div>
+
+    <div class="uv-section-label">Optics &amp; Overlays</div>
+    <label class="uv-row" title="Toggle real-time WGSL Schwarzschild Einstein-ring gravitational lensing around black holes">
+      <span>Schwarzschild Lensing</span>
+      <input id="uv-lensing-toggle" type="checkbox" checked />
+    </label>
+    <label class="uv-row" title="Toggle live osculating Keplerian orbit paths and simulation box guides">
+      <span>Orbit Paths &amp; Guides</span>
+      <input id="uv-orbits-toggle" type="checkbox" checked />
+    </label>
+    <label class="uv-row" title="Toggle 3D hyperdrive travel trajectory line">
+      <span>Travel Path</span>
+      <input id="uv-travel-toggle" type="checkbox" checked />
+    </label>
+    <label class="uv-row" title="Slowly orbit camera automatically (OFF by default for steady physics inspection)">
+      <span>Camera Auto-Spin</span>
+      <input id="uv-autospin-toggle" type="checkbox" />
+    </label>
+
+    <div class="uv-section-label">Retro Display Mode</div>
+    <label class="uv-row" title="Enable optional Retro CRT scanlines, phosphor vignette, and pixelation post-pass">
+      <span>Retro CRT &amp; Scanlines</span>
+      <input id="uv-crt-toggle" type="checkbox" />
+    </label>
+    <div class="uv-row" title="Pixel quantization factor when Retro CRT mode is active">
+      <span>Pixelation</span>
+      <input id="uv-pixel-slider" type="range" min="1" max="6" step="1" value="3" />
+      <span id="uv-pixel-val" style="font-family:var(--mono);font-size:11px;min-width:24px;text-align:right;">3×</span>
+    </div>
+
+    <div class="uv-section-label">PeerCompute Distributed Mesh</div>
+    <div class="uv-row">
+      <input id="uv-peer-url" type="text" placeholder="ws://127.0.0.1:8787" style="flex:1;min-width:0;" title="Optional PeerCompute WebSocket relay URL for 2-of-2 distributed material derivation quorum" />
+    </div>
+    <div class="uv-row">
+      <select id="uv-peer-role" title="PeerCompute mesh node role">
+        <option value="requester">requester</option>
+        <option value="responder">responder</option>
+        <option value="observer">observer</option>
+      </select>
+      <button id="uv-peer-connect-btn" class="uv-btn subtle" type="button" title="Connect or disconnect PeerCompute distributed derivation mesh">Join Mesh</button>
+    </div>
+    <div id="uv-peer-status" style="font-family:var(--mono);font-size:10.5px;color:var(--muted);">Local GPU · 0 remote peers</div>
+  </aside>
+
+  <!-- Collapsible Help & Demos Drawer -->
+  <aside id="uv-help-drawer" class="uv-drawer uv-glass" aria-label="Help and ULG Links">
+    <div class="uv-drawer-head">
+      <span class="uv-drawer-title">ULG Help &amp; Labs</span>
+      <button class="uv-btn subtle icon-only" data-close-drawer="uv-help-drawer" type="button" title="Close Help menu">✕</button>
+    </div>
+
+    <button id="uv-about-scale-btn" class="uv-help-item" type="button" title="Read the governing equations, active WebGPU shader, and physical provenance of the current scale">
+      <span class="uv-help-item-top"><span>ⓘ About Current Scale</span><small id="uv-help-scale-tag">L0</small></span>
+      <span class="uv-help-item-desc">Governing physics, live WebGPU kernels, and accuracy tier for this regime.</span>
+    </button>
+
+    <button id="uv-about-ulg-btn" class="uv-help-item" type="button" title="Read how ULG unifies 40 orders of magnitude from nuclei to cosmic web on WebGPU">
+      <span class="uv-help-item-top"><span>✦ About ULG Universes</span><small>40 OOM</small></span>
+      <span class="uv-help-item-desc">Zero scripted animations: every scale runs real ULG WebGPU compute shaders.</span>
+    </button>
+
+    <div class="uv-section-label">Other ULG Flagship Apps</div>
+    <a class="uv-help-item" href="./index.html" title="Open ULG Studio Continuum — interactive 3D WebGPU MLS-MPM fluids, phase transitions, refraction &amp; reactions">
+      <span class="uv-help-item-top"><span>Studio Continuum ↗</span><small>10⁻³ → 10⁺² m</small></span>
+      <span class="uv-help-item-desc">3D WebGPU MLS-MPM fluid, phase change, optics &amp; reactive continuum studio.</span>
+    </a>
+    <a class="uv-help-item" href="./elements-lab.html" title="Open Material Physics Lab — 24 live WebGPU simulations across all Z = 1..118 elements, compounds &amp; polytope atlases">
+      <span class="uv-help-item-top"><span>Material Physics Lab ↗</span><small>Z = 1..118</small></span>
+      <span class="uv-help-item-desc">Full Periodic Table nuclear, Dirac–KS, FDTD optics, reactive MD &amp; Polytope Atlas lab.</span>
+    </a>
+
+    <div class="uv-section-label">Source Code &amp; Triad</div>
+    <a class="uv-help-item" href="https://github.com/Tsotchke-Corporation/ulg" target="_blank" rel="noopener noreferrer" title="Open the Universal Law Graph repository on GitHub">
+      <span class="uv-help-item-top"><span>↗ GitHub — ULG Repository</span><small>Tsotchke-Corp</small></span>
+      <span class="uv-help-item-desc">github.com/Tsotchke-Corporation/ulg</span>
+    </a>
+    <div class="uv-triad-links">
+      <a href="https://github.com/MetaverseJS/peercompute" target="_blank" rel="noopener noreferrer" title="PeerCompute distributed WebGPU scheduling &amp; peer fabric">PeerCompute ↗</a>
+      <a href="https://github.com/tsotchke/eshkol" target="_blank" rel="noopener noreferrer" title="Eshkol mathematical &amp; higher-order AD closure compiler">Eshkol ↗</a>
+      <a href="https://github.com/tsotchke/moonlab" target="_blank" rel="noopener noreferrer" title="MoonLab quantum &amp; many-body response engine">MoonLab ↗</a>
+    </div>
+  </aside>
+
+  <!-- Bottom-Left Target Analysis & Live 2D GPU Scientific Plot Card -->
+  <section id="uv-inspector" class="uv-inspector uv-glass" aria-label="Target Analysis">
+    <div class="uv-inspector-head">
+      <div style="min-width:0;">
+        <div class="uv-target-kicker" id="uv-target-kicker">L0 · COSMIC WEB · 10⁺²⁵ m</div>
+        <div class="uv-target-name" id="uv-target-name">Initializing WebGPU Cosmos…</div>
+        <div class="uv-target-sub" id="uv-target-sub">3D-FFT FLRW TreePM · 200 Mpc/h</div>
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0;">
+        <button id="uv-info-quick-btn" class="uv-btn subtle icon-only" type="button" title="About the physics and WebGPU kernels at this scale">ⓘ</button>
+        <button id="uv-collapse-btn" class="uv-btn subtle icon-only" type="button" title="Collapse or expand the Target Analysis panel">−</button>
+      </div>
+    </div>
+
+    <div class="uv-inspector-body">
+      <div class="uv-spec-wrap">
+        <div class="uv-spec-label">
+          <span id="uv-spec-title">EMISSION SPECTROGRAPH</span>
+          <span id="uv-comp-text">H 74% · He 25% · Met 1%</span>
+        </div>
+        <canvas id="uv-spectrograph-canvas" width="336" height="22"></canvas>
+      </div>
+
+      <div class="uv-stats-grid" id="uv-stats-grid">
+        <div class="uv-stat-cell"><div class="uv-stat-k">Scale Factor</div><div class="uv-stat-v">—</div></div>
+        <div class="uv-stat-cell"><div class="uv-stat-k">Redshift</div><div class="uv-stat-v">—</div></div>
+        <div class="uv-stat-cell"><div class="uv-stat-k">Density σ</div><div class="uv-stat-v">—</div></div>
+        <div class="uv-stat-cell"><div class="uv-stat-k">GPU Submits</div><div class="uv-stat-v">—</div></div>
+      </div>
+
+      <div class="uv-plot-box">
+        <div class="uv-spec-label">
+          <span id="uv-plot-title">GPU MATTER POWER SPECTRUM P(k)</span>
+          <span id="uv-plot-meta">16 k-bins</span>
+        </div>
+        <canvas id="uv-plot-canvas" width="336" height="86"></canvas>
+      </div>
+
+      <div class="uv-inspector-actions">
+        <button id="uv-dive-btn" class="uv-btn primary" type="button" title="Initiate Hyperdrive dive into the selected target and activate the next WebGPU physics engine">⚡ INITIATE HYPERDRIVE</button>
+        <button id="uv-return-btn" class="uv-btn subtle" type="button" title="Return to the parent cosmic scale above">↑ Orbit</button>
+      </div>
+
+      <div class="uv-provenance-foot">
+        <span id="uv-engine-tag">supergalactic-flrw-treepm.v1</span>
+        <span title="G7 scientific database comparisons are offline and advisory; runtime outputs are declared unvalidated">sciVal: false</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bottom-Right Breadcrumb & Controls Hint -->
+  <div class="uv-bottom-right">
+    <div class="uv-breadcrumb uv-glass" id="uv-breadcrumb"><strong>Cosmic Web</strong></div>
+    <div class="uv-hint-pill uv-glass">Drag: Orbit · Wheel: Zoom · Click: Pick Target · Double-Click: Dive</div>
+  </div>
+
+  <!-- Hyperdrive Transition Overlay -->
+  <div id="uv-warp-overlay" aria-hidden="true">
+    <div class="uv-warp-card uv-glass">
+      <div class="uv-warp-kicker" id="uv-warp-kicker">HYPERDRIVE ENGAGED</div>
+      <div class="uv-warp-title" id="uv-warp-title">APPROACHING GALAXY</div>
+      <div class="uv-warp-sub" id="uv-warp-sub">10⁺²⁵ m → 10⁺²¹ m</div>
+    </div>
+  </div>
+
+  <!-- About / Scale Documentation Modal -->
+  <div id="uv-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="uv-modal-title">
+    <div class="uv-modal">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+        <div>
+          <h2 id="uv-modal-title">About ULG Universes</h2>
+          <div class="uv-modal-sub" id="uv-modal-sub">Universal Law Graph · 40 Orders of Magnitude</div>
+        </div>
+        <button id="uv-modal-close" class="uv-btn subtle icon-only" type="button" title="Close modal">✕</button>
+      </div>
+      <div id="uv-modal-content"></div>
+    </div>
+  </div>
+
+  <!-- WebGPU Required Fallback -->
+  <div id="uv-webgpu-fallback">
+    <div class="uv-fallback-card uv-glass">
+      <h2 id="uv-fallback-title" style="margin-top:0;">WebGPU Required</h2>
+      <p id="uv-fallback-msg" style="color:var(--muted);line-height:1.5;font-size:13px;">
+        ULG Universes runs real first-principles physics kernels directly on your GPU via WebGPU (zero CPU fallback solvers).
+        Please open this page in a WebGPU-capable browser such as Chrome, Edge, or Safari with WebGPU enabled.
+      </p>
+      <a class="uv-btn primary" href="./index.html" style="text-decoration:none;margin-top:8px;">Return to ULG Studio</a>
+    </div>
+  </div>
+
+</body>
+</html>

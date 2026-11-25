@@ -432,9 +432,11 @@ fn ip_particle_weight(particle_index: u32) -> f32 {
   if (!(c > 0.0) || !(rho0 > 0.0) || !(mass > 0.0)) { return 0.0; }
   let rho = mass / volume;
   let ratio = rho / rho0;
-  let stiffness = rho0 * c * c / 7.0;
-  // On the cavitation floor dp/drho = 0.
-  if (stiffness * (pow(ratio, 7.0) - 1.0) <= -0.05 * stiffness) { return 0.0; }
+  // Physical cavitation floor (P_gauge >= 0): expanded/cavitated liquid has
+  // dp/drho = 0 so implicit pressure never applies artificial bulk tensile
+  // pull. Rest-density and compressed liquid (ratio >= 1 - eps) retains full
+  // bulk modulus K to project compressive velocity fields divergence-free.
+  if (ratio < 0.9999) { return 0.0; }
   // K = rho0 c^2 K_hat(rho / rho0): the Eshkol-derived response inside its
   // fitted domain (liquid J is clamped to [0.95, 1.05]); the closed form
   // rho c^2 (rho / rho0)^6 outside it or when the table is off.

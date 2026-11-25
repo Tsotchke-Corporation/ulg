@@ -52,16 +52,15 @@ fn tait_pressure(j: f32) -> f32 {
   let c = params.eos.x;
   let ratio = 1.0 / max(j, 1.0e-6);
   let stiffness = rho0 * c * c / 7.0;
-  return max(stiffness * (pow(ratio, 7.0) - 1.0), -0.05 * stiffness);
+  return max(stiffness * (pow(ratio, 7.0) - 1.0), 0.0);
 }
 fn tait_stiffness(j: f32) -> f32 {
   // K = rho dp/drho = rho c^2 (rho / rho0)^6 (the Eshkol-derived form). Zero
-  // on the tension clamp, where the EOS is flat.
+  // on the physical cavitation floor (ratio < 1 - eps), where the EOS is flat.
   let rho0 = params.scale.w;
   let c = params.eos.x;
   let ratio = 1.0 / max(j, 1.0e-6);
-  let stiffness = rho0 * c * c / 7.0;
-  if (stiffness * (pow(ratio, 7.0) - 1.0) <= -0.05 * stiffness) { return 0.0; }
+  if (ratio < 0.9999) { return 0.0; }
   return rho0 * ratio * c * c * pow(ratio, 6.0);
 }
 fn weights(gx: vec3<f32>) -> array<vec3<f32>, 3> {

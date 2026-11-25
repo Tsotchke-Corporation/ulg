@@ -94,9 +94,10 @@ test('the solver binds the Eshkol stiffness as an A4 GPU response table', async 
 });
 
 test('WGSL mirrors the packed Tait EOS and wall bands', () => {
-  // Same cavitation floor, Tait exponent and liquid-only admission as P2G.
-  assert.match(sphImplicitPressureWgsl, /-0\.05 \* stiffness/);
-  assert.match(sphImplicitPressureWgsl, /pow\(ratio, 7\.0\)/);
+  // Physical cavitation floor (P_gauge >= 0 -> dp/drho = 0 when ratio < 0.9999),
+  // Tait exponent and liquid-only admission matching P2G.
+  assert.match(sphImplicitPressureWgsl, /if \(ratio < 0\.9999\) \{ return 0\.0; \}/);
+  assert.match(sphImplicitPressureWgsl, /pow\(ratio, 6\.0\)/);
   assert.match(sphImplicitPressureWgsl, /row6\.z > 0\.5 && row6\.z < 1\.5/);
   assert.match(sphImplicitPressureWgsl, /row5\.x > 0\.5 && row5\.w > 0\.0/);
   assert.match(sphImplicitPressureWgsl, /sph_thermo\[particle_index \* 3u\]\.w/);

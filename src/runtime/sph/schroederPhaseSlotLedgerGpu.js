@@ -75,12 +75,12 @@ fn signed_quotient(value: ExactMass, divisor: u32) -> ExactMassResult {
   if (el_negative(value)) { q = el_negate(q); }
   return ExactMassResult(q, magnitude.error);
 }
-fn projection(m: ExactMass, u: ExactMass, material: f32) -> vec4<f32> {
+fn projection(m: ExactMass, u: ExactMass, material: f32, phase: f32) -> vec4<f32> {
   let mb = em_project_f32_bits(m); let ub = el_project_f32_bits(u);
   let mass = bitcast<f32>(mb.bits); let energy = bitcast<f32>(ub.bits);
   if ((mb.error | ub.error) != 0u || !finite(mass) || mass <= 0.0 || !finite(energy)) { return vec4<f32>(0.0); }
   let specific = energy / mass;
-  let temperature = gas_temperature(material, specific);
+  let temperature = phase_temperature(material, specific, phase);
   if (!finite(specific) || !finite(temperature) || temperature <= 0.0) { return vec4<f32>(0.0); }
   return vec4<f32>(mass, specific, temperature, 1.0);
 }
@@ -99,7 +99,8 @@ fn prepare_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
   // Disable the physical writer until the whole group passes. Other groups
   // never inspect this decision in this pass; merge members wait for the next.
   prepared[row * 8u].x = 0.0;
-  let i = u32(p.y); let material = source_thermo[i * 3u].x;
+  let i = u32(p.y); let t0 = source_thermo[i * 3u]; let material = t0.x; let phase = t0.y;
+  let source_lane = i / params.lineage_capacity;
   if (field(row, 8u) == 5.0) {
     let count = u32(p.w) + 1u; let rank = u32(p.z);
     for (var n = 1u; n < count; n++) {
@@ -123,13 +124,13 @@ fn prepare_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
       if ((mm.error | uu.error | ss.error) != 0u) { reject_ledger(); return; }
       rem_m = mm.value; rem_u = uu.value; rem_s = ss.value;
     }
-    let parent_view = projection(rem_m, rem_u, material);
-    let child_view = projection(child_m, child_u.value, material);
+    let parent_view = projection(rem_m, rem_u, material, phase);
+    let child_view = projection(child_m, child_u.value, material, phase);
     if (parent_view.w != 1.0 || child_view.w != 1.0) { reject_ledger(); return; }
     projections[row * 2u] = parent_view; projections[row * 2u + 1u] = child_view;
     store_row(i, rem_m, rem_u, rem_s);
     for (var n = 1u; n < count; n++) {
-      store_row(2u * params.lineage_capacity + spare_lineages[rank + n - 1u], child_m, child_u.value, child_s.value);
+      store_row(source_lane * params.lineage_capacity + spare_lineages[rank + n - 1u], child_m, child_u.value, child_s.value);
     }
   } else if (field(row, 8u) == 6.0) {
     let group = field(row, 20u);
@@ -146,7 +147,7 @@ fn prepare_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
     let heat = el_from_f32_bits(bitcast<u32>(prepared[row * 8u + 7u].x));
     let uu = el_add(energy, heat.value); let ss = el_add(source, heat.value);
     if ((heat.error | uu.error | ss.error) != 0u) { reject_ledger(); return; }
-    let view = projection(mass, uu.value, material);
+    let view = projection(mass, uu.value, material, phase);
     if (view.w != 1.0) { reject_ledger(); return; }
     projections[row * 2u] = view;
     for (var r = 0u; r < params.assignment_count; r++) {
@@ -186,10 +187,12 @@ fn project_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
   if (row >= params.assignment_count) { return; }
   let p = prepared[row * 8u];
   if (p.x != 1.0) { return; }
-  project(u32(p.y), projections[row * 2u]);
+  let leader = u32(p.y);
+  let source_lane = leader / params.lineage_capacity;
+  project(leader, projections[row * 2u]);
   if (assignments[row * 32u + 8u] == 5.0) {
     for (var n = 0u; n < u32(p.w); n++) {
-      project(2u * params.lineage_capacity + spare_lineages[u32(p.z) + n], projections[row * 2u + 1u]);
+      project(source_lane * params.lineage_capacity + spare_lineages[u32(p.z) + n], projections[row * 2u + 1u]);
     }
   }
 }
@@ -223,13 +226,13 @@ export function createSchroederPhaseSlotLedgerStage({ device, particleCount, lin
     device.queue.writeBuffer(uniform, 0, new Uint32Array([particleCount, lineageCapacity,
       assignmentRowCount, massRead.byteOffset / 4, segmentCount, 0, 0, 0]));
     const preparePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-phase-slot-ledger-prepare.v2', label: 'ulg-phase-slot-ledger-prepare',
+      cacheKey: 'ulg-phase-slot-ledger-prepare.v3', label: 'ulg-phase-slot-ledger-prepare',
       code: schroederPhaseSlotLedgerPrepareWgsl, entryPoint: 'prepare_ledger',
       bindings: ['read-only-storage', 'read-only-storage', 'storage', 'read-only-storage', 'storage',
         'read-only-storage', 'storage', 'read-only-storage', 'read-only-storage', 'storage', 'uniform', 'storage']
         .map((type, binding) => computeBufferBinding(binding, type)) });
     const projectPipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-phase-slot-ledger-project.v1', label: 'ulg-phase-slot-ledger-project',
+      cacheKey: 'ulg-phase-slot-ledger-project.v2', label: 'ulg-phase-slot-ledger-project',
       code: schroederPhaseSlotLedgerProjectWgsl, entryPoint: 'project_ledger',
       bindings: ['read-only-storage', 'read-only-storage', 'read-only-storage', 'read-only-storage',
         'storage', 'storage', 'storage', 'uniform'].map((type, binding) => computeBufferBinding(binding, type)) });

@@ -3426,10 +3426,10 @@ test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindin
   // pressure comes from the EOS via tracked J only.
   assert.doesNotMatch(mlsMpmP2gGridProjectionWgsl, /max\(row7\.x, 0\.0\)/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /return max\(0\.0, sound_speed_m_per_s \* sound_speed_m_per_s/);
-  // Cavitation clamp: condensed tension is floored at a small fraction of the
-  // Tait stiffness instead of the unbounded signed law (tensile pairing fix).
+  // Physical cavitation floor: condensed tension is floored at zero gauge
+  // pressure instead of artificial bulk tensile glue ("gnocchi" pairing fix).
   assert.match(mlsMpmP2gGridProjectionWgsl, /pow\(ratio, 7\.0\) - 1\.0\);/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /return max\(pressure, -0\.05 \* stiffness\);/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /return max\(pressure, 0\.0\);/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn scatter_product_events/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn finalize_grid/);
@@ -3492,7 +3492,7 @@ test('CPU MLS-MPM P2G grid projection conserves mass and linear momentum without
   assert.equal(projection.fullPhysicsValidation, false);
 });
 
-test('CPU MLS-MPM P2G keeps cavitation-clamped condensed tensile pressure', () => {
+test('CPU MLS-MPM P2G enforces zero-gauge physical cavitation floor on expanded liquid', () => {
   const { sphParticleState, mlsMpmParticleState } = manualBuffers({
     velocity: [0, 0, 0],
     massKg: 4,
@@ -3513,28 +3513,17 @@ test('CPU MLS-MPM P2G keeps cavitation-clamped condensed tensile pressure', () =
   const summary = summarizeGrid(projection.gridNodes);
   const gridSpec = createMlsMpmGridSpec({ gridSpacingM: 1, boxDimsM: [2, 2, 2] });
   const centerOffset = nodeOffset(gridSpec, 1, 1, 1);
-  const centerWeight = 0.6875 ** 3;
-  // Signed tension survives below rest density but is floored at the
-  // cavitation-scale fraction of the Tait stiffness (-0.05 * B): a liquid
-  // cavitates rather than sustaining bulk-scale tension, and the unbounded
-  // branch drove the MLS-MPM tensile pairing instability.
-  const taitStiffnessPa = 4 * 10 * 10 / 7;
-  const expectedPressurePa = Math.max(
-    taitStiffnessPa * ((0.5 ** 7) - 1),
-    -0.05 * taitStiffnessPa
-  );
-  const expectedStressScale = -0.1 * 2 * 4;
-  const expectedAffineDiagonal = expectedStressScale * -expectedPressurePa;
-  const expectedNodeMomentum = centerWeight * expectedAffineDiagonal * -0.25;
 
+  // Expanded condensed fluid (rho < rho0) cavitates at P_gauge = 0 (zero
+  // artificial bulk tensile pull), leaving rest-velocity momentum at zero.
   nearlyEqual(summary.mass, 4, 1e-5);
   nearlyEqual(summary.momentum[0], 0, 1e-5);
   nearlyEqual(summary.momentum[1], 0, 1e-5);
   nearlyEqual(summary.momentum[2], 0, 1e-5);
-  assert.ok(maxNodeMomentumAbs(projection.gridNodes) > 0);
-  nearlyEqual(projection.gridNodes[centerOffset + 1], expectedNodeMomentum, 1e-5);
-  nearlyEqual(projection.gridNodes[centerOffset + 2], expectedNodeMomentum, 1e-5);
-  nearlyEqual(projection.gridNodes[centerOffset + 3], expectedNodeMomentum, 1e-5);
+  assert.equal(maxNodeMomentumAbs(projection.gridNodes), 0);
+  nearlyEqual(projection.gridNodes[centerOffset + 1], 0, 1e-5);
+  nearlyEqual(projection.gridNodes[centerOffset + 2], 0, 1e-5);
+  nearlyEqual(projection.gridNodes[centerOffset + 3], 0, 1e-5);
 });
 
 test('WebGPU MLS-MPM P2G binds a full product-event row for zero-event runs', async () => {

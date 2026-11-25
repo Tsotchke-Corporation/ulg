@@ -11162,6 +11162,7 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   device,
   levelAssignment,
   physicalGasGrouping = false,
+  physicalLiquidGrouping = false,
   sphParticleState = null,
   sphParticleUpload = null,
   baseGridSpacingM = levelAssignment?.baseGridSpacingM ?? DEFAULT_BASE_GRID_SPACING_M,
@@ -11196,7 +11197,14 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
     stateFamilyId
   });
   plan.physicalGasGrouping = physicalGasGrouping === true;
-  if (plan.physicalGasGrouping) plan.aggregateIdentityKeyMode = 'gas-material-source-level-chart-cell';
+  plan.physicalLiquidGrouping = physicalLiquidGrouping === true;
+  if (plan.physicalGasGrouping && plan.physicalLiquidGrouping) {
+    plan.aggregateIdentityKeyMode = 'fluid-material-phase-source-level-chart-cell';
+  } else if (plan.physicalGasGrouping) {
+    plan.aggregateIdentityKeyMode = 'gas-material-source-level-chart-cell';
+  } else if (plan.physicalLiquidGrouping) {
+    plan.aggregateIdentityKeyMode = 'liquid-material-source-level-chart-cell';
+  }
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedAssignmentBuffer = levelAssignment?.assignmentBuffer || null;
   const assignmentRows = levelAssignment?.assignments instanceof Float32Array
@@ -11252,7 +11260,7 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
   });
   const paramsArray = createSchroederPhaseVolumeTargetAggregateParamsArray({
     ...plan,
-    flags: plan.physicalGasGrouping ? 1 : 0,
+    flags: (plan.physicalGasGrouping ? 1 : 0) | (plan.physicalLiquidGrouping ? 2 : 0),
     stateVec4Stride: stateProvided ? SPH_GPU_PARTICLE_STATE_FLOATS / 4 : 0,
     thermoVec4Stride: thermoProvided ? SPH_GPU_PARTICLE_THERMO_FLOATS / 4 : 0
   });
@@ -11284,7 +11292,7 @@ export async function runSchroederPhaseVolumeTargetAggregateWebGpu({
       computeBufferBinding(5, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-phase-volume-target-aggregate.v4',
+      cacheKey: 'ulg-schroeder-phase-volume-target-aggregate.v5',
       label: 'ulg-schroeder-phase-volume-target-aggregate',
       code: schroederPhaseVolumeTargetAggregateWgsl,
       entryPoint: 'main',
@@ -13189,6 +13197,7 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
   levelAssignment,
   hierarchyAggregateNode,
   interfaceRefinementFieldView = null,
+  physicalLiquidGrouping = false,
   sphParticleState = null,
   sphParticleUpload = null,
   baseGridSpacingM = levelAssignment?.baseGridSpacingM ?? DEFAULT_BASE_GRID_SPACING_M,
@@ -13234,9 +13243,13 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
       throw new TypeError('Interface refinement requires the current admitted mechanics field and source family');
     }
   }
-  plan.flags = interfaceRefinementFieldView ? 1 : 0;
+  plan.physicalLiquidGrouping = physicalLiquidGrouping === true && Boolean(interfaceRefinementFieldView);
+  plan.flags = (interfaceRefinementFieldView ? 1 : 0) | (plan.physicalLiquidGrouping ? 2 : 0);
   plan.interfaceRefinementPolicy = interfaceRefinementFieldView
-    ? 'current-physical-support-condensed-neighbor-bounded-octet' : 'disabled';
+    ? (plan.physicalLiquidGrouping
+      ? 'current-physical-support-fluid-interface-bounded-octet'
+      : 'current-physical-support-condensed-neighbor-bounded-octet')
+    : 'disabled';
   const noFullReadback = readbackMode === SCHROEDER_NO_FULL_READBACK_MODE;
   const borrowedAssignmentBuffer = levelAssignment?.assignmentBuffer || null;
   const assignmentRows = levelAssignment?.assignments instanceof Float32Array
@@ -13306,7 +13319,7 @@ export async function runSchroederPhaseVolumeMigrationWebGpu({
       computeBufferBinding(5, 'read-only-storage')
     ];
     const { pipeline, bindGroupLayout, cacheStatus } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-schroeder-phase-volume-migration.v4',
+      cacheKey: 'ulg-schroeder-phase-volume-migration.v5',
       label: 'ulg-schroeder-phase-volume-migration',
       code: schroederPhaseVolumeMigrationWgsl,
       entryPoint: 'main',
@@ -17799,6 +17812,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   particleStorageMaterializationAdmission = null,
   farAggregateLawConsumerAdmission = null,
   enablePhaseSlotRefinement = false,
+  enableLiquidPhaseSlotRefinement = false,
   farAggregateGasStateDeltaAdmission = null,
   farAggregateForceApplicationAdmission = null,
   selectedLevel = 0,
@@ -21966,6 +21980,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       device,
       levelAssignment: resolvedLevelAssignment,
       physicalGasGrouping: enablePhaseSlotRefinement,
+      physicalLiquidGrouping: enablePhaseSlotRefinement && enableLiquidPhaseSlotRefinement,
       // Particle state feeds per-contribution momentum so merged children
       // carry the mass-weighted cell velocity.
       sphParticleState,
@@ -22200,6 +22215,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       sphParticleUpload,
       interfaceRefinementFieldView: enablePhaseSlotRefinement
         ? resolvedSpatialEpochGeneration?.mechanicsFieldView ?? null : null,
+      physicalLiquidGrouping: enablePhaseSlotRefinement && enableLiquidPhaseSlotRefinement,
       baseGridSpacingM: plan.baseGridSpacingM,
       minLevel: plan.minLevel,
       maxLevel: plan.maxLevel,

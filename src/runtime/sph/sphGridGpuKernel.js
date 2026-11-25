@@ -1172,12 +1172,12 @@ function pressureFromPackedParticle({
     if (!(soundSpeedMPerS > 0)) return 0;
     const ratio = densityKgPerM3 / Math.max(restDensityKgPerM3, 1e-9);
     const stiffnessPa = restDensityKgPerM3 * soundSpeedMPerS * soundSpeedMPerS / TAIT_EXPONENT;
-    // Cavitation clamp (WGSL packed_pressure parity): unbounded signed Tait
-    // tension is bulk-scale artificial cohesion and drives the MLS-MPM
-    // tensile pairing instability (mm-separation pairs, pearl-string clumps).
+    // Physical cavitation floor (WGSL packed_pressure parity, P_gauge >= 0):
+    // a free liquid cavitates rather than sustaining bulk negative tension,
+    // preventing MLS-MPM tensile pairing ("gnocchi" clumping).
     const pressurePa = Math.max(
       stiffnessPa * (ratio ** TAIT_EXPONENT - 1),
-      -0.05 * stiffnessPa
+      0
     );
     return pressureScale * pressurePa;
   }

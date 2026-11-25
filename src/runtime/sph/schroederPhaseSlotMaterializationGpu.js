@@ -40,19 +40,24 @@ fn determinant(i: u32) -> f32 {
   return a.x * (b.x * c.x - b.y * b.w) - a.y * (a.w * c.x - b.y * b.z)
     + a.z * (a.w * b.w - b.x * b.z);
 }
-fn gas_source(row: u32) -> bool {
+fn source_fluid_lane(i: u32) -> u32 { return i / params.lineage_capacity; }
+fn fluid_source(row: u32) -> bool {
   let value = field(row, 0u);
   if (!integer(value) || value >= f32(params.particle_count)) { return false; }
   let i = u32(value);
-  // Run after the canonical phase transfer, when gas occupies lane 2.
-  if (i / params.lineage_capacity != 2u) { return false; }
+  // Run after the canonical phase transfer: liquid occupies lane 1 (phase 2)
+  // and gas occupies lane 2 (phase 3). Both fluid lanes have solid_flag == 0.
+  let lane = source_fluid_lane(i);
+  if (lane != 1u && lane != 2u) { return false; }
+  let expected_phase = select(3.0, 2.0, lane == 1u);
+  let expected_fractions = select(vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), lane == 1u);
   let s0 = source_state[i * 2u]; let s1 = source_state[i * 2u + 1u];
   let t0 = source_thermo[i * 3u]; let t1 = source_thermo[i * 3u + 1u];
   let t2 = source_thermo[i * 3u + 2u];
   let m4 = source_mechanics[i * 8u + 4u];
   if (!finite4(s0) || !finite4(s1) || !finite4(t0) || !finite4(t2)
-      || s0.w <= 0.0 || t0.y != 3.0 || t0.z <= 0.0 || t0.w <= 0.0
-      || any(t1 != vec4<f32>(0.0, 0.0, 1.0, 0.0)) || t2.z != 1.0
+      || s0.w <= 0.0 || t0.y != expected_phase || t0.z <= 0.0 || t0.w <= 0.0
+      || any(t1 != expected_fractions) || t2.z != 1.0
       || t2.x < 0.0 || t2.y < 0.0 || t2.w < 0.0
       || !finite4(m4) || m4.z <= 0.0 || m4.w <= 0.0
       || !finite(m4.z * m4.w) || !finite(determinant(i))
@@ -99,8 +104,9 @@ fn prepare(@builtin(global_invocation_id) id: vec3<u32>) {
   if (!assignment_active(row)) { return; }
   let action = field(row, 8u);
   if (action != 5.0 && action != 6.0) { return; }
-  if (!gas_source(row)) { reject(); return; }
+  if (!fluid_source(row)) { reject(); return; }
   let i = source_index(row);
+  let leader_lane = source_fluid_lane(i);
   let t0 = source_thermo[i * 3u];
   if (action == 5.0) {
     let rank_value = field(row, 9u); let count_value = field(row, 10u);
@@ -146,10 +152,10 @@ fn prepare(@builtin(global_invocation_id) id: vec3<u32>) {
   var c0 = vec3<f32>(0.0); var c1 = vec3<f32>(0.0); var c2 = vec3<f32>(0.0);
   for (var other = 0u; other < params.assignment_count; other++) {
     if (!merge_member(other, group)) { continue; }
-    if (!gas_source(other)) { reject(); return; }
+    if (!fluid_source(other)) { reject(); return; }
     let j = source_index(other); let st = source_state[j * 2u]; let vu = source_state[j * 2u + 1u];
     let tt = source_thermo[j * 3u]; let mm = source_mechanics[j * 8u + 4u];
-    if (tt.x != t0.x || tt.w != t0.w
+    if (source_fluid_lane(j) != leader_lane || tt.x != t0.x || tt.y != t0.y || tt.w != t0.w
         || source_mechanics[j * 8u + 6u].z != source_mechanics[i * 8u + 6u].z) { reject(); return; }
     mass += st.w; moment += st.w * st.xyz; momentum += st.w * vu.xyz; internal += st.w * vu.w;
     rest += mm.w; volume += mm.z * mm.w; entities += source_thermo[j * 3u + 2u].y;
@@ -170,7 +176,7 @@ fn prepare(@builtin(global_invocation_id) id: vec3<u32>) {
     let j = source_index(other); let dv = source_state[j * 2u + 1u].xyz - velocity;
     heat += 0.5 * source_state[j * 2u].w * dot(dv, dv);
   }
-  let u = (internal + heat) / mass; let temperature = gas_temperature(t0.x, u);
+  let u = (internal + heat) / mass; let temperature = phase_temperature(t0.x, u, t0.y);
   let position = moment / mass; let j = volume / rest;
   if (!finite4(vec4<f32>(position, mass)) || !finite4(vec4<f32>(velocity, u))
       || !finite4(vec4<f32>(rest, volume, entities, temperature)) || temperature <= 0.0 || !finite(j) || j <= 0.0
@@ -218,7 +224,7 @@ fn materialize(@builtin(global_invocation_id) id: vec3<u32>) {
       if (field(leader, 8u) == 6.0 && field(leader, 20u) == field(row, 20u)
           && prepared[leader * 8u].x == 1.0) {
         let i = source_index(row);
-        clear_slot(i, 3u, source_thermo[i * 3u].x);
+        clear_slot(i, u32(round(source_thermo[i * 3u].y)), source_thermo[i * 3u].x);
         atomicAdd(&evidence[3], 1u); return;
       }
     }
@@ -241,11 +247,12 @@ fn materialize(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var n = 0u; n < count; n++) { extent = max(extent, abs(corner(n, width) - center)); }
     var spacing = vec3<f32>(0.5 * pow(old4.z * old4.w / divisor, 1.0 / 3.0));
     spacing = min(spacing, min(s0.xyz, params.box.xyz - s0.xyz) / max(extent, vec3<f32>(1e-20)));
+    let source_lane = source_fluid_lane(i);
     for (var n = 0u; n < count; n++) {
       var destination = i;
       if (n > 0u) {
         let lineage = spare_lineages[rank + n - 1u];
-        destination = 2u * params.lineage_capacity + lineage;
+        destination = source_lane * params.lineage_capacity + lineage;
         for (var lane = 0u; lane < 4u; lane++) {
           clear_slot(lane * params.lineage_capacity + lineage, lane + 1u, t0.x);
         }
@@ -352,7 +359,7 @@ export function createSchroederPhaseSlotMaterializer(device, {
     const bindings = Array.from({ length: 12 }, (_, i) => computeBufferBinding(i,
       i === 11 ? 'uniform' : i <= 5 ? 'read-only-storage' : 'storage'));
     const pipelines = ['prepare', 'materialize'].map(entryPoint => createCachedExplicitComputePipeline(device, {
-      cacheKey: `ulg-phase-slot-materialization-v1-${entryPoint}`, code: schroederPhaseSlotMaterializationWgsl,
+      cacheKey: `ulg-phase-slot-materialization-v2-${entryPoint}`, code: schroederPhaseSlotMaterializationWgsl,
       entryPoint, bindings, label: `ulg-phase-slot-${entryPoint}`
     }));
     if (exactLedger) ledgerStage = createSchroederPhaseSlotLedgerStage({ device,

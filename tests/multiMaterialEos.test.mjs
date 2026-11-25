@@ -24,9 +24,9 @@ test('compressing condensed water raises pressure steeply (Tait)', () => {
   assert.ok(p.pressurePa > 1e6); // 5% compression -> strong restoring pressure
 });
 
-test('expanded condensed water carries signed restoring tensile pressure', () => {
+test('expanded condensed water cavitates at zero gauge pressure (no artificial tensile cohesion)', () => {
   const p = eos({ density: 900, specificInternalEnergyJPerKg: liquidWaterU, particle: { material: 'h2o' } });
-  assert.ok(p.pressurePa < 0);
+  assert.equal(p.pressurePa, 0);
   assert.ok(Number.isFinite(p.pressurePa));
   assert.ok(p.soundSpeedMPerS > 0);
 });

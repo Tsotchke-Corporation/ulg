@@ -11086,13 +11086,12 @@ fn packed_pressure(density_kg_per_m3: f32, rest_density_kg_per_m3: f32, sound_sp
     let ratio = density_kg_per_m3 / max(rest_density_kg_per_m3, 1.0e-9);
     let stiffness = rest_density_kg_per_m3 * sound_speed_m_per_s * sound_speed_m_per_s / 7.0;
     let pressure = stiffness * (pow(ratio, 7.0) - 1.0);
-    // Cavitation clamp: a liquid cannot sustain bulk-scale tension - it
-    // cavitates. The unbounded signed Tait tension acted as huge artificial
-    // cohesion and drove the MLS-MPM tensile pairing instability (particles
-    // collapsing to mm separation and beading into pearl-string clumps).
-    // Keep a small restoring band below rest density for volume correction,
-    // floored at a cavitation-scale fraction of the Tait stiffness.
-    return max(pressure, -0.05 * stiffness);
+    // Physical cavitation floor (P_gauge >= 0): a free liquid cannot sustain
+    // bulk negative gauge tension. Artificial tensile cohesion (-0.05 * B)
+    // drove MLS-MPM tensile pairing ("gnocchi" clumping) on coarse free
+    // surfaces; compressive stiffness and implicit divergence-free pressure
+    // maintain liquid volume without bulk tensile glue.
+    return max(pressure, 0.0);
   }
   return 0.0;
 }
@@ -16674,26 +16673,36 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let volume_ratio = represented_volume / max(rest_volume, 0.000001);
   let gas_phase = abs(phase_id - params.gas_phase_id) < 0.5;
+  let liquid_phase = abs(phase_id - 2.0) < 0.5;
   let phase_expanded = gas_phase && volume_ratio >= max(params.volume_expand_threshold, 1.0);
   // Fixed phase-slot children have distinct immutable identities and J=1.
-  // Their opt-in coarsening domain is material + source level/chart/cell.
-  // Non-gas rows never contribute, so condensed identities cannot alias it.
+  // Their opt-in coarsening domain is material + phase sign + source level/chart/cell:
+  // gas uses +material_id and liquid uses -material_id (exact 24-bit f32 integers,
+  // strictly disjoint so liquid and gas carriers never alias in the same cell).
   let physical_gas_grouping = (params.flags & 1u) != 0u;
-  if (select(!phase_expanded, !gas_phase, physical_gas_grouping)) {
+  let physical_liquid_grouping = (params.flags & 2u) != 0u;
+  let physical_fluid_grouping = physical_gas_grouping || physical_liquid_grouping;
+  let physical_fluid_eligible = (physical_gas_grouping && gas_phase) || (physical_liquid_grouping && liquid_phase);
+  if (select(!phase_expanded, !physical_fluid_eligible, physical_fluid_grouping)) {
     ss_pvta_write_empty(aggregate_offset, assignment_offset, particle_index, 32.0);
     return;
   }
 
   let physical_support = ss_pvta_volume_radius(represented_volume) * max(params.support_radius_scale, 0.0);
   let target_support = max(physical_support, source_support);
-  let target_level_i32 = select(ss_pvta_level_from_support(target_support), i32(source_level), physical_gas_grouping);
+  let target_level_i32 = select(ss_pvta_level_from_support(target_support), i32(source_level), physical_fluid_grouping);
   let target_level = f32(target_level_i32);
   let target_grid_spacing = max(params.base_grid_spacing_m, 0.000001) * exp2(target_level);
   let target_cell = floor(position / target_grid_spacing);
   let level_delta = target_level - source_level;
 
+  let material_domain = select(
+    level_assignments[assignment_offset + 9u],
+    -level_assignments[assignment_offset + 9u],
+    liquid_phase
+  );
   aggregate_rows[aggregate_offset + 0u] = select(f32(particle_identity[particle_index]),
-    level_assignments[assignment_offset + 9u], physical_gas_grouping);
+    material_domain, physical_fluid_grouping);
   aggregate_rows[aggregate_offset + 1u] = target_level;
   aggregate_rows[aggregate_offset + 2u] = chart_id;
   aggregate_rows[aggregate_offset + 3u] = 1.0;
@@ -18590,16 +18599,33 @@ struct SchroederPhaseVolumeMigrationParams {
 // volume. Keep that cheap local query, then search occupied dictionary ranges
 // across the physical support bounds for larger carriers.
 fn ss_pvm_interface_source_ready(particle: u32) -> bool {
-  if ((params.flags & 1u) == 0u) { return false; }
+  let physical_gas = (params.flags & 1u) != 0u;
+  let physical_liquid = (params.flags & 2u) != 0u;
+  if (!physical_gas && !physical_liquid) { return false; }
   if (interface_fields[0u] != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u
       || interface_fields[1u] != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u
       || interface_fields[2u] != 3u || particle >= interface_fields[16u]) { return false; }
   let descriptor = interface_fields[24u] + particle * interface_fields[25u];
-  return interface_fields[descriptor] == 3u && interface_fields[descriptor + 3u] == 1u;
+  if (interface_fields[descriptor + 3u] != 1u) { return false; }
+  let family = interface_fields[descriptor];
+  return (physical_gas && family == 3u) || (physical_liquid && family == 2u);
+}
+fn ss_pvm_field_is_interface(my_family: u32, my_material: u32, other_family: u32, other_material: u32) -> bool {
+  if (my_family == 3u) {
+    return other_family == 1u || other_family == 2u;
+  }
+  if (my_family == 2u) {
+    // Liquid boundary-layer refinement triggers on solid-fluid contact (sinking
+    // dense bodies, melting walls), multi-material boundaries, or gas/free surface.
+    return other_family == 1u || other_family == 3u || other_material != my_material;
+  }
+  return false;
 }
 fn ss_pvm_condensed_interface(particle: u32) -> bool {
   if (!ss_pvm_interface_source_ready(particle)) { return false; }
   let descriptor = interface_fields[24u] + particle * interface_fields[25u];
+  let my_family = interface_fields[descriptor];
+  let my_material = interface_fields[descriptor + 1u];
   let count = interface_fields[34u];
   let keys = interface_fields[26u]; let stride = interface_fields[27u];
   for (var stencil = 0u; stencil < 27u; stencil++) {
@@ -18612,9 +18638,11 @@ fn ss_pvm_condensed_interface(particle: u32) -> bool {
       if (interface_fields[keys + middle * stride] < node) { lo = middle + 1u; }
       else { hi = middle; }
     }
-    if (lo < count && interface_fields[keys + lo * stride] == node) {
-      let phase = interface_fields[keys + lo * stride + 1u];
-      if (phase == 1u || phase == 2u) { return true; }
+    for (var k = lo; k < count && interface_fields[keys + k * stride] == node; k++) {
+      let key = keys + k * stride;
+      if (ss_pvm_field_is_interface(my_family, my_material, interface_fields[key + 1u], interface_fields[key + 2u])) {
+        return true;
+      }
     }
   }
   let assignment = particle * max(params.assignment_stride, 16u);
@@ -18647,8 +18675,9 @@ fn ss_pvm_condensed_interface(particle: u32) -> bool {
       for (var field = lo; field < count; field++) {
         let key = keys + field * stride;
         if (interface_fields[key] > last) { break; }
-        let phase = interface_fields[key + 1u];
-        if (phase == 1u || phase == 2u) { return true; }
+        if (ss_pvm_field_is_interface(my_family, my_material, interface_fields[key + 1u], interface_fields[key + 2u])) {
+          return true;
+        }
       }
     }
   }
@@ -18809,7 +18838,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   );
   let chart_id = level_assignments[assignment_offset + 15u];
   let physical_gas_grouping = (params.flags & 1u) != 0u;
-  let particle_domain = select(f32(particle_identity[particle_index]), material_id, physical_gas_grouping);
+  let physical_liquid_grouping = (params.flags & 2u) != 0u;
+  let physical_fluid_grouping = physical_gas_grouping || physical_liquid_grouping;
+  let liquid_phase = abs(phase_id - 2.0) < 0.5;
+  let physical_domain = select(material_id, -material_id, liquid_phase);
+  let particle_domain = select(f32(particle_identity[particle_index]), physical_domain, physical_fluid_grouping);
 
   if (!ss_pvm_positive(represented_volume) || !ss_pvm_positive(rest_volume)) {
     ss_pvm_write_row(
@@ -18858,7 +18891,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // One octet per accepted step halves each child's support radius. The
   // hysteresis band avoids threshold flicker; interface rows never coarsen.
   let target_support = select(max(physical_support, source_support), physical_support * 0.5, interface_refine);
-  let target_level_i32 = select(ss_pvm_level_from_support(target_support), i32(source_level), physical_gas_grouping);
+  let target_level_i32 = select(ss_pvm_level_from_support(target_support), i32(source_level), physical_fluid_grouping);
   let target_level = f32(target_level_i32);
   let target_grid_spacing = ss_pvm_grid_spacing_for_level(target_level_i32);
   let level_delta = target_level - source_level;
@@ -18939,11 +18972,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let bulk_support_limit = 2.0 * interface_support
     * max(1.0 - max(level_assignments[assignment_offset + 11u], 0.0), 0.0);
   let aggregate_support = ss_pvm_volume_radius(aggregate_volume) * max(params.support_radius_scale, 0.0);
-  let physical_coarsen = gas_phase && ss_pvm_interface_source_ready(particle_index)
+  let physical_coarsen_phase = (physical_gas_grouping && gas_phase) || (physical_liquid_grouping && liquid_phase);
+  let physical_coarsen = physical_coarsen_phase && ss_pvm_interface_source_ready(particle_index)
     && !at_interface && aggregate_matched && residual_ok
     && aggregate_match_count >= 2.0 && aggregate_match_count <= 8.0
     && ss_pvm_positive(aggregate_volume) && aggregate_support <= bulk_support_limit;
-  let coarsen = select(legacy_coarsen, physical_coarsen, physical_gas_grouping);
+  let coarsen = select(legacy_coarsen, physical_coarsen, physical_fluid_grouping);
   let refine = interface_refine || (phase_expanded && integrity_refine_mask_u32 != 0u);
 
   var status = 1.0;

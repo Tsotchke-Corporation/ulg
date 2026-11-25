@@ -547,12 +547,12 @@ test('canonical Schroeder mechanics shaders stay within eight storage bindings',
   );
   assert.match(
     fusedStepSource,
-    /createActiveGridP2gProjectionWgsl\(mlsMpmP2gGridProjectionCanonicalSpatialWgsl\)/,
+    /createActiveGridP2gProjectionWgsl\(\s*mlsMpmP2gGridProjectionCanonicalSpatialWgsl(?:\s*,\s*[^)]+)?\s*\)/,
     'the observed active-grid variant must derive from the guarded canonical shader'
   );
   assert.match(
     fusedStepSource,
-    /createActiveGridP2gProjectionWgsl\(\s*mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl\s*\)/,
+    /createActiveGridP2gProjectionWgsl\(\s*mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl(?:\s*,\s*[^)]+)?\s*\)/,
     'the production active-grid variant must derive from the guarded canonical shader'
   );
 });

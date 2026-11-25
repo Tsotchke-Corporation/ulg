@@ -10,6 +10,10 @@
 import { createMaterialPolytopeRegistry } from './materialPolytopeRegistry.js';
 import { fitConvexPolytopeWebGpu } from '../gpuMath/chebyshevPolytopeFitGpu.js';
 import {
+  getSharedPolytopeAtlasPersistentCache,
+  normalizePolytopeAtlasCacheDescriptor
+} from './polytopeAtlasPersistentCache.js';
+import {
   defineLawObject,
   differentiateLaw,
   approximateLaw,
@@ -259,11 +263,40 @@ export async function buildMaterialPolytopeAtlasWebGpu(device, bundle, {
   degrees = [5, 5],
   relativeTolerance = 2e-2,
   maxBisectDepth = 3,
-  materialIndex = 0
+  materialIndex = 0,
+  pressureRangePa = [1e2, 1e10],
+  persistentCache = null,
+  useSharedPersistentCache = false
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('buildMaterialPolytopeAtlasWebGpu requires a live WebGPU GPUDevice');
   }
+  const minPressurePa = Math.max(1e-3, Number(pressureRangePa?.[0] ?? 1e2));
+  const maxPressurePa = Math.max(minPressurePa * 10, Number(pressureRangePa?.[1] ?? 1e10));
+  const resolvedPressureRangePa = Object.freeze([minPressurePa, maxPressurePa]);
+  const cache = persistentCache || (useSharedPersistentCache ? getSharedPolytopeAtlasPersistentCache() : null);
+  const cacheDescriptor = cache
+    ? normalizePolytopeAtlasCacheDescriptor({
+        builderSchema: ULG_POLYTOPE_ATLAS_BUILDER_SCHEMA,
+        materialKey: bundle.materialKey,
+        family: bundle.family,
+        closureHash: bundle.closureHash,
+        generatorFingerprint: bundle.generatorFingerprint || 'ulg-foundation-v1',
+        pressureRangePa: resolvedPressureRangePa,
+        degrees,
+        relativeTolerance,
+        maxBisectDepth,
+        materialIndex
+      })
+    : null;
+
+  if (cache && cacheDescriptor) {
+    const cachedAtlas = await cache.get(cacheDescriptor);
+    if (cachedAtlas) {
+      return cachedAtlas;
+    }
+  }
+
   const registry = createMaterialPolytopeRegistry();
   const tMelt = Number(bundle.thermodynamic.meltingPointK);
   const tBoil = Number(bundle.thermodynamic.boilingPointK);
@@ -277,8 +310,8 @@ export async function buildMaterialPolytopeAtlasWebGpu(device, bundle, {
     meltingSlopeKPerLogP: Number(bundle.thermodynamic.meltingSlopeKPerLogP ?? 15),
     boilingSlopeKPerLogP: Number(bundle.thermodynamic.boilingSlopeKPerLogP ?? 180),
     maxTemperatureK: Math.max(tIon * 2, 16000),
-    minPressurePa: 1e2,
-    maxPressurePa: 1e10,
+    minPressurePa,
+    maxPressurePa,
     accuracyTier: bundle.accuracyTier,
     closureHash: bundle.closureHash,
     crystalStructure: {
@@ -311,16 +344,32 @@ export async function buildMaterialPolytopeAtlasWebGpu(device, bundle, {
   registry.registerMaterialPolytopes(bundle.materialKey, allFitted);
   const packedGpuAtlas = packPolytopeAtlasForGpu(allFitted, { materialIndex });
 
-  return Object.freeze({
+  let cacheStatus = 'bypass';
+  let cacheBackend = null;
+  const atlasBase = {
     schema: ULG_POLYTOPE_ATLAS_SCHEMA,
     builderSchema: ULG_POLYTOPE_ATLAS_BUILDER_SCHEMA,
     materialKey: bundle.materialKey,
     family: bundle.family,
     accuracyTier: bundle.accuracyTier,
     closureHash: bundle.closureHash,
+    pressureRangePa: resolvedPressureRangePa,
     polytopeCount: allFitted.length,
     polytopes: Object.freeze(allFitted),
     packedGpuAtlas,
     registry
+  };
+
+  if (cache && cacheDescriptor) {
+    const stored = await cache.set(cacheDescriptor, atlasBase);
+    cacheStatus = stored?.ok ? 'miss-stored' : 'miss-store-failed';
+    cacheBackend = stored?.backend ?? null;
+  }
+
+  return Object.freeze({
+    ...atlasBase,
+    cacheStatus,
+    cacheBackend,
+    cacheKey: cacheDescriptor?.cacheKey ?? null
   });
 }

@@ -33,11 +33,13 @@ import {
 import { stableOpticalMaterialId } from './opticalGpuBuffers.js';
 import { createMaterialPolytopeRegistry } from './materialPolytopeRegistry.js';
 import {
+  buildMaterialPolytopeAtlasWebGpu,
   compilePolytopeEshkolHigherOrderLaws,
   evaluateBundleDensityEos,
   publishPolytopeBundleToTriadGpuRegistry,
   synthesizePolytopeMoonlabTriadClosures
 } from './polytopeAtlasBuilder.js';
+import { getSharedPolytopeAtlasPersistentCache } from './polytopeAtlasPersistentCache.js';
 import {
   registerTriadClosureBundleOnDevice,
   getTriadClosureDeviceStatus
@@ -858,5 +860,18 @@ export function getFoundationPolytopeDeviceStatus(device) {
     adoptedGenerations: state?.adoptedGenerations ?? 0,
     lastReceipt: state?.lastReceipt ?? null,
     triadDeviceStatus: getTriadClosureDeviceStatus(device)
+  });
+}
+
+/**
+ * Hydrate a dynamically synthesized material/compound Polytope Atlas from the
+ * persistent OPFS/IndexedDB warm cache when valid, or compile it on WebGPU and
+ * persist it fail-closed for subsequent Studio/Lab sessions.
+ */
+export async function hydrateOrBuildCachedPolytopeAtlasWebGpu(device, bundle, options = {}) {
+  const persistentCache = options.persistentCache || getSharedPolytopeAtlasPersistentCache();
+  return buildMaterialPolytopeAtlasWebGpu(device, bundle, {
+    ...options,
+    persistentCache
   });
 }

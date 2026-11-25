@@ -217,6 +217,8 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
       isotopeMassShiftHa: atom.isotopeMassShiftHa ?? 0,
       hyperfineSplittingHz: atom.hyperfineSplittingHz ?? 0,
       finiteNucleusUsed: Boolean(atom.finiteNucleusUsed),
+      dirac4Component: Boolean(atom.dirac4Component),
+      totalSmallComponentNormSq: atom.totalSmallComponentNormSq ?? 0,
       relativisticMethod: atom.relativisticMethod,
       resolverStatus: atom.resolverStatus,
       perScfCpuReadbacks: atom.perScfCpuReadbacks,
@@ -226,6 +228,9 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
     electromagnetic: {
       isMetal: em.isMetal,
       bandGapEv: em.bandGapEv,
+      mbjCParameter: bulk.mbjCParameter ?? em.mbjCParameter ?? null,
+      dftUHubbardEv: bulk.dftUHubbardEv ?? em.dftUHubbardEv ?? 0,
+      dftUExchangeSplittingEv: bulk.dftUExchangeSplittingEv ?? 0,
       fermiEnergyEv: bulk.fermiEnergyEv,
       dosAtFermiStatesPerEvAtom: bulk.dosAtFermiStatesPerEvAtom,
       plasmaEnergyEv: em.plasmaEnergyEv,

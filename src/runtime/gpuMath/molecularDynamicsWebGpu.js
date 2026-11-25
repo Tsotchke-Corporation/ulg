@@ -740,7 +740,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     ? Number(idealCoordination)
     : (structStr === 'bcc' || structStr.startsWith('cscl')
       ? 14
-      : (structStr === 'diamond' || structStr.startsWith('zincblende') ? 4 : 12));
+      : (structStr === 'diamond' || structStr.startsWith('zincblende') || structStr.startsWith('cristobalite') ? 4 : 12));
   const resolvedMeltingK = Number.isFinite(Number(meltingPointK)) && Number(meltingPointK) > 1
     ? Number(meltingPointK)
     : Math.max(50, Number(targetTemperatureK) || 600);
@@ -1513,7 +1513,7 @@ export function buildCrystalMdState({
     ];
     rNearestNeighborA = a * Math.sqrt(3) / 2;
     idealCoordination = 14;
-  } else if (struct === 'diamond' || struct.startsWith('zincblende')) {
+  } else if (struct === 'diamond' || struct.startsWith('zincblende') || struct.startsWith('cristobalite')) {
     basis = [
       [0, 0, 0], [0.5, 0.5, 0], [0.5, 0, 0.5], [0, 0.5, 0.5],
       [0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.75, 0.25, 0.75], [0.25, 0.75, 0.75]

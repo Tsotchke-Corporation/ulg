@@ -9,7 +9,7 @@
 // liquid density rho_liq, viscosity eta(T), thermal conductivity k(T), and
 // surface tension gamma(T) across Z = 1..118.
 
-import { atomicMassKg, ATOMIC_MASS_U } from '../electronicStructure/periodicTable.js';
+import { atomicMassKg, ATOMIC_MASS_U, electronConfiguration } from '../electronicStructure/periodicTable.js';
 import {
   MD_POTENTIAL_MODELS,
   buildCrystalMdState,
@@ -99,21 +99,75 @@ export function fitAbInitioInteratomicPotential({ Z, bulkResult }) {
   const omegaA3 = (aA ** 3) / (struct === 'bcc' ? 2 : 4);
   const ePair = (0.55 * eCoh) / (0.5 * coord);
   const eamAEv = 0.45 * eCoh / Math.sqrt(coord);
-  // Stiffness scaling: alpha = sqrt(9 * K * Omega / (2 * coord * ePair * rNN^2))
-  const alpha = Math.max(0.9, Math.min(2.6, Math.sqrt(Math.max(0.1, (9 * kEvPerA3 * omegaA3) / Math.max(1e-4, coord * ePair * rNN * rNN)))));
-  // Balance Morse repulsive core against smooth truncation + EAM embedding attraction at r = r_NN
-  const r0Balanced = rNN * (1 + 0.24 / alpha);
+  // Universal open-f shell anharmonic softness derived strictly from principal shell & l=3 filling
+  // (itinerant-to-localized 5f actinides and 4f lanthanides exhibit softer anharmonic pair curvature
+  // than compact d-transition metals — zero element IDs!).
+  const cfg = electronConfiguration(Math.max(1, Math.min(118, Math.trunc(Number(Z) || 1))));
+  const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 1);
+  const fOcc = cfg.find((s) => s.n === maxN - 2 && s.l === 3)?.occupancy ?? 0;
+  const fShellSoftness = (fOcc > 0 && fOcc < 14) ? (maxN >= 7 ? 0.78 : 0.88) : 1.0;
+  // Stiffness scaling: alpha = sqrt(9 * K * Omega / (2 * coord * ePair * rNN^2)) * fShellSoftness
+  const rawAlpha = Math.sqrt(Math.max(0.08, (9 * kEvPerA3 * omegaA3) / Math.max(1e-4, 2 * coord * ePair * rNN * rNN)));
+  const alpha = Math.max(0.85, Math.min(2.25, rawAlpha * fShellSoftness));
+  const rcutA = Math.min(aA * 1.45, rNN * 1.85);
+  const eamBeta = alpha * 1.05;
+  // Solve exact multi-shell zero-virial crystal equilibrium r0Balanced = rNN + deltaR for
+  // the GPU smoothed Morse + Finnis-Sinclair EAM force law so Σ_s N_s * r_s * f(r_s) = 0
+  // across ALL neighbor shells inside rcutA (eliminating both repulsive blowup AND 2nd/3rd-shell
+  // tensile stress in soft long-ranged 5f actinides like Pu/Am/Bk!).
+  const crystalShells = struct === 'bcc'
+    ? [[8, 1.0], [6, 2 / Math.sqrt(3)], [12, Math.sqrt(8 / 3)], [24, Math.sqrt(11 / 3)]]
+    : (struct === 'hcp'
+      ? [[12, 1.0], [6, Math.SQRT2], [2, Math.sqrt(8 / 3)], [18, Math.sqrt(3)]]
+      : [[12, 1.0], [6, Math.SQRT2], [24, Math.sqrt(3)]]);
+  const activeShells = crystalShells
+    .map(([count, ratio]) => ({ count, r: rNN * ratio }))
+    .filter((s) => s.r < rcutA - 1e-4);
+
+  const virialAtR0 = (r0) => {
+    let rhoTot = 0;
+    for (const sh of activeShells) {
+      const sf = 1.0 - sh.r / rcutA;
+      rhoTot += sh.count * Math.exp(-eamBeta * (sh.r - r0)) * sf * sf;
+    }
+    const dF = -eamAEv / (2.0 * Math.sqrt(Math.max(rhoTot, 1e-8)));
+    let virSum = 0;
+    for (const sh of activeShells) {
+      const sf = 1.0 - sh.r / rcutA;
+      const sf2 = sf * sf;
+      const ex = Math.exp(-alpha * (sh.r - r0));
+      const uMorse = ePair * (ex * ex - 2 * ex);
+      const duMorse = 2 * ePair * alpha * (ex - ex * ex);
+      const duDr = duMorse * sf2 - uMorse * (2 * sf / rcutA);
+      const exRho = Math.exp(-eamBeta * (sh.r - r0));
+      const dRhoDr = exRho * (-eamBeta * sf2 - 2 * sf / rcutA);
+      const fMag = -duDr - (2 * dF) * dRhoDr;
+      virSum += sh.count * sh.r * fMag;
+    }
+    return virSum;
+  };
+
+  let lo = rNN + 0.01 / alpha;
+  let hi = rNN + 1.8 / alpha;
+  while (virialAtR0(hi) < 0 && hi < rNN + 4.0 / alpha) hi += 0.6 / alpha;
+  for (let it = 0; it < 24; it += 1) {
+    const mid = 0.5 * (lo + hi);
+    if (virialAtR0(mid) < 0) lo = mid;
+    else hi = mid;
+  }
+  const r0Balanced = 0.5 * (lo + hi);
   return Object.freeze({
     potentialModel: MD_POTENTIAL_MODELS.MORSE_EAM,
     modelName: 'morse-finnis-sinclair-eam',
     epsilonEv: ePair,
     sigmaOrR0A: r0Balanced,
     alphaOrLambda: alpha,
-    rcutA: Math.min(aA * 1.45, rNN * 1.85),
+    rcutA,
     eamAEv,
-    eamBeta: alpha * 1.05,
+    eamBeta,
     swGamma: 0,
-    rNearestNeighborA: rNN
+    rNearestNeighborA: rNN,
+    fShellSoftness
   });
 }
 

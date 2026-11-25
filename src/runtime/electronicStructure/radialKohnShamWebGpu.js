@@ -462,6 +462,13 @@ struct OrbitalMeta {
   energy_ha: f32,
 };
 
+struct DiracSubshellOut {
+  energy_j_minus_ha: f32,
+  energy_j_plus_ha: f32,
+  splitting_ha: f32,
+  small_component_norm_sq: f32,
+};
+
 @group(0) @binding(0) var<uniform> params: KsParams;
 @group(0) @binding(1) var<storage, read> r_grid: array<f32>;
 @group(0) @binding(2) var<storage, read> vxc_grid: array<f32>;
@@ -470,12 +477,16 @@ struct OrbitalMeta {
 @group(0) @binding(5) var<storage, read_write> vxc_fxc_velec: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> orbitals_u: array<f32>;
 @group(0) @binding(7) var<storage, read_write> orbital_meta: array<OrbitalMeta>;
+@group(0) @binding(8) var<storage, read_write> dirac_out: array<DiracSubshellOut>;
+
+const C_LIGHT: f32 = 137.035999084;
 
 var<workgroup> sh_diag: array<f32, 256>;
 var<workgroup> sh_off: array<f32, 256>;
 var<workgroup> sh_cp: array<f32, 256>;
 var<workgroup> sh_dp: array<f32, 256>;
 var<workgroup> sh_vec: array<f32, 256>;
+var<workgroup> sh_u_plus: array<f32, 256>;
 
 // Pack GPU-resident vxc/fxc/velec buffers into aux vec4 buffer with zero CPU readback.
 @compute @workgroup_size(256, 1, 1)
@@ -499,51 +510,76 @@ fn sturm_count_below(n: u32, lam: f32) -> u32 {
   return count;
 }
 
-// GPU-native Sturm-sequence bisection + shifted Thomas inverse-iteration
-// radial Kohn-Sham eigensolver (1 workgroup per subshell, zero CPU readback).
-@compute @workgroup_size(1, 1, 1)
-fn ks_solve_radial_orbitals(@builtin(workgroup_id) wg_id: vec3<u32>) {
-  let s = wg_id.x;
-  let n = min(params.n_points, 256u);
-  if (s >= params.orbital_count || n < 8u) { return; }
+fn eval_v_nuc(ri: f32, z: f32, r_eq: f32) -> f32 {
+  return select(
+    -z / ri,
+    -(z / (2.0 * max(r_eq, 1e-12))) * (3.0 - (ri * ri) / max(r_eq * r_eq, 1e-24)),
+    r_eq > 0.0 && ri < r_eq
+  );
+}
 
-  let orb_info = orbital_meta[s];
-  let n_q = max(1u, u32(round(orb_info.n_quantum)));
-  let l_q = u32(max(0.0, round(orb_info.l_quantum)));
-  let target_k = select(0u, n_q - l_q - 1u, n_q > l_q);
-  let dx = params.dx;
-  let inv_dx2 = 1.0 / (dx * dx);
-  let l_cent = 0.5 * (f32(l_q) + 0.5) * (f32(l_q) + 0.5);
-  let z = params.atomic_z;
+fn eval_dv_nuc_dr(ri: f32, z: f32, r_eq: f32) -> f32 {
+  return select(
+    z / (ri * ri),
+    (z * ri) / max(r_eq * r_eq * r_eq, 1e-30),
+    r_eq > 0.0 && ri < r_eq
+  );
+}
 
-  let r_eq = sqrt(5.0 / 3.0) * max(0.0, params.r_nuc_bohr);
-  let inv_2c2 = 1.0 / (2.0 * 137.035999084 * 137.035999084);
-  let e_ref = clamp(orb_info.energy_ha, -0.75 * z * z, 0.0);
+fn eval_dv_elec_dr(i: u32, n: u32, dx: f32) -> f32 {
+  if (i > 0u && i + 1u < n) {
+    return (velec_grid[i + 1u] - velec_grid[i - 1u]) / (2.0 * dx * r_grid[i]);
+  }
+  if (i == 0u && n > 2u) {
+    return (velec_grid[2u] - velec_grid[0u]) / (2.0 * dx * r_grid[1u]);
+  }
+  if (i + 1u == n && n > 2u) {
+    return (velec_grid[n - 1u] - velec_grid[n - 3u]) / (2.0 * dx * r_grid[n - 2u]);
+  }
+  return 0.0;
+}
 
+// Solve one relativistic kappa channel (kappa_+ = -(l+1) or kappa_- = +l):
+// populates sh_vec[0..n-1] with signed sqrt(G^2 + F^2) (normalized 4-component spinor)
+// and returns vec2(eigenvalue_ha, small_component_norm_sq).
+fn solve_dirac_kappa_channel(
+  n: u32,
+  n_q: u32,
+  l_q: u32,
+  target_k: u32,
+  kappa: f32,
+  e_ref: f32,
+  dx: f32,
+  inv_dx2: f32,
+  l_cent: f32,
+  z: f32,
+  r_eq: f32,
+  inv_2c2: f32,
+  use_rel: u32
+) -> vec2<f32> {
+  let apply_dirac_so = (use_rel == 2u) && (l_q >= 1u);
   var min_diag: f32 = 1e30;
   for (var i: u32 = 0u; i < n; i = i + 1u) {
     let ri = r_grid[i];
     let inv_r2 = 1.0 / (ri * ri);
-    let v_nuc = select(
-      -z / ri,
-      -(z / (2.0 * max(r_eq, 1e-12))) * (3.0 - (ri * ri) / max(r_eq * r_eq, 1e-24)),
-      r_eq > 0.0 && ri < r_eq
-    );
-    let v_eff = v_nuc + velec_grid[i];
-    // Koelling-Harmon scalar-relativistic effective mass M(r) = 1 + (E - V_eff) / (2 c^2)
-    let m_rel = select(1.0, max(1.0, 1.0 + max(0.0, e_ref - v_eff) * inv_2c2), params.use_rel != 0u);
+    let v_eff = eval_v_nuc(ri, z, r_eq) + velec_grid[i];
+    let m_rel = select(1.0, max(1.0, 1.0 + max(0.0, e_ref - v_eff) * inv_2c2), use_rel != 0u);
     let inv_m = 1.0 / m_rel;
-    let d_val = (inv_dx2 + l_cent) * inv_r2 * inv_m + v_eff;
+    var v_so: f32 = 0.0;
+    if (apply_dirac_so) {
+      let v_prime = eval_dv_nuc_dr(ri, z, r_eq) + eval_dv_elec_dr(i, n, dx);
+      // Exact folded 4-component Dirac spin-orbit term: -(kappa + 1) / (4 M^2 c^2 r) * dV/dr
+      let v_so_raw = -(kappa + 1.0) * (0.5 * inv_2c2) * (v_prime / (m_rel * m_rel * ri));
+      let cent_cap = 0.45 * l_cent * inv_r2 * inv_m;
+      v_so = clamp(v_so_raw, -cent_cap, cent_cap);
+    }
+    let d_val = (inv_dx2 + l_cent) * inv_r2 * inv_m + v_eff + v_so;
     sh_diag[i] = d_val;
     if (d_val < min_diag) { min_diag = d_val; }
     if (i + 1u < n) {
       let r_next = r_grid[i + 1u];
-      let v_nuc_n = select(
-        -z / r_next,
-        -(z / (2.0 * max(r_eq, 1e-12))) * (3.0 - (r_next * r_next) / max(r_eq * r_eq, 1e-24)),
-        r_eq > 0.0 && r_next < r_eq
-      );
-      let m_rel_n = select(1.0, max(1.0, 1.0 + max(0.0, e_ref - (v_nuc_n + velec_grid[i + 1u])) * inv_2c2), params.use_rel != 0u);
+      let v_eff_n = eval_v_nuc(r_next, z, r_eq) + velec_grid[i + 1u];
+      let m_rel_n = select(1.0, max(1.0, 1.0 + max(0.0, e_ref - v_eff_n) * inv_2c2), use_rel != 0u);
       let inv_m_mid = 2.0 / (m_rel + m_rel_n);
       sh_off[i] = -0.5 * inv_dx2 * inv_m_mid / (ri * r_next);
     } else {
@@ -573,7 +609,7 @@ fn ks_solve_radial_orbitals(@builtin(workgroup_id) wg_id: vec3<u32>) {
   }
   let eig = 0.5 * (lo + hi);
 
-  // Shifted Thomas inverse iteration for radial eigenfunction w(x) = sqrt(r)*u(r)
+  // Shifted Thomas inverse iteration for radial eigenfunction w(x) = sqrt(r)*G(r)
   let shift = eig - max(abs(eig) * 1e-5, 1e-6);
   for (var i: u32 = 0u; i < n; i = i + 1u) {
     let ri = r_grid[i];
@@ -605,19 +641,103 @@ fn ks_solve_radial_orbitals(@builtin(workgroup_id) wg_id: vec3<u32>) {
     }
   }
 
-  // Recover u(r) = w(x) / sqrt(r) and normalize integral u(r)^2 * r * dx = 1
-  var norm_sq: f32 = 0.0;
+  // Recover large component G(r) = w(x) / sqrt(r) (storing G in sh_dp temporarily)
+  for (var i: u32 = 0u; i < n; i = i + 1u) {
+    sh_dp[i] = sh_vec[i] / sqrt(r_grid[i]);
+  }
+
+  // Reconstruct exact Dirac small component F(r) = (1 / (2 M c)) * (dG/dx + kappa * G) / r
+  // and normalize the 4-component Dirac spinor: integral (G^2 + F^2) * r * dx = 1.
+  var norm_g_sq: f32 = 0.0;
+  var norm_f_sq: f32 = 0.0;
   for (var i: u32 = 0u; i < n; i = i + 1u) {
     let ri = r_grid[i];
-    let u_raw = sh_vec[i] / sqrt(ri);
-    sh_vec[i] = u_raw;
-    norm_sq = norm_sq + u_raw * u_raw * ri * dx;
+    let g_val = sh_dp[i];
+    var f_val: f32 = 0.0;
+    if (use_rel != 0u) {
+      var dg_dx: f32 = 0.0;
+      if (i > 0u && i + 1u < n) {
+        dg_dx = (sh_dp[i + 1u] - sh_dp[i - 1u]) / (2.0 * dx);
+      } else if (i == 0u && n > 1u) {
+        dg_dx = (sh_dp[1u] - sh_dp[0u]) / dx;
+      } else if (n > 1u) {
+        dg_dx = (sh_dp[n - 1u] - sh_dp[n - 2u]) / dx;
+      }
+      let v_eff = eval_v_nuc(ri, z, r_eq) + velec_grid[i];
+      let m_rel = max(1.0, 1.0 + max(0.0, eig - v_eff) * inv_2c2);
+      f_val = (dg_dx + kappa * g_val) / (2.0 * m_rel * C_LIGHT * ri);
+    }
+    let g2 = g_val * g_val;
+    let f2 = f_val * f_val;
+    norm_g_sq = norm_g_sq + g2 * ri * dx;
+    norm_f_sq = norm_f_sq + f2 * ri * dx;
+    let mag4 = sqrt(max(0.0, g2 + f2));
+    sh_vec[i] = select(-mag4, mag4, g_val >= 0.0);
   }
-  let inv_norm = 1.0 / sqrt(max(norm_sq, 1e-30));
+  let total_norm = max(norm_g_sq + norm_f_sq, 1e-30);
+  let inv_norm = 1.0 / sqrt(total_norm);
   for (var i: u32 = 0u; i < n; i = i + 1u) {
-    orbitals_u[s * n + i] = sh_vec[i] * inv_norm;
+    sh_vec[i] = sh_vec[i] * inv_norm;
   }
-  orbital_meta[s].energy_ha = eig;
+  let small_norm_sq = clamp(norm_f_sq / total_norm, 0.0, 0.49);
+  return vec2<f32>(eig, small_norm_sq);
+}
+
+// GPU-native 4-Component Radial Dirac-Kohn-Sham (and scalar KH / Schrodinger)
+// Sturm-sequence bisection + shifted Thomas inverse-iteration eigensolver
+// (1 workgroup per subshell, zero CPU readback during SCF).
+@compute @workgroup_size(1, 1, 1)
+fn ks_solve_radial_orbitals(@builtin(workgroup_id) wg_id: vec3<u32>) {
+  let s = wg_id.x;
+  let n = min(params.n_points, 256u);
+  if (s >= params.orbital_count || n < 8u) { return; }
+
+  let orb_info = orbital_meta[s];
+  let n_q = max(1u, u32(round(orb_info.n_quantum)));
+  let l_q = u32(max(0.0, round(orb_info.l_quantum)));
+  let target_k = select(0u, n_q - l_q - 1u, n_q > l_q);
+  let dx = params.dx;
+  let inv_dx2 = 1.0 / (dx * dx);
+  let l_cent = 0.5 * (f32(l_q) + 0.5) * (f32(l_q) + 0.5);
+  let z = params.atomic_z;
+  let r_eq = sqrt(5.0 / 3.0) * max(0.0, params.r_nuc_bohr);
+  let inv_2c2 = 1.0 / (2.0 * C_LIGHT * C_LIGHT);
+  let e_ref = clamp(orb_info.energy_ha, -0.75 * z * z, 0.0);
+
+  let kappa_plus = -(f32(l_q) + 1.0);
+  let res_plus = solve_dirac_kappa_channel(
+    n, n_q, l_q, target_k, kappa_plus, e_ref, dx, inv_dx2, l_cent, z, r_eq, inv_2c2, params.use_rel
+  );
+
+  if (params.use_rel == 2u && l_q >= 1u) {
+    // Save j = l + 1/2 signed 4-component amplitude before solving j = l - 1/2 (kappa = +l)
+    for (var i: u32 = 0u; i < n; i = i + 1u) {
+      sh_u_plus[i] = sh_vec[i];
+    }
+    let kappa_minus = f32(l_q);
+    let res_minus = solve_dirac_kappa_channel(
+      n, n_q, l_q, target_k, kappa_minus, e_ref, dx, inv_dx2, l_cent, z, r_eq, inv_2c2, params.use_rel
+    );
+    let lf = f32(l_q);
+    let w_plus = (2.0 * lf + 2.0) / (4.0 * lf + 2.0);
+    let w_minus = 1.0 - w_plus;
+    for (var i: u32 = 0u; i < n; i = i + 1u) {
+      let up = sh_u_plus[i];
+      let um = sh_vec[i];
+      let mag = sqrt(max(0.0, w_plus * up * up + w_minus * um * um));
+      orbitals_u[s * n + i] = select(-mag, mag, up >= 0.0);
+    }
+    let e_avg = w_plus * res_plus.x + w_minus * res_minus.x;
+    let sf_avg = w_plus * res_plus.y + w_minus * res_minus.y;
+    orbital_meta[s].energy_ha = e_avg;
+    dirac_out[s] = DiracSubshellOut(res_minus.x, res_plus.x, res_plus.x - res_minus.x, sf_avg);
+  } else {
+    for (var i: u32 = 0u; i < n; i = i + 1u) {
+      orbitals_u[s * n + i] = sh_vec[i];
+    }
+    orbital_meta[s].energy_ha = res_plus.x;
+    dirac_out[s] = DiracSubshellOut(res_plus.x, res_plus.x, 0.0, res_plus.y);
+  }
 }
 `;
 
@@ -694,7 +814,8 @@ function getKsPipelines(device) {
       { binding: 4, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
       { binding: 5, visibility: 0x0004, buffer: { type: 'storage' } },
       { binding: 6, visibility: 0x0004, buffer: { type: 'storage' } },
-      { binding: 7, visibility: 0x0004, buffer: { type: 'storage' } }
+      { binding: 7, visibility: 0x0004, buffer: { type: 'storage' } },
+      { binding: 8, visibility: 0x0004, buffer: { type: 'storage' } }
     ]
   });
 
@@ -1142,7 +1263,10 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
   const n = Math.min(RADIAL_KS_WEBGPU_GRID_N, Math.max(64, Math.floor(gridPointsN)));
   const funcNorm = String(functional || 'pbe').toLowerCase();
   const usePbe = funcNorm === 'bare' ? 2 : (funcNorm === 'pbe' ? 1 : 0);
-  const useRel = scalarRelativistic ? 1 : 0;
+  // useRel = 2 -> Full 4-Component Radial Dirac-KS (coupled G/F spinors + non-perturbative j = l +- 1/2)
+  // useRel = 1 -> Scalar relativistic Koelling-Harmon (+ small component norm)
+  // useRel = 0 -> Non-relativistic Schrodinger log-grid
+  const useRel = scalarRelativistic ? (spinOrbit ? 2 : 1) : 0;
   const rNucBohr = Math.max(0, Number(nuclearChargeRadiusBohr) || 0);
   const rMax = rMaxBohr ?? Math.max(20, 60 / Math.sqrt(atomicNumberZ));
   const xMin = Math.log(rMinBohr);
@@ -1193,10 +1317,12 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
     usage: returnOrbitalWavefunctions ? (GPU_BUF_STORAGE | GPU_BUF_COPY_SRC) : GPU_BUF_STORAGE
   });
   const orbMetaBuf = device.createBuffer({ size: Math.max(1, orbCount) * 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST | GPU_BUF_COPY_SRC });
+  const diracOutBuf = device.createBuffer({ size: Math.max(1, orbCount) * 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
   const summaryBuf = device.createBuffer({ size: 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
   const soBuf = device.createBuffer({ size: Math.max(1, orbCount) * 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
   const orbUBytes = returnOrbitalWavefunctions ? Math.max(1, orbCount) * bytes : 0;
-  const totalReadBytes = 16 + Math.max(1, orbCount) * 16 + Math.max(1, orbCount) * 16 + bytes + orbUBytes;
+  const metaBytesAlloc = Math.max(1, orbCount) * 16;
+  const totalReadBytes = 16 + metaBytesAlloc * 3 + bytes + orbUBytes;
   const finalReadBuf = device.createBuffer({ size: totalReadBytes, usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST });
 
   try {
@@ -1211,7 +1337,7 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
     });
     const eigBg = device.createBindGroup({
       layout: eigBgl,
-      entries: [uBuf, rBuf, vxcBuf, fxcBuf, velecBuf, auxBuf, orbUBuf, orbMetaBuf].map((buffer, binding) => ({ binding, resource: { buffer } }))
+      entries: [uBuf, rBuf, vxcBuf, fxcBuf, velecBuf, auxBuf, orbUBuf, orbMetaBuf, diracOutBuf].map((buffer, binding) => ({ binding, resource: { buffer } }))
     });
     const obsBg = device.createBindGroup({
       layout: obsBgl,
@@ -1248,13 +1374,14 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
     pass.dispatchWorkgroups(Math.max(1, orbCount), 1, 1);
     pass.end();
 
-    const metaBytes = Math.max(1, orbCount) * 16;
+    const metaBytes = metaBytesAlloc;
     enc.copyBufferToBuffer(summaryBuf, 0, finalReadBuf, 0, 16);
     enc.copyBufferToBuffer(orbMetaBuf, 0, finalReadBuf, 16, metaBytes);
     enc.copyBufferToBuffer(soBuf, 0, finalReadBuf, 16 + metaBytes, metaBytes);
-    enc.copyBufferToBuffer(rhoBuf, 0, finalReadBuf, 16 + metaBytes * 2, bytes);
+    enc.copyBufferToBuffer(diracOutBuf, 0, finalReadBuf, 16 + metaBytes * 2, metaBytes);
+    enc.copyBufferToBuffer(rhoBuf, 0, finalReadBuf, 16 + metaBytes * 3, bytes);
     if (returnOrbitalWavefunctions && orbUBytes > 0) {
-      enc.copyBufferToBuffer(orbUBuf, 0, finalReadBuf, 16 + metaBytes * 2 + bytes, orbUBytes);
+      enc.copyBufferToBuffer(orbUBuf, 0, finalReadBuf, 16 + metaBytes * 3 + bytes, orbUBytes);
     }
     device.queue.submit([enc.finish()]);
 
@@ -1270,7 +1397,8 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
     };
     const metaOffset = 4;
     const soOffset = 4 + orbCount * 4;
-    const rhoOffset = 4 + orbCount * 8;
+    const diracOffset = 4 + orbCount * 8;
+    const rhoOffset = 4 + orbCount * 12;
     const orbUOffset = rhoOffset + n;
     const finalRho = Array.from(allFloats.slice(rhoOffset, rhoOffset + n));
     const orbitalWavefunctions = returnOrbitalWavefunctions
@@ -1279,18 +1407,39 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
 
     let sumOcc = 0;
     let electronCount = 0;
+    let totalSmallComponentNormSq = 0;
     const orbitals = [];
     for (let s = 0; s < orbCount; s += 1) {
       const energyHa = allFloats[metaOffset + s * 4 + 3];
       const sub = cfg[s];
+      const dEMinus = allFloats[diracOffset + s * 4 + 0];
+      const dEPlus = allFloats[diracOffset + s * 4 + 1];
+      const dSplit = allFloats[diracOffset + s * 4 + 2];
+      const smallNormSq = Math.max(0, Number(allFloats[diracOffset + s * 4 + 3]) || 0);
       sumOcc += sub.occupancy * energyHa;
       electronCount += sub.occupancy;
-      const orb = { n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa };
+      totalSmallComponentNormSq += sub.occupancy * smallNormSq;
+      const orb = {
+        n: sub.n,
+        l: sub.l,
+        occupancy: sub.occupancy,
+        energyHa,
+        kappaPlus: -(sub.l + 1),
+        ...(sub.l >= 1 ? { kappaMinus: sub.l } : {}),
+        smallComponentNormSq: smallNormSq
+      };
       if (spinOrbit && sub.l >= 1) {
-        orb.spinOrbitXiHa = allFloats[soOffset + s * 4 + 0];
-        orb.spinOrbitSplittingHa = allFloats[soOffset + s * 4 + 1];
-        orb.energyJMinusHa = allFloats[soOffset + s * 4 + 2];
-        orb.energyJPlusHa = allFloats[soOffset + s * 4 + 3];
+        if (useRel === 2 && Number.isFinite(dEMinus) && Number.isFinite(dEPlus)) {
+          orb.energyJMinusHa = dEMinus;
+          orb.energyJPlusHa = dEPlus;
+          orb.spinOrbitSplittingHa = dSplit;
+          orb.spinOrbitXiHa = dSplit / (sub.l + 0.5);
+        } else {
+          orb.spinOrbitXiHa = allFloats[soOffset + s * 4 + 0];
+          orb.spinOrbitSplittingHa = allFloats[soOffset + s * 4 + 1];
+          orb.energyJMinusHa = allFloats[soOffset + s * 4 + 2];
+          orb.energyJPlusHa = allFloats[soOffset + s * 4 + 3];
+        }
       }
       orbitals.push(orb);
     }
@@ -1323,9 +1472,13 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
       atomicNumberZ,
       configuration: cfg,
       functional: usePbe === 2 ? 'bare' : (usePbe ? 'pbe' : 'lda'),
-      relativisticMethod: useRel
-        ? (spinOrbit ? 'koelling-harmon-gpu+spin-orbit+qed' : 'koelling-harmon-gpu+qed')
-        : (spinOrbit ? 'schrodinger-log-gpu+spin-orbit' : 'schrodinger-log-gpu'),
+      dirac4Component: useRel === 2,
+      totalSmallComponentNormSq,
+      relativisticMethod: useRel === 2
+        ? 'dirac-4comp-gpu+qed'
+        : (useRel === 1
+          ? 'koelling-harmon-gpu+qed'
+          : (spinOrbit ? 'schrodinger-log-gpu+spin-orbit' : 'schrodinger-log-gpu')),
       finiteNucleusUsed: rNucBohr > 0,
       nuclearChargeRadiusBohr: rNucBohr,
       nuclearMassU: hasIsotopeMass ? mNucU : null,
@@ -1351,7 +1504,7 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
       })
     };
   } finally {
-    for (const b of [uBuf, rBuf, rhoBuf, vhBuf, vxcBuf, fxcBuf, velecBuf, auxBuf, orbUBuf, orbMetaBuf, summaryBuf, soBuf, finalReadBuf]) {
+    for (const b of [uBuf, rBuf, rhoBuf, vhBuf, vxcBuf, fxcBuf, velecBuf, auxBuf, orbUBuf, orbMetaBuf, diracOutBuf, summaryBuf, soBuf, finalReadBuf]) {
       b.destroy();
     }
   }

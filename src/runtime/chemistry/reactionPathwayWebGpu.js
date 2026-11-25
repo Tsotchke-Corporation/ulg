@@ -19,6 +19,7 @@ import {
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_REACTION_PATHWAY_SCHEMA = 'ulg.chemistry.reaction-pathway-webgpu.v1';
+export const ULG_MULTI_STEP_REACTION_NETWORK_SCHEMA = 'ulg.chemistry.multi-step-reaction-network-webgpu.v1';
 
 const HA_TO_EV = 27.211386245988;
 const EV_TO_J_PER_MOL = 96485.33212;
@@ -417,6 +418,277 @@ export async function solveReactionPathwayWebGpu(device, {
     provenance: Object.freeze({
       status: 'webgpu-derived',
       solver: 'gpumath-rhf-ci-neb-multimolecule',
+      scientificValidation: false
+    })
+  });
+}
+
+function signatureByAtomicNumber(atoms) {
+  const counts = new Map();
+  for (const a of atoms) {
+    const z = Math.trunc(Number(a.Z));
+    counts.set(z, (counts.get(z) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([z, c]) => `${z}:${c}`).join(',');
+}
+
+function normalizeAtomPoint(a) {
+  const pos = Array.isArray(a.position) ? a.position : [a.x ?? 0, a.y ?? 0, a.z ?? 0];
+  return { Z: Math.trunc(Number(a.Z)), position: [Number(pos[0]), Number(pos[1]), Number(pos[2])] };
+}
+
+/**
+ * Pure Kozuch-Shaik Energetic Span Model analyzer for multi-step sequential
+ * elementary reaction networks:
+ *   S_0 -> TS_1‡ -> S_1 -> TS_2‡ -> ... -> S_k
+ * Computes cumulative energy profile E(xi), exact forward energetic span
+ *   deltaE = max_{j >= i} (E(TS_j) - E(I_i)),
+ * TOF-determining intermediate (TDI), TOF-determining transition state (TDTS),
+ * rate-determining step index, Eyring network rate k_net(T), and thermodynamics.
+ */
+export function analyzeMultiStepReactionNetworkProfile(stepProfiles = [], {
+  temperatureK = 298.15,
+  deltaSJPerMolK = -35.0
+} = {}) {
+  if (!Array.isArray(stepProfiles) || stepProfiles.length < 1) {
+    throw new TypeError('analyzeMultiStepReactionNetworkProfile requires >= 1 elementary step profile');
+  }
+  const intermediateEnergiesEv = [0];
+  const transitionStateEnergiesEv = [];
+  const stepSummaries = [];
+  const stitchedProfile = [];
+
+  let offsetEv = 0;
+  for (let s = 0; s < stepProfiles.length; s += 1) {
+    const st = stepProfiles[s];
+    const energies = Array.isArray(st.energiesEv) && st.energiesEv.length >= 2
+      ? st.energiesEv.map(Number)
+      : [0, Math.max(0.05, Number(st.forwardBarrierEv) || 0.5), Number(st.reactionEnergyEv) || 0];
+    const rel0 = energies[0];
+    const localShifted = energies.map((e) => offsetEv + (e - rel0));
+    let tsLocalIdx = 1;
+    for (let i = 1; i < localShifted.length - 1; i += 1) {
+      if (localShifted[i] > localShifted[tsLocalIdx]) tsLocalIdx = i;
+    }
+    if (localShifted.length === 2) tsLocalIdx = localShifted[1] >= localShifted[0] ? 1 : 0;
+
+    const eStart = localShifted[0];
+    const eTs = localShifted[tsLocalIdx];
+    const eEnd = localShifted[localShifted.length - 1];
+    transitionStateEnergiesEv.push(eTs);
+    intermediateEnergiesEv.push(eEnd);
+
+    const nSeg = localShifted.length;
+    for (let i = (s === 0 ? 0 : 1); i < nSeg; i += 1) {
+      stitchedProfile.push(Object.freeze({
+        stepIndex: s,
+        localImageIndex: i,
+        xi: s + i / Math.max(1, nSeg - 1),
+        energyEv: localShifted[i],
+        isTransitionState: i === tsLocalIdx,
+        isIntermediate: i === 0 || i === nSeg - 1
+      }));
+    }
+
+    stepSummaries.push(Object.freeze({
+      stepIndex: s,
+      label: st.label || st.equation || `Step ${s + 1}`,
+      forwardBarrierEv: Math.max(0.01, eTs - eStart),
+      reverseBarrierEv: Math.max(0.01, eTs - eEnd),
+      stepReactionEnergyEv: eEnd - eStart,
+      cumulativeStartEv: eStart,
+      cumulativeTsEv: eTs,
+      cumulativeEndEv: eEnd,
+      saddleLocalImageIndex: tsLocalIdx
+    }));
+
+    offsetEv = eEnd;
+  }
+
+  // Kozuch-Shaik forward energetic span: max_{j >= i} (E(TS_j) - E(I_i)) over all
+  // reachable reactant/intermediate states I_i (i = 0..k-1) and subsequent TS_j (j = i..k-1)
+  let energeticSpanEv = -Infinity;
+  let tdiStateIndex = 0;
+  let tdtsStepIndex = 0;
+  for (let i = 0; i < stepProfiles.length; i += 1) {
+    for (let j = i; j < stepProfiles.length; j += 1) {
+      const span = transitionStateEnergiesEv[j] - intermediateEnergiesEv[i];
+      if (span > energeticSpanEv) {
+        energeticSpanEv = span;
+        tdiStateIndex = i;
+        tdtsStepIndex = j;
+      }
+    }
+  }
+  energeticSpanEv = Math.max(0.02, Number.isFinite(energeticSpanEv) ? energeticSpanEv : 0.5);
+  const overallReactionEnergyEv = intermediateEnergiesEv[intermediateEnergiesEv.length - 1] - intermediateEnergiesEv[0];
+  const T = Math.max(10, Number(temperatureK) || 298.15);
+  const eyringNetRateSInv = ((KB_J_PER_K * T) / H_PLANCK_JS) * Math.exp(-energeticSpanEv / (KB_EV_PER_K * T));
+  const thermodynamics = computeReactionThermodynamicsCurve(energeticSpanEv, overallReactionEnergyEv, {
+    deltaSJPerMolK
+  });
+
+  return Object.freeze({
+    stepCount: stepProfiles.length,
+    intermediateEnergiesEv: Object.freeze(intermediateEnergiesEv),
+    transitionStateEnergiesEv: Object.freeze(transitionStateEnergiesEv),
+    energeticSpanEv,
+    tdiStateIndex,
+    tdtsStepIndex,
+    rateDeterminingStepIndex: tdtsStepIndex,
+    overallReactionEnergyEv,
+    temperatureK: T,
+    eyringNetRateSInv,
+    stepSummaries: Object.freeze(stepSummaries),
+    stitchedProfile: Object.freeze(stitchedProfile),
+    thermodynamics
+  });
+}
+
+/**
+ * Multi-Step GPU CI-NEB Reaction Network Solver (`S_0 -> TS_1‡ -> S_1 -> ... -> S_k`):
+ * chains sequential elementary GPU CI-NEB steps on the Born-Oppenheimer RHF PES,
+ * enforces exact atom & proton conservation across all intermediates, stitches
+ * the full reaction coordinate xi in [0, k], and derives Kozuch-Shaik energetic-
+ * span steady-state Eyring kinetics strictly on WebGPU.
+ */
+export async function solveMultiStepReactionNetworkWebGpu(device, {
+  steps = null,
+  intermediates = null,
+  equation = '',
+  temperatureK = 298.15,
+  nImagesPerStep = 5,
+  maxNebSteps = 3,
+  basisName = 'auto',
+  sampleVolumes = false,
+  deltaSJPerMolK = -35.0
+} = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    throw new TypeError('solveMultiStepReactionNetworkWebGpu requires a live WebGPU GPUDevice');
+  }
+
+  let resolvedSteps = [];
+  if (Array.isArray(intermediates) && intermediates.length >= 3) {
+    const normStates = intermediates.map((st, idx) => {
+      const atoms = (Array.isArray(st) ? st : st?.atoms)?.map(normalizeAtomPoint) || [];
+      if (atoms.length < 2) {
+        throw new RangeError(`Intermediate state ${idx} must have >= 2 atoms`);
+      }
+      return { label: st?.label || `I_${idx}`, atoms };
+    });
+    const refSig = signatureByAtomicNumber(normStates[0].atoms);
+    for (let i = 1; i < normStates.length; i += 1) {
+      if (signatureByAtomicNumber(normStates[i].atoms) !== refSig) {
+        throw new Error(`Multi-step atom conservation violation at intermediate ${i}: expected ${refSig}, got ${signatureByAtomicNumber(normStates[i].atoms)}`);
+      }
+    }
+    for (let s = 0; s < normStates.length - 1; s += 1) {
+      const rAtoms = normStates[s].atoms;
+      const pAtoms = matchProductAtomsToReactants(rAtoms, normStates[s + 1].atoms);
+      resolvedSteps.push({
+        label: `${normStates[s].label} -> ${normStates[s + 1].label}`,
+        equation: `${normStates[s].label} -> ${normStates[s + 1].label}`,
+        reactantAtoms: rAtoms,
+        productAtoms: pAtoms
+      });
+    }
+  } else if (Array.isArray(steps) && steps.length >= 2) {
+    let refSig = null;
+    for (let s = 0; s < steps.length; s += 1) {
+      const st = steps[s];
+      let rAtoms = st.reactantAtoms?.map(normalizeAtomPoint) || null;
+      let pAtoms = st.productAtoms?.map(normalizeAtomPoint) || null;
+      if ((!rAtoms || !pAtoms) && st.candidate) {
+        const built = buildReactionComplexGeometries(st.candidate, { maxAtoms: 10 });
+        rAtoms = built.reactantAtoms.map(normalizeAtomPoint);
+        pAtoms = built.productAtoms.map(normalizeAtomPoint);
+      }
+      if (!rAtoms || !pAtoms || rAtoms.length !== pAtoms.length) {
+        throw new Error(`Elementary step ${s} requires conserved reactantAtoms and productAtoms`);
+      }
+      const sigR = signatureByAtomicNumber(rAtoms);
+      const sigP = signatureByAtomicNumber(pAtoms);
+      if (sigR !== sigP) {
+        throw new Error(`Atom conservation violation inside step ${s}: ${sigR} != ${sigP}`);
+      }
+      if (refSig == null) refSig = sigR;
+      else if (sigR !== refSig) {
+        throw new Error(`Multi-step stoichiometry mismatch at step ${s}: expected ${refSig}, got ${sigR}`);
+      }
+      resolvedSteps.push({
+        label: st.label || st.equation || `Step ${s + 1}`,
+        equation: st.equation || st.label || `Step ${s + 1}`,
+        candidate: st.candidate || null,
+        reactantAtoms: rAtoms,
+        productAtoms: matchProductAtomsToReactants(rAtoms, pAtoms)
+      });
+    }
+  } else {
+    throw new TypeError('solveMultiStepReactionNetworkWebGpu requires `intermediates` (>= 3 states) or `steps` (>= 2 elementary steps)');
+  }
+
+  const elementaryPathways = [];
+  let totalGpuRhfCalls = 0;
+  for (let s = 0; s < resolvedSteps.length; s += 1) {
+    const st = resolvedSteps[s];
+    const path = await solveReactionPathwayWebGpu(device, {
+      candidate: st.candidate || null,
+      reactantAtoms: st.reactantAtoms,
+      productAtoms: st.productAtoms,
+      equation: st.equation,
+      nImages: nImagesPerStep,
+      maxNebSteps,
+      basisName,
+      sampleVolumes
+    });
+    elementaryPathways.push(path);
+    totalGpuRhfCalls += path.gpuRhfCalls;
+  }
+
+  const analysis = analyzeMultiStepReactionNetworkProfile(
+    elementaryPathways.map((p, idx) => ({
+      label: resolvedSteps[idx].label,
+      equation: p.equation,
+      energiesEv: p.energiesEv,
+      forwardBarrierEv: p.forwardBarrierEv,
+      reactionEnergyEv: p.reactionEnergyEv
+    })),
+    { temperatureK, deltaSJPerMolK }
+  );
+
+  // Stitch full image sequence (skipping duplicate junction images while offsetting E relative to S_0)
+  const eGlobal0Ha = elementaryPathways[0].energiesHa[0];
+  const stitchedImages = [];
+  for (let s = 0; s < elementaryPathways.length; s += 1) {
+    const path = elementaryPathways[s];
+    const nSeg = path.images.length;
+    for (let i = (s === 0 ? 0 : 1); i < nSeg; i += 1) {
+      const im = path.images[i];
+      stitchedImages.push(Object.freeze({
+        ...im,
+        stepIndex: s,
+        globalImageIndex: stitchedImages.length,
+        xi: s + i / Math.max(1, nSeg - 1),
+        energyEv: (im.energyHa - eGlobal0Ha) * HA_TO_EV
+      }));
+    }
+  }
+
+  return Object.freeze({
+    schema: ULG_MULTI_STEP_REACTION_NETWORK_SCHEMA,
+    backend: 'webgpu',
+    equation: equation || resolvedSteps.map((s) => s.label).join(' => '),
+    atomCount: resolvedSteps[0].reactantAtoms.length,
+    totalProtonsZ: resolvedSteps[0].reactantAtoms.reduce((acc, a) => acc + a.Z, 0),
+    stepCount: elementaryPathways.length,
+    totalGpuRhfCalls,
+    elementaryPathways: Object.freeze(elementaryPathways),
+    stitchedImages: Object.freeze(stitchedImages),
+    ...analysis,
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    provenance: Object.freeze({
+      status: 'webgpu-derived',
+      solver: 'gpumath-rhf-multistep-ci-neb-energetic-span',
       scientificValidation: false
     })
   });

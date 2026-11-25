@@ -132,11 +132,14 @@ export async function deriveElectromagneticClosureWebGpu(device, {
     ? optBarePlasmaEv / Math.sqrt(coreDielectricInf * opticalMassRatio)
     : 0;
 
-  // ---- 1. Magnetism: Stoner Instabilities, Pauli, Larmor Diamagnetism, Curie-Weiss ----
-  // Janak/Vosko-Wilk-Nusair Stoner exchange integral I_Stoner (eV): ~0.9 eV for 3d, ~0.6 eV for 4d/4f
-  const iStonerEv = (maxN === 4 && dOcc > 0 && dOcc < 10)
+  // ---- 1. Magnetism: Stoner + Dudarev DFT+U Instabilities, Pauli, Larmor Diamagnetism, Curie-Weiss ----
+  // Janak/Vosko-Wilk-Nusair Stoner exchange integral I_Stoner (eV) coupled with open-d/f Dudarev DFT+U_eff
+  const dftUHubbardEv = Math.max(0, Number(bulkResult.dftUHubbardEv || 0));
+  const mbjCParameter = Number.isFinite(Number(bulkResult.mbjCParameter)) ? Number(bulkResult.mbjCParameter) : null;
+  const iStonerBaseEv = (maxN === 4 && dOcc > 0 && dOcc < 10)
     ? 0.92
     : (fOcc > 0 && fOcc < 14 ? 0.58 : (dOcc > 0 && dOcc < 10 ? 0.55 : 0.25));
+  const iStonerEv = iStonerBaseEv + 0.045 * Math.min(6.0, dftUHubbardEv);
   // Effective spin DOS per spin channel g_spin(E_F) = 0.5 * g_tot(E_F)
   const gSpinEf = 0.5 * (bulkResult.dosAtFermiStatesPerEvAtom || 0);
   const stonerProduct = iStonerEv * gSpinEf;
@@ -359,6 +362,8 @@ export async function deriveElectromagneticClosureWebGpu(device, {
     staticDielectricConstant,
     magneticPhase,
     stonerProduct,
+    dftUHubbardEv,
+    mbjCParameter,
     magneticMomentMuB,
     curieOrNeelTempK,
     magneticSusceptibilitySi,

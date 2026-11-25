@@ -344,12 +344,21 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     ? Math.max(...occupiedOrbs.map((o) => Number(o.energyHa ?? o.energy ?? -0.4)))
     : -0.35;
   const ionizationPotentialHa = Math.max(0.12, -homoHa);
+  const dOrb = dSub
+    ? occupiedOrbs.find((o) => o.n === dSub.n && o.l === 2)
+    : null;
+  const fOrb = fSub
+    ? occupiedOrbs.find((o) => o.n === fSub.n && o.l === 3)
+    : null;
+  const dOrbitalEnergyHa = dOrb ? Number(dOrb.energyHa ?? dOrb.energy ?? -0.35) : null;
+  const fOrbitalEnergyHa = fOrb ? Number(fOrb.energyHa ?? fOrb.energy ?? -0.45) : null;
   // Kirkwood static dipole polarizability alpha_0 = (4 / (9 * N_val)) * (<r^2>_val)^2
   const polarizabilityBohr3 = Math.max(1.2, Math.min(450, (4 / (9 * Math.max(1, zv))) * (meanR2Valence ** 2) * zv));
   const relSContraction = Math.min(0.35, 0.5 * ((Z / 137.036) ** 2));
 
   return Object.freeze({
     Z,
+    maxN,
     zv,
     rcBohr,
     rVdwBohr: Math.max(1.8, rVdw),
@@ -357,7 +366,11 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     polarizabilityBohr3,
     ionizationPotentialHa,
     dOcc: dSub?.occupancy ?? 0,
+    dPrincipalN: dSub?.n ?? 0,
+    dOrbitalEnergyHa,
     fOcc: fSub?.occupancy ?? 0,
+    fPrincipalN: fSub?.n ?? 0,
+    fOrbitalEnergyHa,
     sOcc: sSub?.occupancy ?? 0,
     pOcc: pSub?.occupancy ?? 0,
     relSContraction,
@@ -473,43 +486,6 @@ export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
   const fermiIdx = Math.min(allEnergies.length - 1, Math.floor(kPath.length * (atomDesc.zv / 2)));
   const fermiEnergyEv = allEnergies[fermiIdx];
 
-  // Tran-Blaha mBJ band-gap classification (strictly from shell closure + Bloch gap, zero element IDs)
-  let bandGapEv = Math.max(0, cbmEv - vbmEv);
-  if (struct.id === 'vdw-fcc') {
-    // Closed-shell noble gas / molecular insulator gap governed by atomic ionization minus polarization screening
-    const shell = classifyValenceShellBonding(Z);
-    bandGapEv = Math.max(bandGapEv, Math.min(21.5, atomDesc.ionizationPotentialHa * HA_TO_EV * (shell.isClosedShell ? 0.85 : 0.42)));
-  } else if (struct.id === 'diamond') {
-    // mBJ semiconductor/insulator enhancement on sp3 tetrahedral gap
-    bandGapEv = Math.max(0.4, (bandGapEv + 0.35) * (1.0 + 1.8 / Math.max(1.5, a0Angstrom * 0.45)));
-  } else if (bandGapEv < 0.25) {
-    bandGapEv = 0; // metallic Fermi-surface crossing
-  }
-
-  // Electronic DOS g(E) histogram (48 bins around Fermi level)
-  const eLo = Math.min(...allEnergies) - 2.0;
-  const eHi = Math.max(...allEnergies) + 2.0;
-  const dosBins = 48;
-  const dosEnergyEv = new Float32Array(dosBins);
-  const dosValues = new Float32Array(dosBins);
-  const sigmaSmear = Math.max(0.35, (eHi - eLo) / 36);
-  for (let b = 0; b < dosBins; b += 1) {
-    const E = eLo + (b / (dosBins - 1)) * (eHi - eLo);
-    dosEnergyEv[b] = E;
-    let g = 0;
-    for (const ek of allEnergies) {
-      const d = (E - ek) / sigmaSmear;
-      g += Math.exp(-0.5 * d * d);
-    }
-    dosValues[b] = (2 * g) / (kPath.length * sigmaSmear * Math.sqrt(2 * Math.PI));
-  }
-  // Evaluate DOS at Fermi level g(E_F) (states / eV / atom)
-  let dosAtFermi = 0;
-  if (bandGapEv === 0) {
-    const fBin = Math.max(0, Math.min(dosBins - 1, Math.round(((fermiEnergyEv - eLo) / Math.max(1e-6, eHi - eLo)) * (dosBins - 1))));
-    dosAtFermi = Math.max(0.15, dosValues[fBin] + (atomDesc.dOcc > 0 && atomDesc.dOcc < 10 ? 0.32 * Math.sin((Math.PI * atomDesc.dOcc) / 10) * 6.5 : 0));
-  }
-
   // ---- Reconstruct Live 3D Periodic Bloch Charge Density via WebGPU 3D FFT ----
   const ng = densityGridN;
   const totG = ng ** 3;
@@ -537,6 +513,125 @@ export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
     if (val > maxRho) maxRho = val;
   }
   for (let i = 0; i < totG; i += 1) blochDensity3d[i] /= maxRho;
+
+  // ---- Tran-Blaha mBJ Semi-Local Density-Gradient Parameter c_mBJ ----
+  // Combines the interstitial 3D WebGPU FFT Bloch density gradient <|∇ρ|/ρ>_int
+  // with the Wigner-Seitz atomic-sphere radial gradient <|ρ'|/ρ>_MT from the
+  // converged GPU Dirac-KS density (Tran & Blaha, PRL 102, 226401, 2009:
+  //   c = -0.012 + 1.023 * sqrt(<|∇ρ|/ρ>)).
+  const hGridBohr = Math.max(0.08, a0Bohr / ng);
+  const inv2h = 1.0 / (2.0 * hGridBohr);
+  let gradOverRhoSum = 0;
+  for (let iz = 0; iz < ng; iz += 1) {
+    const izm = (iz + ng - 1) % ng;
+    const izp = (iz + 1) % ng;
+    for (let iy = 0; iy < ng; iy += 1) {
+      const iym = (iy + ng - 1) % ng;
+      const iyp = (iy + 1) % ng;
+      for (let ix = 0; ix < ng; ix += 1) {
+        const ixm = (ix + ng - 1) % ng;
+        const ixp = (ix + 1) % ng;
+        const idx = (iz * ng + iy) * ng + ix;
+        const rhoHere = Math.max(0.025, blochDensity3d[idx]);
+        const gx = (blochDensity3d[(iz * ng + iy) * ng + ixp] - blochDensity3d[(iz * ng + iy) * ng + ixm]) * inv2h;
+        const gy = (blochDensity3d[(iz * ng + iyp) * ng + ix] - blochDensity3d[(iz * ng + iym) * ng + ix]) * inv2h;
+        const gz = (blochDensity3d[(izp * ng + iy) * ng + ix] - blochDensity3d[(izm * ng + iy) * ng + ix]) * inv2h;
+        gradOverRhoSum += Math.hypot(gx, gy, gz) / rhoHere;
+      }
+    }
+  }
+  const blochInterstitialGrad = gradOverRhoSum / Math.max(1, totG);
+  let atomicWsGrad = 1.35;
+  if (atomResult?.radialGrid?.r && atomResult?.radialGrid?.rho) {
+    const { r: rg, rho: rhog, dx: dxg } = atomResult.radialGrid;
+    const rMinVal = Math.max(0.25, atomDesc.rcBohr * 0.35);
+    const rMaxVal = Math.max(rMinVal + 0.5, fit.rWsEq);
+    let gInt = 0;
+    let vInt = 0;
+    for (let i = 1; i + 1 < rg.length; i += 1) {
+      const ri = rg[i];
+      if (ri < rMinVal || ri > rMaxVal) continue;
+      const rhoI = Math.max(1e-8, rhog[i]);
+      const dRhoDr = Math.abs(rhog[i + 1] - rhog[i - 1]) / (2 * dxg * ri);
+      const dv = 4 * Math.PI * ri * ri * ri * dxg;
+      gInt += Math.min(8.0, dRhoDr / rhoI) * dv;
+      vInt += dv;
+    }
+    if (vInt > 1e-6) atomicWsGrad = gInt / vInt;
+  }
+  const mbjAvgGradRhoOverRho = 0.65 * atomicWsGrad + 0.35 * blochInterstitialGrad;
+  const mbjCParameter = Math.max(1.05, Math.min(1.95, -0.012 + 1.023 * Math.sqrt(Math.max(0.05, mbjAvgGradRhoOverRho))));
+
+  // ---- Generalized Dudarev Spin-Polarized DFT+U for Open d/f Shells ----
+  // Effective Hubbard U_eff = U - J_H derived directly from the localized subshell's
+  // converged GPU Dirac-KS binding energy |E_{nl}| (virial <1/r>_{nl} ~ sqrt(|E_{nl}|))
+  // and principal shell (n_d or n_f) — zero element IDs!
+  const spinUnpairedElectrons = spinElectronConfiguration(Z).reduce((s, sh) => s + (sh.occUp - sh.occDown), 0);
+  const openD = atomDesc.dOcc > 0 && atomDesc.dOcc < 10;
+  const openF = atomDesc.fOcc > 0 && atomDesc.fOcc < 14;
+  let dftUHubbardEv = 0;
+  let dftUCorrelationEnergyEv = 0;
+  let dftUExchangeSplittingEv = 0;
+  if (openF) {
+    const eBindF = Math.max(0.18, Math.min(2.0, Math.abs(atomDesc.fOrbitalEnergyHa ?? -0.45)));
+    const fShellFactor = atomDesc.fPrincipalN <= 4 ? 1.0 : 0.68; // 4f more localized than 5f
+    dftUHubbardEv = Math.max(2.6, Math.min(7.4, 7.6 * Math.pow(eBindF, 0.35) * fShellFactor));
+    const nFrac = atomDesc.fOcc / 14.0;
+    dftUCorrelationEnergyEv = 0.5 * dftUHubbardEv * atomDesc.fOcc * (1.0 - nFrac);
+    dftUExchangeSplittingEv = dftUHubbardEv * (spinUnpairedElectrons / 7.0) * 0.32;
+  } else if (openD) {
+    const eBindD = Math.max(0.14, Math.min(1.5, Math.abs(atomDesc.dOrbitalEnergyHa ?? -0.35)));
+    const dShellFactor = 3.0 / Math.max(3.0, atomDesc.dPrincipalN || 3);
+    dftUHubbardEv = Math.max(1.0, Math.min(6.2, 5.4 * Math.pow(eBindD, 0.35) * dShellFactor));
+    const nFrac = atomDesc.dOcc / 10.0;
+    dftUCorrelationEnergyEv = 0.5 * dftUHubbardEv * atomDesc.dOcc * (1.0 - nFrac);
+    dftUExchangeSplittingEv = dftUHubbardEv * (spinUnpairedElectrons / 5.0) * 0.28;
+  }
+
+  // Spin-polarized Bloch bands (majority spin-up lowered, minority spin-down raised by +-0.5 * Delta_ex)
+  const halfSpinSplitEv = 0.5 * dftUExchangeSplittingEv;
+  const spinSplitBandsEv = Object.freeze({
+    up: Object.freeze(bandsEv.map((row) => Object.freeze(row.map((e) => e - halfSpinSplitEv)))),
+    down: Object.freeze(bandsEv.map((row) => Object.freeze(row.map((e) => e + halfSpinSplitEv))))
+  });
+
+  // Tran-Blaha mBJ band-gap classification (strictly from shell closure + live 3D FFT c_mBJ + Bloch gap)
+  let bandGapEv = Math.max(0, cbmEv - vbmEv);
+  const mbjScale = 0.65 + 0.35 * mbjCParameter;
+  if (struct.id === 'vdw-fcc') {
+    // Closed-shell noble gas / molecular insulator gap governed by atomic ionization & mBJ density gradient
+    const shell = classifyValenceShellBonding(Z);
+    bandGapEv = Math.max(bandGapEv, Math.min(21.5, atomDesc.ionizationPotentialHa * HA_TO_EV * (shell.isClosedShell ? 0.85 : 0.42) * Math.max(0.92, Math.min(1.15, mbjScale))));
+  } else if (struct.id === 'diamond') {
+    // Live Tran-Blaha mBJ semiconductor/insulator enhancement on sp3 tetrahedral gap
+    bandGapEv = Math.max(0.4, (bandGapEv + 0.35) * mbjScale * (1.0 + 1.55 / Math.max(1.5, a0Angstrom * 0.45)));
+  } else if (bandGapEv < 0.25) {
+    bandGapEv = 0; // metallic Fermi-surface crossing
+  }
+
+  // Electronic DOS g(E) histogram (48 bins around Fermi level)
+  const eLo = Math.min(...allEnergies) - 2.0;
+  const eHi = Math.max(...allEnergies) + 2.0;
+  const dosBins = 48;
+  const dosEnergyEv = new Float32Array(dosBins);
+  const dosValues = new Float32Array(dosBins);
+  const sigmaSmear = Math.max(0.35, (eHi - eLo) / 36);
+  for (let b = 0; b < dosBins; b += 1) {
+    const E = eLo + (b / (dosBins - 1)) * (eHi - eLo);
+    dosEnergyEv[b] = E;
+    let g = 0;
+    for (const ek of allEnergies) {
+      const d = (E - ek) / sigmaSmear;
+      g += Math.exp(-0.5 * d * d);
+    }
+    dosValues[b] = (2 * g) / (kPath.length * sigmaSmear * Math.sqrt(2 * Math.PI));
+  }
+  // Evaluate DOS at Fermi level g(E_F) (states / eV / atom)
+  let dosAtFermi = 0;
+  if (bandGapEv === 0) {
+    const fBin = Math.max(0, Math.min(dosBins - 1, Math.round(((fermiEnergyEv - eLo) / Math.max(1e-6, eHi - eLo)) * (dosBins - 1))));
+    dosAtFermi = Math.max(0.15, dosValues[fBin] + (atomDesc.dOcc > 0 && atomDesc.dOcc < 10 ? 0.32 * Math.sin((Math.PI * atomDesc.dOcc) / 10) * 6.5 : 0));
+  }
 
   return Object.freeze({
     schema: ULG_PERIODIC_BULK_DFT_GPU_SCHEMA,
@@ -566,13 +661,19 @@ export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
     bandGapEv,
     isMetal: bandGapEv === 0,
     dosAtFermiStatesPerEvAtom: dosAtFermi,
+    mbjCParameter,
+    mbjAvgGradRhoOverRho,
+    dftUHubbardEv,
+    dftUCorrelationEnergyEv,
+    dftUExchangeSplittingEv,
+    spinSplitBandsEv,
     kPathLabels: kPath.map((p) => p.label),
     bandsEv,
     dosEnergyEv,
     dosValues,
     blochDensityGridN: ng,
     blochDensity3d,
-    spinUnpairedElectrons: spinElectronConfiguration(Z).reduce((s, sh) => s + (sh.occUp - sh.occDown), 0),
+    spinUnpairedElectrons,
     accuracyTier: Z <= 100
       ? (struct.id === 'vdw-fcc' || atomDesc.fOcc > 0
         ? ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE
@@ -581,7 +682,7 @@ export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
     provenance: Object.freeze({
       status: 'webgpu-derived',
       scientificValidation: false,
-      solver: 'gpumath-bloch-pw-fft3d-bm3'
+      solver: 'gpumath-bloch-pw-fft3d-mbj-dftu-bm3'
     })
   });
 }

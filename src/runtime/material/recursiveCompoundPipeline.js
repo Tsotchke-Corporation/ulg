@@ -54,6 +54,32 @@ function isNonmetalShell(Z) {
   return pOcc > 0 && (pOcc >= maxN || (maxN === 2 && pOcc >= 1) || (maxN === 3 && pOcc >= 2) || (maxN >= 6 && pOcc >= 5));
 }
 
+// Detect extended 3D covalent tetrahedral AX2 networks strictly from quantum
+// shell numbers & stoichiometry (zero hardcoded formula/element tables!):
+//   - Binary 1:2 stoichiometry (A X2)
+//   - Center A is tetravalent p^2 with principal shell n >= 3 (weak p_pi-p_pi
+//     double-bond overlap favors 4-coord sigma networks such as SiO2/GeO2/SiS2,
+//     whereas n = 2 p^2 forms discrete pi-bonded molecular CO2!)
+//   - Ligand X is a more electronegative divalent chalcogen (p^4: O, S, Se, Te).
+function classifyExtendedCovalentAx2Network(species) {
+  if (!Array.isArray(species) || species.length !== 2) return null;
+  const ordered = [...species].sort((a, b) => a.count - b.count);
+  if (ordered[0].count !== 1 || ordered[1].count !== 2) return null;
+  const center = ordered[0];
+  const ligand = ordered[1];
+  const cfgA = electronConfiguration(center.Z);
+  const maxNA = cfgA.reduce((m, s) => Math.max(m, s.n), 0);
+  const pOccA = cfgA.find((s) => s.n === maxNA && s.l === 1)?.occupancy ?? 0;
+  const sOccA = cfgA.find((s) => s.n === maxNA && s.l === 0)?.occupancy ?? 0;
+  const cfgX = electronConfiguration(ligand.Z);
+  const maxNX = cfgX.reduce((m, s) => Math.max(m, s.n), 0);
+  const pOccX = cfgX.find((s) => s.n === maxNX && s.l === 1)?.occupancy ?? 0;
+  if (pOccA === 2 && sOccA === 2 && maxNA >= 3 && pOccX === 4 && mullikenElectronegativity(ligand.Z) > mullikenElectronegativity(center.Z) + 0.35) {
+    return Object.freeze({ center, ligand, maxNA, maxNX });
+  }
+  return null;
+}
+
 // Canonical ionic/covalent crystal prototypes with exact Madelung constants
 const IONIC_CRYSTAL_PROTOTYPES = Object.freeze([
   { id: 'rocksalt-B1', spaceGroup: 'Fm-3m (225)', madelung: 1.74756, coord: 6, packing: 0.68, stoich: 'AB' },
@@ -61,7 +87,8 @@ const IONIC_CRYSTAL_PROTOTYPES = Object.freeze([
   { id: 'zincblende-B3', spaceGroup: 'F-43m (216)', madelung: 1.63806, coord: 4, packing: 0.56, stoich: 'AB' },
   { id: 'fluorite-C1', spaceGroup: 'Fm-3m (225)', madelung: 2.51939, coord: 8, packing: 0.66, stoich: 'AB2' },
   { id: 'rutile-C4', spaceGroup: 'P4_2/mnm (136)', madelung: 2.4080, coord: 6, packing: 0.62, stoich: 'AB2' },
-  { id: 'corundum-D51', spaceGroup: 'R-3c (167)', madelung: 4.1719, coord: 6, packing: 0.65, stoich: 'A2B3' }
+  { id: 'corundum-D51', spaceGroup: 'R-3c (167)', madelung: 4.1719, coord: 6, packing: 0.65, stoich: 'A2B3' },
+  { id: 'cristobalite-C9', spaceGroup: 'Fd-3m (227)', madelung: 2.201, coord: 4, packing: 0.43, stoich: 'AX2-covalent' }
 ]);
 
 // Approximate covalent/ionic radii & Mulliken electronegativity derived from shell quantum numbers (general formula)
@@ -243,6 +270,18 @@ export function buildMultiSpeciesCrystalLattice(formula, {
       [0.0, 0.42, 0.25, 1], [0.42, 0.0, 0.25, 1], [0.50, 0.50, 0.08, 1],
       [0.0, 0.92, 0.75, 1], [0.92, 0.0, 0.75, 1], [0.50, 0.50, 0.58, 1]
     ];
+  } else if (proto.includes('cristobalite') || proto.includes('c9')) {
+    spaceGroup = 'Fd-3m (227)';
+    // Ideal beta-cristobalite (C9) 3D corner-sharing tetrahedral AX2 network:
+    // 8 tetrahedral A sites (diamond Wyckoff 8a) + 16 bridging X sites (Wyckoff 16c midpoints)
+    motif = [
+      [0, 0, 0, 0], [0.5, 0.5, 0, 0], [0.5, 0, 0.5, 0], [0, 0.5, 0.5, 0],
+      [0.25, 0.25, 0.25, 0], [0.75, 0.75, 0.25, 0], [0.75, 0.25, 0.75, 0], [0.25, 0.75, 0.75, 0],
+      [0.125, 0.125, 0.125, 1], [0.875, 0.875, 0.125, 1], [0.875, 0.125, 0.875, 1], [0.125, 0.875, 0.875, 1],
+      [0.625, 0.625, 0.125, 1], [0.375, 0.375, 0.125, 1], [0.375, 0.625, 0.875, 1], [0.625, 0.375, 0.875, 1],
+      [0.625, 0.125, 0.625, 1], [0.375, 0.875, 0.625, 1], [0.375, 0.125, 0.375, 1], [0.625, 0.875, 0.375, 1],
+      [0.125, 0.625, 0.625, 1], [0.875, 0.375, 0.625, 1], [0.875, 0.625, 0.375, 1], [0.125, 0.375, 0.375, 1]
+    ];
   } else {
     // Molecular FCC / FCC Alloy: tile distinct molecular or alloy sites across FCC sublattices
     spaceGroup = proto.includes('alloy') ? 'Fm-3m (225)' : 'P1 (molecular crystal)';
@@ -318,14 +357,17 @@ export function buildMultiSpeciesCrystalLattice(formula, {
   //   cscl-B2: NN = a * sqrt(3)/2 = 0.866 a (< 0.94 a < 1.0 a)
   //   rocksalt-B1: NN = 0.50 a (< 0.58 a < 0.707 a)
   //   zincblende-B3 / fluorite-C1: NN = a * sqrt(3)/4 = 0.433 a (< 0.52 a)
+  //   cristobalite-C9: A-X NN = a * sqrt(3)/8 = 0.2165 a (< 0.28 a < 0.3536 a)
   const bondPairs = [];
-  const protoNnFactor = proto.includes('cscl') || proto.includes('b2')
-    ? 0.94
-    : (proto.includes('rocksalt') || proto.includes('b1')
-      ? 0.58
-      : (proto.includes('zincblende') || proto.includes('b3') || proto.includes('fluorite') || proto.includes('c1')
-        ? 0.52
-        : 0.78));
+  const protoNnFactor = proto.includes('cristobalite') || proto.includes('c9')
+    ? 0.28
+    : (proto.includes('cscl') || proto.includes('b2')
+      ? 0.94
+      : (proto.includes('rocksalt') || proto.includes('b1')
+        ? 0.58
+        : (proto.includes('zincblende') || proto.includes('b3') || proto.includes('fluorite') || proto.includes('c1')
+          ? 0.52
+          : 0.78)));
   const maxBondDist = a * protoNnFactor;
   for (let i = 0; i < atomCount; i += 1) {
     for (let j = i + 1; j < atomCount; j += 1) {
@@ -423,8 +465,10 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   const meanHydrogenMassU = hCount > 0 ? hMassNum / hCount : ATOMIC_MASS_U[0];
   const deltaEn = Math.max(0, maxEn - minEn);
   const paulingIonicity = 1 - Math.exp(-0.25 * deltaEn * deltaEn);
-  const isIonicSolid = !allNonMetal && paulingIonicity >= 0.30;
-  const isAlloyMetal = !allNonMetal && !isIonicSolid;
+  const covalentAx2Network = classifyExtendedCovalentAx2Network(species);
+  const isCovalentNetwork = Boolean(covalentAx2Network);
+  const isIonicSolid = !isCovalentNetwork && !allNonMetal && paulingIonicity >= 0.30;
+  const isAlloyMetal = !isCovalentNetwork && !allNonMetal && !isIonicSolid;
   const molarMassKg = molarMassU * 1e-3;
   const molMassKg = molarMassKg / AVOGADRO;
 
@@ -454,7 +498,33 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   let boilingPointK = 373;
   let debyeTempK = 260;
 
-  if (isIonicSolid) {
+  if (isCovalentNetwork) {
+    // Extended 3D corner-sharing tetrahedral AX2 covalent network (beta-cristobalite C9):
+    // 4 polar-covalent A-X sigma bonds per formula unit, derived strictly from shell radii & deltaEn.
+    const { center, ligand } = covalentAx2Network;
+    const rBondM = Math.max(
+      1.35e-10,
+      (shellRadiusBohr(center.Z) + shellRadiusBohr(ligand.Z)) * BOHR_TO_M * 0.62
+    );
+    // Ideal C9 cristobalite: r_AX = a * sqrt(3) / 8, 8 formula units per cubic cell
+    const aCellM = (8.0 * rBondM) / Math.sqrt(3);
+    const volFormulaM3 = Math.max(2.0e-29, (aCellM ** 3) / 8.0);
+    crystalStructure = 'cristobalite-C9';
+    spaceGroup = 'Fd-3m (227)';
+    latticeConstantA = aCellM * 1e10;
+    densityKgPerM3 = Math.max(1200, Math.min(9000, molMassKg / volFormulaM3));
+    // Polar-covalent Pauling bond dissociation energy sum over 4 directional A-X bonds
+    const eBondEv = Math.max(2.2, Math.min(5.8, (3.2e-10 / rBondM) * (1.28 + 0.52 * deltaEn)));
+    cohesiveEnergyEv = Math.max(5.5, Math.min(20.0, 2.55 * eBondEv));
+    // Open corner-sharing tetrahedral framework bulk modulus K_0 ~ 0.14 * E_coh / V_formula
+    bulkModulusPa = Math.max(18e9, Math.min(120e9, 0.16 * (cohesiveEnergyEv * EV_TO_J) / volFormulaM3));
+    shearModulusPa = 0.72 * bulkModulusPa;
+    bandGapEv = Math.max(4.5, Math.min(10.5, 4.2 + 2.6 * deltaEn));
+    isMetal = false;
+    debyeTempK = Math.max(260, Math.min(950, 128 * Math.sqrt((bulkModulusPa * 1e-9) / Math.max(0.5, densityKgPerM3 * 1e-3))));
+    meltingPointK = Math.max(1150, Math.min(2600, 155 * cohesiveEnergyEv + 260));
+    boilingPointK = Math.max(meltingPointK * 1.35, meltingPointK + 750);
+  } else if (isIonicSolid) {
     // Select optimal canonical ionic crystal prototype matching actual stoichiometry!
     const sortedCounts = species.map((s) => s.count).sort((a, b) => a - b);
     const ratioKey = sortedCounts.length >= 2 && sortedCounts[0] === 1 && sortedCounts[1] === 2
@@ -564,7 +634,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   const formulaVolA3 = (molMassKg / Math.max(1, densityKgPerM3)) * 1e30;
   const basisCount = crystalStructure.startsWith('cscl') || crystalStructure === 'bcc'
     ? 2
-    : (crystalStructure.startsWith('zincblende') || crystalStructure === 'diamond' ? 8 : 4);
+    : (crystalStructure.startsWith('zincblende') || crystalStructure === 'diamond' || crystalStructure.startsWith('cristobalite') ? 8 : 4);
   const mdLatticeA = Math.max(2.6, Math.min(9.5, Math.cbrt(formulaVolA3 * basisCount)));
   const rNnFactor = basisCount === 2
     ? Math.sqrt(3) / 2
@@ -574,14 +644,25 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     crystalStructure,
     latticeConstantA: mdLatticeA,
     massU: Math.max(2, molarMassU),
-    potentialModel: isIonicSolid ? MD_POTENTIAL_MODELS.MORSE_EAM : MD_POTENTIAL_MODELS.LENNARD_JONES,
-    modelName: isIonicSolid ? 'Morse+EAM (Ionic Lattice)' : 'Lennard-Jones (Molecular/Dispersion)',
-    epsilonEv: Math.max(0.005, Math.min(1.5, cohesiveEnergyEv / 8.0)),
-    sigmaOrR0A: isIonicSolid ? Math.max(1.8, rNnMd * 1.08) : Math.max(1.8, rNnMd / Math.pow(2, 1 / 6)),
-    alphaOrLambda: 1.4,
+    potentialModel: isCovalentNetwork
+      ? MD_POTENTIAL_MODELS.STILLINGER_WEBER
+      : (isIonicSolid ? MD_POTENTIAL_MODELS.MORSE_EAM : MD_POTENTIAL_MODELS.LENNARD_JONES),
+    modelName: isCovalentNetwork
+      ? 'Stillinger-Weber (Tetrahedral Covalent Network)'
+      : (isIonicSolid ? 'Morse+EAM (Ionic Lattice)' : 'Lennard-Jones (Molecular/Dispersion)'),
+    epsilonEv: isCovalentNetwork
+      ? Math.max(0.35, Math.min(2.6, cohesiveEnergyEv / 5.0))
+      : Math.max(0.005, Math.min(1.5, cohesiveEnergyEv / 8.0)),
+    sigmaOrR0A: isCovalentNetwork
+      ? Math.max(1.5, rNnMd / 1.1225)
+      : (isIonicSolid ? Math.max(1.8, rNnMd * 1.08) : Math.max(1.8, rNnMd / Math.pow(2, 1 / 6))),
+    alphaOrLambda: isCovalentNetwork ? 21.0 : 1.4,
     eamAEv: isIonicSolid ? cohesiveEnergyEv * 0.2 : 0,
     eamBeta: 1.4,
-    rcutA: Math.max(4.5, mdLatticeA * 1.25),
+    swGamma: isCovalentNetwork ? 1.2 : 0,
+    rcutA: isCovalentNetwork
+      ? Math.min(mdLatticeA * 1.35, (rNnMd / 1.1225) * 1.80)
+      : Math.max(4.5, mdLatticeA * 1.25),
     dtFs: Math.min(2.0, Math.max(0.5, 0.14 * Math.sqrt(Math.max(2, molarMassU)))),
     defaultTemperatureK: tProbeMd
   });
@@ -603,6 +684,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       alphaOrLambda: mdConfig.alphaOrLambda,
       eamAEv: mdConfig.eamAEv,
       eamBeta: mdConfig.eamBeta,
+      swGamma: mdConfig.swGamma,
       rcutA: mdConfig.rcutA,
       dtFs: mdConfig.dtFs,
       targetTemperatureK: tProbeMd,

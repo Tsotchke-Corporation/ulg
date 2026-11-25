@@ -34,6 +34,7 @@ import {
   buildMaterialPolytopeAtlasWebGpu,
   evaluateBundleDensityEos
 } from '../runtime/material/polytopeAtlasBuilder.js';
+import { getSharedPolytopeAtlasPersistentCache } from '../runtime/material/polytopeAtlasPersistentCache.js';
 import {
   climbingImageNEBWebGpu,
   registerMolecularRhfSimulationModule,
@@ -4628,16 +4629,26 @@ async function rebuildPolytopeAtlasForRegime(regime) {
       relativeTolerance: 0.05,
       maxBisectDepth: 2,
       pressureRangePa: [1e2, pMax],
-      materialIndex: b.atomicNumber || 0
+      materialIndex: b.atomicNumber || 0,
+      useSharedPersistentCache: true
     });
     if (window.__ulgElementsLabState) {
       window.__ulgElementsLabState.atlasPolytopeCount = currentAtlas.polytopeCount;
+      window.__ulgElementsLabState.lastAtlasCacheStatus = currentAtlas.cacheStatus || 'bypass';
+      window.__ulgElementsLabState.lastAtlasCacheBackend = currentAtlas.cacheBackend || null;
+      window.__ulgElementsLabState.polytopeCacheStats = getSharedPolytopeAtlasPersistentCache().getStats();
     }
-    statusBadge.textContent = `${b.materialKey} · ${regime} Atlas OK`;
+    const cacheTag = currentAtlas.cacheStatus === 'hit'
+      ? ` · ${String(currentAtlas.cacheBackend || 'cache').toUpperCase()} warm`
+      : '';
+    statusBadge.textContent = `${b.materialKey} · ${regime} Atlas OK${cacheTag}`;
     renderSimControls();
     redrawCurrentTab();
+    syncDebugState();
+    return currentAtlas;
   } catch (err) {
     statusBadge.textContent = `Atlas err: ${err.message}`;
+    return null;
   }
 }
 
@@ -4702,7 +4713,7 @@ async function runElementDerivation(Z, massNumberA = null, { preserveQuantumNumb
     updateNuclearFissionVolume();
     const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
     currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentElementRes.bundle, {
-      degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax], materialIndex: Z
+      degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax], materialIndex: Z, useSharedPersistentCache: true
     });
     uiState.polytopeProbe = null;
     try {
@@ -4832,7 +4843,7 @@ async function activateCompoundBackfeed(compoundRes, targetTab = 'crystal') {
   currentCompoundRes = compoundRes;
   const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
   currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, compoundRes.bundle, {
-    degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax]
+    degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax], useSharedPersistentCache: true
   });
   uiState.polytopeProbe = null;
   activeSpecimenKind = 'compound';
@@ -4908,7 +4919,7 @@ async function runCompoundDerivation(formula, { backfeedAllTabs = false, switchT
 
     const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
     currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentCompoundRes.bundle, {
-      degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax]
+      degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax], useSharedPersistentCache: true
     });
     uiState.polytopeProbe = null;
 
@@ -5143,11 +5154,37 @@ function syncDebugState() {
       : null,
     registeredModules: defaultSimulationModuleRegistry.listModules().map((m) => m.methodKey),
     closureCount: labClosureStore.size,
+    lastAtlasCacheStatus: currentAtlas?.cacheStatus || 'bypass',
+    lastAtlasCacheBackend: currentAtlas?.cacheBackend || null,
+    lastAtlasCacheKey: currentAtlas?.cacheKey || null,
+    lastAtlasPressureRangePa: currentAtlas?.pressureRangePa ? Array.from(currentAtlas.pressureRangePa) : null,
+    polytopeCacheStats: getSharedPolytopeAtlasPersistentCache().getStats(),
     g7Advisory: isComp ? null : currentElementRes?.g7Advisory
   };
   // Clean programmatic test/verification API (100% backward compatible + new Chemistry & 3D Polytope hooks!)
   window.__ulgElementsLabApi = {
     setTab: (t) => setActiveTab(t),
+    getPolytopeCacheStats: () => getSharedPolytopeAtlasPersistentCache().getStats(),
+    clearPolytopeCache: async () => {
+      await getSharedPolytopeAtlasPersistentCache().clear();
+      syncDebugState();
+      return getSharedPolytopeAtlasPersistentCache().getStats();
+    },
+    corruptPolytopeCacheEntryForTest: async (cacheKey, rawText = '{corrupt') => {
+      await getSharedPolytopeAtlasPersistentCache().writeRawForTest(cacheKey, rawText);
+    },
+    rebuildPolytopeAtlas: async (regime = uiState.polytopeRegime) => {
+      const atlas = await rebuildPolytopeAtlasForRegime(regime);
+      return atlas
+        ? {
+            polytopeCount: atlas.polytopeCount,
+            cacheStatus: atlas.cacheStatus,
+            cacheBackend: atlas.cacheBackend,
+            cacheKey: atlas.cacheKey,
+            pressureRangePa: atlas.pressureRangePa ? Array.from(atlas.pressureRangePa) : null
+          }
+        : null;
+    },
     setSimSpeed: (s) => setSimSpeed(s),
     stepSimOnce: () => stepActiveSimulationOnce(),
     setDataDockOpen: (open) => setDataDockOpen(open),

@@ -6770,14 +6770,29 @@ fn validate_coarse_velocity_publish(
     + 0.5 * dot(impulse, impulse) / mass;
   let vmax = params.cfl_factor * params.coarse_spacing_m / params.macro_dt;
   let cfl_ratio = velocity_magnitude_ratio(future, vmax);
-  if (!all(vec3<bool>(
+  let coarse_numeric_valid = all(vec3<bool>(
       finite_f32(future.x), finite_f32(future.y), finite_f32(future.z)
-    )) || !finite_f32(delta_energy) || !finite_f32(vmax) || !(vmax > 0.0)
-      || !finite_f32(cfl_ratio)
-      || cfl_ratio < 0.0
-      || !velocity_endpoint_within_physical_audit(future, vmax)) {
+    )) && finite_f32(delta_energy) && finite_f32(vmax) && vmax > 0.0
+    && finite_f32(cfl_ratio) && cfl_ratio >= 0.0;
+  if (!coarse_numeric_valid) {
     ws_reject(STATUS_CFL_REJECTED | STATUS_NONFINITE, 86u);
     reflux_reject(REFLUX_CFL_REJECTED | REFLUX_NONFINITE);
+    return;
+  }
+  if (!velocity_endpoint_within_physical_audit(future, vmax)) {
+    ws_reject(STATUS_CFL_REJECTED, 86u);
+    reflux_reject(REFLUX_CFL_REJECTED);
+    publish_cfl_interval_reject_trace(
+      1u,
+      coarse_field,
+      prior,
+      impulse / mass,
+      impulse / mass,
+      vmax,
+      0.0,
+      vec3<f32>(0.0, -1.0, 0.0),
+      vec3<f32>(0.0, -1.0, 0.0)
+    );
     return;
   }
   let proposal = params.route_proposal_offset

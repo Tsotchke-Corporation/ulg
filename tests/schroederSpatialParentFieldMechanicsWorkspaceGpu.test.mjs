@@ -2577,6 +2577,14 @@ test('workspace route CFL solver intersects cumulative feasible alpha intervals'
     coarsePublishValidatorSource,
     /velocity_endpoint_within_physical_audit\(future, vmax\)/
   );
+  assert.match(
+    coarsePublishValidatorSource,
+    /if \(!coarse_numeric_valid\)\s*\{\s*ws_reject\(STATUS_CFL_REJECTED \| STATUS_NONFINITE, 86u\);\s*reflux_reject\(REFLUX_CFL_REJECTED \| REFLUX_NONFINITE\);/
+  );
+  assert.match(
+    coarsePublishValidatorSource,
+    /if \(!velocity_endpoint_within_physical_audit\(future, vmax\)\)\s*\{\s*ws_reject\(STATUS_CFL_REJECTED, 86u\);\s*reflux_reject\(REFLUX_CFL_REJECTED\);\s*publish_cfl_interval_reject_trace\(\s*1u,\s*coarse_field/
+  );
   assert.doesNotMatch(coarsePublishValidatorSource, /length\(future\)/);
   const coarsePublishSealSource = source
     .split('fn seal_coarse_velocity_publish()')[1]

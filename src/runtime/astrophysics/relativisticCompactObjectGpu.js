@@ -619,7 +619,7 @@ export function createKerrAccretionJetSessionWebGpu(device, {
   });
 
   const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const parcelBuf = device.createBuffer({ label: `${label}-parcels`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
+  const parcelBuf = device.createBuffer({ label: `${label}-parcels`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telReadBuf = device.createBuffer({ label: `${label}-tel-rd`, size: 16, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
 

@@ -8,6 +8,10 @@
 
 import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
+  GPU_PICK_LAYOUT,
+  createGpuEntityPickerWebGpu
+} from '../runtime/gpuMath/gpuEntityPickerWebGpu.js';
+import {
   AU_METERS,
   G_AU_SOLAR_YR,
   REAL_SOLAR_SYSTEM_CATALOG
@@ -337,6 +341,7 @@ export async function mountUlgUniversesDemo() {
   const plotMeta = document.getElementById('uv-plot-meta');
   const plotCanvas = document.getElementById('uv-plot-canvas');
   const diveBtn = document.getElementById('uv-dive-btn');
+  const focusMoteBtn = document.getElementById('uv-focus-mote-btn');
   const surfaceQuickBtn = document.getElementById('uv-surface-quick-btn');
   const returnBtn = document.getElementById('uv-return-btn');
   const engineTag = document.getElementById('uv-engine-tag');
@@ -364,6 +369,7 @@ export async function mountUlgUniversesDemo() {
   const modalClose = document.getElementById('uv-modal-close');
 
   const renderer = createUlgUniversesRenderer(device, canvas);
+  const entityPicker = createGpuEntityPickerWebGpu(device);
   const physics = createUlgUniversesPhysics(device, {
     seed: initialSeed,
     qualityId: initialQuality,
@@ -377,6 +383,11 @@ export async function mountUlgUniversesDemo() {
   });
   let selectedTargetId = null;
   let hoveredTargetId = null;
+  let pickedGpuMote = null;     // Live GPU-picked individual mote (star, asteroid, plasma parcel, atom, nucleon!)
+  let moteFocusLocked = false;  // When true, camera tracks pickedGpuMote.worldPos smoothly!
+  let camTarget = [0, 0, 0];
+  let lastNucleonSpheres = [];
+  let moteTrackAccum = 0;
   let running = true;
   let timeScale = 1.0;
   let lensingEnabled = true;
@@ -646,9 +657,16 @@ export async function mountUlgUniversesDemo() {
           <span>ISM Z/Z☉</span>
           <input id="uv-gal-z-slider" type="range" min="0.1" max="2.5" step="0.1" value="${physics.galaxyMetallicity.toFixed(1)}" />
           <span id="uv-gal-z-val" style="font-family:var(--mono);font-size:11px;">${physics.galaxyMetallicity.toFixed(1)}</span>
+        </div>
+        <div class="uv-row" title="Seed field B₀ for the live GPU 24³ 3D α–ω galactic dynamo (0 = strictly zero B-field!)">
+          <span>Dynamo B₀</span>
+          <input id="uv-gal-b0-slider" type="range" min="0.0" max="0.8" step="0.05" value="${physics.galacticB0.toFixed(2)}" />
+          <span id="uv-gal-b0-val" style="font-family:var(--mono);font-size:11px;">${physics.galacticB0.toFixed(2)}</span>
         </div>`;
       scaleControlsEl.querySelector('#uv-gal-preset-sel')?.addEventListener('change', async (e) => {
         await physics.initGalaxy({ preset: e.target.value });
+        pickedGpuMote = null;
+        moteFocusLocked = false;
         selectDefaultTarget();
         renderScaleControls();
         renderNow(performance.now());
@@ -663,6 +681,14 @@ export async function mountUlgUniversesDemo() {
         const vEl = scaleControlsEl.querySelector('#uv-gal-z-val');
         if (vEl) vEl.textContent = zMet.toFixed(1);
         await physics.initGalaxy({ preset: physics.galaxyPreset, metallicity: zMet });
+      });
+      scaleControlsEl.querySelector('#uv-gal-b0-slider')?.addEventListener('change', async (e) => {
+        const b0 = Number(e.target.value);
+        const vEl = scaleControlsEl.querySelector('#uv-gal-b0-val');
+        if (vEl) vEl.textContent = b0.toFixed(2);
+        await physics.setGalacticB0(b0);
+        updateInspectorCard();
+        renderNow(performance.now());
       });
     } else if (currentLevel === 2) {
       if (physics.galaxyBranch === 'smbh-core') {
@@ -768,8 +794,9 @@ export async function mountUlgUniversesDemo() {
           <div style="font-size:11px;color:var(--muted);line-height:1.35;">3D self-gravitating resistive MHD winding helical B-towers &amp; launching magnetocentrifugal J×B jets.</div>
         ` : physics.stellarMode === 'fusion' ? `
           <div class="uv-seg-group">
-            <button class="uv-seg-btn ${physics.stellarPreset === 'solar-nebula' ? 'active' : ''}" data-st-preset="solar-nebula" type="button">Solar</button>
-            <button class="uv-seg-btn ${physics.stellarPreset === 'massive-supernova' ? 'active' : ''}" data-st-preset="massive-supernova" type="button">Massive</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'main-sequence-star' ? 'active' : ''}" data-st-preset="main-sequence-star" type="button">Active Star</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'solar-nebula' ? 'active' : ''}" data-st-preset="solar-nebula" type="button">Nebula</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'massive-supernova' ? 'active' : ''}" data-st-preset="massive-supernova" type="button">18 M☉ SN</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'binary-nursery' ? 'active' : ''}" data-st-preset="binary-nursery" type="button">Binary</button>
           </div>
           <div class="uv-row">
@@ -777,9 +804,16 @@ export async function mountUlgUniversesDemo() {
             <input id="uv-st-accel" type="range" min="0.5" max="6.0" step="0.25" value="${physics.stellarTimeAccel}" />
             <span id="uv-st-accel-val" style="font-family:var(--mono);font-size:11px;">${physics.stellarTimeAccel.toFixed(1)}×</span>
           </div>
+          <div class="uv-row" title="Seed B₀ for the live GPU 24³ 3D stellar convective dynamo (0 = zero coronal B-field!)">
+            <span>Dynamo B₀</span>
+            <input id="uv-st-b0" type="range" min="0.0" max="0.9" step="0.05" value="${physics.stellarB0.toFixed(2)}" />
+            <span id="uv-st-b0-val" style="font-family:var(--mono);font-size:11px;">${physics.stellarB0.toFixed(2)}</span>
+          </div>
         ` : `<div style="font-size:11px;color:var(--muted);line-height:1.35;">Live first-principles GPU regime from ULG’s Universal Law Graph — inspect spectra, TOV M(R), or flare light curve on the right.</div>`}`;
       scaleControlsEl.querySelector('#uv-stellar-mode-sel')?.addEventListener('change', async (e) => {
         await physics.setStellarMode(e.target.value);
+        pickedGpuMote = null;
+        moteFocusLocked = false;
         selectDefaultTarget();
         renderScaleControls();
         updateInspectorCard();
@@ -794,13 +828,25 @@ export async function mountUlgUniversesDemo() {
       for (const b of scaleControlsEl.querySelectorAll('[data-st-preset]')) {
         b.addEventListener('click', async () => {
           await physics.initStellarCore({ preset: b.dataset.stPreset });
+          pickedGpuMote = null;
+          moteFocusLocked = false;
           renderScaleControls();
+          updateInspectorCard();
+          renderNow(performance.now());
         });
       }
       scaleControlsEl.querySelector('#uv-st-accel')?.addEventListener('input', (e) => {
         physics.setStellarTimeAccel(Number(e.target.value));
         const v = scaleControlsEl.querySelector('#uv-st-accel-val');
         if (v) v.textContent = `${physics.stellarTimeAccel.toFixed(1)}×`;
+      });
+      scaleControlsEl.querySelector('#uv-st-b0')?.addEventListener('change', async (e) => {
+        const v = Number(e.target.value);
+        const lbl = scaleControlsEl.querySelector('#uv-st-b0-val');
+        if (lbl) lbl.textContent = v.toFixed(2);
+        await physics.setStellarB0(v);
+        updateInspectorCard();
+        renderNow(performance.now());
       });
     } else if (currentLevel === 4) {
       const atmoAct = physics.planetaryAtmoState?.activation;
@@ -1377,7 +1423,7 @@ export async function mountUlgUniversesDemo() {
     }
   }
 
-  // ---- Interactive 3D Pointer Orbit, Continuous Wheel Zoom & Target Picking ----
+  // ---- Interactive 3D Pointer Orbit, Continuous Wheel Zoom & Universal GPU Mote Picking ----
   let pointerDown = false;
   let pointerMoved = false;
   let downX = 0;
@@ -1385,11 +1431,448 @@ export async function mountUlgUniversesDemo() {
   let lastX = 0;
   let lastY = 0;
 
+  function getActiveGpuPickDescriptor() {
+    const span = log10ViewSpanM;
+    if (currentLevel === 0) {
+      if (physics.cosmoMode !== 'web' && physics.cosmoBaryonSession) {
+        const bScale = (12.2 / Math.max(100, physics.cosmoBaryonSession.boxSizeMpc || 260.0)) * Math.pow(10, Math.max(-0.6, Math.min(1.8, 24.8 - span)));
+        return {
+          kind: 'cosmo-baryon',
+          buffer: physics.cosmoBaryonSession.getResidentTracersBuffer(),
+          count: physics.cosmoBaryonSession.tracerCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.STANDARD,
+          worldScale: bScale,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (physics.cosmoSession) {
+        return {
+          kind: 'cosmo-web',
+          buffer: physics.cosmoSession.particlesBuffer,
+          count: physics.cosmoSession.particleCount,
+          strideFloats: 8,
+          layoutMode: GPU_PICK_LAYOUT.STANDARD,
+          worldScale: lastWorldScaleInfo.cosmoScale ?? 0.09,
+          offsetHi: lastWorldScaleInfo.cosmoOffset ?? [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+    } else if (currentLevel === 1 && physics.galaxyEngine) {
+      return {
+        kind: 'galaxy-star',
+        buffer: physics.galaxyEngine.getResidentBuffer(),
+        count: physics.galaxyEngine.count,
+        strideFloats: 8,
+        layoutMode: GPU_PICK_LAYOUT.GALAXY_VISIBLE,
+        worldScale: lastWorldScaleInfo.galaxyScale ?? 0.85,
+        offsetHi: lastWorldScaleInfo.galaxyOffset ?? [0, 0, 0],
+        offsetLo: [0, 0, 0],
+        skipFirst: 0
+      };
+    } else if (currentLevel === 2 && physics.galaxyBranch !== 'smbh-core') {
+      if (physics.solarMode === 'formation' && physics.protoplanetarySession) {
+        const dScale = 0.92 * Math.pow(10, Math.max(-1.2, Math.min(1.2, 12.6 - span)));
+        return {
+          kind: 'proto-pebble',
+          buffer: physics.protoplanetarySession.getResidentPebblesBuffer(),
+          count: physics.protoplanetarySession.pebbleCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.FLAGGED_LIVE_16F,
+          worldScale: dScale,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (physics.solarMode === 'quasar-jet' && physics.kerrJetSession) {
+        const qScale = 0.85 * Math.pow(10, Math.max(-1.0, Math.min(1.2, 12.6 - span)));
+        return {
+          kind: 'kerr-parcel',
+          buffer: physics.kerrJetSession.getResidentParcelsBuffer(),
+          count: physics.kerrJetSession.particleCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.FLAGGED_LIVE_16F,
+          worldScale: qScale,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (['xray-binary', 'bns-kilonova', 'type-ia', 'bbh-merger'].includes(physics.solarMode) && physics.relBinarySession) {
+        const bScale = 1.12 * Math.pow(10, Math.max(-1.0, Math.min(1.2, 12.6 - span)));
+        return {
+          kind: 'relbin-parcel',
+          buffer: physics.relBinarySession.getResidentParcelsBuffer(),
+          count: physics.relBinarySession.particleCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.FLAGGED_LIVE_16F,
+          worldScale: bScale,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (['comet-tails', 'hot-jupiter'].includes(physics.solarMode) && physics.radWindL2Session) {
+        const rScale = 1.05 * Math.pow(10, Math.max(-1.0, Math.min(1.2, 12.6 - span)));
+        return {
+          kind: 'radwind-parcel',
+          buffer: physics.radWindL2Session.getResidentParcelsBuffer(),
+          count: physics.radWindL2Session.particleCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.FLAGGED_LIVE_16F,
+          worldScale: rScale,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (['roche-rings', 'giant-impact', 'red-giant'].includes(physics.solarMode) && physics.tidalRocheSession) {
+        const tScale = 1.06 * Math.pow(10, Math.max(-1.0, Math.min(1.2, 12.6 - span)));
+        return {
+          kind: 'roche-parcel',
+          buffer: physics.tidalRocheSession.getResidentParticlesBuffer(),
+          count: physics.tidalRocheSession.particleCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.FLAGGED_LIVE_16F,
+          worldScale: tScale,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (physics.solarEngine) {
+        const focusSt = physics.solarEngine.getMassiveBodyState64(physics.focusedSolarBodyIndex);
+        const fHi = [Math.fround(focusSt.posAu[0]), Math.fround(focusSt.posAu[1]), Math.fround(focusSt.posAu[2])];
+        const fLo = [Math.fround(focusSt.posAu[0] - fHi[0]), Math.fround(focusSt.posAu[1] - fHi[1]), Math.fround(focusSt.posAu[2] - fHi[2])];
+        return {
+          kind: 'solar-asteroid',
+          buffer: physics.solarEngine.getResidentBuffer(),
+          count: physics.solarEngine.totalCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.SOLAR_DOUBLE_FLOAT,
+          worldScale: lastWorldScaleInfo.solarScaleAuToWorld ?? 1.0,
+          offsetHi: fHi,
+          offsetLo: fLo,
+          skipFirst: physics.solarEngine.massiveCount
+        };
+      }
+    } else if (currentLevel === 3) {
+      const stScale = 0.92 * Math.pow(10, Math.max(-1.0, Math.min(1.0, 9.2 - span)));
+      if (physics.stellarMode === 'nebular-mhd' && physics.nebulaMhdSession) {
+        return {
+          kind: 'nebula-mhd-parcel',
+          buffer: physics.nebulaMhdSession.getResidentTracersBuffer(),
+          count: physics.nebulaMhdSession.tracerCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.STANDARD,
+          worldScale: stScale * 1.15,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (['h2-pillars', 'planetary-nebula', 'snr-pwn'].includes(physics.stellarMode) && physics.radWindL3Session) {
+        return {
+          kind: 'radwind-parcel',
+          buffer: physics.radWindL3Session.getResidentParcelsBuffer(),
+          count: physics.radWindL3Session.particleCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.FLAGGED_LIVE_16F,
+          worldScale: stScale * 1.05,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if ((physics.stellarMode === 'pulsar' || physics.stellarMode === 'magnetar') && physics.magnetosphereSession) {
+        return {
+          kind: 'mag-parcel',
+          buffer: physics.magnetosphereSession.getResidentParcelsBuffer(),
+          count: physics.magnetosphereSession.particleCount,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.FLAGGED_LIVE_16F,
+          worldScale: stScale * 1.12,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+      if (physics.stellarEngine) {
+        return {
+          kind: 'stellar-hydro-parcel',
+          buffer: physics.stellarEngine.getResidentBuffer(),
+          count: physics.stellarEngine.count,
+          strideFloats: 16,
+          layoutMode: GPU_PICK_LAYOUT.STANDARD,
+          worldScale: stScale * 0.95,
+          offsetHi: [0, 0, 0],
+          offsetLo: [0, 0, 0],
+          skipFirst: 0
+        };
+      }
+    } else if (currentLevel === 5 && physics.mdSession) {
+      const box = physics.mdSession.boxLengthsA;
+      const maxDim = Math.max(box[0], box[1], box[2], 6.0);
+      const baseScale = 8.4 / maxDim;
+      const mdZoomFactor = Math.pow(10, Math.max(-1.2, Math.min(1.4, -8.2 - span)));
+      return {
+        kind: 'md-atom',
+        buffer: physics.mdSession.positionsBuffer,
+        velBuffer: physics.mdSession.velocitiesBuffer,
+        count: physics.mdSession.atomCount,
+        strideFloats: 4,
+        layoutMode: GPU_PICK_LAYOUT.MD_PERIODIC_4F,
+        worldScale: baseScale * mdZoomFactor,
+        offsetHi: [0, 0, 0],
+        offsetLo: [box[0] * 0.5, box[1] * 0.5, box[2] * 0.5],
+        skipFirst: 0
+      };
+    }
+    return null;
+  }
+
+  function decodePickedGpuMote(desc, index, rawFloats) {
+    const f = rawFloats;
+    const sc = desc.worldScale || 1.0;
+    const offHi = desc.offsetHi || [0, 0, 0];
+    const offLo = desc.offsetLo || [0, 0, 0];
+    let rawPos = [f[0] || 0, f[1] || 0, f[2] || 0];
+    let worldPos;
+    if (desc.layoutMode === GPU_PICK_LAYOUT.SOLAR_DOUBLE_FLOAT) {
+      rawPos = [f[0] + f[4], f[1] + f[5], f[2] + f[6]];
+      worldPos = [
+        ((f[0] - offHi[0]) + (f[4] - offLo[0])) * sc,
+        ((f[1] - offHi[1]) + (f[5] - offLo[1])) * sc,
+        ((f[2] - offHi[2]) + (f[6] - offLo[2])) * sc
+      ];
+    } else if (desc.layoutMode === GPU_PICK_LAYOUT.MD_PERIODIC_4F) {
+      worldPos = [(f[0] - offLo[0]) * sc, (f[1] - offLo[1]) * sc, (f[2] - offLo[2]) * sc];
+    } else {
+      worldPos = [(f[0] - offHi[0]) * sc, (f[1] - offHi[1]) * sc, (f[2] - offHi[2]) * sc];
+    }
+
+    if (desc.kind === 'cosmo-web') {
+      const vMag = Math.hypot(f[4] || 0, f[5] || 0, f[6] || 0);
+      const dens = Math.max(0.1, Number(f[7]) || 1.0);
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `Cosmic-Web Halo Mote #${index}`,
+        subtitle: `2LPT FLRW TreePM Tracer · (${rawPos[0].toFixed(1)}, ${rawPos[1].toFixed(1)}, ${rawPos[2].toFixed(1)}) Mpc`,
+        composition: `Collisionless Dark-Matter + Baryon Filament Tracer · Click 🎯 Focus to dive into this knot`,
+        tempK: 8500,
+        stats: [
+          ['Comoving r', `${Math.hypot(...rawPos).toFixed(1)} Mpc`],
+          ['Peculiar |v|', `${(vMag * 120).toFixed(0)} km/s`],
+          ['Local δ/ρ̄', `${dens.toFixed(2)}×`],
+          ['GPU Buffer', `Index #${index}`]
+        ]
+      };
+    }
+    if (desc.kind === 'cosmo-baryon') {
+      const isDm = (f[11] || 0) > 0.5;
+      const tK = Number(f[8]) || 3000;
+      const xHii = Number(f[9]) || 0;
+      const rho = Number(f[7]) || 1.0;
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `${isDm ? 'Dark-Matter Lensing Halo' : 'Baryon / IGM Parcel'} #${index}`,
+        subtitle: `Live GPU Cosmological Tracer · (${rawPos[0].toFixed(1)}, ${rawPos[1].toFixed(1)}, ${rawPos[2].toFixed(1)}) Mpc`,
+        composition: isDm ? 'Collisionless CDM Mass Tracer' : `H/He Plasma · x_HII=${(xHii * 100).toFixed(1)}% · T=${tK > 1e5 ? `${(tK / 1e6).toFixed(1)} MK` : `${Math.round(tK)} K`}`,
+        tempK: Math.max(2500, Math.min(35000, tK)),
+        stats: [
+          ['Species', isDm ? 'Dark Matter' : 'Baryon Gas'],
+          ['Temp T', tK > 1e5 ? `${(tK / 1e6).toFixed(2)} MK` : `${Math.round(tK)} K`],
+          ['Ionized x_HII', `${(xHii * 100).toFixed(1)}%`],
+          ['Density ρ', `${rho.toFixed(2)} ρ̄`]
+        ]
+      };
+    }
+    if (desc.kind === 'galaxy-star') {
+      const pop = Number(f[7]) || 0;
+      const rKly = Math.hypot(rawPos[0], rawPos[2]) * 5.2;
+      const zKly = rawPos[1] * 5.2;
+      const vOrb = Math.hypot(f[4] || 0, f[5] || 0, f[6] || 0);
+      const bVec = physics.galacticDynamoSession?.sampleBAt?.(rawPos[0], rawPos[1], rawPos[2]) || [0, 0, 0];
+      const bLocal = Math.hypot(bVec[0], bVec[1], bVec[2]);
+      const popName = index === 0
+        ? 'Central SMBH Core Anchor'
+        : (pop >= 0.80 ? 'H II Star-Forming Knot (OB)' : (pop >= 0.36 ? 'Spiral-Arm Blue-White Star' : 'Golden Bulge / Disk K-G Star'));
+      const tempK = pop >= 0.80 ? 22000 : (pop >= 0.36 ? 9800 : 4800);
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `Star #${index} · ${popName}`,
+        subtitle: `Live 32³ CIC Particle-Mesh Orbit · R = ${rKly.toFixed(1)} kly · z = ${zKly.toFixed(2)} kly`,
+        composition: `GPU Baryonic Star Buffer · Click 🎯 Focus or Dive to inspect this star's system`,
+        tempK,
+        stats: [
+          ['Radius R', `${rKly.toFixed(1)} kly`],
+          ['Orbital |v|', `${(vOrb * 24.5).toFixed(0)} km/s`],
+          ['Local |B|', `${(bLocal * 12.0).toFixed(2)} μG`],
+          ['Mass Unit', `${(f[3] || 0).toFixed(4)}`]
+        ]
+      };
+    }
+    if (desc.kind === 'solar-asteroid') {
+      const rAu = Math.hypot(rawPos[0], rawPos[1], rawPos[2]);
+      const vAuYr = Math.hypot(f[8] || 0, f[9] || 0, f[10] || 0);
+      const vKmS = vAuYr * 4.7405;
+      const isKbo = (f[11] || 0) > 6.5 || rAu > 12;
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `${isKbo ? 'Kuiper Belt Object' : 'Main-Belt Asteroid'} #${index}`,
+        subtitle: `f32x2 Symplectic N-Body Minor Body · r = ${rAu.toFixed(3)} AU`,
+        composition: isKbo ? 'H₂O / CH₄ / N₂ Outer-System Icy Planetesimal' : 'Carbonaceous / Silicate Chondrite Asteroid',
+        tempK: Math.max(40, Math.round(280 / Math.sqrt(Math.max(0.2, rAu)))),
+        stats: [
+          ['Helio r', `${rAu.toFixed(3)} AU`],
+          ['Speed |v|', `${vKmS.toFixed(2)} km/s`],
+          ['Zone', isKbo ? 'Kuiper Belt' : 'Main Belt'],
+          ['GPU Index', `#${index}`]
+        ]
+      };
+    }
+    if (desc.kind === 'proto-pebble') {
+      const rAu = Math.hypot(rawPos[0], rawPos[1], rawPos[2]);
+      const tK = Number(f[8]) || 180;
+      const ice = Number(f[9]) || 0;
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `${ice > 0.5 ? 'Icy Outer' : 'Rocky Silicate'} Pebble #${index}`,
+        subtitle: `Epstein/Stokes Gas-Drag Disk Tracer · r = ${rAu.toFixed(2)} AU`,
+        composition: ice > 0.5 ? 'Condensed H₂O/CO Ice + Silicate Core (Beyond Snow Line)' : 'Refractory Silicate + Fe-Ni Chondrule Dust',
+        tempK: Math.max(50, Math.min(2000, tK)),
+        stats: [
+          ['Disk r', `${rAu.toFixed(2)} AU`],
+          ['Temp T(r)', `${Math.round(tK)} K`],
+          ['Ice Frac', `${(ice * 100).toFixed(0)}%`],
+          ['Speed |v|', `${Math.hypot(f[4] || 0, f[5] || 0, f[6] || 0).toFixed(2)}`]
+        ]
+      };
+    }
+    if (desc.kind === 'stellar-hydro-parcel') {
+      const logT = Number(f[8]) || 4.0;
+      const logRho = Number(f[9]) || -5.0;
+      const tK = Math.pow(10, logT);
+      const xH = Number(f[10]) || 0.72;
+      const logEps = Number(f[11]) || -30;
+      const xIon = Number(f[13]) || 0;
+      const xHe = Number(f[14]) || 0.26;
+      const xZ = Number(f[15]) || 0.02;
+      const bVec = physics.stellarDynamoSession?.sampleBAt?.(rawPos[0], rawPos[1], rawPos[2]) || [0, 0, 0];
+      const bLoc = Math.hypot(bVec[0], bVec[1], bVec[2]);
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `Stellar Plasma Parcel #${index}`,
+        subtitle: `self-gravitating-hydro@1 · r = ${Math.hypot(...rawPos).toFixed(2)} · x_ion = ${(xIon * 100).toFixed(0)}%`,
+        composition: `H ${(xH * 100).toFixed(1)}% · He ${(xHe * 100).toFixed(1)}% · Z ${(xZ * 100).toFixed(2)}%`,
+        tempK: Math.max(2000, Math.min(40000, tK)),
+        stats: [
+          ['Parcel T', tK >= 1e6 ? `${(tK / 1e6).toFixed(2)} MK` : `${Math.round(tK).toLocaleString()} K`],
+          ['log₁₀ ρ', `${logRho.toFixed(2)} kg/m³`],
+          ['Fusion ε', logEps > -12 ? `10^${logEps.toFixed(1)} W/kg` : 'Inactive'],
+          ['Dynamo |B|', `${bLoc.toFixed(3)} B_sim`]
+        ]
+      };
+    }
+    if (desc.kind === 'nebula-mhd-parcel') {
+      const bMag = Number(f[7]) || 0;
+      const rho = Number(f[11]) || 0;
+      const jetV = Number(f[13]) || 0;
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `MHD Nebula Parcel #${index}`,
+        subtitle: `3D Resistive MHD · B = (${(f[8] || 0).toFixed(2)}, ${(f[9] || 0).toFixed(2)}, ${(f[10] || 0).toFixed(2)})`,
+        composition: jetV > 0.15 ? 'Magnetocentrifugal (J×B) Bipolar Jet Plasma' : 'Rotating Magnetized Molecular Cloud Gas & Dust',
+        tempK: jetV > 0.15 ? 14000 : 4200,
+        stats: [
+          ['Local |B|', `${bMag.toFixed(3)}`],
+          ['Density ρ', `${rho.toFixed(2)}`],
+          ['Jet Outflow', `${jetV.toFixed(2)}`],
+          ['Speed |v|', `${Math.hypot(f[4] || 0, f[5] || 0, f[6] || 0).toFixed(2)}`]
+        ]
+      };
+    }
+    if (desc.kind === 'mag-parcel' || desc.kind === 'kerr-parcel' || desc.kind === 'relbin-parcel') {
+      const role = Number(f[3]) || 0;
+      const gamma = Math.max(1.0, Number(f[7]) || 1.0);
+      const aux = Number(f[9]) || 0;
+      const roleLbl = desc.kind === 'mag-parcel'
+        ? (role > 1.5 ? 'Reconnection Flare / PWN' : (role > 0.5 ? 'Polar-Cap Open Beam' : 'Closed Magnetosphere Loop'))
+        : (desc.kind === 'kerr-parcel'
+          ? (role > 0.5 && role < 1.5 ? 'Blandford–Znajek Jet' : 'Novikov–Thorne Disk')
+          : (role > 1.5 ? 'r-Process Ejecta' : 'Relativistic Stream'));
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `${roleLbl} Parcel #${index}`,
+        subtitle: `Persistent GPU Plasma Mote · Lorentz Γ = ${gamma.toFixed(2)}×`,
+        composition: `Speed |v| = ${Math.hypot(f[4] || 0, f[5] || 0, f[6] || 0).toFixed(2)} · r = ${Math.hypot(...rawPos).toFixed(2)}`,
+        tempK: 22000,
+        stats: [
+          ['Role', roleLbl.slice(0, 14)],
+          ['Lorentz Γ', `${gamma.toFixed(2)}×`],
+          [desc.kind === 'mag-parcel' ? 'Local |B|' : 'Y_e / Aux', `${aux.toFixed(3)}`],
+          ['Emissivity', `${(f[10] || 0).toFixed(2)}`]
+        ]
+      };
+    }
+    if (desc.kind === 'radwind-parcel' || desc.kind === 'roche-parcel') {
+      const spd = Math.hypot(f[4] || 0, f[5] || 0, f[6] || 0);
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `${desc.kind === 'radwind-parcel' ? 'Photoionized Nebula/Tail' : 'Tidal Debris/Ring'} Parcel #${index}`,
+        subtitle: `Live GPU Parcel · r = ${Math.hypot(...rawPos).toFixed(2)} · |v| = ${spd.toFixed(2)}`,
+        composition: desc.kind === 'radwind-parcel'
+          ? `Hα=${(f[8] || 0).toFixed(2)} · [O III]=${(f[9] || 0).toFixed(2)} · [S II]=${(f[10] || 0).toFixed(2)}`
+          : `Intact=${(f[7] || 0) > 0.5 ? 'Cohesive' : 'Disrupted'} · T_norm=${(f[8] || 0).toFixed(2)}`,
+        tempK: 11000,
+        stats: [
+          ['Radius r', `${Math.hypot(...rawPos).toFixed(2)}`],
+          ['Speed |v|', `${spd.toFixed(2)}`],
+          [desc.kind === 'radwind-parcel' ? 'Hα / [O III]' : 'Temp Norm', desc.kind === 'radwind-parcel' ? `${(f[8] || 0).toFixed(1)} / ${(f[9] || 0).toFixed(1)}` : `${(f[8] || 0).toFixed(2)}`],
+          ['GPU Index', `#${index}`]
+        ]
+      };
+    }
+    if (desc.kind === 'md-atom') {
+      const b = physics.getCachedElementBundle(physics.mdElementZ, true)?.bundle;
+      const sym = b?.symbol || `Z=${physics.mdElementZ}`;
+      return {
+        kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+        name: `Atom #${index} · ${sym} (Z=${physics.mdElementZ})`,
+        subtitle: `Live WebGPU MD Atom · (${rawPos[0].toFixed(2)}, ${rawPos[1].toFixed(2)}, ${rawPos[2].toFixed(2)}) Å`,
+        composition: `${b?.mechanical?.crystalStructure || 'lattice'} · m = ${(b?.nuclear?.atomicMassU || 55.8).toFixed(2)} u`,
+        tempK: physics.mdTelemetry?.temperatureK || physics.mdTempK,
+        stats: [
+          ['Element', `${sym} (Z=${physics.mdElementZ})`],
+          ['Lattice x,y', `${rawPos[0].toFixed(1)}, ${rawPos[1].toFixed(1)} Å`],
+          ['Lattice z', `${rawPos[2].toFixed(2)} Å`],
+          ['Bath Temp', `${Math.round(physics.mdTelemetry?.temperatureK || physics.mdTempK)} K`]
+        ]
+      };
+    }
+    return {
+      kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
+      name: `GPU Mote #${index}`,
+      subtitle: `Live Resident WebGPU Entity`,
+      composition: '',
+      tempK: 6000,
+      stats: [['Index', `#${index}`], ['X', rawPos[0].toFixed(2)], ['Y', rawPos[1].toFixed(2)], ['Z', rawPos[2].toFixed(2)]]
+    };
+  }
+
   function pickTargetAt(clientX, clientY) {
     const targets = physics.getTargetsForLevel(currentLevel, lastWorldScaleInfo);
     let best = null;
-    let bestDist = 48;
+    let bestDist = 42;
     for (const t of targets) {
+      // Skip generic origin placeholder targets when clicking on rich GPU particle clouds!
+      if (currentLevel === 0 && physics.cosmoMode !== 'web') continue;
+      if (currentLevel === 2 && !['nbody', 'smbh-core'].includes(physics.solarMode) && physics.galaxyBranch !== 'smbh-core') continue;
+      if (currentLevel === 3 || currentLevel === 5) continue;
       const proj = projectWorldToScreen(t.pos, lastViewProj, lastCssW, lastCssH);
       if (!proj.visible) continue;
       const d = Math.hypot(proj.sx - clientX, proj.sy - clientY);
@@ -1400,6 +1883,149 @@ export async function mountUlgUniversesDemo() {
     }
     return best;
   }
+
+  async function pickAnyEntityAt(clientX, clientY, { preferGpuMote = false } = {}) {
+    // 1. At L7 Atomic Nucleus, allow clicking ANY individual quantized proton (p+) or neutron (n0)!
+    if (currentLevel === 7 && lastNucleonSpheres.length > 0) {
+      let bestNuc = null;
+      let bestD = 36;
+      for (let i = 0; i < lastNucleonSpheres.length; i += 1) {
+        const s = lastNucleonSpheres[i];
+        const proj = projectWorldToScreen(s.pos, lastViewProj, lastCssW, lastCssH);
+        if (!proj.visible) continue;
+        const d = Math.hypot(proj.sx - clientX, proj.sy - clientY);
+        if (d < bestD) {
+          bestD = d;
+          bestNuc = { idx: i, sphere: s };
+        }
+      }
+      if (bestNuc) {
+        const isProton = bestNuc.sphere.color0[0] > 0.7;
+        const rFm = Math.hypot(...bestNuc.sphere.pos) * (Number(physics.nuclearResult?.chargeRadiusFm || 3.7) / 2.2);
+        pickedGpuMote = {
+          kind: 'nucleon',
+          level: 7,
+          index: bestNuc.idx,
+          rawPos: [...bestNuc.sphere.pos],
+          worldPos: [...bestNuc.sphere.pos],
+          name: `${isProton ? 'Proton p⁺' : 'Neutron n⁰'} #${bestNuc.idx + 1} (${physics.nuclearA}${physics.nuclearResult?.isotope?.split('-')[0] || ''})`,
+          subtitle: isProton ? 'Valence Quarks u-u-d · Charge +1e · Spin ½' : 'Valence Quarks u-d-d · Charge 0 · Spin ½',
+          composition: `Bound inside Woods–Saxon nuclear potential (B/A = ${(physics.nuclearResult?.bindingPerNucleonMeV || 8.79).toFixed(3)} MeV)`,
+          tempK: 1e10,
+          stats: [
+            ['Baryon', isProton ? 'Proton (p⁺)' : 'Neutron (n⁰)'],
+            ['Shell r', `${rFm.toFixed(2)} fm`],
+            ['Mass', isProton ? '938.27 MeV' : '939.57 MeV'],
+            ['Quarks', isProton ? 'u u d' : 'u d d']
+          ]
+        };
+        updateInspectorCard();
+        renderNow(performance.now());
+        return pickedGpuMote;
+      }
+    }
+
+    // 2. Check named macro bodies (Planets/Moons on L2, Sgr A* on L1, named Superclusters on L0)
+    if (!preferGpuMote) {
+      const macroHit = pickTargetAt(clientX, clientY);
+      if (macroHit && (currentLevel === 2 || currentLevel === 4 || (currentLevel === 1 && macroHit.isSmbh))) {
+        pickedGpuMote = null;
+        moteFocusLocked = false;
+        selectedTargetId = macroHit.id;
+        if (currentLevel === 1 && macroHit.branch) {
+          physics.setGalaxyBranch(macroHit.branch, macroHit.pos);
+        } else if (currentLevel === 2 && macroHit.bodyIndex != null) {
+          physics.setFocusedSolarBody(macroHit.bodyIndex);
+          if (macroHit.bodyIndex > 0) void physics.initPlanetaryInterior({ bodyIndex: macroHit.bodyIndex });
+        }
+        renderScaleControls();
+        updateInspectorCard();
+        return macroHit;
+      }
+    }
+
+    // 3. Universal WebGPU Entity Ray-Picker directly on the active scale's live resident GPU buffer!
+    const desc = getActiveGpuPickDescriptor();
+    if (desc && desc.buffer && desc.count > 0) {
+      const ndcX = (clientX / Math.max(1, lastCssW)) * 2 - 1;
+      const ndcY = 1 - (clientY / Math.max(1, lastCssH)) * 2;
+      const aspect = lastCssW / Math.max(1, lastCssH);
+      const hit = await entityPicker.pickEntity({
+        buffer: desc.buffer,
+        count: desc.count,
+        strideFloats: desc.strideFloats,
+        layoutMode: desc.layoutMode,
+        skipFirst: desc.skipFirst || 0,
+        viewProj: lastViewProj,
+        clickNdcX: ndcX,
+        clickNdcY: ndcY,
+        aspect,
+        maxPickNdc: 0.14,
+        offsetHi: desc.offsetHi,
+        offsetLo: desc.offsetLo,
+        worldScale: desc.worldScale
+      });
+      if (hit) {
+        const raw = new Float32Array([...hit.vec0, ...hit.vec1, ...hit.vec2, ...hit.vec3]);
+        pickedGpuMote = decodePickedGpuMote(desc, hit.index, raw);
+        updateInspectorCard();
+        renderNow(performance.now());
+        return pickedGpuMote;
+      }
+    }
+
+    // 4. Fallback to macro target if GPU buffer pick found nothing near cursor
+    const fallback = pickTargetAt(clientX, clientY);
+    if (fallback) {
+      pickedGpuMote = null;
+      moteFocusLocked = false;
+      selectedTargetId = fallback.id;
+      if (currentLevel === 1 && fallback.branch) physics.setGalaxyBranch(fallback.branch, fallback.pos);
+      renderScaleControls();
+      updateInspectorCard();
+      return fallback;
+    }
+    return null;
+  }
+
+  async function refreshTrackedPickedMote() {
+    if (!pickedGpuMote || pickedGpuMote.level !== currentLevel || pickedGpuMote.kind === 'nucleon') return;
+    const desc = getActiveGpuPickDescriptor();
+    if (!desc || desc.kind !== pickedGpuMote.kind || !desc.buffer) return;
+    const raw = await entityPicker.readSingleEntity(desc.buffer, pickedGpuMote.index, desc.strideFloats);
+    if (raw && pickedGpuMote && pickedGpuMote.kind === desc.kind) {
+      pickedGpuMote = decodePickedGpuMote(desc, pickedGpuMote.index, raw);
+    }
+  }
+
+  function focusPickedMote({ zoomIn = false } = {}) {
+    if (!pickedGpuMote) return false;
+    if (currentLevel === 0 && pickedGpuMote.kind === 'cosmo-web') {
+      physics.setCosmoFocusMpc(pickedGpuMote.rawPos);
+      moteFocusLocked = true;
+      if (zoomIn) flyToLog10Span(Math.max(21.2, log10ViewSpanM - 1.6));
+    } else if (currentLevel === 1 && pickedGpuMote.kind === 'galaxy-star') {
+      physics.setGalaxyBranch('solar-system', pickedGpuMote.rawPos);
+      moteFocusLocked = true;
+      if (zoomIn) flyToLog10Span(Math.max(17.5, log10ViewSpanM - 1.5));
+    } else {
+      moteFocusLocked = !moteFocusLocked || zoomIn;
+      if (moteFocusLocked) {
+        camTarget = [...pickedGpuMote.worldPos];
+        if (zoomIn) camState.dist = Math.max(6.5, camState.dist * 0.62);
+      } else {
+        camTarget = [0, 0, 0];
+        camState.dist = 18.0;
+      }
+    }
+    updateInspectorCard();
+    renderNow(performance.now());
+    return true;
+  }
+
+  focusMoteBtn?.addEventListener('click', () => {
+    focusPickedMote({ zoomIn: !moteFocusLocked });
+  });
 
   canvas.addEventListener('pointerdown', (e) => {
     pointerDown = true;
@@ -1426,36 +2052,29 @@ export async function mountUlgUniversesDemo() {
     } else if (!physics.surfaceActive) {
       const hit = pickTargetAt(e.clientX, e.clientY);
       hoveredTargetId = hit?.id || null;
-      canvas.style.cursor = hit ? 'pointer' : 'grab';
+      canvas.style.cursor = hit ? 'pointer' : 'crosshair';
     }
   });
   canvas.addEventListener('pointerup', (e) => {
     if (pointerDown && !pointerMoved && !physics.surfaceActive) {
-      const hit = pickTargetAt(e.clientX, e.clientY);
-      if (hit) {
-        selectedTargetId = hit.id;
-        autopilot = false;
-        autopilotBtn?.classList.remove('active');
-        if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
-        if (currentLevel === 1 && hit.branch) {
-          physics.setGalaxyBranch(hit.branch, hit.pos);
-        } else if (currentLevel === 2 && hit.bodyIndex != null) {
-          physics.setFocusedSolarBody(hit.bodyIndex);
-          if (hit.bodyIndex > 0) void physics.initPlanetaryInterior({ bodyIndex: hit.bodyIndex });
-        }
-        renderScaleControls();
-      }
+      autopilot = false;
+      autopilotBtn?.classList.remove('active');
+      if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
+      void pickAnyEntityAt(e.clientX, e.clientY);
     }
     pointerDown = false;
   });
-  canvas.addEventListener('dblclick', (e) => {
+  canvas.addEventListener('dblclick', async (e) => {
     if (physics.surfaceActive) return;
-    const hit = pickTargetAt(e.clientX, e.clientY);
-    if (hit) selectedTargetId = hit.id;
     autopilot = false;
     autopilotBtn?.classList.remove('active');
     if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
-    void initiateHyperdrive();
+    const picked = await pickAnyEntityAt(e.clientX, e.clientY);
+    if (picked && picked === pickedGpuMote) {
+      focusPickedMote({ zoomIn: true });
+    } else {
+      void initiateHyperdrive();
+    }
   });
 
   // TRUE CONTINUOUS 40-ORDER-OF-MAGNITUDE MOUSE-WHEEL ZOOM!
@@ -1702,18 +2321,30 @@ export async function mountUlgUniversesDemo() {
 
   function updateInspectorCard() {
     const sc = UNIVERSES_SCALES[currentLevel];
-    const target = getSelectedTarget();
+    const hasMote = Boolean(pickedGpuMote && pickedGpuMote.level === currentLevel);
+    const target = hasMote ? pickedGpuMote : getSelectedTarget();
     if (scaleBadge) scaleBadge.textContent = `10^${log10ViewSpanM.toFixed(1)} m`;
     if (zoomReadout) zoomReadout.textContent = formatPhysicalSpan(log10ViewSpanM);
     if (zoomSlider && document.activeElement !== zoomSlider) zoomSlider.value = log10ViewSpanM.toFixed(2);
-    if (targetKicker) targetKicker.textContent = `L${sc.level} · ${sc.name.toUpperCase()} · ${formatPhysicalSpan(log10ViewSpanM)}`;
+    if (targetKicker) {
+      targetKicker.textContent = hasMote
+        ? `GPU MOTE INSPECTOR · L${sc.level} · ${formatPhysicalSpan(log10ViewSpanM)}`
+        : `L${sc.level} · ${sc.name.toUpperCase()} · ${formatPhysicalSpan(log10ViewSpanM)}`;
+    }
     if (targetName) targetName.textContent = target?.name || sc.name;
     if (targetSub) targetSub.textContent = target?.subtitle || sc.engineSchema;
     if (compText) compText.textContent = target?.composition || '';
     if (specTitle) specTitle.textContent = currentLevel >= 5 ? 'GATE 1 OPTICAL SPECTRUM' : 'EMISSION SPECTROGRAPH';
+    if (focusMoteBtn) {
+      focusMoteBtn.style.display = hasMote && !physics.surfaceActive ? 'inline-flex' : 'none';
+      focusMoteBtn.textContent = moteFocusLocked ? '🎯 Locked' : '🎯 Focus';
+      focusMoteBtn.classList.toggle('active', moteFocusLocked);
+    }
 
     let cells = [];
-    if (currentLevel === 0) {
+    if (hasMote && Array.isArray(pickedGpuMote.stats) && pickedGpuMote.stats.length) {
+      cells = pickedGpuMote.stats;
+    } else if (currentLevel === 0) {
       if (physics.cosmoMode !== 'web' && physics.cosmoBaryonTelemetry) {
         const bt = physics.cosmoBaryonTelemetry;
         const tempLabel = bt.redshiftZ > 100
@@ -1932,6 +2563,31 @@ export async function mountUlgUniversesDemo() {
         reticleCtx.fillText(t.name, p.sx + r + 6, p.sy + 3.5);
       }
     }
+    if (pickedGpuMote && pickedGpuMote.level === currentLevel && pickedGpuMote.worldPos) {
+      const mp = projectWorldToScreen(pickedGpuMote.worldPos, viewProj, lastCssW, lastCssH);
+      if (mp.visible) {
+        const mr = 14;
+        reticleCtx.save();
+        reticleCtx.strokeStyle = 'rgba(250, 204, 21, 0.96)';
+        reticleCtx.lineWidth = 1.9;
+        // Crisp rotated diamond + crosshair locked directly onto the live GPU mote!
+        reticleCtx.beginPath();
+        reticleCtx.moveTo(mp.sx, mp.sy - mr);
+        reticleCtx.lineTo(mp.sx + mr, mp.sy);
+        reticleCtx.lineTo(mp.sx, mp.sy + mr);
+        reticleCtx.lineTo(mp.sx - mr, mp.sy);
+        reticleCtx.closePath();
+        reticleCtx.stroke();
+        reticleCtx.beginPath();
+        reticleCtx.arc(mp.sx, mp.sy, 3.0, 0, Math.PI * 2);
+        reticleCtx.fillStyle = '#fde047';
+        reticleCtx.fill();
+        reticleCtx.font = '600 11px monospace';
+        reticleCtx.fillStyle = '#fef08a';
+        reticleCtx.fillText(pickedGpuMote.name, mp.sx + mr + 7, mp.sy + 3.5);
+        reticleCtx.restore();
+      }
+    }
   }
 
   // ---- Build Seamless Continuous-Zoom Multi-Scale Scene Payload ----
@@ -2019,22 +2675,18 @@ export async function mountUlgUniversesDemo() {
         alphaGain: 0.34 * wGal,
         extra1: [effGalOff[0], effGalOff[1], effGalOff[2], 0]
       });
-      // Subtle galactic alpha-omega dynamo magnetic field spiral streamlines when Orbit/Guides ON
-      if (showOrbits && physics.showGalacticBField && physics.galaxyPreset === 'disk' && span > 19.2) {
-        const bAlpha = 0.16 * wGal * smoothstep(19.2, 20.5, span);
-        for (let arm = 0; arm < 4; arm += 1) {
-          const baseA = arm * Math.PI * 0.5;
-          let prev = null;
-          for (let s = 0; s <= 28; s += 1) {
-            const r = 1.4 + s * 0.34;
-            const th = baseA + Math.log(1 + r / 0.65) / Math.tan((17 * Math.PI) / 180);
-            const pt = [(Math.cos(th) * r - effGalOff[0]) * galScale, (0.04 - effGalOff[1]) * galScale, (Math.sin(th) * r - effGalOff[2]) * galScale];
-            if (prev) {
-              lineChunks.push(...prev, 0.28, 0.76, 1.0, bAlpha);
-              lineChunks.push(...pt, 0.28, 0.76, 1.0, bAlpha);
-            }
-            prev = pt;
-          }
+      // 100% EMERGENT 3D GPU α–ω Galactic Dynamo magnetic streamlines traced through live GPU B(x,y,z)!
+      // (Zero hardcoded analytic spiral formulas; B₀ = 0 produces 0 streamlines!)
+      if (showOrbits && physics.showGalacticBField && physics.galacticDynamoStreamlines?.length >= 14 && span > 18.8) {
+        const bFade = wGal * smoothstep(18.8, 20.2, span);
+        const rawG = physics.galacticDynamoStreamlines;
+        for (let i = 0; i < rawG.length; i += 7) {
+          lineChunks.push(
+            (rawG[i] - effGalOff[0]) * galScale,
+            (rawG[i + 1] - effGalOff[1]) * galScale,
+            (rawG[i + 2] - effGalOff[2]) * galScale,
+            rawG[i + 3], rawG[i + 4], rawG[i + 5], rawG[i + 6] * bFade
+          );
         }
       }
     }
@@ -2409,24 +3061,18 @@ export async function mountUlgUniversesDemo() {
           alphaGain: 0.30 * wStarCore,
           extra1: [0, 0, 0, 0]
         });
-        // Coronal dipolar magnetic flux loops around the active fusion star
-        if (showOrbits) {
-          const rLoopBase = 3.2 * stScale;
-          for (let lIdx = 0; lIdx < 8; lIdx += 1) {
-            const phi = (lIdx / 8) * Math.PI * 2;
-            const cP = Math.cos(phi); const sP = Math.sin(phi);
-            let prev = null;
-            for (let s = 0; s <= 24; s += 1) {
-              const lam = -1.15 + (s / 24) * 2.3;
-              const cl = Math.cos(lam);
-              const rr = rLoopBase * 1.55 * cl * cl;
-              const pt = [rr * cl * cP, rr * Math.sin(lam), rr * cl * sP];
-              if (prev) {
-                lineChunks.push(...prev, 0.36, 0.80, 1.0, 0.24 * wStarCore);
-                lineChunks.push(...pt, 0.36, 0.80, 1.0, 0.24 * wStarCore);
-              }
-              prev = pt;
-            }
+        // 100% EMERGENT 3D GPU Stellar Convective Dynamo magnetic streamlines traced through live GPU B(x,y,z)!
+        // (Zero hardcoded analytic dipole loops; B₀ = 0 produces 0 streamlines!)
+        if (showOrbits && physics.stellarDynamoStreamlines?.length >= 14) {
+          const rawS = physics.stellarDynamoStreamlines;
+          const scS = stScale * 0.95;
+          for (let i = 0; i < rawS.length; i += 7) {
+            lineChunks.push(
+              rawS[i] * scS,
+              rawS[i + 1] * scS,
+              rawS[i + 2] * scS,
+              rawS[i + 3], rawS[i + 4], rawS[i + 5], rawS[i + 6] * wStarCore
+            );
           }
         }
       }
@@ -2505,6 +3151,7 @@ export async function mountUlgUniversesDemo() {
     if (wNuc > 0.01 && physics.nuclearResult) {
       const nucZoom = Math.pow(10, Math.max(-1.2, Math.min(0.9, -14.3 - span)));
       const nucleons = physics.buildQuantizedNucleonSpheres(physics.nuclearResult, 2.2 * nucZoom, nowSec);
+      lastNucleonSpheres = nucleons;
       spheres.push(...nucleons);
       const td = physics.tdseTelemetry;
       let peakIdx = 20;
@@ -2521,6 +3168,32 @@ export async function mountUlgUniversesDemo() {
         tdseCrestNorm: Math.max(0.45, Math.min(0.94, peakIdx / Math.max(1, (td?.prob?.length || 128) - 1))),
         alphaMul: wNuc
       };
+    }
+
+    // 8. 3D WebGPU Golden Diamond Selection Beacon around the currently clicked & tracked GPU mote!
+    if (pickedGpuMote && pickedGpuMote.worldPos && pickedGpuMote.level === currentLevel) {
+      const tp = pickedGpuMote.worldPos;
+      const distCam = Math.max(0.4, Math.hypot(camera.pos[0] - tp[0], camera.pos[1] - tp[1], camera.pos[2] - tp[2]));
+      const sz = Math.max(0.14, Math.min(2.2, distCam * 0.032));
+      const cR = 1.0; const cG = 0.84; const cB = 0.30; const cA = 0.96;
+      // 3D Octahedron diamond frame (12 edges) + cardinal crosshair ticks (6 segments)
+      const vPx = [tp[0] + sz, tp[1], tp[2]];
+      const vNx = [tp[0] - sz, tp[1], tp[2]];
+      const vPy = [tp[0], tp[1] + sz, tp[2]];
+      const vNy = [tp[0], tp[1] - sz, tp[2]];
+      const vPz = [tp[0], tp[1], tp[2] + sz];
+      const vNz = [tp[0], tp[1], tp[2] - sz];
+      const pushEdge = (a, b, r = cR, g = cG, bl = cB, al = cA) => {
+        lineChunks.push(a[0], a[1], a[2], r, g, bl, al, b[0], b[1], b[2], r, g, bl, al);
+      };
+      pushEdge(vPy, vPx); pushEdge(vPy, vNx); pushEdge(vPy, vPz); pushEdge(vPy, vNz);
+      pushEdge(vNy, vPx); pushEdge(vNy, vNx); pushEdge(vNy, vPz); pushEdge(vNy, vNz);
+      pushEdge(vPx, vPz); pushEdge(vPz, vNx); pushEdge(vNx, vNz); pushEdge(vNz, vPx);
+      const szOut = sz * 1.65;
+      pushEdge([tp[0] + sz * 1.15, tp[1], tp[2]], [tp[0] + szOut, tp[1], tp[2]], 0.45, 0.92, 1.0, 0.88);
+      pushEdge([tp[0] - sz * 1.15, tp[1], tp[2]], [tp[0] - szOut, tp[1], tp[2]], 0.45, 0.92, 1.0, 0.88);
+      pushEdge([tp[0], tp[1] + sz * 1.15, tp[2]], [tp[0], tp[1] + szOut, tp[2]], 0.45, 0.92, 1.0, 0.88);
+      pushEdge([tp[0], tp[1] - sz * 1.15, tp[2]], [tp[0], tp[1] - szOut, tp[2]], 0.45, 0.92, 1.0, 0.88);
     }
 
     return {
@@ -2610,18 +3283,27 @@ export async function mountUlgUniversesDemo() {
       return;
     }
 
+    if (moteFocusLocked && pickedGpuMote && pickedGpuMote.level === currentLevel && pickedGpuMote.worldPos) {
+      camTarget = [
+        camTarget[0] + (pickedGpuMote.worldPos[0] - camTarget[0]) * 0.25,
+        camTarget[1] + (pickedGpuMote.worldPos[1] - camTarget[1]) * 0.25,
+        camTarget[2] + (pickedGpuMote.worldPos[2] - camTarget[2]) * 0.25
+      ];
+    } else {
+      camTarget = [camTarget[0] * 0.82, camTarget[1] * 0.82, camTarget[2] * 0.82];
+    }
     const cp = Math.cos(camState.pitch);
     const sp = Math.sin(camState.pitch);
     const cy = Math.cos(camState.yaw);
     const sy = Math.sin(camState.yaw);
     const eye = [
-      camState.dist * cp * sy,
-      camState.dist * sp,
-      camState.dist * cp * cy
+      camTarget[0] + camState.dist * cp * sy,
+      camTarget[1] + camState.dist * sp,
+      camTarget[2] + camState.dist * cp * cy
     ];
     const fovRad = (48 * Math.PI) / 180;
     const proj = mat4PerspectiveWebGpu(fovRad, aspect, 0.05, 260.0);
-    const look = mat4LookAt(eye, [0, 0, 0], [0, 1, 0]);
+    const look = mat4LookAt(eye, camTarget, [0, 1, 0]);
     const viewProj = mat4Mul(proj, look.mat);
     lastViewProj = viewProj;
 
@@ -2691,6 +3373,10 @@ export async function mountUlgUniversesDemo() {
     if (nextLvl !== currentLevel) {
       const prevLvl = currentLevel;
       currentLevel = nextLvl;
+      pickedGpuMote = null;
+      moteFocusLocked = false;
+      camTarget = [0, 0, 0];
+      camState.dist = 18.0;
       if (currentLevel === 4 && prevLvl !== 4 && !pointerDown) {
         orientCameraToSunlitPhase(physics.focusedSolarBodyIndex);
       }
@@ -2701,6 +3387,12 @@ export async function mountUlgUniversesDemo() {
 
     if (running) {
       void physics.stepActiveRegimes(currentLevel, log10ViewSpanM, timeScale);
+    }
+
+    moteTrackAccum += dtSec;
+    if (moteTrackAccum >= 0.10 && pickedGpuMote && pickedGpuMote.level === currentLevel) {
+      moteTrackAccum = 0;
+      void refreshTrackedPickedMote();
     }
 
     const isStaticScale = (currentLevel === 6)
@@ -2791,6 +3483,9 @@ export async function mountUlgUniversesDemo() {
         galaxyPreset: physics.galaxyPreset,
         galacticBodyCount: physics.galaxyEngine?.count ?? 0,
         galacticGravityMode: physics.galaxyEngine?.gravityMode ?? null,
+        galacticDynamoMagEnergy: physics.galacticDynamoTelemetry?.magneticEnergy ?? null,
+        galacticDynamoStreamlineFloats: physics.galacticDynamoStreamlines?.length ?? 0,
+        galacticB0: physics.galacticB0,
         galaxyBranch: physics.galaxyBranch,
         planetarySteps: physics.solarEngine?.stepIndex ?? 0,
         solarSimTimeYr: physics.solarEngine?.simTimeYr ?? 0,
@@ -2802,7 +3497,14 @@ export async function mountUlgUniversesDemo() {
         solarRelMomentumError: c1?.relMomentumError ?? null,
         stellarSteps: physics.stellarEngine?.stepIndex ?? 0,
         stellarMode: physics.stellarMode,
+        stellarPreset: physics.stellarPreset,
         stellarCoreTempK: physics.stellarTelemetry?.coreTempK ?? null,
+        stellarDynamoMagEnergy: physics.stellarDynamoTelemetry?.magneticEnergy ?? null,
+        stellarDynamoStreamlineFloats: physics.stellarDynamoStreamlines?.length ?? 0,
+        stellarB0: physics.stellarB0,
+        magnetosphereStreamlineFloats: physics.magnetosphereFieldLines?.length ?? 0,
+        pickedGpuMote: pickedGpuMote ? { kind: pickedGpuMote.kind, index: pickedGpuMote.index, name: pickedGpuMote.name, subtitle: pickedGpuMote.subtitle } : null,
+        moteFocusLocked,
         nebulaMhdSteps: physics.nebulaMhdSession?.stepIndex ?? 0,
         nebulaMhdMagneticEnergy: physics.nebulaMhdTelemetry?.magneticEnergy ?? null,
         nebulaMhdPeakToroidalB: physics.nebulaMhdTelemetry?.peakToroidalB ?? null,
@@ -2966,6 +3668,88 @@ export async function mountUlgUniversesDemo() {
       renderNow(performance.now());
       return this.getState();
     },
+    async setGalacticB0(val) {
+      await physics.setGalacticB0(val);
+      renderScaleControls();
+      updateInspectorCard();
+      renderNow(performance.now());
+      return this.getState();
+    },
+    async setStellarB0(val) {
+      await physics.setStellarB0(val);
+      renderScaleControls();
+      updateInspectorCard();
+      renderNow(performance.now());
+      return this.getState();
+    },
+    async setStellarPreset(preset) {
+      await physics.initStellarCore({ preset });
+      pickedGpuMote = null;
+      moteFocusLocked = false;
+      renderScaleControls();
+      updateInspectorCard();
+      renderNow(performance.now());
+      return this.getState();
+    },
+    async pickAtCanvasFraction(fx = 0.5, fy = 0.5, { preferGpuMote = true } = {}) {
+      renderNow(performance.now());
+      return pickAnyEntityAt(fx * lastCssW, fy * lastCssH, { preferGpuMote });
+    },
+    focusPickedMote(opts = { zoomIn: true }) {
+      return focusPickedMote(opts);
+    },
+    getPickedMote() {
+      return pickedGpuMote;
+    },
+    async readGalaxyDiagnostics() {
+      if (!physics.galaxyEngine) return null;
+      const b = await physics.galaxyEngine.readbackBodies();
+      const n = Math.floor(b.length / 8);
+      let visCount = 0; let sumR = 0; let sumZ2 = 0; let maxR = 0; let escaped = 0;
+      for (let i = 1; i < n; i += 1) {
+        const o = i * 8;
+        if (b[o + 7] < -0.5) continue;
+        const r = Math.hypot(b[o], b[o + 2]);
+        const z = b[o + 1];
+        visCount += 1;
+        sumR += r;
+        sumZ2 += z * z;
+        if (r > maxR) maxR = r;
+        if (r > 18.0 || Math.abs(z) > 10.0) escaped += 1;
+      }
+      return {
+        stepIndex: physics.galaxyEngine.stepIndex,
+        visibleStars: visCount,
+        meanRadius: sumR / Math.max(1, visCount),
+        rmsHeightZ: Math.sqrt(sumZ2 / Math.max(1, visCount)),
+        maxRadius: maxR,
+        escapedFrac: escaped / Math.max(1, visCount)
+      };
+    },
+    async readStellarDiagnostics() {
+      if (!physics.stellarEngine) return null;
+      const b = await physics.stellarEngine.readbackBodies();
+      const n = Math.floor(b.length / 16);
+      let sumR = 0; let sumV2 = 0; let maxSpd = 0; let boundCount = 0;
+      for (let i = 0; i < n; i += 1) {
+        const o = i * 16;
+        const r = Math.hypot(b[o], b[o + 1], b[o + 2]);
+        const spd = Math.hypot(b[o + 4], b[o + 5], b[o + 6]);
+        sumR += r;
+        sumV2 += spd * spd;
+        if (spd > maxSpd) maxSpd = spd;
+        if (r < 6.5) boundCount += 1;
+      }
+      return {
+        stepIndex: physics.stellarEngine.stepIndex,
+        count: n,
+        meanRadius: sumR / Math.max(1, n),
+        rmsSpeed: Math.sqrt(sumV2 / Math.max(1, n)),
+        maxSpeed: maxSpd,
+        boundFrac: boundCount / Math.max(1, n),
+        coreTempK: physics.stellarTelemetry?.coreTempK ?? null
+      };
+    },
     setPlanetaryTriboelectric(enabled) {
       physics.setPlanetaryTriboelectric(enabled);
       renderScaleControls();
@@ -3076,6 +3860,7 @@ export async function mountUlgUniversesDemo() {
       window.removeEventListener('keyup', handleSurfaceKeyUp);
       window.removeEventListener('pagehide', handleUnload);
       window.removeEventListener('beforeunload', handleUnload);
+      entityPicker.dispose();
       physics.dispose();
       renderer.dispose();
     }

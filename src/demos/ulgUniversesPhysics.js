@@ -92,6 +92,12 @@ import {
 import { createHydrogenNebulaInitialBodies } from '../runtime/astrophysics/nebulaInitialConditions.js';
 import { createSelfGravitatingHydroEngine } from '../runtime/sph/selfGravitatingHydroGpu.js';
 import {
+  createGalacticParticleMeshEngineWebGpu
+} from '../runtime/astrophysics/galacticParticleMeshGpu.js';
+import {
+  createEmergent3dDynamoFieldWebGpu
+} from '../runtime/astrophysics/emergentMhdDynamoGpu.js';
+import {
   createResidentScaleAtlasMultipoleNBodyEngine,
   createResidentTiledNBodyEngine
 } from './cosmicQuantumGpuKernels.js';
@@ -188,21 +194,31 @@ export function createRealisticSpiralGalaxyBodies({
 
   const populateSingleGalaxy = (start, end, cx, cy, cz, cvx, cvy, cvz, tiltX, tiltZ, scaleR = 1.0) => {
     const subN = end - start;
-    const mSmbh = 30.0 * scaleR;
-    const mBulgeTotal = 140.0 * scaleR;
-    const mDiskTotal = 260.0 * scaleR;
-    const mDmTotal = 950.0 * scaleR;
-    const aBulge = 1.05 * scaleR;
-    const rDisk = 3.1 * scaleR;
-    const aDm = 6.8 * scaleR;
+    // Balanced-mass flat-rotation galaxy tuned for smooth 32^3 CIC 3D-FFT PM + exact direct SMBH:
+    //   - DM halo gets 36% of particles -> m_dm / m_disk <= 2.3 (eliminates two-body disk heating!)
+    //   - Effective circular speed matched to smooth mesh potential + Toomre Q >= 1.5 epicyclic stability!
+    const mSmbh = 44.0 * scaleR;
+    const mBulgeTotal = 135.0 * scaleR;
+    const mDiskTotal = 290.0 * scaleR;
+    const mDmTotal = 780.0 * scaleR;
+    const aBulge = 1.25 * scaleR;
+    const rDisk = 3.2 * scaleR;
+    const aDm = 7.4 * scaleR;
+    const meshSoft = 1.05 * scaleR;
+    const smbhSoft = 0.72 * scaleR;
 
-    const enclosedMass = (r) => {
-      const mb = mBulgeTotal * (r * r) / ((r + aBulge) * (r + aBulge));
-      const x = r / rDisk;
+    const enclosedAccel = (r) => {
+      const rSafe = Math.max(0.15 * scaleR, r);
+      const aSmbh = (gravity * mSmbh * rSafe) / Math.pow(rSafe * rSafe + smbhSoft * smbhSoft, 1.5);
+      const rEff = Math.hypot(rSafe, meshSoft);
+      const mb = mBulgeTotal * (rSafe * rSafe) / ((rSafe + aBulge) * (rSafe + aBulge));
+      const x = rSafe / rDisk;
       const md = mDiskTotal * (1 - (1 + x) * Math.exp(-x));
-      const mdm = mDmTotal * (r * r) / ((r + aDm) * (r + aDm));
-      return mSmbh + mb + md + mdm;
+      const mdm = mDmTotal * (rSafe * rSafe) / ((rSafe + aDm) * (rSafe + aDm));
+      const aMesh = (gravity * (mb + md + mdm) * rSafe) / (rEff * rEff * rEff);
+      return aSmbh + aMesh;
     };
+    const vCircAt = (r) => Math.sqrt(Math.max(0, r * enclosedAccel(r)));
 
     const cTx = Math.cos(tiltX); const sTx = Math.sin(tiltX);
     const cTz = Math.cos(tiltZ); const sTz = Math.sin(tiltZ);
@@ -215,9 +231,9 @@ export function createRealisticSpiralGalaxyBodies({
     // Index start = central SMBH mass anchor
     bodies.set([cx + ox, cy + oy, cz + oz, mSmbh, cvx, cvy, cvz, 0.05], start * 8);
 
-    const nDm = Math.floor((subN - 1) * 0.20);
-    const nBulge = Math.floor((subN - 1) * 0.16);
-    const nHaloStars = Math.floor((subN - 1) * 0.06);
+    const nDm = Math.floor((subN - 1) * 0.36);
+    const nBulge = Math.floor((subN - 1) * 0.14);
+    const nHaloStars = Math.floor((subN - 1) * 0.04);
     const nDisk = (subN - 1) - nDm - nBulge - nHaloStars;
 
     const dmEach = mDmTotal / Math.max(1, nDm);
@@ -228,15 +244,16 @@ export function createRealisticSpiralGalaxyBodies({
 
     // 1. Hernquist Dark-Matter Halo particles (popTag = -1.0 -> invisible, real GPU gravity!)
     for (let i = 0; i < nDm && cursor < end; i += 1, cursor += 1) {
-      const u = Math.max(0.01, Math.min(0.92, rand()));
-      const r = Math.min(14.5 * scaleR, aDm * Math.sqrt(u) / Math.max(0.05, 1 - Math.sqrt(u)));
+      const u = Math.max(0.01, Math.min(0.88, rand()));
+      const r = Math.min(18.5 * scaleR, aDm * Math.sqrt(u) / Math.max(0.08, 1 - Math.sqrt(u)));
       const cosP = 2 * rand() - 1;
       const sinP = Math.sqrt(Math.max(0, 1 - cosP * cosP));
       const phi = 2 * Math.PI * rand();
       const lx = r * sinP * Math.cos(phi);
       const ly = r * cosP;
       const lz = r * sinP * Math.sin(phi);
-      const sigmaV = Math.sqrt((gravity * enclosedMass(r)) / (3.0 * Math.hypot(r, aDm * 0.45)));
+      // Jeans isotropic dispersion matched to actual mesh+SMBH potential (virialized 2K + U ~ 0)
+      const sigmaV = vCircAt(r) * 0.56;
       const pR = rot(lx, ly, lz);
       const vR = rot(gauss() * sigmaV, gauss() * sigmaV, gauss() * sigmaV);
       bodies.set([
@@ -248,63 +265,66 @@ export function createRealisticSpiralGalaxyBodies({
     // 2. Warm Golden Central Bulge + Faint Stellar Halo
     for (let i = 0; i < nBulge + nHaloStars && cursor < end; i += 1, cursor += 1) {
       const isHalo = i >= nBulge;
-      const u = Math.max(0.005, Math.min(0.93, rand()));
-      const aScale = isHalo ? aBulge * 4.2 : aBulge;
-      const r = Math.min(11.5 * scaleR, aScale * Math.sqrt(u) / Math.max(0.06, 1 - Math.sqrt(u)));
+      const u = Math.max(0.005, Math.min(0.92, rand()));
+      const aScale = isHalo ? aBulge * 4.0 : aBulge;
+      const r = Math.min(11.5 * scaleR, aScale * Math.sqrt(u) / Math.max(0.07, 1 - Math.sqrt(u)));
       const cosP = 2 * rand() - 1;
       const sinP = Math.sqrt(Math.max(0, 1 - cosP * cosP));
       const phi = 2 * Math.PI * rand();
       const lx = r * sinP * Math.cos(phi);
       const ly = r * cosP * (isHalo ? 0.85 : 0.62);
       const lz = r * sinP * Math.sin(phi);
-      const vCirc = Math.sqrt((gravity * enclosedMass(r)) / Math.hypot(r, softening));
-      const disp = vCirc * (isHalo ? 0.52 : 0.42);
-      const spinFrac = isHalo ? 0.15 : 0.55;
+      const vCirc = vCircAt(r);
+      const disp = vCirc * (isHalo ? 0.50 : 0.36);
+      const spinFrac = isHalo ? 0.18 : 0.62;
       const vx = -Math.sin(phi) * vCirc * spinFrac + gauss() * disp;
-      const vy = gauss() * disp * 0.72;
+      const vy = gauss() * disp * 0.68;
       const vz = Math.cos(phi) * vCirc * spinFrac + gauss() * disp;
       const pR = rot(lx, ly, lz);
       const vR = rot(vx, vy, vz);
-      const popTag = isHalo ? (0.24 + rand() * 0.10) : (0.02 + Math.min(0.28, (r / (2.5 * scaleR)) * 0.24));
+      const popTag = isHalo ? (0.24 + rand() * 0.10) : (0.02 + Math.min(0.28, (r / (2.6 * scaleR)) * 0.24));
       bodies.set([
         cx + pR[0] + ox, cy + pR[1] + oy, cz + pR[2] + oz, bulgeEach,
         cvx + vR[0], cvy + vR[1], cvz + vR[2], popTag
       ], cursor * 8);
     }
 
-    // 3. Exponential Disk with Smooth Logarithmic Spiral Arms & H II Star-Forming Knots
-    const pitchTan = Math.tan((17 * Math.PI) / 180); // realistic ~17 deg Sc/Sb spiral pitch
+    // 3. Toomre-Stable Exponential Disk with Smooth Logarithmic Spiral Arms & H II Star-Forming Knots
+    const pitchTan = Math.tan((17 * Math.PI) / 180);
     for (; cursor < end; cursor += 1) {
-      // Sample exponential disk radius r ~ Gamma(2, rDisk) smoothly down to core (no inner ring gap!)
       const rRaw = -rDisk * Math.log(Math.max(1e-4, rand() * rand()));
-      const r = Math.max(0.18 * scaleR, Math.min(11.5 * scaleR, rRaw * 0.78));
-      const armStrength = Math.min(1.0, Math.max(0.0, (r - 0.7 * scaleR) / (2.0 * scaleR)));
+      const r = Math.max(0.32 * scaleR, Math.min(11.5 * scaleR, rRaw * 0.78));
+      const armStrength = Math.min(1.0, Math.max(0.0, (r - 0.75 * scaleR) / (2.0 * scaleR)));
       const isArmStar = rand() < (0.72 * armStrength);
       let theta;
       let popTag;
       if (isArmStar) {
-        const armIdx = (cursor & 3); // 2 primary + 2 secondary logarithmic arms
+        const armIdx = (cursor & 3);
         const isPrimary = (armIdx & 1) === 0;
         const armBase = (armIdx * Math.PI) * 0.5 + (isPrimary ? 0 : 0.22);
         const logSpiral = Math.log(1.0 + r / (0.65 * scaleR)) / pitchTan;
-        const armWidth = (isPrimary ? 0.28 : 0.38) + 0.024 * (r / scaleR);
+        const armWidth = (isPrimary ? 0.26 : 0.36) + 0.022 * (r / scaleR);
         theta = armBase + logSpiral + gauss() * armWidth;
         const isH2 = rand() < 0.11 && r > 1.4 * scaleR && r < 8.5 * scaleR;
         popTag = isH2 ? (0.82 + rand() * 0.22) : (0.38 + rand() * 0.38);
       } else {
         theta = rand() * Math.PI * 2;
-        popTag = 0.08 + rand() * 0.26; // warm inter-arm & inner disk stars
+        popTag = 0.08 + rand() * 0.26;
       }
-      const zH = (0.12 + 0.028 * (r / scaleR)) * scaleR;
+      const zH = (0.14 + 0.028 * (r / scaleR)) * scaleR;
       const lx = r * Math.cos(theta);
       const lz = r * Math.sin(theta);
       const ly = gauss() * zH;
-      const mEnc = enclosedMass(r);
-      const vCirc = Math.sqrt((gravity * mEnc) / Math.hypot(r, softening));
-      const epicyclic = vCirc * (0.06 + 0.04 * Math.exp(-r / rDisk));
-      const vx = -Math.sin(theta) * vCirc + gauss() * epicyclic;
-      const vy = gauss() * epicyclic * 0.45;
-      const vz = Math.cos(theta) * vCirc + gauss() * epicyclic;
+      const vCirc = vCircAt(r);
+      // Asymmetric-drift correction + Toomre Q >= 1.5 radial/vertical epicyclic stability!
+      const vAz = vCirc * 0.985;
+      const sigR = vCirc * (0.08 + 0.05 * Math.exp(-r / rDisk));
+      const sigZ = vCirc * 0.045;
+      const vRad = gauss() * sigR;
+      const vTan = vAz + gauss() * (sigR * 0.72);
+      const vx = Math.cos(theta) * vRad - Math.sin(theta) * vTan;
+      const vy = gauss() * sigZ;
+      const vz = Math.sin(theta) * vRad + Math.cos(theta) * vTan;
       const pR = rot(lx, ly, lz);
       const vR = rot(vx, vy, vz);
       bodies.set([
@@ -590,8 +610,12 @@ export function createUlgUniversesPhysics(device, {
   let cosmoBaryonSession = null;
   let cosmoBaryonTelemetry = null;
 
-  // Level 1: Flat-Rotation Spiral Galaxy + Dark Matter Halo + Galactic Dynamo (7 emergent morphologies)
+  // Level 1: Smooth 32^3 CIC 3D-FFT PM Spiral Galaxy + Balanced DM Halo + Live Emergent 3D α-ω Dynamo!
   let galaxyEngine = null;
+  let galacticDynamoSession = null;
+  let galacticDynamoTelemetry = null;
+  let galacticDynamoStreamlines = new Float32Array(0);
+  let galacticB0 = 0.30;
   let galaxyPreset = 'disk';
   let galaxyMetallicity = 1.0;
   let ismCoolingAnchors = null;
@@ -626,9 +650,13 @@ export function createUlgUniversesPhysics(device, {
   let tidalRocheTelemetry = null;
   let tidalRocheMode = null;
 
-  // Level 3: Stellar Core Fusion + 3D Resistive MHD + Photoionized Nebulae + Pulsars / Magnetars + GR TOV!
+  // Level 3: Hydrostatic Main-Sequence Star + Core Fusion + Emergent 3D Stellar Dynamo + Resistive MHD + Remnants!
   let stellarEngine = null;
-  let stellarPreset = 'solar-nebula';
+  let stellarDynamoSession = null;
+  let stellarDynamoTelemetry = null;
+  let stellarDynamoStreamlines = new Float32Array(0);
+  let stellarB0 = 0.36;
+  let stellarPreset = 'main-sequence-star';
   let stellarTelemetry = null;
   let stellarNuclearNetwork = null;
   let stellarLaneEmden = null;
@@ -811,13 +839,17 @@ export function createUlgUniversesPhysics(device, {
     });
   }
 
-  // ---- L1: Realistic Flat-Rotation-Curve Spiral Galaxy ----
+  // ---- L1: Smooth 32^3 CIC 3D-FFT Particle-Mesh Spiral Galaxy + Live Emergent GPU 3D α-ω Dynamo ----
   async function initGalaxy({ preset = galaxyPreset, metallicity = galaxyMetallicity, seedOverride = null } = {}) {
     galaxyPreset = GALAXY_MORPHOLOGIES.includes(preset) ? preset : 'disk';
     galaxyMetallicity = Math.max(0.1, Math.min(3.0, Number(metallicity) || 1.0));
     if (galaxyEngine) {
       galaxyEngine.dispose();
       galaxyEngine = null;
+    }
+    if (galacticDynamoSession) {
+      galacticDynamoSession.dispose();
+      galacticDynamoSession = null;
     }
     if (!ismCoolingAnchors) {
       ismCoolingAnchors = await deriveGate1IsmCoolingAnchorsWebGpu(device);
@@ -828,15 +860,42 @@ export function createUlgUniversesPhysics(device, {
       preset: galaxyPreset,
       seed: activeSeed
     });
-    galaxyEngine = createResidentScaleAtlasMultipoleNBodyEngine({
+    galaxyEngine = createGalacticParticleMeshEngineWebGpu({
       device,
       initialBodies: bodies0,
-      mode: 0,
-      boxHalf: 16.0,
-      theta: 0.65,
-      label: `ulg-universes-galaxy-${quality.galaxyStars}`
+      gridN: 32,
+      boxSize: 48.0,
+      secondSmbhIndex: galaxyPreset === 'binary' ? (quality.galaxyStars >> 1) : 0,
+      smbhSoftening: 0.72,
+      label: `ulg-universes-galaxy-pm-${quality.galaxyStars}`
     });
-    await galaxyEngine.step({ dt: 0.008, gravity: 1.0, softening: 0.28, readback: false });
+    if (galaxyPreset === 'disk' || galaxyPreset === 'barred' || galaxyPreset === 'proto' || galaxyPreset === 'sphere' || galaxyPreset === 'globular') {
+      await galaxyEngine.calibrateEquilibrium({ gravity: 1.0, softening: 0.35 });
+    }
+    await galaxyEngine.step({ dt: 0.008, substeps: 2, gravity: 1.0, softening: 0.35, readback: false });
+
+    // Coupled live GPU 24^3 3D α-ω Galactic Dynamo driven strictly by live GPU galaxy particle velocities!
+    galacticDynamoSession = createEmergent3dDynamoFieldWebGpu(device, {
+      gridN: 24,
+      boxSize: 26.0,
+      strideFloats: 8,
+      geometry: 'galactic',
+      initialB0: galacticB0,
+      alphaAmp: 0.035,
+      etaRes: 0.16,
+      bSat: 0.85,
+      velScale: 0.22,
+      label: 'ulg-universes-galactic-dynamo'
+    });
+    galacticDynamoTelemetry = await galacticDynamoSession.step({
+      particleBuffer: galaxyEngine.getResidentBuffer(),
+      particleCount: galaxyEngine.count,
+      dt: 0.040,
+      substeps: 8,
+      readTelemetry: true,
+      readBField: true
+    });
+    galacticDynamoStreamlines = galacticDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.30 });
 
     const rand = mulberry32(activeSeed ^ 0x229a1);
     const armPos = [4.8, 0.04, 2.1];
@@ -1164,7 +1223,7 @@ export function createUlgUniversesPhysics(device, {
     for (let w = 0; w < warm; w += 1) {
       magnetosphereTelemetry = await next.step({ dt: 0.055, substeps: 3, readTelemetry: w === warm - 1 });
     }
-    magnetosphereFieldLines = next.buildDipoleFieldLines({ linesPerRing: 12, steps: 22, worldScale: 1.0, alpha: 0.48 });
+    magnetosphereFieldLines = next.buildDipoleFieldLines({ linesPerRing: 16, steps: 32, worldScale: 1.0, alpha: 0.74 });
     magnetosphereSession = next;
   }
 
@@ -1199,14 +1258,18 @@ export function createUlgUniversesPhysics(device, {
     cryoPlumeSession = next;
   }
 
-  // ---- L3: Stellar Core & Fusion Plasma ----
+  // ---- L3: Hydrostatic Main-Sequence Star & Core Fusion Plasma + Live Emergent GPU 3D Stellar Dynamo ----
   async function initStellarCore({ preset = stellarPreset, seedOverride = null } = {}) {
-    stellarPreset = ['solar-nebula', 'massive-supernova', 'binary-nursery'].includes(preset)
+    stellarPreset = ['main-sequence-star', 'solar-nebula', 'massive-supernova', 'binary-nursery'].includes(preset)
       ? preset
-      : 'solar-nebula';
+      : 'main-sequence-star';
     if (stellarEngine) {
       stellarEngine.dispose();
       stellarEngine = null;
+    }
+    if (stellarDynamoSession) {
+      stellarDynamoSession.dispose();
+      stellarDynamoSession = null;
     }
     if (!stellarClosureRef) {
       const reg = await registerPlasmaFusionClosureArtifact({ closureRegistry, device });
@@ -1218,12 +1281,18 @@ export function createUlgUniversesPhysics(device, {
       preset: stellarPreset,
       seed: activeSeed
     });
+    const isHydrostaticStar = stellarPreset === 'main-sequence-star';
     stellarEngine = createSelfGravitatingHydroEngine({
       device,
       initialBodies: bodies0,
       closureRegistry,
       closureRef: stellarClosureRef,
-      boxHalf: 14.0,
+      boxHalf: isHydrostaticStar ? 7.5 : 14.0,
+      rCellFactor: isHydrostaticStar ? 0.385 : 0.075,
+      softening: isHydrostaticStar ? 0.45 : 0.25,
+      baseLogRho: isHydrostaticStar ? -1.6 : -16.2,
+      refRhoSim: isHydrostaticStar ? 0.095 : 0.08,
+      tScaleK: isHydrostaticStar ? 1.85e6 : 7.8e5,
       label: `ulg-universes-stellar-${stellarPreset}`
     });
     stellarTelemetry = await stellarEngine.step({
@@ -1231,6 +1300,28 @@ export function createUlgUniversesPhysics(device, {
       timeAccel: stellarTimeAccel,
       readTelemetry: true
     });
+    // Live GPU 24^3 3D Stellar Convective Dynamo driven strictly by live stellar plasma velocities!
+    stellarDynamoSession = createEmergent3dDynamoFieldWebGpu(device, {
+      gridN: 24,
+      boxSize: 16.0,
+      strideFloats: 16,
+      geometry: 'stellar',
+      initialB0: stellarB0,
+      alphaAmp: 0.22,
+      etaRes: 0.055,
+      bSat: 0.95,
+      velScale: 0.35,
+      label: 'ulg-universes-stellar-dynamo'
+    });
+    stellarDynamoTelemetry = await stellarDynamoSession.step({
+      particleBuffer: stellarEngine.getResidentBuffer(),
+      particleCount: stellarEngine.count,
+      dt: 0.042,
+      substeps: 8,
+      readTelemetry: true,
+      readBField: true
+    });
+    stellarDynamoStreamlines = stellarDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.42 });
     const [nucNet, le] = await Promise.all([
       evaluateStellarNuclearNetworkWebGpu(device, [
         { rhoKgM3: 1.5e5, temperatureK: 1.5e7, xH: 0.72, xHe: 0.26, xZ: 0.02, dtS: 1e12 },
@@ -1557,7 +1648,21 @@ export function createUlgUniversesPhysics(device, {
         }
       } else if (activeLevel === 1 && galaxyEngine) {
         const dt = 0.009 * Math.max(0.1, Math.min(3.0, timeScale));
-        await galaxyEngine.step({ dt, gravity: 1.0, softening: 0.28, readback: false });
+        await galaxyEngine.step({ dt, substeps: 2, gravity: 1.0, softening: 0.35, readback: false });
+        if (galacticDynamoSession) {
+          const readB = (galaxyEngine.stepIndex % 4) === 0;
+          galacticDynamoTelemetry = await galacticDynamoSession.step({
+            particleBuffer: galaxyEngine.getResidentBuffer(),
+            particleCount: galaxyEngine.count,
+            dt: 0.040 * Math.max(0.2, Math.min(2.2, timeScale)),
+            substeps: 1,
+            readTelemetry: readB,
+            readBField: readB
+          });
+          if (readB) {
+            galacticDynamoStreamlines = galacticDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.30 });
+          }
+        }
       } else if (activeLevel === 2) {
         if (galaxyBranch === 'smbh-core' && smbhEngine) {
           smbhBodies = await smbhEngine.step({ dt: 0.008 * Math.max(0.1, Math.min(3.0, timeScale)), gravity: 1.0, softening: 0.08, readback: true });
@@ -1618,20 +1723,38 @@ export function createUlgUniversesPhysics(device, {
             readTelemetry: true
           });
         } else if ((stellarMode === 'pulsar' || stellarMode === 'magnetar') && magnetosphereSession) {
+          const readMagB = (magnetosphereSession.stepIndex % 4) === 0;
           magnetosphereTelemetry = await magnetosphereSession.step({
             dt: 0.036 * Math.max(0.2, Math.min(2.5, timeScale)),
             substeps: 2,
-            readTelemetry: true
+            readTelemetry: true,
+            readBField: readMagB
           });
-          magnetosphereFieldLines = magnetosphereSession.buildDipoleFieldLines({ linesPerRing: 12, steps: 20, worldScale: 1.0, alpha: 0.48 });
+          if (readMagB) {
+            magnetosphereFieldLines = magnetosphereSession.buildDipoleFieldLines({ linesPerRing: 16, steps: 32, worldScale: 1.0, alpha: 0.74 });
+          }
         } else if (stellarMode === 'white-dwarf-tov') {
           // Static GR TOV equilibrium curve already solved on WebGPU
         } else if (stellarEngine) {
           stellarTelemetry = await stellarEngine.step({
-            dt: 0.015 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.014 * Math.max(0.2, Math.min(2.5, timeScale)),
             timeAccel: stellarTimeAccel,
             readTelemetry: true
           });
+          if (stellarDynamoSession) {
+            const readStB = (stellarEngine.stepIndex % 4) === 0;
+            stellarDynamoTelemetry = await stellarDynamoSession.step({
+              particleBuffer: stellarEngine.getResidentBuffer(),
+              particleCount: stellarEngine.count,
+              dt: 0.038 * Math.max(0.2, Math.min(2.2, timeScale)),
+              substeps: 1,
+              readTelemetry: readStB,
+              readBField: readStB
+            });
+            if (readStB) {
+              stellarDynamoStreamlines = stellarDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.42 });
+            }
+          }
         }
       } else if (activeLevel === 4) {
         if (surfaceActive && surfaceSession) {
@@ -2015,6 +2138,41 @@ export function createUlgUniversesPhysics(device, {
     if (nebulaMhdSession) await initNebularMhd({ initialB0: nebulaB0 });
   }
   function setShowGalacticBField(enabled) { showGalacticBField = Boolean(enabled); }
+  async function setGalacticB0(val) {
+    galacticB0 = Math.max(0, Math.min(1.2, Number(val) || 0));
+    if (galacticDynamoSession && galaxyEngine) {
+      galacticDynamoSession.resetSeedB(galacticB0);
+      galacticDynamoTelemetry = await galacticDynamoSession.step({
+        particleBuffer: galaxyEngine.getResidentBuffer(),
+        particleCount: galaxyEngine.count,
+        dt: 0.045,
+        substeps: galacticB0 > 1e-6 ? 8 : 1,
+        readTelemetry: true,
+        readBField: true
+      });
+      galacticDynamoStreamlines = galacticDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.44 });
+    }
+  }
+  async function setStellarB0(val) {
+    stellarB0 = Math.max(0, Math.min(1.2, Number(val) || 0));
+    if (stellarDynamoSession && stellarEngine) {
+      stellarDynamoSession.resetSeedB(stellarB0);
+      stellarDynamoTelemetry = await stellarDynamoSession.step({
+        particleBuffer: stellarEngine.getResidentBuffer(),
+        particleCount: stellarEngine.count,
+        dt: 0.042,
+        substeps: stellarB0 > 1e-6 ? 8 : 1,
+        readTelemetry: true,
+        readBField: true
+      });
+      stellarDynamoStreamlines = stellarDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.42 });
+    }
+  }
+  function setCosmoFocusMpc(posMpc) {
+    if (Array.isArray(posMpc) && posMpc.length >= 3 && cosmoTargets.length > 0) {
+      cosmoTargets[0] = { ...cosmoTargets[0], posMpc: [Number(posMpc[0]) || 0, Number(posMpc[1]) || 0, Number(posMpc[2]) || 0] };
+    }
+  }
   function setPlanetaryTriboelectric(enabled) {
     planetaryTriboelectric = Boolean(enabled);
     planetaryAtmoSession?.setEnableTriboelectric?.(planetaryTriboelectric);
@@ -2532,6 +2690,7 @@ export function createUlgUniversesPhysics(device, {
     try { cosmoSession?.destroy(); } catch {}
     try { cosmoBaryonSession?.dispose(); } catch {}
     try { galaxyEngine?.dispose(); } catch {}
+    try { galacticDynamoSession?.dispose(); } catch {}
     try { smbhEngine?.dispose(); } catch {}
     try { solarEngine?.dispose(); } catch {}
     try { protoplanetarySession?.dispose(); } catch {}
@@ -2540,6 +2699,7 @@ export function createUlgUniversesPhysics(device, {
     try { radWindL2Session?.dispose(); } catch {}
     try { tidalRocheSession?.dispose(); } catch {}
     try { stellarEngine?.dispose(); } catch {}
+    try { stellarDynamoSession?.dispose(); } catch {}
     try { nebulaMhdSession?.dispose(); } catch {}
     try { radWindL3Session?.dispose(); } catch {}
     try { magnetosphereSession?.dispose(); } catch {}
@@ -2568,6 +2728,10 @@ export function createUlgUniversesPhysics(device, {
     get cosmoBaryonSession() { return cosmoBaryonSession; },
     get cosmoBaryonTelemetry() { return cosmoBaryonTelemetry; },
     get galaxyEngine() { return galaxyEngine; },
+    get galacticDynamoSession() { return galacticDynamoSession; },
+    get galacticDynamoTelemetry() { return galacticDynamoTelemetry; },
+    get galacticDynamoStreamlines() { return galacticDynamoStreamlines; },
+    get galacticB0() { return galacticB0; },
     get galaxyPreset() { return galaxyPreset; },
     get galaxyMetallicity() { return galaxyMetallicity; },
     get galaxyFocusPos() { return galaxyFocusPos; },
@@ -2595,6 +2759,10 @@ export function createUlgUniversesPhysics(device, {
     get solarConservation() { return solarConservation; },
     get focusedSolarBodyIndex() { return focusedSolarBodyIndex; },
     get stellarEngine() { return stellarEngine; },
+    get stellarDynamoSession() { return stellarDynamoSession; },
+    get stellarDynamoTelemetry() { return stellarDynamoTelemetry; },
+    get stellarDynamoStreamlines() { return stellarDynamoStreamlines; },
+    get stellarB0() { return stellarB0; },
     get stellarMode() { return stellarMode; },
     get nebulaMhdSession() { return nebulaMhdSession; },
     get nebulaMhdTelemetry() { return nebulaMhdTelemetry; },
@@ -2694,6 +2862,9 @@ export function createUlgUniversesPhysics(device, {
     setProtoplanetaryGasDrag,
     setStellarMode,
     setNebulaB0,
+    setGalacticB0,
+    setStellarB0,
+    setCosmoFocusMpc,
     setShowGalacticBField,
     setGalaxyBranch,
     setFocusedSolarBody,

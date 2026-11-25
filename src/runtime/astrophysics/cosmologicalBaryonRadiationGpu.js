@@ -645,7 +645,7 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
   const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const cellA = device.createBuffer({ label: `${label}-cellA`, size: ic.cells.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const cellB = device.createBuffer({ label: `${label}-cellB`, size: ic.cells.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
-  const tracerBuf = device.createBuffer({ label: `${label}-tracers`, size: ic.tracers.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
+  const tracerBuf = device.createBuffer({ label: `${label}-tracers`, size: ic.tracers.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
   const lensBuf = device.createBuffer({ label: `${label}-lens`, size: n * n * 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 32, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telReadBuf = device.createBuffer({ label: `${label}-tel-read`, size: 32, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });

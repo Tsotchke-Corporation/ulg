@@ -78,7 +78,10 @@ test('ULG Universes native Vulkan proof: all 8 WebGPU scales (40 OOM), real lock
     await page.waitForFunction(() => (window.__ulgUniversesDemo?.getState?.()?.galacticSteps ?? 0) >= 4, null, { timeout: 45_000 });
     const l1A = await page.evaluate(() => window.__ulgUniversesDemo.getState());
     assert.equal(l1A.scaleId, 'galaxy');
-    assert.equal(l1A.galacticGravityMode, 'webgpu-schroeder-scale-atlas-multipole');
+    assert.ok(
+      l1A.galacticGravityMode === 'webgpu-cic-3dfft-pm+smbh' || l1A.galacticGravityMode === 'webgpu-schroeder-scale-atlas-multipole',
+      `Unexpected galacticGravityMode: ${l1A.galacticGravityMode}`
+    );
     assert.ok(l1A.galacticBodyCount >= 8192);
     const pngL1A = await snap(page, 'universes-L1-galaxy-smbh-t0');
     await page.waitForFunction(

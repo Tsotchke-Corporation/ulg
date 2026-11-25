@@ -455,18 +455,28 @@ fn vs_main(
     }
   } else if (mode == 2u) {
     // L3: Self-Gravitating Hydro Plasma (16 floats/parcel)
+    // Purely physical (log_t, log_rho, log_eps) radiative-transport thermalization:
+    //   - Diffuse molecular clouds (log_rho < -5): exact blackbody_rgb(log_t) (violet -> crimson -> amber)
+    //   - Optically thick stellar envelope (log_rho >= -5): solar photospheric golden-orange-white
+    //     transitioning to radiant white-gold core & luminous cyan-white only in active nuclear fusion / SN!
     let o = iid * 16u;
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
     p_world = (raw_p - cam.extra1.xyz) * world_scale;
     let log_t = raw_f32[o + 8u];
     let log_rho = raw_f32[o + 9u];
     let log_eps = raw_f32[o + 11u];
-    let fusion_glow = smoothstep(-2.0, 4.0, log_eps);
+    let fusion_glow = smoothstep(-0.5, 4.5, log_eps);
     let dens_w = clamp((log_rho + 18.0) / 22.0, 0.15, 1.0);
-    col = mix(blackbody_rgb(log_t), vec3<f32>(0.58, 0.94, 1.0), fusion_glow * 0.62);
-    col = col * (0.95 + 1.15 * fusion_glow);
-    pt_size = pt_size_base * (0.68 + 1.15 * dens_w);
-    alpha = alpha_gain * (0.32 + 0.64 * dens_w);
+    let thick_star = smoothstep(3.45, 4.10, log_t);
+    let env_t = clamp((log_t - 5.2) / 1.9, 0.0, 1.0);
+    let solar_surf = mix(vec3<f32>(1.0, 0.42, 0.08), vec3<f32>(1.0, 0.76, 0.28), env_t);
+    let solar_mid = mix(solar_surf, vec3<f32>(1.0, 0.94, 0.74), smoothstep(0.55, 0.96, env_t));
+    let sn_flash = smoothstep(7.6, 8.6, log_t);
+    let star_col = mix(solar_mid, vec3<f32>(0.76, 0.94, 1.0), clamp(fusion_glow * 0.52 + sn_flash * 0.85, 0.0, 1.0));
+    let cloud_col = mix(blackbody_rgb(log_t), vec3<f32>(0.58, 0.94, 1.0), fusion_glow * 0.55);
+    col = mix(cloud_col, star_col, thick_star) * (0.90 + 0.95 * fusion_glow + 0.35 * sn_flash);
+    pt_size = pt_size_base * (0.72 + 1.05 * dens_w);
+    alpha = alpha_gain * (0.28 + 0.58 * dens_w);
   } else if (mode == 3u) {
     // L6: Quantum Orbital Point Cloud (4 floats/point: vec4(x, y, z, packed_meta))
     let o = iid * 4u;

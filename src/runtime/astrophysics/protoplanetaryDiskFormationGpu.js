@@ -469,7 +469,7 @@ export function createProtoplanetaryDiskFormationSessionWebGpu(device, {
   const telPipe = mkPipe('reduce_disk_telemetry');
 
   const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const pebblesBuf = device.createBuffer({ label: `${label}-pebbles`, size: pebInit.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
+  const pebblesBuf = device.createBuffer({ label: `${label}-pebbles`, size: pebInit.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
   const embryoSummaryBuf = device.createBuffer({ label: `${label}-embryos`, size: nEmb * 32, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const accAtomicBuf = device.createBuffer({ label: `${label}-acc-atomic`, size: nEmb * 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 32, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });

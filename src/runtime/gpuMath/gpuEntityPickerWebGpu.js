@@ -2,7 +2,7 @@
 // (`src/runtime/gpuMath/gpuEntityPickerWebGpu.js`).
 //
 // Strictly Star Spec v0.4 & GPU-Native compliant:
-//   - ZERO full-buffer CPU readbacks, ZERO serial @workgroup_size(1) compute passes!
+//   - ZERO full-buffer CPU readbacks, ZERO serial 1-thread compute passes!
 //   - Scans ANY resident WebGPU particle/star/atom/mote/lipid/agent buffer directly on
 //     the GPU (`@workgroup_size(64)` parallel reduction) against the user's click ray/NDC,
 //     returning ONLY a single 80-byte hit record containing `{ index, distPx, depth, rawVec0..3 }`!

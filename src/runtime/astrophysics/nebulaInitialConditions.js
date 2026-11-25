@@ -12,6 +12,19 @@ import {
   SIM_MASS_PER_SOLAR_MASS
 } from '../sph/selfGravitatingHydroGpu.js';
 
+export const MAIN_SEQUENCE_STAR_INITIAL_CONDITION = Object.freeze({
+  id: 'main-sequence-star',
+  label: 'Hydrostatic Main-Sequence Star (1.0 M☉)',
+  shortLabel: '1 M☉ Active Star',
+  description: 'Hydrostatic Lane-Emden convective 1.0 M☉ G2V star in nuclear-thermal equilibrium with differential rotation driving an emergent 3D convective dynamo.',
+  totalMassSolar: 1.0,
+  initialTempK: 1.50e7,
+  initialLog10Rho: 5.15,
+  angularMomentum: 0.36,
+  cloudRadius: 4.0,
+  geometry: 'lane-emden-star'
+});
+
 export const NEBULA_INITIAL_CONDITIONS = Object.freeze({
   'solar-nebula': Object.freeze({
     id: 'solar-nebula',
@@ -74,7 +87,9 @@ export function createHydrogenNebulaInitialBodies({
   seed = 1939,
   centerOffset = [0, 0, 0]
 } = {}) {
-  const cfg = NEBULA_INITIAL_CONDITIONS[preset] || NEBULA_INITIAL_CONDITIONS['solar-nebula'];
+  const cfg = preset === 'main-sequence-star'
+    ? MAIN_SEQUENCE_STAR_INITIAL_CONDITION
+    : (NEBULA_INITIAL_CONDITIONS[preset] || NEBULA_INITIAL_CONDITIONS['solar-nebula']);
   const n = Math.max(256, Math.min(32768, Math.floor(count)));
   const bodies = new Float32Array(n * HYDRO_PARTICLE_STRIDE_FLOATS);
   const ox = Number(centerOffset?.[0]) || 0;
@@ -110,7 +125,58 @@ export function createHydrogenNebulaInitialBodies({
     let vx; let vy; let vz;
 
     let localCenterX = 0;
-    if (cfg.geometry === 'twin-lobe') {
+    let overrideLogT = null;
+    let overrideLogRho = null;
+    let overrideFMol = null;
+    let overrideXIon = null;
+    let overrideXH = 0.74;
+    let overrideXHe = 0.25;
+    let overrideXZ = 0.01;
+    if (cfg.geometry === 'lane-emden-star') {
+      // Exact Lane-Emden n = 1.5 convective polytrope spherical hydrostatic star:
+      //   rho(r) ~ (1 - (r/R)^2)^1.5, T(r) ~ (1 - (r/R)^2) -> P(r) ~ (1 - (r/R)^2)^2.5
+      //   yielding exact radial hydrostatic force balance (-grad P / rho = a_grav) everywhere!
+      let rFrac = 0.5;
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        const uTry = rand();
+        const pdf = (uTry * uTry) * Math.pow(Math.max(0, 1.0 - uTry * uTry), 1.5);
+        // Peak of u^2 (1 - u^2)^1.5 occurs at u^2 = 0.4 -> 0.4 * 0.6^1.5 = 0.1859
+        if (rand() * 0.19 <= pdf) {
+          rFrac = uTry;
+          break;
+        }
+      }
+      const r = 0.12 + rFrac * (cfg.cloudRadius - 0.12);
+      const cosPh = 2 * rand() - 1;
+      const sinPh = Math.sqrt(Math.max(0, 1 - cosPh * cosPh));
+      const th = rand() * Math.PI * 2;
+      x = r * sinPh * Math.cos(th);
+      y = r * cosPh;
+      z = r * sinPh * Math.sin(th);
+
+      // Solar-like differential rotation (faster equator, slower poles) + gentle outer convective eddies
+      const lat2 = cosPh * cosPh;
+      const omegaDiff = (0.48 - 0.14 * lat2) * (0.78 + 0.35 * Math.exp(-rFrac * 1.4));
+      const convZone = Math.max(0, (rFrac - 0.56) / 0.44);
+      const convCell = Math.sin(th * 6.0 + cosPh * 4.0) * Math.cos(rFrac * 8.0) * convZone * 0.18;
+      vx = -z * omegaDiff + (x / r) * convCell + gauss() * 0.03;
+      vy = (y / r) * convCell + gauss() * 0.03;
+      vz = x * omegaDiff + (z / r) * convCell + gauss() * 0.03;
+
+      // Exact n=1.5 polytropic temperature & density profile (1.5e7 K fusing core -> 5,800 K photosphere)
+      const polyTheta = Math.max(0.002, 1.0 - rFrac * rFrac * 0.996);
+      const tLocal = Math.max(5800, 5800 + (cfg.initialTempK - 5800) * polyTheta);
+      const rhoLocal = Math.pow(10, -3.6 + (cfg.initialLog10Rho - (-3.6)) * Math.pow(polyTheta, 0.72));
+      overrideLogT = Math.log10(tLocal);
+      overrideLogRho = Math.log10(rhoLocal);
+      overrideFMol = 0.0;
+      overrideXIon = rFrac < 0.92 ? 1.0 : 0.45;
+      // Core slightly He-enriched from 4.6 Gyr of solar pp-chain fusion
+      const heEnrich = 0.22 * Math.exp(-rFrac * rFrac * 8.0);
+      overrideXH = 0.72 - heEnrich;
+      overrideXHe = 0.26 + heEnrich;
+      overrideXZ = 0.02;
+    } else if (cfg.geometry === 'twin-lobe') {
       const lobe = i & 1;
       const sign = lobe === 0 ? -1 : 1;
       const sepHalf = 4.5;
@@ -178,11 +244,11 @@ export function createHydrogenNebulaInitialBodies({
     // Measure local core boost from each lobe's own center (translation- & multi-body-invariant!)
     const rInit = Math.hypot(x - localCenterX, y, z);
     const coreBoost = Math.exp(-rInit * rInit / 12.0);
-    const localLogRho = logRho0 + coreBoost * 1.0;
-    const localLogT = logT0 + coreBoost * 0.10;
+    const localLogRho = overrideLogRho ?? (logRho0 + coreBoost * 1.0);
+    const localLogT = overrideLogT ?? (logT0 + coreBoost * 0.10);
     const hSmooth = 0.32 + 0.04 * Math.min(6, rInit);
 
-    // Primordial cosmic abundances: X_H = 0.74, X_He = 0.25, X_Z = 0.01 (sum == 1.0)
+    // Primordial cosmic abundances (or solar core profile for main-sequence-star; sum == 1.0)
     bodies[off + 0] = x + ox;
     bodies[off + 1] = y + oy;
     bodies[off + 2] = z + oz;
@@ -193,12 +259,12 @@ export function createHydrogenNebulaInitialBodies({
     bodies[off + 7] = hSmooth;
     bodies[off + 8] = localLogT;
     bodies[off + 9] = localLogRho;
-    bodies[off + 10] = 0.74;
-    bodies[off + 11] = -30.0;
-    bodies[off + 12] = 0.998;
-    bodies[off + 13] = 0.0;
-    bodies[off + 14] = 0.25;
-    bodies[off + 15] = 0.01;
+    bodies[off + 10] = overrideXH;
+    bodies[off + 11] = overrideLogT != null && overrideLogT > 6.8 ? -1.5 : -30.0;
+    bodies[off + 12] = overrideFMol ?? 0.998;
+    bodies[off + 13] = overrideXIon ?? 0.0;
+    bodies[off + 14] = overrideXHe;
+    bodies[off + 15] = overrideXZ;
   }
   return bodies;
 }

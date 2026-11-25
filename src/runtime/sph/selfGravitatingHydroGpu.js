@@ -215,12 +215,8 @@ fn sgh_deposit(@builtin(global_invocation_id) gid: vec3<u32>) {
   let rel_pos = pm.xyz - com_pos;
   let rel_vel = p.vel_smooth.xyz - com_vel;
 
-  // Uniform full-domain 32^3 compressible hydrodynamics grid accumulation
-  let hx = clamp_cell32(rel_pos.x, params.box_half);
-  let hy = clamp_cell32(rel_pos.y, params.box_half);
-  let hz = clamp_cell32(rel_pos.z, params.box_half);
-  let hb = cell_idx32(hx, hy, hz) * 8u;
-
+  // Uniform full-domain 32^3 smooth CIC trilinear compressible hydrodynamics grid deposition
+  // (eliminates NGP cell-face discontinuities & grid-waffle clumping while conserving exact mass/momentum/pressure!)
   let logT = clamp(p.thermo.x, 1.0, 9.6);
   let logRho = clamp(p.thermo.y, -18.0, 11.0);
   let eos = sample_eos_table(logRho, logT);
@@ -241,14 +237,39 @@ fn sgh_deposit(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cs2_nuc = p_nuc * 1600.0;
   let press_cell = pm.w * (cs2_thermal + cs2_rad + cs2_deg + cs2_nuc);
 
-  atomicAdd(&hydro_accum[hb + 0u], i32(round(clamp(pm.w * Q_MASS, -1e8, 1e8))));
-  atomicAdd(&hydro_accum[hb + 1u], i32(round(clamp(press_cell * Q_PRESS, -1e8, 1e8))));
-  atomicAdd(&hydro_accum[hb + 2u], i32(round(clamp(pm.w * rel_pos.x * Q_MOM, -1e8, 1e8))));
-  atomicAdd(&hydro_accum[hb + 3u], i32(round(clamp(pm.w * rel_pos.y * Q_MOM, -1e8, 1e8))));
-  atomicAdd(&hydro_accum[hb + 4u], i32(round(clamp(pm.w * rel_pos.z * Q_MOM, -1e8, 1e8))));
-  atomicAdd(&hydro_accum[hb + 5u], i32(round(clamp(pm.w * rel_vel.x * Q_MOM, -1e8, 1e8))));
-  atomicAdd(&hydro_accum[hb + 6u], i32(round(clamp(pm.w * rel_vel.y * Q_MOM, -1e8, 1e8))));
-  atomicAdd(&hydro_accum[hb + 7u], i32(round(clamp(pm.w * rel_vel.z * Q_MOM, -1e8, 1e8))));
+  let u_dep = clamp(
+    ((rel_pos + vec3<f32>(params.box_half)) / (2.0 * params.box_half)) * 32.0 - vec3<f32>(0.5),
+    vec3<f32>(0.0),
+    vec3<f32>(30.999)
+  );
+  let ix0 = u32(floor(u_dep.x));
+  let iy0 = u32(floor(u_dep.y));
+  let iz0 = u32(floor(u_dep.z));
+  let fx = u_dep.x - f32(ix0);
+  let fy = u_dep.y - f32(iy0);
+  let fz = u_dep.z - f32(iz0);
+
+  for (var dz: u32 = 0u; dz < 2u; dz = dz + 1u) {
+    let wz = select(1.0 - fz, fz, dz == 1u);
+    for (var dy: u32 = 0u; dy < 2u; dy = dy + 1u) {
+      let wyz = wz * select(1.0 - fy, fy, dy == 1u);
+      for (var dx: u32 = 0u; dx < 2u; dx = dx + 1u) {
+        let w = wyz * select(1.0 - fx, fx, dx == 1u);
+        if (w > 1e-5) {
+          let hb = cell_idx32(ix0 + dx, iy0 + dy, iz0 + dz) * 8u;
+          let wm = pm.w * w;
+          atomicAdd(&hydro_accum[hb + 0u], i32(round(clamp(wm * Q_MASS, -1e8, 1e8))));
+          atomicAdd(&hydro_accum[hb + 1u], i32(round(clamp(press_cell * w * Q_PRESS, -1e8, 1e8))));
+          atomicAdd(&hydro_accum[hb + 2u], i32(round(clamp(wm * rel_pos.x * Q_MOM, -1e8, 1e8))));
+          atomicAdd(&hydro_accum[hb + 3u], i32(round(clamp(wm * rel_pos.y * Q_MOM, -1e8, 1e8))));
+          atomicAdd(&hydro_accum[hb + 4u], i32(round(clamp(wm * rel_pos.z * Q_MOM, -1e8, 1e8))));
+          atomicAdd(&hydro_accum[hb + 5u], i32(round(clamp(wm * rel_vel.x * Q_MOM, -1e8, 1e8))));
+          atomicAdd(&hydro_accum[hb + 6u], i32(round(clamp(wm * rel_vel.y * Q_MOM, -1e8, 1e8))));
+          atomicAdd(&hydro_accum[hb + 7u], i32(round(clamp(wm * rel_vel.z * Q_MOM, -1e8, 1e8))));
+        }
+      }
+    }
+  }
 }
 
 @compute @workgroup_size(64)
@@ -288,11 +309,98 @@ fn read_hydro_b(ix: i32, iy: i32, iz: i32) -> vec4<f32> {
   return hydro_grid[cell_idx32(u32(ix), u32(iy), u32(iz)) * 2u + 1u];
 }
 
-fn pair_face_press(m_self: f32, cs2_self: f32, a_nbr: vec4<f32>, cell_w: f32) -> f32 {
-  let m_n = a_nbr.x;
-  if (m_n <= 1e-6) { return 0.0; }
-  let cs2_n = a_nbr.y / m_n;
-  return (m_n * (cs2_self + cs2_n)) / ((m_self + m_n) * cell_w);
+fn sample_hydro_trilin_mp(u_in: vec3<f32>) -> vec2<f32> {
+  let u = clamp(u_in, vec3<f32>(0.0), vec3<f32>(30.999));
+  let ix = i32(floor(u.x));
+  let iy = i32(floor(u.y));
+  let iz = i32(floor(u.z));
+  let fx = u.x - f32(ix);
+  let fy = u.y - f32(iy);
+  let fz = u.z - f32(iz);
+
+  let a000 = read_hydro_a(ix, iy, iz).xy;
+  let a100 = read_hydro_a(ix + 1, iy, iz).xy;
+  let a010 = read_hydro_a(ix, iy + 1, iz).xy;
+  let a110 = read_hydro_a(ix + 1, iy + 1, iz).xy;
+  let a001 = read_hydro_a(ix, iy, iz + 1).xy;
+  let a101 = read_hydro_a(ix + 1, iy, iz + 1).xy;
+  let a011 = read_hydro_a(ix, iy + 1, iz + 1).xy;
+  let a111 = read_hydro_a(ix + 1, iy + 1, iz + 1).xy;
+
+  let c00 = mix(a000, a100, fx);
+  let c10 = mix(a010, a110, fx);
+  let c01 = mix(a001, a101, fx);
+  let c11 = mix(a011, a111, fx);
+  let c0 = mix(c00, c10, fy);
+  let c1 = mix(c01, c11, fy);
+  return mix(c0, c1, fz);
+}
+
+fn sample_hydro_trilin_grad_p(u_in: vec3<f32>, cell_w: f32) -> vec4<f32> {
+  let u = clamp(u_in, vec3<f32>(0.0), vec3<f32>(30.999));
+  let ix = i32(floor(u.x));
+  let iy = i32(floor(u.y));
+  let iz = i32(floor(u.z));
+  let fx = u.x - f32(ix);
+  let fy = u.y - f32(iy);
+  let fz = u.z - f32(iz);
+
+  let a000 = read_hydro_a(ix, iy, iz).xy;
+  let a100 = read_hydro_a(ix + 1, iy, iz).xy;
+  let a010 = read_hydro_a(ix, iy + 1, iz).xy;
+  let a110 = read_hydro_a(ix + 1, iy + 1, iz).xy;
+  let a001 = read_hydro_a(ix, iy, iz + 1).xy;
+  let a101 = read_hydro_a(ix + 1, iy, iz + 1).xy;
+  let a011 = read_hydro_a(ix, iy + 1, iz + 1).xy;
+  let a111 = read_hydro_a(ix + 1, iy + 1, iz + 1).xy;
+
+  let inv_w = 1.0 / cell_w;
+  let dpdx = mix(mix(a100.y - a000.y, a110.y - a010.y, fy), mix(a101.y - a001.y, a111.y - a011.y, fy), fz) * inv_w;
+  let dpdy = mix(mix(a010.y - a000.y, a110.y - a100.y, fx), mix(a011.y - a001.y, a111.y - a101.y, fx), fz) * inv_w;
+  let dpdz = mix(mix(a001.y - a000.y, a101.y - a100.y, fx), mix(a011.y - a010.y, a111.y - a110.y, fx), fy) * inv_w;
+  // Symmetric 8-corner cell mass average prevents vacuum-edge blowup while matching exact local density in interior
+  let m_avg = 0.125 * (a000.x + a100.x + a010.x + a110.x + a001.x + a101.x + a011.x + a111.x);
+  return vec4<f32>(dpdx, dpdy, dpdz, m_avg);
+}
+
+fn sample_hydro_trilin_com_vel(u_in: vec3<f32>, fallback_r: vec3<f32>, fallback_v: vec3<f32>) -> array<vec3<f32>, 2> {
+  let u = clamp(u_in, vec3<f32>(0.0), vec3<f32>(30.999));
+  let ix = i32(floor(u.x));
+  let iy = i32(floor(u.y));
+  let iz = i32(floor(u.z));
+  let fx = u.x - f32(ix);
+  let fy = u.y - f32(iy);
+  let fz = u.z - f32(iz);
+
+  var r_sum = vec3<f32>(0.0);
+  var v_sum = vec3<f32>(0.0);
+  var w_sum = 0.0;
+  for (var dz: i32 = 0; dz < 2; dz = dz + 1) {
+    let wz = select(1.0 - fz, fz, dz == 1);
+    for (var dy: i32 = 0; dy < 2; dy = dy + 1) {
+      let wyz = wz * select(1.0 - fy, fy, dy == 1);
+      for (var dx: i32 = 0; dx < 2; dx = dx + 1) {
+        let w = wyz * select(1.0 - fx, fx, dx == 1);
+        let a = read_hydro_a(ix + dx, iy + dy, iz + dz);
+        if (a.x > 1e-6) {
+          let b = read_hydro_b(ix + dx, iy + dy, iz + dz);
+          let wm = w * a.x;
+          r_sum = r_sum + vec3<f32>(a.z, a.w, b.w) * wm;
+          v_sum = v_sum + b.xyz * wm;
+          w_sum = w_sum + wm;
+        }
+      }
+    }
+  }
+  let inv_w = 1.0 / max(1e-6, w_sum);
+  return array<vec3<f32>, 2>(
+    select(fallback_r, r_sum * inv_w, w_sum > 1e-6),
+    select(fallback_v, v_sum * inv_w, w_sum > 1e-6)
+  );
+}
+
+fn sample_hydro_trilin_v(u_in: vec3<f32>, fallback_v: vec3<f32>) -> vec3<f32> {
+  return sample_hydro_trilin_com_vel(u_in, vec3<f32>(0.0), fallback_v)[1];
 }
 
 @compute @workgroup_size(64)
@@ -317,54 +425,56 @@ fn sgh_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let acc_grav = grav_sample.xyz;
   let grav_phi = grav_sample.w;
 
-  // 2. Uniform full-domain 32^3 local hydro stencil (ZERO origin-centered inner grid!)
-  let hx = i32(clamp_cell32(self_rel.x, params.box_half));
-  let hy = i32(clamp_cell32(self_rel.y, params.box_half));
-  let hz = i32(clamp_cell32(self_rel.z, params.box_half));
+  // 2. Smooth CIC trilinear full-domain 32^3 hydro stencil (ZERO origin-centered inner grid,
+  //    ZERO NGP cell-face discontinuities or Cartesian grid-waffle clumping!)
   let cell_w = (2.0 * params.box_half) / 32.0;
+  let u_vec = clamp(
+    ((self_rel + vec3<f32>(params.box_half)) / (2.0 * params.box_half)) * 32.0 - vec3<f32>(0.5),
+    vec3<f32>(0.0),
+    vec3<f32>(30.999)
+  );
+  let mp_here = sample_hydro_trilin_mp(u_vec);
+  let grad_p_m = sample_hydro_trilin_grad_p(u_vec, cell_w);
 
-  let a_mid = read_hydro_a(hx, hy, hz);
-  let b_mid = read_hydro_b(hx, hy, hz);
-  let a_xp = read_hydro_a(hx + 1, hy, hz);
-  let a_xm = read_hydro_a(hx - 1, hy, hz);
-  let a_yp = read_hydro_a(hx, hy + 1, hz);
-  let a_ym = read_hydro_a(hx, hy - 1, hz);
-  let a_zp = read_hydro_a(hx, hy, hz + 1);
-  let a_zm = read_hydro_a(hx, hy, hz - 1);
+  let m_local = max(1e-5, mp_here.x);
+  // Smooth 3D CIC sub-cell peak density recovery
+  let local_rho_sim = max(self_pm.w * 2.0, mp_here.x * 4.5);
 
-  let b_xp = read_hydro_b(hx + 1, hy, hz);
-  let b_xm = read_hydro_b(hx - 1, hy, hz);
-  let b_yp = read_hydro_b(hx, hy + 1, hz);
-  let b_ym = read_hydro_b(hx, hy - 1, hz);
-  let b_zp = read_hydro_b(hx, hy, hz + 1);
-  let b_zm = read_hydro_b(hx, hy, hz - 1);
-
-  let nbr_mass = a_mid.x + 0.16 * (a_xp.x + a_xm.x + a_yp.x + a_ym.x + a_zp.x + a_zm.x);
-  let local_rho_sim = max(self_pm.w * 2.0, nbr_mass * 2.4);
-
-  let cell_com_rel = select(self_rel, vec3<f32>(a_mid.z, a_mid.w, b_mid.w), a_mid.x > 1e-6);
-  let cell_vel_rel = select(self_vrel_sys, b_mid.xyz, a_mid.x > 1e-6);
+  let com_vel_trilin = sample_hydro_trilin_com_vel(u_vec, self_rel, self_vrel_sys);
+  let cell_com_rel = com_vel_trilin[0];
+  let cell_vel_rel = com_vel_trilin[1];
   let r_cell_rel = self_rel - cell_com_rel;
   let v_cell_rel = self_vrel_sys - cell_vel_rel;
 
-  let vx_p = select(cell_vel_rel.x, b_xp.x, a_xp.x > 1e-6);
-  let vx_m = select(cell_vel_rel.x, b_xm.x, a_xm.x > 1e-6);
-  let vy_p = select(cell_vel_rel.y, b_yp.y, a_yp.x > 1e-6);
-  let vy_m = select(cell_vel_rel.y, b_ym.y, a_ym.x > 1e-6);
-  let vz_p = select(cell_vel_rel.z, b_zp.z, a_zp.x > 1e-6);
-  let vz_m = select(cell_vel_rel.z, b_zm.z, a_zm.x > 1e-6);
+  let vx_p = sample_hydro_trilin_v(u_vec + vec3<f32>(1.0, 0.0, 0.0), cell_vel_rel).x;
+  let vx_m = sample_hydro_trilin_v(u_vec - vec3<f32>(1.0, 0.0, 0.0), cell_vel_rel).x;
+  let vy_p = sample_hydro_trilin_v(u_vec + vec3<f32>(0.0, 1.0, 0.0), cell_vel_rel).y;
+  let vy_m = sample_hydro_trilin_v(u_vec - vec3<f32>(0.0, 1.0, 0.0), cell_vel_rel).y;
+  let vz_p = sample_hydro_trilin_v(u_vec + vec3<f32>(0.0, 0.0, 1.0), cell_vel_rel).z;
+  let vz_m = sample_hydro_trilin_v(u_vec - vec3<f32>(0.0, 0.0, 1.0), cell_vel_rel).z;
   let div_v_grid = ((vx_p - vx_m) + (vy_p - vy_m) + (vz_p - vz_m)) / (2.0 * cell_w);
   let div_v_sub = dot(v_cell_rel, r_cell_rel) / (dot(r_cell_rel, r_cell_rel) + 0.16 * cell_w * cell_w);
-  let div_v = clamp(0.55 * div_v_grid + 0.45 * div_v_sub, -6.0, 6.0);
+  let div_v = clamp(0.65 * div_v_grid + 0.35 * div_v_sub, -6.0, 6.0);
 
-  let m_self_cell = max(1e-5, a_mid.x);
-  let cs2_local = select(0.0, a_mid.y / m_self_cell, a_mid.x > 1e-6);
-  let acc_press_grad = vec3<f32>(
-    pair_face_press(m_self_cell, cs2_local, a_xm, cell_w) - pair_face_press(m_self_cell, cs2_local, a_xp, cell_w),
-    pair_face_press(m_self_cell, cs2_local, a_ym, cell_w) - pair_face_press(m_self_cell, cs2_local, a_yp, cell_w),
-    pair_face_press(m_self_cell, cs2_local, a_zm, cell_w) - pair_face_press(m_self_cell, cs2_local, a_zp, cell_w)
-  ) * 0.5;
-  let acc_press_sub = r_cell_rel * (cs2_local / (0.35 * cell_w * cell_w));
+  let cs2_local = select(0.0, mp_here.y / m_local, mp_here.x > 1e-6);
+  // Exact 1-cell analytical trilinear CIC pressure gradient -(grad P)/rho (eliminates odd-even checkerboard!)
+  let rho_eff = max(self_pm.w * 2.5, 0.55 * mp_here.x + 0.45 * grad_p_m.w);
+  let acc_press_grad = (-grad_p_m.xyz / rho_eff) * 0.58;
+  // Smooth sub-cell isotropic pressure cushion: identically 0 in resolved hydrostatic envelopes
+  // (cs2_local <= 8.0), engaging smoothly only when a collapsing core compresses below grid-cell
+  // resolution (protostellar core & nuclear-saturation bounce) to prevent sub-cell shock focus!
+  var acc_press_sub = vec3<f32>(0.0);
+  let sub_engage = smoothstep(8.0, 22.0, cs2_local);
+  if (sub_engage > 0.001) {
+    let sub_k_max = select(0.32, 0.72, cs2_local > 600.0) / max(1e-4, params.dt * params.dt);
+    let sub_k = min(cs2_local / (0.52 * cell_w * cell_w), sub_k_max) * sub_engage;
+    acc_press_sub = r_cell_rel * sub_k;
+    let sub_mag = length(acc_press_sub);
+    let sub_acc_cap = select(min(140.0, (sqrt(max(0.0, cs2_local)) + 6.0) / max(0.02, params.dt * 1.6)), 900.0, cs2_local > 600.0);
+    if (sub_mag > sub_acc_cap) {
+      acc_press_sub = acc_press_sub * (sub_acc_cap / sub_mag);
+    }
+  }
 
   // 3. Local Jeans sub-grid physical density scaling from local_rho_sim & local |Phi_i|
   let prev_logT = clamp(p.thermo.x, 1.0, 9.6);
@@ -460,7 +570,8 @@ fn sgh_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let gamma_m1 = clamp(gamma_eff - 1.0, 0.06, 0.90);
 
   let is_compressing = div_v_grid < -0.04 && cs2_local < 900.0;
-  let damp_local = select(0.996, 0.925, is_compressing);
+  let is_hot_core = cs2_local > 24.0 && cs2_local < 600.0;
+  let damp_local = select(select(0.994, 0.962, is_hot_core), 0.925, is_compressing);
   let v_rel2 = dot(v_cell_rel, v_cell_rel);
   let ke_dissipated = 0.5 * (1.0 - damp_local * damp_local) * v_rel2;
   let optical_trap = clamp((logRho + log10_kappa + 6.5) / 7.5, 0.0, 1.0);
@@ -662,6 +773,7 @@ export function createSelfGravitatingHydroEngine({
   gravityG = 0.42,
   softening = 0.25,
   boxHalf = 14.0,
+  rCellFactor = 0.075,
   baseLogRho = -16.2,
   refRhoSim = 0.08,
   burnTimescaleS = 4.2e14,
@@ -733,7 +845,7 @@ export function createSelfGravitatingHydroEngine({
     useAdjSoftening: true,
     qMass: 65536.0,
     qMom: 4096.0,
-    rCellFactor: 0.075,
+    rCellFactor,
     label: `${label}-ss-atlas`
   });
   const gate1Burn = getGate1StellarBurnConstants();
@@ -760,7 +872,7 @@ export function createSelfGravitatingHydroEngine({
     computeBufferBinding(7, 'uniform')
   ];
   const mk = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-self-gravitating-hydro-${entryPoint}.v16-ss-atlas`,
+    cacheKey: `ulg-self-gravitating-hydro-${entryPoint}.v26-cic-grad-ss-atlas`,
     label: `ulg-self-gravitating-hydro-${entryPoint}`,
     code: selfGravitatingHydroWgsl,
     entryPoint,
@@ -898,7 +1010,7 @@ export function createSelfGravitatingHydroEngine({
         await telemetryStagingBuf.mapAsync(1);
         const snap = new Uint32Array(telemetryStagingBuf.getMappedRange().slice(0));
         telemetryStagingBuf.unmap();
-        if (snap[14] > 4 && Math.pow(10, (snap[0] || 1400) / 1000) >= 2.5e8) {
+        if (snap[14] > 4 && Math.pow(10, (snap[0] || 1400) / 1000) >= 1.5e8) {
           hadNuclearBounce = true;
         }
         lastTelemetry = decodeHydroTelemetry(snap, particleCount, totalMassSolar, hadNuclearBounce);

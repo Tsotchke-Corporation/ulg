@@ -78,7 +78,7 @@ body {
 }
 
 .ulg-empty-card {
-  max-width: 460px;
+  max-width: 580px;
   padding: 28px 30px;
   border-radius: 16px;
   border: 1px solid var(--ulg-border);

@@ -231,13 +231,21 @@ export function mountUlgSimStudioApp({
     <div id="ulg-stage" class="ulg-studio-stage"></div>
     <div id="ulg-empty-state" class="ulg-studio-empty">
       <div class="ulg-empty-card">
-        <p class="ulg-empty-eyebrow">ULG · Schroeder Spatial Physics</p>
+        <p class="ulg-empty-eyebrow">ULG · Universal Law Graph</p>
         <h1 class="ulg-empty-title">Simulation ready</h1>
-        <p class="ulg-empty-copy">Nothing is allocated yet. Open the menu in the top right to choose a preset or assemble custom bodies, then launch on WebGPU.</p>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
-          <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Configure &amp; Launch</button>
-          <a id="ulg-empty-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
-          <a id="ulg-empty-universes-link" class="ulg-btn ulg-btn-subtle" href="./universes.html" style="text-decoration:none;">ULG Universes (40-OOM) ↗</a>
+        <p class="ulg-empty-copy">Nothing is allocated yet. Launch a first-principles WebGPU lab below or open the Mesoscale Continuum Solver (MLS-MPM) to assemble custom bodies.</p>
+        <div style="display:flex;flex-direction:column;gap:10px;align-items:center;">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
+            <a id="ulg-empty-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
+            <a id="ulg-empty-universes-link" class="ulg-btn ulg-btn-subtle" href="./universes.html" style="text-decoration:none;">Astrophysics · ULG Universes ↗</a>
+          </div>
+          <div>
+            <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Mesoscale Continuum Solver (MLS-MPM)</button>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
+            <a id="ulg-empty-organic-link" class="ulg-btn ulg-btn-subtle" href="./organic-lab.html" style="text-decoration:none;">Organic Chemistry Lab ↗</a>
+            <a id="ulg-empty-life-link" class="ulg-btn ulg-btn-subtle" href="./life-lab.html" style="text-decoration:none;">Emergent Biology Lab ↗</a>
+          </div>
         </div>
       </div>
     </div>
@@ -311,7 +319,9 @@ export function mountUlgSimStudioApp({
             <button id="ulg-stop-btn" class="ulg-btn ulg-btn-subtle ulg-btn-danger" type="button" hidden>Unload</button>
             <button id="ulg-diagnostics-toggle" class="ulg-btn ulg-btn-subtle" type="button" aria-expanded="false">Diagnostics</button>
             <a id="ulg-elements-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
-            <a id="ulg-universes-link" class="ulg-btn ulg-btn-subtle" href="./universes.html" style="text-decoration:none;">ULG Universes (40-OOM) ↗</a>
+            <a id="ulg-universes-link" class="ulg-btn ulg-btn-subtle" href="./universes.html" style="text-decoration:none;">Astrophysics · ULG Universes ↗</a>
+            <a id="ulg-organic-lab-link" class="ulg-btn ulg-btn-subtle" href="./organic-lab.html" style="text-decoration:none;">Organic Chemistry Lab ↗</a>
+            <a id="ulg-life-lab-link" class="ulg-btn ulg-btn-subtle" href="./life-lab.html" style="text-decoration:none;">Emergent Biology Lab ↗</a>
           </div>
           <div class="ulg-footer-group">
             <label class="ulg-autoplay-label">

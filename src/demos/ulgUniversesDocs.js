@@ -23,8 +23,8 @@ export const UNIVERSES_SCALES = Object.freeze([
       '∇²Φ = (3/2) Ω_m (H₀² / a) δ(x, t)   [3D-FFT Poisson via fft3dWebGpu]\n' +
       'dp/da = −(1 / a² H(a)) ∇Φ   (Symplectic KDK FLRW Comoving Integrator)',
     summary:
-      'Evolves full-Nyquist 2LPT (Second-Order Lagrangian Perturbation Theory) dark-matter and baryon filaments inside a 200 Mpc/h expanding ΛCDM universe in a single WebGPU queue.submit per step, sharing ULG’s Gate 0B 3D Radix-2 FFT engine. Scroll inward continuously to fly straight into a supercluster spiral galaxy.',
-    kernels: 'build2LptCosmologyICsWebGpu · createSupergalacticTreePmSessionWebGpu · reduce_power_spectrum_pk (16-bin GPU P(k))'
+      'Evolves full-Nyquist 2LPT dark-matter filaments (1-submit FLRW 3D-FFT TreePM) AND the general Cosmological Baryon & Radiation law (Eisenstein–Hu BAO/CMB recombination ΔT/T at z=1100, Pop III UV Reionization bubble percolation at z=10, and Bullet-Cluster X-ray ICM shock + 2D gravitational lensing convergence κ/α).',
+    kernels: 'build2LptCosmologyICsWebGpu · createSupergalacticTreePmSessionWebGpu · createCosmologicalBaryonRadiationSessionWebGpu'
   }),
   Object.freeze({
     level: 1,
@@ -43,7 +43,7 @@ export const UNIVERSES_SCALES = Object.freeze([
       'a_i = −G Σ_cell M_cell (r_i − r_cell) / (|r_i − r_cell|² + ε²)^(3/2)   [SchroederScaleAtlas]\n' +
       'v_c(r) ≈ const (NFW dark-matter halo + exponential disk + bulge) · Λ(T, Z) from Gate 1 H/He/C/O',
     summary:
-      'Simulates 16K–65K GPU-resident stars in a physically realistic flat-rotation-curve disk galaxy with ULG’s parallel SchroederScaleAtlas multipole gravity (zero cartoon oversized black hole at 100 kly!). Scroll continuously into the Galactic Center to resolve the relativistic SMBH with Schwarzschild lensing, or into a disk star to enter a true-scale Solar System.',
+      'Simulates 16K–65K GPU-resident stars on parallel SchroederScaleAtlas multipole gravity across 7 emergent morphologies (Grand-Design Spiral, Barred Spiral, Major Merger, Giant Elliptical, High-z Clumpy Protogalaxy, Tidally Disrupted Dwarf & Halo Stream, and Core-Collapsed Globular Cluster) plus Gate 1 ISM cooling Λ(T, Z).',
     kernels: 'createResidentScaleAtlasMultipoleNBodyEngine · deriveGate1IsmCoolingAnchorsWebGpu'
   }),
   Object.freeze({
@@ -63,8 +63,8 @@ export const UNIVERSES_SCALES = Object.freeze([
       'd²r_i/dt² = −G Σ_{j≠i} m_j (r_i − r_j) / |r_i − r_j|³   [f32x2 Symplectic GPU N-Body]\n' +
       'v_gas = (1−η)v_K · T(r) < T_snow → H₂O ice condensation · DLM Particle-Rigid Planetesimals',
     summary:
-      'Toggle between the Mature Real-Scale Solar System (100% WebGPU double-float symplectic N-body at exact astronomical radii, Earth = 0.00916 R☉) and live Protoplanetary Disk Formation (gas-drag pebble drift, radiative snow line, Hill-sphere pebble accretion, and composite DLM particle-rigid planetesimal collisions).',
-    kernels: 'createSolarSystemNBodyEngineWebGpu · createProtoplanetaryDiskFormationSessionWebGpu · createParticleRigidDynamicsSessionWebGpu'
+      'Spans mature double-float symplectic Solar System N-body, Protoplanetary Disk Accretion, Roche-Limit Ring Disruption & Shepherd Moons, Giant Moon-Forming Impact, Active Dual-Tail Comets, Hot-Jupiter XUV Photoevaporation, Red-Giant Engulfment (+5 Gyr), Kerr Blandford–Znajek Quasar/Blazar Jets, Roche X-Ray Binaries, Type Ia Detonations, and 2.5PN GW Chirp BNS Kilonova / BBH Mergers.',
+    kernels: 'createSolarSystemNBodyEngineWebGpu · createProtoplanetaryDiskFormationSessionWebGpu · createKerrAccretionJetSessionWebGpu · createRelativisticBinaryMergerSessionWebGpu · createTidalRocheDisruptionSessionWebGpu'
   }),
   Object.freeze({
     level: 3,
@@ -83,8 +83,8 @@ export const UNIVERSES_SCALES = Object.freeze([
       '∂B/∂t = ∇×(v×B) + η∇²B − ∇ψ,   F_L = (∇×B)×B / μ₀   [3D Resistive MHD + Dedner GLM]\n' +
       'du/dt = −(P/ρ)∇·v + q_visc + ε_pp + ε_CNO + ε_3α − Λ_rad   [self-gravitating-hydro@1]',
     summary:
-      'Switch between live 3D Self-Gravitating Resistive MHD Nebular Collapse (watching rotating magnetized clouds wind poloidal B-fields into helical towers and launch magnetocentrifugal J×B bipolar jets) and live Stellar Core Thermonuclear Fusion (self-gravitating-hydro@1 + Gate 1 nuclear Q-values + Lane–Emden).',
-    kernels: 'createNebularMhdCollapseSessionWebGpu · createSelfGravitatingHydroEngine · evaluateStellarNuclearNetworkWebGpu'
+      'Spans live Stellar Core Fusion, 3D Resistive MHD Nebular Collapse & Bipolar Jets, Strömgren Photoionized H II Star-Forming Pillars, Bipolar Planetary Nebulae, Supernova Remnants / Crab PWN, Spitkovsky Millisecond Pulsars, Hall-Crustal-Yield Magnetar Giant Flares, and live WebGPU GR TOV Unified Degenerate EOS (White Dwarf → Neutron Star → Black Hole).',
+    kernels: 'createNebularMhdCollapseSessionWebGpu · createSelfGravitatingHydroEngine · createRadiativePhotoionizationWindSessionWebGpu · createCompactMagnetosphereSessionWebGpu · solveRelativisticTovBatchWebGpu'
   }),
   Object.freeze({
     level: 4,
@@ -103,8 +103,8 @@ export const UNIVERSES_SCALES = Object.freeze([
       'dv/dt + 2Ω×v = −∇P/ρ · ∇²φ = −ρ_q/ε₀ · |E| > E_Paschen(P) → Lightning Discharge\n' +
       'dM/dr = 4π r² ρ_polytope(P, T),   B_dip(Ω, r_core, σ_Fe) → Magnetospheric Aurorae',
     summary:
-      'Dynamically activates ULG’s general spherical baroclinic atmosphere, particulate triboelectric charging, GPU Poisson E-field, Paschen dielectric-breakdown lightning, and core-geodynamo aurorae purely from the focused world’s physical state (dormant on airless worlds!). Toggle Interior Cutaway for Gate 2 Polytope Atlas core/mantle shells.',
-    kernels: 'createPlanetaryAtmosphereElectricSessionWebGpu · solvePlanetaryInteriorWebGpu (eval_polytope_atlas_bank_2d)'
+      'Dynamically activates ULG’s general spherical baroclinic atmosphere, particulate triboelectric charging, GPU Poisson Paschen lightning, core-geodynamo aurorae, Hadean Magma Ocean radiative crust, viscoelastic Cryovolcanic Icy Plumes, Tidally Locked Eyeball circulation, and dark Rogue-World geothermal storms purely from physical state — plus toggleable Gate 2 Polytope Atlas cutaway.',
+    kernels: 'createPlanetaryAtmosphereElectricSessionWebGpu · solvePlanetaryInteriorWebGpu · createTidalRocheDisruptionSessionWebGpu'
   }),
   Object.freeze({
     level: 5,
@@ -249,17 +249,15 @@ export function formatPhysicalSpan(log10SpanM) {
 
 export function buildAboutUlgUniversesHtml() {
   return `
-    <p><strong>ULG Universes</strong> is a single-canvas, <strong>continuous-zoom 40-order-of-magnitude</strong> WebGPU cosmos spanning <code>10⁺²⁵ m</code> supergalactic filaments down to <code>10⁻¹⁵ m</code> atomic nuclei.</p>
-    <p>Scroll the mouse wheel, pinch, or drag the 40-OOM scale scrubber to fly continuously across physical scales without hard scene cuts. Every scale runs a real ULG WebGPU compute solver with true relative astronomical/atomic proportions:</p>
+    <p><strong>ULG Universes</strong> is a single-canvas, <strong>continuous-zoom 40-order-of-magnitude</strong> WebGPU cosmos spanning <code>10⁺²⁵ m</code> supergalactic filaments down to <code>10⁻¹⁵ m</code> atomic nuclei — paired with a continuous <strong>Cosmic Epoch Spine</strong> from CMB Recombination (<code>z = 1100</code>) through Cosmic Dawn (<code>z = 10</code>), Cosmic Noon / Quasar Peak (<code>z = 2.8</code>), and Present Day (<code>z = 0</code>) into the <code>+5 Gyr</code> Red-Giant &amp; Remnant Era.</p>
+    <p>Every astronomical entity emerges dynamically from ULG’s <strong>15-node Universal Law Graph</strong> on WebGPU — zero hardcoded entity/planet hacks or scripted animations:</p>
     <ul>
-      <li><strong>L0 Cosmic Web (10²⁵ m):</strong> <code>28³–36³</code> particles on 1-submit FLRW 3D-FFT TreePM cosmology + live 16-bin GPU <code>P(k)</code>.</li>
-      <li><strong>L1 Spiral Galaxy (10²¹ m):</strong> <code>16K–65K</code> flat-rotation-curve disk + NFW halo stars on parallel <code>SchroederScaleAtlas</code> multipole gravity + Gate 1 ISM cooling <code>Λ(T, Z)</code>. Zoom into the Galactic Center to resolve the relativistic SMBH with WGSL Schwarzschild lensing.</li>
-      <li><strong>L2 Solar System (10¹² m → 10⁷ m):</strong> <strong>100% mutual WebGPU double-float (<code>f32x2</code>) symplectic N-body</strong> for the Sun, all 8 planets, Earth’s Moon, Io/Europa/Ganymede, Titan, 1P/Halley, and 512 Main/Kuiper Belt asteroids — rendered at <strong>exact astronomical radii</strong> (Earth 109× smaller than Sun).</li>
-      <li><strong>L3 Stellar Core (10⁹ m):</strong> Live <code>self-gravitating-hydro@1</code> plasma + Gate 1 nuclear Q-values + RK4 Lane–Emden polytropes.</li>
-      <li><strong>L4 Planetary World (10⁷ m):</strong> Seamless zoom onto the live Solar System planet with multi-octave FBM continents, oceans, clouds, Rayleigh atmosphere, and toggleable GPU Polytope Atlas hydrostatic cutaway.</li>
-      <li><strong>L5 Crystal &amp; Fluid MD (10⁻⁸ m):</strong> <code>1,000–4,000</code> live <code>O(N)</code> linked-cell GPU MD atoms with Gate 1 optical reflectance, thermostat, and GPU gravity.</li>
-      <li><strong>L6 Quantum Atom (10⁻¹⁰ m):</strong> 4-component Dirac–KS (0 SCF readbacks) + GPU inverse-CDF orbital cloud + RHF molecule + PeerCompute 2-of-2 quorum mesh.</li>
-      <li><strong>L7 Atomic Nucleus (10⁻¹⁵ m):</strong> Quantized 3D protons &amp; neutrons inside the GPU Woods–Saxon potential well + live symplectic Visscher 1D quantum α-tunneling TDSE.</li>
+      <li><strong>L0 Cosmology (10²⁵ m):</strong> 2LPT 1-submit FLRW 3D-FFT TreePM Cosmic Web + Eisenstein–Hu BAO/CMB ΔT/T shell (<code>z=1100</code>), Pop III Reionization bubbles (<code>z=10</code>), and Bullet-Cluster X-ray ICM / 2D gravitational lensing.</li>
+      <li><strong>L1 Galaxies &amp; Clusters (10²¹ m):</strong> <code>16K–65K</code> GPU stars on parallel <code>SchroederScaleAtlas</code> multipole gravity across Spiral, Barred Spiral, Major Merger, Elliptical, High-z Clumpy Protogalaxy, Tidally Disrupted Dwarf &amp; Halo Stream, and Core-Collapsed Globular Cluster + Gate 1 ISM cooling <code>Λ(T, Z)</code>.</li>
+      <li><strong>L2 Planetary, Small-Body &amp; Relativistic Systems (10¹² m → 10⁷ m):</strong> Double-float (<code>f32x2</code>) symplectic Solar System N-body, Protoplanetary Disk Accretion, Roche-Limit Ring Disruption &amp; Shepherd Moons, Giant Moon-Forming Impact, Active Dual-Tail Comets, Hot-Jupiter XUV Photoevaporation, Red-Giant Engulfment, Kerr Blandford–Znajek Quasar/Blazar Jets (live Doppler beaming), Roche X-Ray Binaries, Type Ia Detonations, and 2.5PN GW-Chirp BNS Kilonova &amp; BBH Mergers.</li>
+      <li><strong>L3 Stars, Nebulae &amp; Compact Remnants (10⁹ m):</strong> Thermonuclear Fusion Core, 3D Resistive MHD Nebular Collapse &amp; Bipolar Jets, Strömgren Photoionized H II Pillars, Bipolar Planetary Nebulae, SNR / Crab PWN, Millisecond Pulsars, Hall-Crustal-Yield Magnetar Giant Flares, and live WebGPU GR TOV Unified Degenerate EOS (White Dwarf → Neutron Star → Black Hole).</li>
+      <li><strong>L4 Planetary Worlds (10⁷ m):</strong> Spherical baroclinic atmosphere, triboelectric Paschen lightning, core-geodynamo aurorae, Hadean Magma Ocean, Cryovolcanic Icy Plumes, Tidally Locked Eyeball &amp; Rogue Worlds, plus Gate 2 Polytope Atlas cutaway.</li>
+      <li><strong>L5–L7 Microphysics (10⁻⁸ m → 10⁻¹⁵ m):</strong> Linked-cell GPU MD, 4-component Dirac–KS Atoms + RHF Molecules + PeerCompute 2-of-2 quorum mesh, and quantized Woods–Saxon Atomic Nuclei + Visscher α-tunneling TDSE.</li>
     </ul>
     <p style="font-size:12px;color:#94a3b8;"><strong>Scientific Honesty Disclosure:</strong> Runtime closures explicitly carry <code>scientificValidation: false</code>; G7 scientific benchmark comparisons remain offline and advisory.</p>
   `;

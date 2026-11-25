@@ -37,6 +37,36 @@ import {
   evaluateParticleRigidActivation,
   registerParticleRigidDynamicsModule
 } from './sph/particleRigidDynamicsGpu.js';
+import {
+  COSMO_BARYON_RAD_LAW_ADAPTER,
+  evaluateCosmologicalBaryonRadiationActivation,
+  registerCosmologicalBaryonRadiationModule
+} from './astrophysics/cosmologicalBaryonRadiationGpu.js';
+import {
+  RELATIVISTIC_COMPACT_LAW_ADAPTER,
+  evaluateRelativisticCompactActivation,
+  registerRelativisticCompactModule
+} from './astrophysics/relativisticCompactObjectGpu.js';
+import {
+  COMPACT_MAGNETOSPHERE_LAW_ADAPTER,
+  evaluateCompactMagnetosphereActivation,
+  registerCompactMagnetosphereModule
+} from './astrophysics/compactMagnetosphereGpu.js';
+import {
+  RELATIVISTIC_BINARY_LAW_ADAPTER,
+  evaluateRelativisticBinaryActivation,
+  registerRelativisticBinaryMergerModule
+} from './astrophysics/relativisticBinaryMergerGpu.js';
+import {
+  RADIATIVE_WIND_LAW_ADAPTER,
+  evaluateRadiativeWindActivation,
+  registerRadiativePhotoionizationWindModule
+} from './astrophysics/radiativePhotoionizationWindGpu.js';
+import {
+  TIDAL_ROCHE_LAW_ADAPTER,
+  evaluateTidalRocheActivation,
+  registerTidalRocheDisruptionModule
+} from './astrophysics/tidalRocheDisruptionGpu.js';
 
 export const ULG_UNIVERSAL_LAW_GRAPH_SCHEMA = 'peercompute.ulg.universal-law-graph.v1';
 
@@ -279,6 +309,87 @@ export const UNIVERSAL_LAW_GRAPH_NODES = Object.freeze([
     scaleRangeM: Object.freeze([1e-3, 1e8]),
     adapter: PARTICLE_RIGID_DYNAMICS_LAW_ADAPTER,
     evaluateActivation: evaluateParticleRigidActivation
+  }),
+  Object.freeze({
+    id: 'cosmological-baryon-radiation',
+    methodKey: 'cosmological-baryon-radiation@1',
+    title: 'Eisenstein-Hu BAO/CMB Recombination, Reionization Bubbles, ICM X-Ray/SZ & 2D Lensing',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM
+    ]),
+    scaleRangeM: Object.freeze([1e21, 1e26]),
+    adapter: COSMO_BARYON_RAD_LAW_ADAPTER,
+    evaluateActivation: evaluateCosmologicalBaryonRadiationActivation
+  }),
+  Object.freeze({
+    id: 'relativistic-compact-kerr-jet',
+    methodKey: 'relativistic-compact-kerr-jet@1',
+    title: 'GR TOV Unified Degenerate EOS (WD/NS/BH) & Kerr Blandford-Znajek Relativistic Jets (Quasar/Blazar)',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.NUCLEAR_QUANTUM
+    ]),
+    scaleRangeM: Object.freeze([1e3, 1e22]),
+    adapter: RELATIVISTIC_COMPACT_LAW_ADAPTER,
+    evaluateActivation: evaluateRelativisticCompactActivation
+  }),
+  Object.freeze({
+    id: 'compact-magnetosphere-spindown',
+    methodKey: 'compact-magnetosphere-spindown@1',
+    title: 'Force-Free Oblique Dipole Spin-Down, Pulsar Lighthouse Beams & Magnetar Crustal-Yield Giant Flares',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS,
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY
+    ]),
+    scaleRangeM: Object.freeze([1e4, 1e17]),
+    adapter: COMPACT_MAGNETOSPHERE_LAW_ADAPTER,
+    evaluateActivation: evaluateCompactMagnetosphereActivation
+  }),
+  Object.freeze({
+    id: 'relativistic-binary-gw-rprocess',
+    methodKey: 'relativistic-binary-gw-rprocess@1',
+    title: '1PN/2.5PN Gravitational-Wave Inspiral Chirp, Roche-Lobe X-Ray Binaries, Type Ia & BNS Kilonova r-Process',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.NUCLEAR_QUANTUM,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e4, 1e15]),
+    adapter: RELATIVISTIC_BINARY_LAW_ADAPTER,
+    evaluateActivation: evaluateRelativisticBinaryActivation
+  }),
+  Object.freeze({
+    id: 'radiative-photoionization-winds',
+    methodKey: 'radiative-photoionization-winds@1',
+    title: 'Strömgren Photoionization (H II Pillars/Planetary Nebulae/SNR), Stellar Winds, XUV Escape & Dual-Tail Comets',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e3, 1e20]),
+    adapter: RADIATIVE_WIND_LAW_ADAPTER,
+    evaluateActivation: evaluateRadiativeWindActivation
+  }),
+  Object.freeze({
+    id: 'tidal-roche-rheology-cryovolcanism',
+    methodKey: 'tidal-roche-rheology-cryovolcanism@1',
+    title: 'Roche-Limit Cohesive Disruption, Ring Shepherd Moons, Tidal Heating, Cryovolcanism, Magma Oceans & RGB Engulfment',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e2, 1e14]),
+    adapter: TIDAL_ROCHE_LAW_ADAPTER,
+    evaluateActivation: evaluateTidalRocheActivation
   })
 ]);
 
@@ -352,7 +463,13 @@ export function registerAllTopDownLawModules(registry) {
     registerNebularMhdSimulationModule(registry),
     registerPlanetaryAtmosphereElectricModule(registry),
     registerProtoplanetaryDiskSimulationModule(registry),
-    registerParticleRigidDynamicsModule(registry)
+    registerParticleRigidDynamicsModule(registry),
+    registerCosmologicalBaryonRadiationModule(registry),
+    registerRelativisticCompactModule(registry),
+    registerCompactMagnetosphereModule(registry),
+    registerRelativisticBinaryMergerModule(registry),
+    registerRadiativePhotoionizationWindModule(registry),
+    registerTidalRocheDisruptionModule(registry)
   ].filter(Boolean);
   return registered;
 }

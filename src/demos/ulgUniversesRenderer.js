@@ -289,16 +289,16 @@ fn vs_main(
     col = mix(core_col, jet_col * 1.55, clamp(jet_f * 0.90 + mag_f * 0.18 * (1.0 - dens_f), 0.0, 1.0));
     pt_size = pt_size_base * (0.58 + 0.82 * dens_f + 0.75 * jet_f);
     alpha = alpha_gain * (0.26 + 0.56 * dens_f + 0.62 * jet_f);
-  } else {
+  } else if (mode == 6u) {
     // Mode 6: L2 Protoplanetary Accretion Disk Pebbles (warm silicate dust inside snow line, icy sapphire outside!)
     let o = iid * 16u;
     let is_live = raw_f32[o + 15u];
     if (is_live < 0.5 || raw_f32[o + 3u] <= 0.0) {
-      var culled: VsOut;
-      culled.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-      culled.color = vec4<f32>(0.0);
-      culled.uv = vec2<f32>(0.0);
-      return culled;
+      var culled6: VsOut;
+      culled6.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled6.color = vec4<f32>(0.0);
+      culled6.uv = vec2<f32>(0.0);
+      return culled6;
     }
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
     p_world = (raw_p - cam.extra1.xyz) * world_scale;
@@ -309,6 +309,160 @@ fn vs_main(
     col = mix(hot_inner, icy_outer, ice_f);
     pt_size = pt_size_base * (0.78 + 0.45 * ice_f);
     alpha = alpha_gain * (0.48 + 0.36 * (1.0 - ice_f * 0.35));
+  } else if (mode == 7u) {
+    // Mode 7: Relativistic Kerr/BZ Jet (real camera-angle Doppler beaming!), Magnetar Flares/Pulsar Beams, & BNS Kilonova r-Process Ejecta!
+    let o = iid * 16u;
+    let is_live = raw_f32[o + 15u];
+    if (is_live < 0.5) {
+      var culled7: VsOut;
+      culled7.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled7.color = vec4<f32>(0.0);
+      culled7.uv = vec2<f32>(0.0);
+      return culled7;
+    }
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let role = raw_f32[o + 3u];
+    let vel = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
+    let gamma = max(1.0, raw_f32[o + 7u]);
+    let t_norm = clamp(raw_f32[o + 8u], 0.0, 2.0);
+    let aux_ye = raw_f32[o + 9u];
+    let emiss = clamp(raw_f32[o + 10u], 0.0, 2.6);
+    // Live relativistic Doppler beaming factor delta = 1 / (Gamma * (1 - beta * cos(theta)))!
+    // Orbiting into a Quasar jet cone naturally boosts it into a blazing blue-white Blazar!
+    let to_obs = normalize(cam.cam_pos.xyz - p_world);
+    let v_mag = length(vel);
+    let beta = sqrt(max(0.0, 1.0 - 1.0 / (gamma * gamma)));
+    let cos_th = select(0.0, dot(vel / v_mag, to_obs), v_mag > 1e-4);
+    let doppler = clamp(1.0 / max(0.28, gamma * (1.0 - min(0.88, beta) * cos_th)), 0.35, 3.2);
+    let beam_boost = mix(1.0, pow(doppler, 1.35), smoothstep(1.15, 2.5, gamma));
+    if (role > 0.5 && role < 1.5) {
+      // Relativistic BZ Jet / Polar Lighthouse Beam / Blue Polar Kilonova Wind
+      col = mix(vec3<f32>(0.24, 0.72, 1.0), vec3<f32>(0.88, 0.96, 1.0), clamp(beam_boost * 0.45, 0.0, 1.0)) * (0.9 + 0.85 * emiss) * beam_boost;
+      pt_size = pt_size_base * (0.65 + 0.55 * min(2.0, beam_boost));
+      alpha = alpha_gain * clamp(0.32 + 0.48 * emiss * min(1.8, beam_boost), 0.05, 0.95);
+    } else if (role >= 1.5) {
+      // Red Lanthanide r-Process Kilonova / Magnetar Giant Flare Fireball / Dusty Torus
+      let is_red_rproc = aux_ye > 0.01 && aux_ye < 0.25;
+      let base_c = select(
+        mix(vec3<f32>(0.92, 0.34, 0.72), vec3<f32>(1.0, 0.86, 0.42), clamp(t_norm * 0.65, 0.0, 1.0)),
+        mix(vec3<f32>(0.96, 0.26, 0.14), vec3<f32>(1.0, 0.70, 0.26), clamp(t_norm * 0.7, 0.0, 1.0)),
+        is_red_rproc
+      );
+      col = base_c * (0.75 + 0.95 * emiss);
+      pt_size = pt_size_base * (0.82 + 0.65 * clamp(emiss * 0.5, 0.0, 1.0));
+      alpha = alpha_gain * clamp(0.26 + 0.52 * emiss, 0.05, 0.92);
+    } else {
+      // Novikov-Thorne Hot Kerr Accretion Disk / Twisted Magnetosphere Loops
+      let disk_c = mix(vec3<f32>(1.0, 0.42, 0.14), vec3<f32>(0.94, 0.96, 1.0), clamp(t_norm * 0.75, 0.0, 1.0));
+      col = disk_c * (0.8 + 0.7 * emiss) * mix(1.0, doppler, 0.45);
+      pt_size = pt_size_base * (0.62 + 0.52 * min(1.5, t_norm));
+      alpha = alpha_gain * clamp(0.30 + 0.48 * emiss, 0.06, 0.88);
+    }
+  } else if (mode == 8u) {
+    // Mode 8: Photoionized Nebulae (H II Pillars / Planetary Nebula / SNR-PWN: H-alpha, [O III], [S II]) + Dual-Tail Comets + Hot-Jupiter XUV!
+    let o = iid * 16u;
+    let is_live = raw_f32[o + 15u];
+    if (is_live < 0.5) {
+      var culled8: VsOut;
+      culled8.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled8.color = vec4<f32>(0.0);
+      culled8.uv = vec2<f32>(0.0);
+      return culled8;
+    }
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let ha = clamp(raw_f32[o + 8u], 0.0, 2.0);
+    let o3 = clamp(raw_f32[o + 9u], 0.0, 2.0);
+    let s2_dust = clamp(raw_f32[o + 10u], 0.0, 2.0);
+    // Physically mapped optical emission palette:
+    //   [O III] 500.7nm -> electric teal-cyan, H-alpha 656.3nm -> rose-crimson, [S II]/Dust -> warm amber-gold!
+    let c_ha = vec3<f32>(1.0, 0.28, 0.44) * ha;
+    let c_o3 = vec3<f32>(0.16, 0.88, 1.0) * o3;
+    let c_s2 = vec3<f32>(1.0, 0.72, 0.28) * s2_dust;
+    let tot = max(0.12, ha + o3 + s2_dust);
+    col = (c_ha + c_o3 + c_s2) * (0.95 / pow(tot, 0.28));
+    pt_size = pt_size_base * (0.72 + 0.62 * min(1.5, tot));
+    alpha = alpha_gain * clamp(0.24 + 0.56 * min(1.5, tot), 0.05, 0.90);
+  } else if (mode == 9u) {
+    // Mode 9: Roche-Limit Tidal Disruption Debris, Shepherd-Moon Rings, Giant Impact Ejecta, & Cryovolcanic Ice Plumes!
+    let o = iid * 16u;
+    let is_live = raw_f32[o + 15u];
+    if (is_live < 0.5) {
+      var culled9: VsOut;
+      culled9.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled9.color = vec4<f32>(0.0);
+      culled9.uv = vec2<f32>(0.0);
+      return culled9;
+    }
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let intact = raw_f32[o + 7u];
+    let t_norm = clamp(raw_f32[o + 8u], 0.0, 2.0);
+    let role = raw_f32[o + 10u];
+    if (role > 1.5 && role < 2.5) {
+      // Cryovolcanic icy water-vapor plume crystals
+      col = vec3<f32>(0.68, 0.92, 1.0) * (0.85 + 0.45 * t_norm);
+      pt_size = pt_size_base * 0.85;
+      alpha = alpha_gain * 0.58;
+    } else if (t_norm > 0.72) {
+      // Incandescent molten silicate Giant-Impact / Red-Giant engulfment debris
+      col = mix(vec3<f32>(0.96, 0.34, 0.10), vec3<f32>(1.0, 0.88, 0.48), clamp((t_norm - 0.72) * 1.1, 0.0, 1.0));
+      pt_size = pt_size_base * (0.78 + 0.45 * min(1.2, t_norm));
+      alpha = alpha_gain * 0.72;
+    } else {
+      // Icy/rocky Roche ring & rubble-pile particles
+      col = mix(vec3<f32>(0.88, 0.80, 0.66), vec3<f32>(0.76, 0.88, 1.0), select(0.25, 0.75, intact > 0.5));
+      pt_size = pt_size_base * select(0.65, 0.95, intact > 0.5);
+      alpha = alpha_gain * 0.64;
+    }
+  } else {
+    // Mode 10: Cosmological Baryon & Radiation (CMB ΔT/T Shell, Reionization H II Bubbles, & Galaxy Cluster X-Ray ICM + DM!)
+    let o = iid * 16u;
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let rho = clamp(raw_f32[o + 7u], 0.05, 6.0);
+    let temp_k = raw_f32[o + 8u];
+    let x_hii = clamp(raw_f32[o + 9u], 0.0, 1.0);
+    let sz_dt = raw_f32[o + 10u];
+    let is_dm = raw_f32[o + 11u] > 0.5;
+    let flags = u32(round(raw_f32[o + 14u]));
+    if ((flags & 1u) != 0u) {
+      // CMB Recombination Acoustic Surface (authentic Planck cold-indigo -> deep-teal -> amber-gold -> vermilion ΔT/T!)
+      let f = clamp(sz_dt * 0.56 + 0.5, 0.0, 1.0);
+      let c_cold = vec3<f32>(0.04, 0.18, 0.88);
+      let c_teal = vec3<f32>(0.10, 0.62, 0.72);
+      let c_warm = vec3<f32>(0.96, 0.74, 0.18);
+      let c_hot  = vec3<f32>(0.95, 0.26, 0.06);
+      if (f < 0.35) {
+        col = mix(c_cold, c_teal, f / 0.35);
+      } else if (f < 0.68) {
+        col = mix(c_teal, c_warm, (f - 0.35) / 0.33);
+      } else {
+        col = mix(c_warm, c_hot, (f - 0.68) / 0.32);
+      }
+      pt_size = pt_size_base * 1.05;
+      alpha = alpha_gain * 0.72;
+    } else if ((flags & 2u) != 0u) {
+      // Cosmic Dawn Reionization: Neutral dark-crimson HI web vs glowing electric-cyan H II ionization bubbles!
+      let c_hi = vec3<f32>(0.48, 0.12, 0.34);
+      let c_hii = vec3<f32>(0.10, 0.82, 1.0);
+      let c_pop3 = vec3<f32>(1.0, 0.86, 0.44);
+      col = mix(c_hi, c_hii, smoothstep(0.08, 0.72, x_hii));
+      col = mix(col, c_pop3, smoothstep(0.84, 0.99, x_hii));
+      pt_size = pt_size_base * (0.62 + 0.75 * x_hii);
+      alpha = alpha_gain * (0.24 + 0.68 * x_hii);
+    } else {
+      // Bullet-Cluster Galaxy Cluster Merger: Vivid Magenta-Rose X-Ray Shocked ICM vs Deep Electric-Blue DM Lensing Halos!
+      let x_em = clamp(log(1.0 + max(0.0, temp_k * 1e-7) * rho) * 0.55, 0.15, 1.15);
+      col = select(
+        mix(vec3<f32>(0.96, 0.16, 0.48), vec3<f32>(1.0, 0.62, 0.24), clamp(x_em * 0.65, 0.0, 1.0)),
+        vec3<f32>(0.14, 0.48, 1.0) * (0.75 + 0.55 * min(1.3, rho * 0.35)),
+        is_dm
+      );
+      pt_size = pt_size_base * select(0.75 + 0.48 * min(1.1, x_em), 1.05, is_dm);
+      alpha = alpha_gain * select(0.32 + 0.45 * min(1.0, x_em), 0.72, is_dm);
+    }
   }
 
   let world_corner = p_world
@@ -518,8 +672,8 @@ fn fs_main(in: VsOut) -> FsOut {
       let corona = exp(-(d_min - 1.0) * 6.8) * 0.78;
       var out_c: FsOut;
       out_c.color = vec4<f32>(in.color0.rgb * corona * 1.5, corona);
-      let clip_c = cam.view_proj * vec4<f32>(in.center + ro + rd * closest, 1.0);
-      out_c.depth = clamp(clip_c.z / max(1e-5, clip_c.w), 0.0, 0.9999);
+      // Far depth so translucent stellar corona glow NEVER carves square cutouts out of nebula/ring/jet particles!
+      out_c.depth = 0.99999;
       return out_c;
     }
     if ((kind == 1u || kind == 4u) && in.color1.w > 0.25 && d_min < 1.07) {
@@ -527,8 +681,7 @@ fn fs_main(in: VsOut) -> FsOut {
       let lit_side = clamp(dot(normalize(ro + rd * closest), light_dir) * 0.8 + 0.35, 0.0, 1.0);
       var out_a: FsOut;
       out_a.color = vec4<f32>(vec3<f32>(0.34, 0.68, 1.0) * h_atmo * lit_side, h_atmo * lit_side);
-      let clip_a = cam.view_proj * vec4<f32>(in.center + ro + rd * closest, 1.0);
-      out_a.depth = clamp(clip_a.z / max(1e-5, clip_a.w), 0.0, 0.9999);
+      out_a.depth = 0.99999;
       return out_a;
     }
     discard;
@@ -739,6 +892,15 @@ fn fs_main(in: VsOut) -> FsOut {
       let base = mix(in.color0.rgb, in.color1.rgb, 0.25 + 0.45 * fresnel);
       col = base * (0.3 + 0.75 * ndl) + vec3<f32>(1.0) * spec * 0.65;
     }
+  } else if (kind == 7u) {
+    // Kind 7: Incandescent Hadean Magma Ocean World (dark cooled basalt plates rifted by glowing molten lava cracks!)
+    let crust = fbm5(n_hit * 4.2 + seed_v);
+    let cracks = fbm5(n_hit * 13.5 - seed_v * 1.4);
+    let rift = smoothstep(0.46, 0.64, abs(crust - 0.50) * -2.0 + 0.72 + (cracks - 0.5) * 0.35);
+    let basalt = mix(vec3<f32>(0.10, 0.08, 0.09), vec3<f32>(0.24, 0.16, 0.14), cracks);
+    let lava = mix(vec3<f32>(0.96, 0.22, 0.04), vec3<f32>(1.0, 0.86, 0.32), smoothstep(0.45, 0.95, rift));
+    let atm = vec3<f32>(1.0, 0.48, 0.18) * fresnel * in.color1.w * 0.9;
+    col = basalt * (0.08 + 0.85 * ndl) * soft_term + lava * rift * 1.65 + atm * (0.35 + 0.65 * ndl);
   } else {
     // Kind 6: Quantized L7 Nuclear Protons (warm ruby-amber) & Neutrons (cool sapphire-silver)
     let base = mix(in.color0.rgb, in.color1.rgb, 0.22 + 0.55 * fresnel);

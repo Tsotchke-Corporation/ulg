@@ -38,12 +38,18 @@ test('Universal Law Graph contracts validate cleanly with 0 errors, 0 private-gr
   // Register all top-down & particle-rigid modules on a fresh SimulationModuleRegistry
   const reg = createSimulationModuleRegistry();
   const registered = registerAllTopDownLawModules(reg);
-  assert.equal(registered.length, 4);
+  assert.ok(registered.length >= 10, `Expected >= 10 registered law modules, got ${registered.length}`);
   for (const key of [
     'nebular-mhd-collapse@1',
     'planetary-atmosphere-em@1',
     'protoplanetary-accretion@1',
-    'particle-rigid-dynamics@1'
+    'particle-rigid-dynamics@1',
+    'cosmological-baryon-radiation@1',
+    'relativistic-compact-kerr-jet@1',
+    'compact-magnetosphere-spindown@1',
+    'relativistic-binary-gw-rprocess@1',
+    'radiative-photoionization-winds@1',
+    'tidal-roche-rheology-cryovolcanism@1'
   ]) {
     assert.equal(reg.hasModule(key), true, `Module ${key} must be registered`);
   }

@@ -39,6 +39,7 @@ import { releaseMlsMpmPostMechanicsExactMassCapture,
 import { acquireSphAerosolSpatialParcelRead } from './sphAerosolSpatialBinding.js';
 import { releaseSphAerosolParcelRead } from './sphAerosolParcelGpu.js';
 import {
+  composeWgslVariantFromSource,
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
@@ -5323,28 +5324,61 @@ function compactSpatialGasRowsFromProductEventRows(productEventRows, {
   return compactRows;
 }
 
+const MLS_MPM_WGSL_VARIANT_MANIFESTS = new Map();
+
+export function getSphMlsMpmWgslVariantManifests() {
+  return Object.freeze(Object.fromEntries(MLS_MPM_WGSL_VARIANT_MANIFESTS.entries()));
+}
+
+function recordWgslVariantManifest(variant) {
+  MLS_MPM_WGSL_VARIANT_MANIFESTS.set(`${variant.moduleId}:${variant.variantId}`, Object.freeze({
+    schema: variant.schema,
+    moduleId: variant.moduleId,
+    variantId: variant.variantId,
+    activeFragments: variant.activeFragments,
+    overriddenSlots: variant.overriddenSlots,
+    fingerprint: variant.fingerprint
+  }));
+  return variant.code;
+}
+
 function replaceRequiredWgsl(source, search, replacement, label) {
-  if (!source.includes(search)) {
+  const first = source.indexOf(search);
+  if (first < 0) {
     throw new Error(`Unable to build active-grid WGSL variant; missing ${label}`);
   }
-  return source.replace(search, replacement);
+  if (source.indexOf(search, first + search.length) >= 0) {
+    throw new Error(`Unable to build active-grid WGSL variant; ambiguous ${label}`);
+  }
+  return `${source.slice(0, first)}${replacement}${source.slice(first + search.length)}`;
 }
 
 function replaceRequiredWgslRange(source, start, end, replacement, label) {
   const startIndex = source.indexOf(start);
+  if (startIndex < 0) {
+    throw new Error(`Unable to build active-grid WGSL variant; missing ${label}`);
+  }
+  if (source.indexOf(start, startIndex + start.length) >= 0) {
+    throw new Error(`Unable to build active-grid WGSL variant; ambiguous range start for ${label}`);
+  }
   const endIndex = source.indexOf(end, startIndex + start.length);
-  if (startIndex < 0 || endIndex < 0) {
+  if (endIndex < 0) {
     throw new Error(`Unable to build active-grid WGSL variant; missing ${label}`);
   }
   return `${source.slice(0, startIndex)}${replacement}${source.slice(endIndex)}`;
 }
 
 function createActiveGridP2gProjectionWgsl(sourceWgsl = mlsMpmP2gGridProjectionWgsl) {
-  const withParams = replaceRequiredWgsl(
-    sourceWgsl,
-    `  schroeder_spatial_pad2: u32,
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-p2g',
+    variantId: 'active-grid',
+    baseSource: sourceWgsl,
+    slots: [
+      {
+        slot: 'p2g-active-grid-params',
+        match: `  schroeder_spatial_pad2: u32,
 };`,
-    `  schroeder_spatial_pad2: u32,
+        code: `  schroeder_spatial_pad2: u32,
   active_start_i: u32,
   active_start_j: u32,
   active_start_k: u32,
@@ -5353,33 +5387,31 @@ function createActiveGridP2gProjectionWgsl(sourceWgsl = mlsMpmP2gGridProjectionW
   active_count_k: u32,
   active_node_count: u32,
   active_pad0: u32,
-};`,
-    'P2G active parameter fields'
-  );
-  const withEnabledFilter = replaceRequiredWgsl(
-    withParams,
-    `fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
+};`
+      },
+      {
+        slot: 'p2g-active-node-filter',
+        match: `fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
   return true;
 }`,
-    `fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
+        code: `fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
   return i >= params.active_start_i
     && j >= params.active_start_j
     && k >= params.active_start_k
     && i < params.active_start_i + params.active_count_i
     && j < params.active_start_j + params.active_count_j
     && k < params.active_start_k + params.active_count_k;
-}`,
-    'P2G active node write filter'
-  );
-  const withActiveFinalizeIndex = replaceRequiredWgsl(
-    withEnabledFilter,
-    `fn p2g_finalize_node_index(global_index: u32) -> u32 {
+}`
+      },
+      {
+        slot: 'p2g-active-finalize-index',
+        match: `fn p2g_finalize_node_index(global_index: u32) -> u32 {
   if (global_index >= params.grid_node_count) {
     return params.grid_node_count;
   }
   return global_index;
 }`,
-    `fn p2g_finalize_node_index(global_index: u32) -> u32 {
+        code: `fn p2g_finalize_node_index(global_index: u32) -> u32 {
   if (global_index >= params.active_node_count) {
     return params.grid_node_count;
   }
@@ -5395,12 +5427,13 @@ function createActiveGridP2gProjectionWgsl(sourceWgsl = mlsMpmP2gGridProjectionW
     return params.grid_node_count;
   }
   return (i * params.grid_ny + j) * params.grid_nz + k;
-}`,
-    'P2G active finalize node index mapping'
-  );
-  return `${withActiveFinalizeIndex}
-
-@compute @workgroup_size(64)
+}`
+      }
+    ],
+    append: [
+      {
+        slot: 'p2g-active-clear-accumulators',
+        code: `@compute @workgroup_size(64)
 fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let node_index = p2g_finalize_node_index(global_id.x);
   if (node_index >= params.grid_node_count) {
@@ -5411,16 +5444,23 @@ fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
   atomicStore(&grid_accumulators[accumulator_base + 1u], 0);
   atomicStore(&grid_accumulators[accumulator_base + 2u], 0);
   atomicStore(&grid_accumulators[accumulator_base + 3u], 0);
-}
-`;
+}`
+      }
+    ]
+  }));
 }
 
 function createActiveGridUpdateWgsl() {
-  const withParams = replaceRequiredWgsl(
-    mlsMpmGridUpdateWgsl,
-    `  wall_barrier_min_gap_m: f32,
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-grid-update',
+    variantId: 'active-grid',
+    baseSource: mlsMpmGridUpdateWgsl,
+    slots: [
+      {
+        slot: 'grid-update-active-params',
+        match: `  wall_barrier_min_gap_m: f32,
 };`,
-    `  wall_barrier_min_gap_m: f32,
+        code: `  wall_barrier_min_gap_m: f32,
   active_start_i: u32,
   active_start_j: u32,
   active_start_k: u32,
@@ -5429,18 +5469,17 @@ function createActiveGridUpdateWgsl() {
   active_count_k: u32,
   active_node_count: u32,
   active_pad0: u32,
-};`,
-    'grid-update active parameter fields'
-  );
-  const withFieldSample = replaceRequiredWgsl(
-    withParams,
-    `  let node_index = global_id.x;
+};`
+      },
+      {
+        slot: 'grid-update-active-node-index',
+        match: `  let node_index = global_id.x;
   if (node_index >= params.grid_node_count) {
     return;
   }
 
   let row0 = p2g_grid_nodes[node_index * 2u];`,
-    `  let active_index = global_id.x;
+        code: `  let active_index = global_id.x;
   if (active_index >= params.active_node_count) {
     return;
   }
@@ -5457,10 +5496,10 @@ function createActiveGridUpdateWgsl() {
   }
   let node_index = (i * params.grid_ny + j) * params.grid_nz + k;
 
-  let row0 = p2g_grid_nodes[node_index * 2u];`,
-    'grid-update active node index mapping'
-  );
-  return withFieldSample;
+  let row0 = p2g_grid_nodes[node_index * 2u];`
+      }
+    ]
+  }));
 }
 
 function createCompactMechanicsP2gProjectionWgsl(sourceWgsl) {
@@ -5833,22 +5872,26 @@ fn clear_accumulators(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 
 function createCompactMechanicsGridUpdateWgsl() {
-  const withViewBinding = replaceRequiredWgsl(
-    mlsMpmGridUpdateWgsl,
-    '@group(0) @binding(3) var<storage, read> pressure_force_rows: array<vec4<f32>>;',
-    `@group(0) @binding(3) var<storage, read> pressure_force_rows: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read> compact_mechanics_view: array<u32>;`,
-    'compact mechanics grid-update view binding'
-  );
-  return replaceRequiredWgsl(
-    withViewBinding,
-    `  let node_index = global_id.x;
+  return recordWgslVariantManifest(composeWgslVariantFromSource({
+    moduleId: 'mls-mpm-grid-update',
+    variantId: 'compact-mechanics',
+    baseSource: mlsMpmGridUpdateWgsl,
+    slots: [
+      {
+        slot: 'compact-mechanics-grid-update-view-binding',
+        match: '@group(0) @binding(3) var<storage, read> pressure_force_rows: array<vec4<f32>>;',
+        code: `@group(0) @binding(3) var<storage, read> pressure_force_rows: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> compact_mechanics_view: array<u32>;`
+      },
+      {
+        slot: 'compact-mechanics-grid-update-node-index',
+        match: `  let node_index = global_id.x;
   if (node_index >= params.grid_node_count) {
     return;
   }
 
   let row0 = p2g_grid_nodes[node_index * 2u];`,
-    `  let compact_index = global_id.x;
+        code: `  let compact_index = global_id.x;
   if (arrayLength(&compact_mechanics_view) <= 53u) {
     return;
   }
@@ -5866,9 +5909,10 @@ function createCompactMechanicsGridUpdateWgsl() {
     return;
   }
 
-  let row0 = p2g_grid_nodes[node_index * 2u];`,
-    'compact mechanics grid-update node index mapping'
-  );
+  let row0 = p2g_grid_nodes[node_index * 2u];`
+      }
+    ]
+  }));
 }
 
 function createMechanicsFieldP2gProjectionWgsl(sourceWgsl) {

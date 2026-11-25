@@ -2,15 +2,14 @@
 
 Written 2026-07-25, after the Slice 9 debugging run.
 
-> **2026-11-22 Live-Code Verification (`23a961c4`):** The core architectural
-> finding below **remains open**: `validateFusedResidentLawPlan`
-> (`src/runtime/sph/sphMlsMpmGpuStep.js:19108`) checks only 4 hardcoded
-> resource strings on one fused sidecar plan, `74` `replaceRequiredWgsl`
-> string-patching call sites remain in `sphMlsMpmGpuStep.js:5279-10132` (plus
-> raw `.replace()` in 4 more files), and solids / dormancy still maintain
-> private grids beside the canonical SS epoch. See
-> [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) Sections 4–6 for the active
-> remediation queue.
+> **2026-11-24 Remediation Update (`feat/continuum-architecture-refraction-lod`):**
+> Option (2)'s 5 declarative `ulg-gpu-abi` guardrails are now **IMPLEMENTED & VULKAN-VERIFIED**:
+> 1. Generated WGSL lane accessors from `*_ROW_LAYOUT` (`ulg-gpu-abi/src/laneAccessorGenerator.js`),
+> 2. Branded paired `(V0, J, Vcurrent)` `RepresentedVolume` type + generated WGSL (`ulg-gpu-abi/src/representedVolume.js`),
+> 3. Explicit single-owner `GpuResourceLeaseScope` with step-end leak assertion (`src/runtime/sph/gpuResourceLease.js`, wired into `schroederPhaseSlotRefinementGpu.js`),
+> 4. Enforced typed Law Adapter Contract with `generateBindGroupLayoutEntriesFromLawDescriptor` & `assertBindGroupMatchesLawDescriptor` (`src/runtime/sph/lawAdapterContract.js`, 9 canonical adapters with zero private-grid debt; thermal & reaction dormancy confirmed running in `canonicalSsDirectoryMode: true`), and
+> 5. Named WGSL fragment composer (`ulg-gpu-abi/src/wgslComposer.js`) with live migration of `sphMlsMpmGpuStep.js` active-grid / compact-mechanics variants (`getSphMlsMpmWgslVariantManifests()`) and fail-closed ambiguity checking on remaining `replaceRequiredWgsl` anchors.
+> Verified via `tests/ssLawArchitectureGuardrails.test.mjs` and `tests/ssLawArchitectureGuardrails.native.test.mjs` on real Vulkan WebGPU. Remaining incremental follow-on: progressively migrate the remaining `sphMlsMpmGpuStep.js` mechanics-field variant patches onto `composeWgslModule` slots and (Option 1) build a future StableHLO-sized Eshkol WGSL emitter over these locked descriptors.
 
 The question that prompted
 it: *is there a well thought out architectural plan for how the datastructure

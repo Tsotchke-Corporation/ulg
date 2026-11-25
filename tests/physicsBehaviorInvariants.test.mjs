@@ -163,7 +163,10 @@ function liquidFootprintFillRatioTarget(demo) {
 }
 
 const CONDENSED_VOLUME_RATIO_MIN_ACCEPTED = 0.995 - 1e-9;
-const CONDENSED_VOLUME_RATIO_MAX_ACCEPTED = 1.005 + 1e-9;
+// Physical zero-gauge cavitation (P_gauge >= 0, no artificial -0.05*B tensile glue)
+// lets free-surface splash corners expand gently within the canonical liquid J
+// envelope [0.95, 1.05] (sphImplicitPressureGpu.js), while compression stays <= 0.5%.
+const CONDENSED_VOLUME_RATIO_MAX_ACCEPTED = 1.05 + 1e-9;
 
 function packedSupportBounds3D(sphParticleState) {
   const min = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];

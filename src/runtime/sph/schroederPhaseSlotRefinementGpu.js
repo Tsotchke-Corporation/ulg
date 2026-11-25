@@ -6,6 +6,7 @@ import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKern
 import { webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { deferSubmittedWorkCleanup, createQueueOrderedCleanupClaimIssuer,
   submitQueueOrderedProducerWorkAndCleanup } from '../webgpuComputeLayout.js';
+import { createGpuResourceLeaseScope } from './gpuResourceLease.js';
 
 const sourceCaptures = new WeakMap();
 const consumedRequests = new WeakSet();
@@ -96,6 +97,10 @@ export async function runSchroederPhaseSlotRefinementWebGpu(args) {
   if (!admission.approved) throw new TypeError('Phase-slot refinement has no StateManager materialization admission');
   consumedRequests.add(request);
   sourceCaptures.set(token, null);
+  const leaseScope = createGpuResourceLeaseScope({
+    scopeId: 'phase-slot-refinement',
+    epoch: Number(assignment?.slotAssignmentEpoch ?? 0)
+  });
   const stage = createSchroederPhaseSlotMaterializer(device, {
     lineageCapacity: plans[0].lineageCapacity, firstSpareLineage: reserves[0].firstLineageIndex,
     spareCount: reserves[0].count, assignmentRowCount: assignment.allocationRowCount,
@@ -103,13 +108,20 @@ export async function runSchroederPhaseSlotRefinementWebGpu(args) {
     exactLedger: phaseSeal ? { massRead: phaseSeal.exactLedgerPhase.carrierMassRead,
       energy: phaseSeal.exactLedgerPhase.exactEnergy } : null
   });
+  const scratchLease = leaseScope.issue(stage, {
+    label: 'phase-slot-materializer-scratch',
+    producer: 'runSchroederPhaseSlotRefinementWebGpu',
+    expectedConsumers: ['queue-ordered-cleanup'],
+    onRelease: () => stage.cleanupSubmittedWork()
+  });
   let submitted = false, ledgerCommitted = null;
   try {
     const encoder = device.createCommandEncoder({ label: 'ulg-phase-slot-refinement' });
     stage.encode(encoder, { sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer,
       slotAssignmentBuffer: assignment.slotAssignmentBuffer, spareLineagesBuffer });
     submitQueueOrderedProducerWorkAndCleanup(scratchCleanupIssuer, device, [encoder.finish()], {
-      producerOutput: stage, cleanup: stage.cleanupSubmittedWork
+      producerOutput: stage,
+      cleanup: () => leaseScope.release(scratchLease, { by: 'queue-ordered-cleanup', allowAlreadyReleased: true })
     });
     submitted = true;
     if (ledger) {
@@ -127,6 +139,7 @@ export async function runSchroederPhaseSlotRefinementWebGpu(args) {
       ownsStateBuffer: true, ownsThermoBuffer: true, ownsMechanicsBuffer: true,
       fullParticleReadbackFree: true, fullParticleReadbackPerformed: false,
       mapAsyncCount: 0, readbackBytes: 0, hostQueueFenceCount: 0,
+      leaseScopeSnapshot: () => leaseScope.snapshot(),
       destroyOutputParticleBufferComponents: stage.destroyOutputParticleBufferComponents,
       destroyOutputParticleBuffers() {
         return stage.destroyOutputParticleBufferComponents({ state: true, thermo: true, mechanics: true });
@@ -150,8 +163,14 @@ export async function runSchroederPhaseSlotRefinementWebGpu(args) {
     return result;
   } catch (error) {
     if (ledgerCommitted) void stage.ledgerStage.releaseUnadopted(ledgerCommitted).catch(() => {});
-    if (submitted) deferSubmittedWorkCleanup(device, stage.destroy);
-    else stage.destroy();
+    if (submitted) deferSubmittedWorkCleanup(device, () => {
+      leaseScope.release(scratchLease, { by: 'error-deferred-destroy', allowAlreadyReleased: true });
+      stage.destroy();
+    });
+    else {
+      leaseScope.release(scratchLease, { by: 'error-immediate-destroy', allowAlreadyReleased: true });
+      stage.destroy();
+    }
     throw error;
   }
 }

@@ -58,6 +58,9 @@ export * from './sphReactionProductPlacementReceipt.js';
 export * from './schroederSpatialTopologyTransition.js';
 export * from './schroederSpatialTopologyTransitionWgsl.js';
 export * from './materialFoundationAbi.js';
+export * from './laneAccessorGenerator.js';
+export * from './representedVolume.js';
+export * from './wgslComposer.js';
 
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';

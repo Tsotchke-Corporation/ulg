@@ -261,15 +261,29 @@ export const CANONICAL_ULG_LAW_ADAPTERS = Object.freeze([
     fallbackPolicy: LAW_FALLBACK_POLICIES.FAIL_CLOSED
   }),
   Object.freeze({
+    id: 'implicit-pressure-solve',
+    lawNodeId: 'law:implicit-pressure-projection',
+    orderConstraint: 'after:mls-mpm-grid-update',
+    adapterMode: LAW_ADAPTER_MODES.CELL_LOCAL,
+    spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+    reads: Object.freeze(['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'mls-mpm-grid-velocity']),
+    writes: Object.freeze(['mls-mpm-grid-velocity']),
+    accumulates: Object.freeze(['implicit-pressure-cg-scratch']),
+    pairedVolumeState: Object.freeze({ v0Lane: 'mls-mpm-mechanics.restVolumeM3', jLane: 'mls-mpm-mechanics.volumeRatioJ' }),
+    conservedQuantities: Object.freeze(['linear-momentum', 'incompressibility-divergence']),
+    validityDomain: Object.freeze({ cavitationFloorGaugePa: 0.0, eshkolStiffnessDomain: Object.freeze([0.9, 1.1]) }),
+    fallbackPolicy: LAW_FALLBACK_POLICIES.DORMANT_SKIP
+  }),
+  Object.freeze({
     id: 'mls-mpm-g2p',
     lawNodeId: 'law:mechanics-g2p',
-    orderConstraint: 'after:mls-mpm-grid-update',
+    orderConstraint: 'after:implicit-pressure-solve',
     adapterMode: LAW_ADAPTER_MODES.CELL_LOCAL,
     spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
     reads: Object.freeze(['sph-particle-state', 'mls-mpm-mechanics', 'mls-mpm-grid-velocity']),
     writes: Object.freeze(['sph-particle-state', 'mls-mpm-mechanics']),
     accumulates: Object.freeze([]),
-    pairedVolumeState: Object.freeze({ v0Lane: 'mls-mpm-mechanics.restVolume', jLane: 'mls-mpm-mechanics.F' }),
+    pairedVolumeState: Object.freeze({ v0Lane: 'mls-mpm-mechanics.restVolumeM3', jLane: 'mls-mpm-mechanics.volumeRatioJ' }),
     conservedQuantities: Object.freeze(['mass', 'linear-momentum']),
     validityDomain: Object.freeze({ maxDisplacementCells: 1.0 }),
     fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP
@@ -317,9 +331,23 @@ export const CANONICAL_ULG_LAW_ADAPTERS = Object.freeze([
     fallbackPolicy: LAW_FALLBACK_POLICIES.DORMANT_SKIP
   }),
   Object.freeze({
+    id: 'phase-slot-refinement',
+    lawNodeId: 'law:dynamic-material-volume-lod',
+    orderConstraint: 'after:phase-carrier-transfer',
+    adapterMode: LAW_ADAPTER_MODES.SURFACE_INTERFACE,
+    spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+    reads: Object.freeze(['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'exact-mass-ledger', 'exact-energy-ledger']),
+    writes: Object.freeze(['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'exact-mass-ledger', 'exact-energy-ledger']),
+    accumulates: Object.freeze(['phase-slot-refinement-evidence']),
+    pairedVolumeState: Object.freeze({ v0Lane: 'mls-mpm-mechanics.restVolumeM3', jLane: 'mls-mpm-mechanics.volumeRatioJ' }),
+    conservedQuantities: Object.freeze(['mass-2e-149', 'internal-energy-minus-entropy-2e-149', 'linear-momentum', 'first-moment', 'represented-volume']),
+    validityDomain: Object.freeze({ fluidLanes: Object.freeze([1, 2]), requiresStateManagerAdmission: true }),
+    fallbackPolicy: LAW_FALLBACK_POLICIES.DORMANT_SKIP
+  }),
+  Object.freeze({
     id: 'coherent-solids-rigid-and-coupling',
     lawNodeId: 'law:coherent-solids',
-    orderConstraint: 'after:phase-carrier-transfer',
+    orderConstraint: 'after:phase-slot-refinement',
     adapterMode: LAW_ADAPTER_MODES.SOLID_PROXY,
     spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
     reads: Object.freeze(['solid-rigid-frames', 'sph-particle-state', 'sph-thermo-phase']),
@@ -331,3 +359,122 @@ export const CANONICAL_ULG_LAW_ADAPTERS = Object.freeze([
     fallbackPolicy: LAW_FALLBACK_POLICIES.FAIL_CLOSED
   })
 ]);
+
+const COMPUTE_SHADER_STAGE = globalThis.GPUShaderStage?.COMPUTE ?? 4;
+
+/**
+ * Derive canonical WebGPU `GPUBindGroupLayoutEntry[]` directly from a Law
+ * Adapter descriptor's declared `reads[]`, `writes[]`, `accumulates[]`, and
+ * optional uniform parameter bindings. Prevents pipelines from drifting out
+ * of sync with their declared resource access contract.
+ */
+export function generateBindGroupLayoutEntriesFromLawDescriptor(descriptor, resourceBindingTable, {
+  visibility = COMPUTE_SHADER_STAGE,
+  uniformBindings = []
+} = {}) {
+  const check = validateLawAdapterDescriptor(descriptor);
+  if (!check.valid) {
+    const err = new Error(`Cannot derive bind-group layout for invalid law descriptor: ${check.errors.join(', ')}`);
+    err.code = 'ERR_LAW_DESCRIPTOR_INVALID';
+    throw err;
+  }
+  if (!resourceBindingTable || typeof resourceBindingTable !== 'object') {
+    throw new TypeError('resourceBindingTable must map resource names to non-negative integer binding indices');
+  }
+  const reads = normalizeStringList(descriptor.reads);
+  const writes = normalizeStringList(descriptor.writes);
+  const accumulates = normalizeStringList(descriptor.accumulates);
+  const writableSet = new Set([...writes, ...accumulates]);
+  const allResources = [...new Set([...reads, ...writes, ...accumulates])];
+
+  const byBinding = new Map();
+  for (const resource of allResources) {
+    const binding = resourceBindingTable[resource];
+    if (!Number.isSafeInteger(binding) || binding < 0) {
+      const err = new RangeError(
+        `Law "${descriptor.id}" declares resource "${resource}" which has no valid binding index in resourceBindingTable`
+      );
+      err.code = 'ERR_LAW_BINDING_MISSING';
+      throw err;
+    }
+    if (byBinding.has(binding)) {
+      const err = new Error(
+        `Law "${descriptor.id}" binding index ${binding} collision between "${byBinding.get(binding).resource}" and "${resource}"`
+      );
+      err.code = 'ERR_LAW_BINDING_COLLISION';
+      throw err;
+    }
+    byBinding.set(binding, {
+      resource,
+      entry: Object.freeze({
+        binding,
+        visibility,
+        buffer: Object.freeze({
+          type: writableSet.has(resource) ? 'storage' : 'read-only-storage'
+        })
+      })
+    });
+  }
+  for (const uniformSpec of uniformBindings) {
+    const binding = typeof uniformSpec === 'number' ? uniformSpec : uniformSpec?.binding;
+    const minBindingSize = typeof uniformSpec === 'object' && uniformSpec?.minBindingSize > 0
+      ? uniformSpec.minBindingSize
+      : undefined;
+    if (!Number.isSafeInteger(binding) || binding < 0) {
+      throw new RangeError(`Law "${descriptor.id}" uniform binding index must be a non-negative integer`);
+    }
+    if (byBinding.has(binding)) {
+      const err = new Error(
+        `Law "${descriptor.id}" uniform binding ${binding} collides with storage resource "${byBinding.get(binding).resource}"`
+      );
+      err.code = 'ERR_LAW_BINDING_COLLISION';
+      throw err;
+    }
+    byBinding.set(binding, {
+      resource: `uniform:${binding}`,
+      entry: Object.freeze({
+        binding,
+        visibility,
+        buffer: Object.freeze({
+          type: 'uniform',
+          ...(minBindingSize !== undefined ? { minBindingSize } : {})
+        })
+      })
+    });
+  }
+  const sorted = [...byBinding.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, item]) => item.entry);
+  return Object.freeze(sorted);
+}
+
+/**
+ * Verify that an actual WebGPU bind-group entry array covers every declared
+ * binding of the Law Adapter descriptor with zero missing or undeclared extras.
+ */
+export function assertBindGroupMatchesLawDescriptor(descriptor, resourceBindingTable, boundEntries, options = {}) {
+  const expected = generateBindGroupLayoutEntriesFromLawDescriptor(descriptor, resourceBindingTable, options);
+  if (!Array.isArray(boundEntries)) {
+    throw new TypeError(`Law "${descriptor.id}": boundEntries must be an array`);
+  }
+  const expectedIndices = expected.map((e) => e.binding);
+  const actualIndices = boundEntries.map((e) => e?.binding);
+  const actualSet = new Set(actualIndices);
+  if (actualSet.size !== boundEntries.length) {
+    const err = new Error(`Law "${descriptor.id}": duplicate binding index in bind-group entries`);
+    err.code = 'ERR_LAW_BIND_GROUP_DUPLICATE';
+    throw err;
+  }
+  const missing = expectedIndices.filter((idx) => !actualSet.has(idx));
+  const extra = actualIndices.filter((idx) => !expectedIndices.includes(idx));
+  if (missing.length > 0 || extra.length > 0) {
+    const err = new Error(
+      `Law "${descriptor.id}": bind-group mismatch (missing=[${missing.join(',')}], extra=[${extra.join(',')}])`
+    );
+    err.code = 'ERR_LAW_BIND_GROUP_MISMATCH';
+    err.missing = Object.freeze(missing);
+    err.extra = Object.freeze(extra);
+    throw err;
+  }
+  return expected;
+}

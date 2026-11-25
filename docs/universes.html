@@ -202,6 +202,36 @@
     }
     .uv-rung-btn.active .uv-rung-exp { opacity: 1; color: #bae6fd; }
 
+    .uv-epoch-rail {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      max-width: 100%;
+    }
+    .uv-epoch-rail::-webkit-scrollbar { display: none; }
+    .uv-epoch-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: rgba(15, 25, 45, 0.48);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      padding: 3px 7px;
+      border-radius: 7px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 140ms ease;
+    }
+    .uv-epoch-btn:hover { background: rgba(30, 52, 88, 0.72); color: var(--text); }
+    .uv-epoch-btn.active {
+      background: linear-gradient(135deg, rgba(251, 191, 36, 0.24), rgba(167, 139, 250, 0.24));
+      border-color: rgba(251, 191, 36, 0.65);
+      color: #fef3c7;
+    }
+
     /* Top-right compact button cluster */
     .uv-actions {
       display: flex;
@@ -712,7 +742,7 @@
       .uv-drawer { top: 108px; }
     }
   </style>
-  <script type="module" crossorigin src="./assets/universes-pJm62rhy.js"></script>
+  <script type="module" crossorigin src="./assets/universes-CYXgXLZ-.js"></script>
 </head>
 <body>
   <canvas id="uv-canvas"></canvas>
@@ -731,6 +761,7 @@
         </span>
       </div>
       <nav class="uv-scale-rail uv-glass" id="uv-scale-rail" aria-label="40-Order-of-Magnitude Scale Ladder"></nav>
+      <nav class="uv-epoch-rail uv-glass" id="uv-epoch-rail" aria-label="Cosmic Evolutionary Epoch"></nav>
       <div class="uv-zoom-bar uv-glass" title="Continuous 40-Order-of-Magnitude Zoom Scrubber — drag or scroll the mouse wheel anywhere to zoom seamlessly from 10⁺²⁵ m to 10⁻¹⁵ m">
         <span>10²⁵m</span>
         <input id="uv-zoom-slider" type="range" min="-14.8" max="25.4" step="0.02" value="24.8" dir="rtl" aria-label="Continuous 40-OOM Scale Zoom" />

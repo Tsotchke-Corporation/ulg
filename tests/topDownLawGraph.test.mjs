@@ -49,7 +49,8 @@ test('Universal Law Graph contracts validate cleanly with 0 errors, 0 private-gr
     'compact-magnetosphere-spindown@1',
     'relativistic-binary-gw-rprocess@1',
     'radiative-photoionization-winds@1',
-    'tidal-roche-rheology-cryovolcanism@1'
+    'tidal-roche-rheology-cryovolcanism@1',
+    'planetary-surface-vehicles@1'
   ]) {
     assert.equal(reg.hasModule(key), true, `Module ${key} must be registered`);
   }

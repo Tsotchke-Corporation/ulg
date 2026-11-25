@@ -337,9 +337,22 @@ export async function mountUlgUniversesDemo() {
   const plotMeta = document.getElementById('uv-plot-meta');
   const plotCanvas = document.getElementById('uv-plot-canvas');
   const diveBtn = document.getElementById('uv-dive-btn');
+  const surfaceQuickBtn = document.getElementById('uv-surface-quick-btn');
   const returnBtn = document.getElementById('uv-return-btn');
   const engineTag = document.getElementById('uv-engine-tag');
   const breadcrumbEl = document.getElementById('uv-breadcrumb');
+  const hintPillEl = document.getElementById('uv-hint-pill');
+  const surfaceHudEl = document.getElementById('uv-surface-hud');
+  const surfaceTelemetryEl = document.getElementById('uv-surf-telemetry');
+  const surfaceJumpBtn = document.getElementById('uv-surf-jump-btn');
+  const surfaceVehicleBtn = document.getElementById('uv-surf-vehicle-btn');
+  const surfaceCamBtn = document.getElementById('uv-surf-cam-btn');
+  const surfaceOrbitBtn = document.getElementById('uv-surf-orbit-btn');
+  const touchPadsEl = document.getElementById('uv-touch-pads');
+  const joyMoveEl = document.getElementById('uv-joy-move');
+  const joyMoveKnob = document.getElementById('uv-joy-move-knob');
+  const joyLookEl = document.getElementById('uv-joy-look');
+  const joyLookKnob = document.getElementById('uv-joy-look-knob');
   const warpOverlay = document.getElementById('uv-warp-overlay');
   const helpScaleTag = document.getElementById('uv-help-scale-tag');
   const aboutScaleBtn = document.getElementById('uv-about-scale-btn');
@@ -419,6 +432,7 @@ export async function mountUlgUniversesDemo() {
       btn.addEventListener('click', () => {
         const lvl = Number.parseInt(btn.dataset.level, 10);
         if (Number.isFinite(lvl)) {
+          if (physics.surfaceActive) exitSurfaceViewUi();
           autopilot = false;
           autopilotBtn?.classList.remove('active');
           if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
@@ -455,6 +469,7 @@ export async function mountUlgUniversesDemo() {
 
   // Continuous 40-OOM Scrubber Slider!
   zoomSlider?.addEventListener('input', (e) => {
+    if (physics.surfaceActive) exitSurfaceViewUi();
     autopilot = false;
     autopilotBtn?.classList.remove('active');
     if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
@@ -814,22 +829,35 @@ export async function mountUlgUniversesDemo() {
           <span>3D Interior Cutaway</span>
           <input id="uv-cutaway-toggle" type="checkbox" ${physics.planetaryCutaway ? 'checked' : ''} />
         </label>
-        <div style="font-size:10.5px;color:var(--muted);line-height:1.35;">Dynamic Law Graph: <code>${atmoAct?.anyActive ? atmoAct.activeLaws.join(' · ') : 'Vacuum body — atmospheric &amp; EM laws dormant (0 dispatches)'}</code></div>`;
+        <button id="uv-land-surface-btn" class="uv-btn primary" type="button" style="justify-content:center;" title="Land on the live GPU planetary surface with a 6-Wheel Jump-Rocket Rover and Coaxial Atmospheric Drone (Shortcut: L)">${physics.surfaceActive ? '🚀 Launch Back to Orbit (Esc)' : '🚙 Land on Surface (Rover + Drone)'}</button>
+        <div style="font-size:10.5px;color:var(--muted);line-height:1.35;">Dynamic Law Graph: <code>${physics.surfaceActive ? 'planetary-surface-vehicles · ' : ''}${atmoAct?.anyActive ? atmoAct.activeLaws.join(' · ') : 'Vacuum body — atmospheric &amp; EM laws dormant (0 dispatches)'}</code></div>`;
       scaleControlsEl.querySelector('#uv-planetary-mode-sel')?.addEventListener('change', async (e) => {
         await physics.setPlanetaryMode(e.target.value);
-        selectDefaultTarget();
-        renderScaleControls();
-        updateInspectorCard();
-        renderNow(performance.now());
+        if (physics.surfaceActive) {
+          await enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex });
+        } else {
+          selectDefaultTarget();
+          renderScaleControls();
+          updateInspectorCard();
+          renderNow(performance.now());
+        }
       });
       scaleControlsEl.querySelector('#uv-planet-sel')?.addEventListener('change', async (e) => {
         const idx = Number(e.target.value);
         physics.setFocusedSolarBody(idx);
         await physics.initPlanetaryInterior({ bodyIndex: idx });
-        log10ViewSpanM = idealPlanetaryFramingLog10Span(REAL_SOLAR_SYSTEM_CATALOG[idx]);
-        orientCameraToSunlitPhase(idx);
-        selectDefaultTarget();
-        syncScaleChrome();
+        if (physics.surfaceActive) {
+          await enterSurfaceViewUi({ bodyIndex: idx });
+        } else {
+          log10ViewSpanM = idealPlanetaryFramingLog10Span(REAL_SOLAR_SYSTEM_CATALOG[idx]);
+          orientCameraToSunlitPhase(idx);
+          selectDefaultTarget();
+          syncScaleChrome();
+        }
+      });
+      scaleControlsEl.querySelector('#uv-land-surface-btn')?.addEventListener('click', async () => {
+        if (physics.surfaceActive) exitSurfaceViewUi();
+        else await enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex });
       });
       scaleControlsEl.querySelector('#uv-tribo-toggle')?.addEventListener('change', (e) => {
         physics.setPlanetaryTriboelectric(e.target.checked);
@@ -985,8 +1013,11 @@ export async function mountUlgUniversesDemo() {
     if (engineTag) engineTag.textContent = sc.engineSchema;
     if (plotTitle) plotTitle.textContent = sc.plotTitle;
     if (diveBtn) diveBtn.textContent = sc.diveButton;
-    if (returnBtn) returnBtn.disabled = currentLevel === 0;
-    if (orbitUpBtn) orbitUpBtn.disabled = currentLevel === 0;
+    if (surfaceQuickBtn) {
+      surfaceQuickBtn.style.display = (currentLevel === 4 && !physics.surfaceActive) ? 'inline-flex' : 'none';
+    }
+    if (returnBtn) returnBtn.disabled = currentLevel === 0 && !physics.surfaceActive;
+    if (orbitUpBtn) orbitUpBtn.disabled = currentLevel === 0 && !physics.surfaceActive;
     if (scaleRail) {
       for (const b of scaleRail.querySelectorAll('[data-level]')) {
         b.classList.toggle('active', Number(b.dataset.level) === currentLevel);
@@ -1029,9 +1060,218 @@ export async function mountUlgUniversesDemo() {
   }
 
   async function returnToOrbit() {
+    if (physics.surfaceActive) {
+      exitSurfaceViewUi();
+      return;
+    }
     if (currentLevel <= 0) return;
     flyToLog10Span(UNIVERSES_SCALES[currentLevel - 1].log10SpanM);
   }
+
+  // ---- Planetary Surface Explorer (TinyPlanetControls: Jump-Rocket Rover + Atmospheric Drone) ----
+  function syncSurfaceHud() {
+    const active = Boolean(physics.surfaceActive && physics.surfaceSession);
+    surfaceHudEl?.classList.toggle('active', active);
+    touchPadsEl?.classList.toggle('active', active);
+    if (surfaceQuickBtn) {
+      surfaceQuickBtn.style.display = (currentLevel === 4 && !active) ? 'inline-flex' : 'none';
+    }
+    if (hintPillEl) {
+      hintPillEl.style.display = active ? 'none' : '';
+    }
+    if (!active) return;
+    const sess = physics.surfaceSession;
+    const tel = physics.surfaceTelemetry || sess.getTelemetry();
+    const env = sess.env;
+    const isDrone = sess.activeVehicle === 'drone';
+    const spec = REAL_SOLAR_SYSTEM_CATALOG[physics.planetaryBodyIndex] || REAL_SOLAR_SYSTEM_CATALOG[3];
+    const worldName = physics.planetaryMode === 'magma-ocean'
+      ? 'Hadean Magma Ocean'
+      : (physics.planetaryMode === 'cryo-plumes' ? 'Cryovolcanic Moon' : spec.name);
+    const atmStr = env.rhoAtmKgM3 > 1e-4 ? `ρ=${env.rhoAtmKgM3.toFixed(env.rhoAtmKgM3 < 0.1 ? 3 : 2)} kg/m³` : '<span class="warn">VACUUM (0 Pa)</span>';
+    const vehMetrics = isDrone
+      ? (env.droneFlightCapable
+        ? `Alt ${(tel.droneAltitudeM || 0).toFixed(1)} m · Spd ${(tel.droneSpeedMS || 0).toFixed(1)} m/s · <span class="good">Lift ${(tel.droneAeroLiftN || 0).toFixed(1)}/${env.maxAeroLiftN.toFixed(1)} N</span>`
+        : `Alt ${(tel.droneAltitudeM || 0).toFixed(1)} m · <span class="warn">0.0 N AERO LIFT (VACUUM!)</span>`)
+      : `Alt ${(tel.roverAltitudeM || 0).toFixed(1)} m · Spd ${(tel.roverSpeedMS || 0).toFixed(1)} m/s · Fuel ${Math.round((tel.roverRocketFuel ?? 1) * 100)}%`;
+    if (surfaceTelemetryEl) {
+      surfaceTelemetryEl.innerHTML =
+        `<span><strong>${isDrone ? '🚁 DRONE' : '🚙 ROVER'}</strong> · ${worldName} · g=${env.gravityMS2.toFixed(2)} m/s² · ${atmStr} · ${vehMetrics}</span>`;
+    }
+    if (surfaceJumpBtn) {
+      surfaceJumpBtn.textContent = isDrone ? '⬆ ASCEND (Space)' : '🔥 ROCKET JUMP';
+      surfaceJumpBtn.classList.toggle('firing', Boolean(physics.surfaceControls.jump));
+    }
+    if (surfaceVehicleBtn) {
+      surfaceVehicleBtn.textContent = isDrone
+        ? (env.hasSolidCrust ? '🚙 SWITCH ROVER (F)' : '☁ CLOUD DECK DRONE')
+        : '🚁 DEPLOY DRONE (F)';
+      surfaceVehicleBtn.classList.toggle('active', isDrone);
+    }
+    if (surfaceCamBtn) {
+      surfaceCamBtn.textContent = sess.cameraMode === 'first-person' ? '📷 1ST CAM (V)' : '📷 3RD CAM (V)';
+      surfaceCamBtn.classList.toggle('active', sess.cameraMode === 'first-person');
+    }
+  }
+
+  async function enterSurfaceViewUi({ bodyIndex = null, planetaryModeOverride = null } = {}) {
+    autopilot = false;
+    autopilotBtn?.classList.remove('active');
+    if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
+    flyTargetLog10 = null;
+    let idx = bodyIndex;
+    if (typeof idx === 'string') {
+      const found = REAL_SOLAR_SYSTEM_CATALOG.findIndex((b) => b.id === idx);
+      idx = found > 0 ? found : physics.planetaryBodyIndex;
+    }
+    if (!(idx > 0)) {
+      idx = physics.focusedSolarBodyIndex > 0 ? physics.focusedSolarBodyIndex : (physics.planetaryBodyIndex > 0 ? physics.planetaryBodyIndex : 4);
+    }
+    currentLevel = 4;
+    log10ViewSpanM = 2.0; // ~100 m surface horizon scale!
+    await physics.enterSurfaceView({ bodyIndex: idx, planetaryModeOverride });
+    selectDefaultTarget();
+    syncScaleChrome();
+    syncSurfaceHud();
+    updateInspectorCard();
+    renderNow(performance.now());
+    return physics.surfaceTelemetry;
+  }
+
+  function exitSurfaceViewUi() {
+    if (!physics.surfaceActive) return;
+    physics.exitSurfaceView();
+    const spec = REAL_SOLAR_SYSTEM_CATALOG[physics.planetaryBodyIndex] || REAL_SOLAR_SYSTEM_CATALOG[3];
+    currentLevel = 4;
+    log10ViewSpanM = idealPlanetaryFramingLog10Span(spec);
+    orientCameraToSunlitPhase(physics.planetaryBodyIndex);
+    syncScaleChrome();
+    syncSurfaceHud();
+    updateInspectorCard();
+    renderNow(performance.now());
+  }
+
+  surfaceQuickBtn?.addEventListener('click', () => {
+    void enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex });
+  });
+  surfaceJumpBtn?.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    physics.setSurfaceControls({ jump: true });
+    syncSurfaceHud();
+  });
+  const stopSurfaceJump = () => {
+    if (physics.surfaceControls.jump) {
+      physics.setSurfaceControls({ jump: false });
+      syncSurfaceHud();
+    }
+  };
+  surfaceJumpBtn?.addEventListener('pointerup', stopSurfaceJump);
+  surfaceJumpBtn?.addEventListener('pointerleave', stopSurfaceJump);
+  surfaceJumpBtn?.addEventListener('pointercancel', stopSurfaceJump);
+  surfaceVehicleBtn?.addEventListener('click', () => {
+    if (!physics.surfaceSession) return;
+    const next = physics.surfaceSession.activeVehicle === 'drone' ? 'rover' : 'drone';
+    physics.setSurfaceVehicle(next);
+    syncSurfaceHud();
+    renderNow(performance.now());
+  });
+  surfaceCamBtn?.addEventListener('click', () => {
+    if (!physics.surfaceSession) return;
+    const next = physics.surfaceSession.cameraMode === 'chase' ? 'first-person' : 'chase';
+    physics.setSurfaceCameraMode(next);
+    syncSurfaceHud();
+    renderNow(performance.now());
+  });
+  surfaceOrbitBtn?.addEventListener('click', () => exitSurfaceViewUi());
+
+  // Touch Dual-Joysticks (modeled on peercompute/demos/planetgen TinyPlanetControls)
+  function bindTouchJoystick(padEl, knobEl, onMove) {
+    if (!padEl || !knobEl) return;
+    let activePid = null;
+    const maxR = 36;
+    const updateFromEvent = (e) => {
+      const rect = padEl.getBoundingClientRect();
+      const cx = rect.left + rect.width * 0.5;
+      const cy = rect.top + rect.height * 0.5;
+      let dx = e.clientX - cx;
+      let dy = e.clientY - cy;
+      const dist = Math.hypot(dx, dy);
+      if (dist > maxR) {
+        dx = (dx / dist) * maxR;
+        dy = (dy / dist) * maxR;
+      }
+      knobEl.style.transform = `translate(calc(-50% + ${dx.toFixed(1)}px), calc(-50% + ${dy.toFixed(1)}px))`;
+      onMove(dx / maxR, -dy / maxR);
+    };
+    padEl.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      activePid = e.pointerId;
+      padEl.setPointerCapture?.(e.pointerId);
+      updateFromEvent(e);
+    });
+    padEl.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== activePid) return;
+      updateFromEvent(e);
+    });
+    const resetJoy = (e) => {
+      if (e.pointerId !== activePid) return;
+      activePid = null;
+      knobEl.style.transform = 'translate(-50%, -50%)';
+      onMove(0, 0);
+    };
+    padEl.addEventListener('pointerup', resetJoy);
+    padEl.addEventListener('pointercancel', resetJoy);
+  }
+  bindTouchJoystick(joyMoveEl, joyMoveKnob, (nx, ny) => {
+    physics.setSurfaceControls({ moveX: nx, moveY: ny });
+  });
+  bindTouchJoystick(joyLookEl, joyLookKnob, (nx, ny) => {
+    physics.addSurfaceLookDelta(-nx * 0.08, -ny * 0.05);
+  });
+
+  // Desktop TinyPlanetControls Keyboard Handlers (WASD + Space Jump Rockets + F Drone + V Cam + Esc Orbit!)
+  const handleSurfaceKeyDown = (e) => {
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if (!physics.surfaceActive) {
+      if (e.code === 'KeyL' && currentLevel === 4 && !e.repeat) {
+        void enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex });
+      }
+      return;
+    }
+    if (e.code === 'KeyW' || e.code === 'ArrowUp') { physics.setSurfaceControls({ forward: true }); e.preventDefault(); }
+    else if (e.code === 'KeyS' || e.code === 'ArrowDown') { physics.setSurfaceControls({ backward: true }); e.preventDefault(); }
+    else if (e.code === 'KeyA' || e.code === 'ArrowLeft') { physics.setSurfaceControls({ left: true }); e.preventDefault(); }
+    else if (e.code === 'KeyD' || e.code === 'ArrowRight') { physics.setSurfaceControls({ right: true }); e.preventDefault(); }
+    else if (e.code === 'Space') { physics.setSurfaceControls({ jump: true }); e.preventDefault(); }
+    else if (e.code === 'ControlLeft' || e.code === 'ControlRight' || e.code === 'KeyC') { physics.setSurfaceControls({ down: true }); }
+    else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') { physics.setSurfaceControls({ turbo: true }); }
+    else if (e.code === 'KeyQ') { physics.setSurfaceControls({ yawLeft: true }); }
+    else if (e.code === 'KeyE') { physics.setSurfaceControls({ yawRight: true }); }
+    else if (e.code === 'KeyF' && !e.repeat && physics.surfaceSession) {
+      physics.setSurfaceVehicle(physics.surfaceSession.activeVehicle === 'drone' ? 'rover' : 'drone');
+      syncSurfaceHud();
+    } else if (e.code === 'KeyV' && !e.repeat && physics.surfaceSession) {
+      physics.setSurfaceCameraMode(physics.surfaceSession.cameraMode === 'chase' ? 'first-person' : 'chase');
+      syncSurfaceHud();
+    } else if (e.code === 'Escape') {
+      exitSurfaceViewUi();
+    }
+  };
+  const handleSurfaceKeyUp = (e) => {
+    if (!physics.surfaceActive) return;
+    if (e.code === 'KeyW' || e.code === 'ArrowUp') physics.setSurfaceControls({ forward: false });
+    else if (e.code === 'KeyS' || e.code === 'ArrowDown') physics.setSurfaceControls({ backward: false });
+    else if (e.code === 'KeyA' || e.code === 'ArrowLeft') physics.setSurfaceControls({ left: false });
+    else if (e.code === 'KeyD' || e.code === 'ArrowRight') physics.setSurfaceControls({ right: false });
+    else if (e.code === 'Space') physics.setSurfaceControls({ jump: false });
+    else if (e.code === 'ControlLeft' || e.code === 'ControlRight' || e.code === 'KeyC') physics.setSurfaceControls({ down: false });
+    else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') physics.setSurfaceControls({ turbo: false });
+    else if (e.code === 'KeyQ') physics.setSurfaceControls({ yawLeft: false });
+    else if (e.code === 'KeyE') physics.setSurfaceControls({ yawRight: false });
+  };
+  window.addEventListener('keydown', handleSurfaceKeyDown);
+  window.addEventListener('keyup', handleSurfaceKeyUp);
 
   diveBtn?.addEventListener('click', () => {
     autopilot = false;
@@ -1175,18 +1415,22 @@ export async function mountUlgUniversesDemo() {
       const dx = e.clientX - lastX;
       const dy = e.clientY - lastY;
       if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) pointerMoved = true;
-      camState.yaw -= dx * 0.006;
-      camState.pitch = Math.max(-1.42, Math.min(1.42, camState.pitch + dy * 0.006));
+      if (physics.surfaceActive) {
+        physics.addSurfaceLookDelta(-dx * 0.0055, dy * 0.0055);
+      } else {
+        camState.yaw -= dx * 0.006;
+        camState.pitch = Math.max(-1.42, Math.min(1.42, camState.pitch + dy * 0.006));
+      }
       lastX = e.clientX;
       lastY = e.clientY;
-    } else {
+    } else if (!physics.surfaceActive) {
       const hit = pickTargetAt(e.clientX, e.clientY);
       hoveredTargetId = hit?.id || null;
       canvas.style.cursor = hit ? 'pointer' : 'grab';
     }
   });
   canvas.addEventListener('pointerup', (e) => {
-    if (pointerDown && !pointerMoved) {
+    if (pointerDown && !pointerMoved && !physics.surfaceActive) {
       const hit = pickTargetAt(e.clientX, e.clientY);
       if (hit) {
         selectedTargetId = hit.id;
@@ -1205,6 +1449,7 @@ export async function mountUlgUniversesDemo() {
     pointerDown = false;
   });
   canvas.addEventListener('dblclick', (e) => {
+    if (physics.surfaceActive) return;
     const hit = pickTargetAt(e.clientX, e.clientY);
     if (hit) selectedTargetId = hit.id;
     autopilot = false;
@@ -1216,6 +1461,7 @@ export async function mountUlgUniversesDemo() {
   // TRUE CONTINUOUS 40-ORDER-OF-MAGNITUDE MOUSE-WHEEL ZOOM!
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    if (physics.surfaceActive) return;
     autopilot = false;
     autopilotBtn?.classList.remove('active');
     if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
@@ -1594,15 +1840,26 @@ export async function mountUlgUniversesDemo() {
         ];
       }
     } else if (currentLevel === 4) {
-      const pr = physics.planetaryResult;
-      const at = physics.planetaryAtmoTelemetry;
-      const spec = REAL_SOLAR_SYSTEM_CATALOG[physics.planetaryBodyIndex];
-      cells = [
-        ['World', spec?.name || 'Earth'],
-        ['MoI I/MR²', pr ? pr.moiFactor.toFixed(4) : '—'],
-        ['Lightning', at ? `${at.activeLightningCells} cells` : 'Dormant (Vac)'],
-        ['Peak |E|', at ? `${(at.peakElectricFieldVPerM / 1e3).toFixed(0)} kV/m` : '0 kV/m']
-      ];
+      if (physics.surfaceActive && physics.surfaceSession) {
+        const st = physics.surfaceTelemetry || physics.surfaceSession.getTelemetry();
+        const env = physics.surfaceSession.env;
+        cells = [
+          ['Surface g', `${env.gravityMS2.toFixed(2)} m/s²`],
+          ['Air ρ_atm', env.rhoAtmKgM3 > 1e-4 ? `${env.rhoAtmKgM3.toFixed(3)} kg/m³` : '0 (Vacuum)'],
+          ['Rover Alt/Fuel', `${st.roverAltitudeM.toFixed(1)}m / ${Math.round(st.roverRocketFuel * 100)}%`],
+          ['Drone Max Lift', env.droneFlightCapable ? `${env.maxAeroLiftN.toFixed(1)} N (OK)` : '0.0 N (Vac)']
+        ];
+      } else {
+        const pr = physics.planetaryResult;
+        const at = physics.planetaryAtmoTelemetry;
+        const spec = REAL_SOLAR_SYSTEM_CATALOG[physics.planetaryBodyIndex];
+        cells = [
+          ['World', spec?.name || 'Earth'],
+          ['MoI I/MR²', pr ? pr.moiFactor.toFixed(4) : '—'],
+          ['Lightning', at ? `${at.activeLightningCells} cells` : 'Dormant (Vac)'],
+          ['Peak |E|', at ? `${(at.peakElectricFieldVPerM / 1e3).toFixed(0)} kV/m` : '0 kV/m']
+        ];
+      }
     } else if (currentLevel === 5) {
       const mt = physics.mdTelemetry;
       cells = [
@@ -2290,6 +2547,69 @@ export async function mountUlgUniversesDemo() {
 
   function renderNow(nowMs = performance.now()) {
     syncCanvasSize();
+    const aspect = canvas.width / Math.max(1, canvas.height);
+
+    // Planetary Surface View (TinyPlanetControls + Jump-Rocket Rover + Atmospheric Drone!)
+    if (physics.surfaceActive && physics.surfaceSession) {
+      const s = physics.surfaceSession;
+      const pose = s.getCameraPose();
+      const fovRad = (58 * Math.PI) / 180;
+      const proj = mat4PerspectiveWebGpu(fovRad, aspect, 0.15, 420.0);
+      const look = mat4LookAt(pose.eye, pose.target, pose.up);
+      const viewProj = mat4Mul(proj, look.mat);
+      lastViewProj = viewProj;
+
+      const camera = {
+        viewProj,
+        pos: pose.eye,
+        right: look.right,
+        up: look.up,
+        fwd: look.fwd,
+        aspect,
+        fovTanHalf: Math.tan(fovRad * 0.5),
+        timeSec: nowMs * 0.001,
+        level: 4,
+        log10SpanM: 2.0
+      };
+      const surfLightDir = s.env.isRogue
+        ? vec3Norm([0.15, 0.96, 0.22])
+        : (s.env.isMagmaOcean ? vec3Norm([0.70, 0.28, 0.65]) : vec3Norm([0.58, 0.44, 0.68]));
+
+      renderer.renderFrame({
+        camera,
+        lightDir: surfLightDir,
+        surfaceScene: {
+          terrainVertBuf: s.getResidentTerrainVertBuffer(),
+          terrainIdxBuf: s.getResidentTerrainIndexBuffer(),
+          indexCount: s.indexCount,
+          vehicleVertBuf: s.getResidentVehicleVertBuffer(),
+          vehicleVertCount: s.vehicleVertCount,
+          env: s.env,
+          lightDir: surfLightDir
+        },
+        particleClouds: [{
+          buffer: s.getResidentPlumesBuffer(),
+          count: s.particleCount,
+          mode: 11,
+          worldScale: 1.0,
+          pointSize: 0.72,
+          alphaGain: 0.92,
+          extra1: [pose.focusPos[0], 0, pose.focusPos[2], 1.0 / (2.0 * s.env.tinyPlanetCurvatureRadiusM)]
+        }],
+        post: {
+          bhUv: [0.5, 0.5],
+          bhStrength: 0,
+          warpAmount: 0,
+          flashAmount: bigBangFlash,
+          crtEnabled: retroCrt,
+          pixelSize,
+          timeSec: nowMs * 0.001
+        }
+      });
+      if (reticleCtx) reticleCtx.clearRect(0, 0, lastCssW, lastCssH);
+      return;
+    }
+
     const cp = Math.cos(camState.pitch);
     const sp = Math.sin(camState.pitch);
     const cy = Math.cos(camState.yaw);
@@ -2299,7 +2619,6 @@ export async function mountUlgUniversesDemo() {
       camState.dist * sp,
       camState.dist * cp * cy
     ];
-    const aspect = canvas.width / Math.max(1, canvas.height);
     const fovRad = (48 * Math.PI) / 180;
     const proj = mat4PerspectiveWebGpu(fovRad, aspect, 0.05, 260.0);
     const look = mat4LookAt(eye, [0, 0, 0], [0, 1, 0]);
@@ -2395,6 +2714,7 @@ export async function mountUlgUniversesDemo() {
     if (hudTickAccum >= 0.18) {
       hudTickAccum = 0;
       if (fpsBadge) fpsBadge.textContent = `${fpsDisplay} FPS · WebGPU`;
+      if (physics.surfaceActive) syncSurfaceHud();
       updateInspectorCard();
       updatePeerStatusUi();
     }
@@ -2507,6 +2827,14 @@ export async function mountUlgUniversesDemo() {
         planetaryAtmoSteps: physics.planetaryAtmoSession?.stepIndex ?? 0,
         planetaryLightningCells: physics.planetaryAtmoTelemetry?.activeLightningCells ?? 0,
         planetaryPeakElectricVPerM: physics.planetaryAtmoTelemetry?.peakElectricFieldVPerM ?? 0,
+        surfaceActive: physics.surfaceActive,
+        surfaceVehicle: physics.surfaceSession?.activeVehicle ?? null,
+        surfaceCameraMode: physics.surfaceSession?.cameraMode ?? null,
+        surfaceGravityMS2: physics.surfaceSession?.env?.gravityMS2 ?? null,
+        surfaceAtmoDensityKgM3: physics.surfaceSession?.env?.rhoAtmKgM3 ?? null,
+        surfaceDroneFlightCapable: physics.surfaceSession?.env?.droneFlightCapable ?? null,
+        surfaceDroneMaxAeroLiftN: physics.surfaceSession?.env?.maxAeroLiftN ?? null,
+        surfaceTelemetry: physics.surfaceTelemetry ?? null,
         activeUniversalLaws: physics.getActiveUniversalLaws(currentLevel, log10ViewSpanM).active.map((l) => l.id),
         mdSteps: physics.mdTelemetry?.totalSteps ?? 0,
         mdAtomCount: physics.mdSession?.atomCount ?? 0,
@@ -2656,6 +2984,36 @@ export async function mountUlgUniversesDemo() {
       physics.setPlanetaryCutaway(enabled);
       renderNow(performance.now());
     },
+    async enterSurfaceView(opts = {}) {
+      await enterSurfaceViewUi(opts);
+      return this.getState();
+    },
+    exitSurfaceView() {
+      exitSurfaceViewUi();
+      return this.getState();
+    },
+    setSurfaceVehicle(mode) {
+      physics.setSurfaceVehicle(mode);
+      syncSurfaceHud();
+      renderNow(performance.now());
+      return this.getState();
+    },
+    setSurfaceCameraMode(mode) {
+      physics.setSurfaceCameraMode(mode);
+      syncSurfaceHud();
+      renderNow(performance.now());
+      return this.getState();
+    },
+    setSurfaceControls(partial = {}) {
+      physics.setSurfaceControls(partial);
+      syncSurfaceHud();
+      return this.getState();
+    },
+    addSurfaceLookDelta(dYaw, dPitch) {
+      physics.addSurfaceLookDelta(dYaw, dPitch);
+      renderNow(performance.now());
+      return this.getState();
+    },
     async setMdPhase(phasePreset) {
       await physics.initMolecularDynamics({ Z: physics.mdElementZ, phasePreset });
       renderScaleControls();
@@ -2714,6 +3072,8 @@ export async function mountUlgUniversesDemo() {
       disposed = true;
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', syncCanvasSize);
+      window.removeEventListener('keydown', handleSurfaceKeyDown);
+      window.removeEventListener('keyup', handleSurfaceKeyUp);
       window.removeEventListener('pagehide', handleUnload);
       window.removeEventListener('beforeunload', handleUnload);
       physics.dispose();

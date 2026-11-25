@@ -741,6 +741,128 @@
       .uv-inspector { width: calc(100vw - 24px); bottom: 10px; left: 12px; padding: 10px; }
       .uv-drawer { top: 108px; }
     }
+
+    /* Planetary Surface TinyPlanet Vehicle Controls HUD (Rover + Jump Rockets + Atmospheric Drone) */
+    #uv-surface-hud {
+      position: fixed;
+      left: 50%;
+      bottom: 14px;
+      transform: translateX(-50%);
+      z-index: 22;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 13px;
+      max-width: calc(100vw - 24px);
+    }
+    #uv-surface-hud.active { display: flex; }
+    .uv-surf-telemetry {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #cbd5e1;
+    }
+    .uv-surf-telemetry strong { color: #38bdf8; }
+    .uv-surf-telemetry .warn { color: #fbbf24; }
+    .uv-surf-telemetry .good { color: #34d399; }
+    .uv-surf-pills {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 6px;
+    }
+    .uv-surf-pill {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.84);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 7px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: all 120ms ease;
+      touch-action: none;
+    }
+    .uv-surf-pill:hover { border-color: var(--border-hi); background: rgba(24, 46, 82, 0.94); }
+    .uv-surf-pill.active, .uv-surf-pill:active {
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.40), rgba(167, 139, 250, 0.36));
+      border-color: var(--accent);
+      color: #ffffff;
+      box-shadow: 0 0 14px rgba(56, 189, 248, 0.35);
+    }
+    .uv-surf-pill.rocket {
+      border-color: rgba(251, 146, 60, 0.65);
+      background: rgba(124, 45, 18, 0.52);
+      color: #ffedd5;
+    }
+    .uv-surf-pill.rocket.firing, .uv-surf-pill.rocket:active {
+      background: linear-gradient(135deg, rgba(249, 115, 22, 0.88), rgba(234, 179, 8, 0.78));
+      border-color: #fde047;
+      color: #ffffff;
+      box-shadow: 0 0 18px rgba(249, 115, 22, 0.55);
+    }
+    .uv-surf-keys {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .uv-touch-pads {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 84px;
+      z-index: 21;
+      display: none;
+      justify-content: space-between;
+      padding: 0 18px;
+      pointer-events: none;
+    }
+    .uv-touch-pads.active { display: flex; }
+    .uv-joy-pad {
+      width: 112px;
+      height: 112px;
+      border-radius: 50%;
+      border: 1px solid rgba(112, 168, 255, 0.36);
+      background: rgba(7, 13, 25, 0.45);
+      backdrop-filter: blur(8px);
+      position: relative;
+      pointer-events: auto;
+      touch-action: none;
+    }
+    .uv-joy-knob {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: rgba(56, 189, 248, 0.42);
+      border: 1px solid rgba(186, 230, 253, 0.85);
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .uv-joy-label {
+      position: absolute;
+      bottom: -18px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .uv-touch-pads.active:not(.force-visible) { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -942,6 +1064,7 @@
 
       <div class="uv-inspector-actions">
         <button id="uv-dive-btn" class="uv-btn primary" type="button" title="Initiate Hyperdrive dive into the selected target and activate the next WebGPU physics engine">⚡ INITIATE HYPERDRIVE</button>
+        <button id="uv-surface-quick-btn" class="uv-btn" type="button" style="display:none;border-color:rgba(251,146,60,0.55);color:#ffedd5;" title="Land 6-Wheel Jump-Rocket Rover &amp; Coaxial Atmospheric Drone on this world (Shortcut: L)">🚙 Land</button>
         <button id="uv-return-btn" class="uv-btn subtle" type="button" title="Return to the parent cosmic scale above">↑ Orbit</button>
       </div>
 
@@ -955,8 +1078,26 @@
   <!-- Bottom-Right Breadcrumb & Controls Hint -->
   <div class="uv-bottom-right">
     <div class="uv-breadcrumb uv-glass" id="uv-breadcrumb"><strong>Cosmic Web</strong></div>
-    <div class="uv-hint-pill uv-glass">Scroll: Continuous 40-OOM Zoom · Drag: Orbit · Click: Focus Target · Dbl-Click: Fly In</div>
+    <div class="uv-hint-pill uv-glass" id="uv-hint-pill">Scroll: Continuous 40-OOM Zoom · Drag: Orbit · Click: Focus Target · Dbl-Click: Fly In</div>
   </div>
+
+  <!-- Planetary Surface Vehicle Controls HUD (TinyPlanetControls: Rover + Jump Rockets + Atmospheric Drone) -->
+  <div id="uv-touch-pads" class="uv-touch-pads" aria-label="Surface Touch Joysticks">
+    <div id="uv-joy-move" class="uv-joy-pad"><div class="uv-joy-knob" id="uv-joy-move-knob"></div><span class="uv-joy-label">DRIVE / FLY</span></div>
+    <div id="uv-joy-look" class="uv-joy-pad"><div class="uv-joy-knob" id="uv-joy-look-knob"></div><span class="uv-joy-label">LOOK</span></div>
+  </div>
+  <section id="uv-surface-hud" class="uv-glass" aria-label="Planetary Surface Vehicle Controls">
+    <div class="uv-surf-telemetry" id="uv-surf-telemetry">
+      <span><strong>ROVER</strong> · g=3.72 m/s² · ρ=0.016 kg/m³ · Alt 0.0 m · Fuel 100%</span>
+    </div>
+    <div class="uv-surf-pills">
+      <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to fire Rover Jump Rockets (or ascend in Drone)">🔥 ROCKET JUMP</button>
+      <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to deploy / switch between 6-Wheel Rover and Coaxial Atmospheric Drone">🚁 DEPLOY DRONE (F)</button>
+      <button id="uv-surf-cam-btn" class="uv-surf-pill" type="button" title="Press V to toggle 3rd-Person Chase and 1st-Person Mast/Cockpit Camera">📷 3RD CAM (V)</button>
+      <button id="uv-surf-orbit-btn" class="uv-surf-pill" type="button" title="Press Esc to launch back to Orbital Planetary View">🚀 ORBIT (Esc)</button>
+    </div>
+    <div class="uv-surf-keys" id="uv-surf-keys">WASD: Drive/Fly · Space: Jump Rockets / Ascend · Ctrl/C: Brake/Descend · Shift: Boost · Drag/QE: Look · F: Drone · V: Cam · Esc: Orbit</div>
+  </section>
 
   <!-- Hyperdrive Transition Overlay -->
   <div id="uv-warp-overlay" aria-hidden="true">

@@ -23,12 +23,12 @@ import {
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 
-test('All 15 Universal Law Graph nodes validate cleanly with 0 errors, 0 private-grid debt, and 0 new @workgroup_size(1)', () => {
+test('All 16 Universal Law Graph nodes validate cleanly with 0 errors, 0 private-grid debt, and 0 new @workgroup_size(1)', () => {
   const check = validateUniversalLawGraphContracts();
   assert.equal(check.valid, true, `Errors: ${check.errors.join(', ')} debt: ${check.debt.join(', ')}`);
   assert.equal(check.debt.length, 0);
-  assert.equal(check.nodeCount, 15);
-  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 15);
+  assert.equal(check.nodeCount, 16);
+  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 16);
 
   for (const rel of [
     'src/runtime/astrophysics/cosmicEpochState.js',

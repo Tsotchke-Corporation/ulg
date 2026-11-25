@@ -67,6 +67,11 @@ import {
   evaluateTidalRocheActivation,
   registerTidalRocheDisruptionModule
 } from './astrophysics/tidalRocheDisruptionGpu.js';
+import {
+  PLANETARY_SURFACE_LAW_ADAPTER,
+  evaluatePlanetarySurfaceActivation,
+  registerPlanetarySurfaceVehiclesModule
+} from './astrophysics/planetarySurfaceVehiclesGpu.js';
 
 export const ULG_UNIVERSAL_LAW_GRAPH_SCHEMA = 'peercompute.ulg.universal-law-graph.v1';
 
@@ -390,6 +395,19 @@ export const UNIVERSAL_LAW_GRAPH_NODES = Object.freeze([
     scaleRangeM: Object.freeze([1e2, 1e14]),
     adapter: TIDAL_ROCHE_LAW_ADAPTER,
     evaluateActivation: evaluateTidalRocheActivation
+  }),
+  Object.freeze({
+    id: 'planetary-surface-vehicles',
+    methodKey: 'planetary-surface-vehicles@1',
+    title: 'Planetary Surface Terrain, Rocker-Bogie Rover Jump Rockets, & Actuator-Disk Atmospheric Drone Flight',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e-1, 5e4]),
+    adapter: PLANETARY_SURFACE_LAW_ADAPTER,
+    evaluateActivation: evaluatePlanetarySurfaceActivation
   })
 ]);
 
@@ -469,7 +487,8 @@ export function registerAllTopDownLawModules(registry) {
     registerCompactMagnetosphereModule(registry),
     registerRelativisticBinaryMergerModule(registry),
     registerRadiativePhotoionizationWindModule(registry),
-    registerTidalRocheDisruptionModule(registry)
+    registerTidalRocheDisruptionModule(registry),
+    registerPlanetarySurfaceVehiclesModule(registry)
   ].filter(Boolean);
   return registered;
 }

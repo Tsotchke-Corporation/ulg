@@ -101,6 +101,234 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
+// Planetary Surface Atmospheric Sky Dome + Sun Disk + Starfield (for Airless & Atmospheric Worlds!)
+//   extra0: vec4(skyZenith.r, skyZenith.g, skyZenith.b, skyOpticalDepth)
+//   extra1: vec4(lightDir.x, lightDir.y, lightDir.z, curvInv2R)
+//   extra2: vec4(skyHorizon.r, skyHorizon.g, skyHorizon.b, isMagmaOrRogue)
+const SURFACE_SKY_WGSL = /* wgsl */ `
+${CAMERA_WGSL}
+
+@group(0) @binding(0) var<uniform> cam: CameraUniforms;
+
+struct VsOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+  var pts = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(3.0, -1.0),
+    vec2<f32>(-1.0, 3.0)
+  );
+  var out: VsOut;
+  out.pos = vec4<f32>(pts[vid], 0.9999, 1.0);
+  out.ndc = pts[vid];
+  return out;
+}
+
+fn hash31_s(p: vec3<f32>) -> f32 {
+  var q = fract(p * 0.1031);
+  q = q + dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
+}
+
+fn star_layer_s(dir: vec3<f32>, scale: f32, thresh: f32) -> vec3<f32> {
+  let p = dir * scale;
+  let cell = floor(p);
+  let f = fract(p) - 0.5;
+  let h = hash31_s(cell);
+  if (h < thresh) { return vec3<f32>(0.0); }
+  let jitter = vec3<f32>(hash31_s(cell + 17.1), hash31_s(cell + 41.7), hash31_s(cell + 73.3)) - 0.5;
+  let d = length(f - jitter * 0.50);
+  let spark = exp(-d * d * 82.0) * smoothstep(thresh, 1.0, h);
+  let temp = hash31_s(cell + 99.9);
+  return mix(vec3<f32>(0.72, 0.84, 1.0), vec3<f32>(1.0, 0.86, 0.66), temp) * spark;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+  let fov = cam.cam_up.w;
+  let aspect = cam.cam_right.w;
+  let dir = normalize(
+    cam.cam_fwd.xyz
+    + cam.cam_right.xyz * (in.ndc.x * aspect * fov)
+    + cam.cam_up.xyz * (in.ndc.y * fov)
+  );
+  let sky_zen = cam.extra0.rgb;
+  let opt_depth = clamp(cam.extra0.w, 0.0, 1.0);
+  let sun_dir = normalize(cam.extra1.xyz);
+  let sky_hor = cam.extra2.rgb;
+
+  // Smooth elevation gradient from horizon haze band to deep zenith sky!
+  let elev = clamp(dir.y, -0.35, 1.0);
+  let sky_t = pow(clamp((elev + 0.04) / 1.04, 0.0, 1.0), 0.56);
+  var col = mix(sky_hor, sky_zen, sky_t);
+
+  // Subtle below-horizon horizon-haze fill so curved TinyPlanet terrain melts seamlessly into the horizon!
+  if (dir.y < 0.0) {
+    let below = 1.0 - smoothstep(-0.36, 0.0, dir.y);
+    col = mix(col, sky_hor * mix(0.96, 0.84, opt_depth), below);
+  }
+
+  // Forward Mie solar scattering + crisp HDR solar disk
+  let cos_sun = dot(dir, sun_dir);
+  let sun_disk = smoothstep(0.9986, 0.9996, cos_sun);
+  let sun_halo = pow(max(0.0, cos_sun), 10.0) * (0.28 + 0.52 * opt_depth)
+    + pow(max(0.0, cos_sun), 64.0) * (0.55 + 0.65 * opt_depth);
+  let sun_col = mix(vec3<f32>(1.0, 0.96, 0.88), vec3<f32>(1.0, 0.78, 0.52), opt_depth * 0.45);
+  col = col + sun_col * sun_halo + vec3<f32>(2.4, 2.25, 1.95) * sun_disk;
+
+  // High-contrast crisp stars shine brightly in airless vacuum (Moon/Mercury!) and fade cleanly in atmospheric skies
+  let star_vis = clamp((1.0 - smoothstep(0.03, 0.30, opt_depth)) * smoothstep(-0.02, 0.14, dir.y), 0.0, 1.0);
+  if (star_vis > 0.02) {
+    let stars = star_layer_s(dir, 62.0, 0.970) * 1.25
+      + star_layer_s(dir, 140.0, 0.978) * 0.72
+      + star_layer_s(dir, 240.0, 0.986) * 0.35;
+    col = col + stars * star_vis;
+  }
+
+  return vec4<f32>(col, 1.0);
+}
+`;
+
+// Planetary Surface 3D Terrain & Articulated Solid Vehicle (Rover + Drone) Lit Shader!
+// Consumes 48-byte vertices directly from GPU terrain_verts & vehicleVertBuf:
+//   @location(0) pos_curv:  vec4(x, y_curved, z, rawHeight)
+//   @location(1) norm_tag:  vec4(nx, ny, nz, tag)  0=rock, 1=ice/highland, 2=ocean, 3=magma, 4=vehicle
+//   @location(2) col_emiss: vec4(r, g, b, emissive)
+const SURFACE_MESH_WGSL = /* wgsl */ `
+${CAMERA_WGSL}
+
+@group(0) @binding(0) var<uniform> cam: CameraUniforms;
+
+struct VsIn {
+  @location(0) pos_curv: vec4<f32>,
+  @location(1) norm_tag: vec4<f32>,
+  @location(2) col_emiss: vec4<f32>,
+};
+
+struct VsOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) world_pos: vec3<f32>,
+  @location(1) norm: vec3<f32>,
+  @location(2) albedo: vec3<f32>,
+  @location(3) surf_info: vec3<f32>, // x = tag, y = emissive, z = rawHeight
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+  var out: VsOut;
+  out.pos = cam.view_proj * vec4<f32>(in.pos_curv.xyz, 1.0);
+  out.world_pos = in.pos_curv.xyz;
+  out.norm = in.norm_tag.xyz;
+  out.albedo = in.col_emiss.rgb;
+  out.surf_info = vec3<f32>(in.norm_tag.w, in.col_emiss.w, in.pos_curv.w);
+  return out;
+}
+
+fn surf_hash(p: vec2<f32>) -> f32 {
+  return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+fn surf_noise(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(surf_hash(i), surf_hash(i + vec2<f32>(1.0, 0.0)), u.x),
+    mix(surf_hash(i + vec2<f32>(0.0, 1.0)), surf_hash(i + vec2<f32>(1.0, 1.0)), u.x),
+    u.y
+  );
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+  let sky_zen = cam.extra0.rgb;
+  let opt_depth = clamp(cam.extra0.w, 0.0, 1.0);
+  let sun_dir = normalize(cam.extra1.xyz);
+  let sky_hor = cam.extra2.rgb;
+
+  let n = normalize(in.norm);
+  let view_v = cam.cam_pos.xyz - in.world_pos;
+  let dist = length(view_v);
+  let v = view_v / max(1e-4, dist);
+  let half_v = normalize(sun_dir + v);
+
+  let tag = in.surf_info.x;
+  let emissive = in.surf_info.y;
+
+  // Fine procedural micro-regolith grain on natural terrain (crisp smooth metal/foil on vehicles!)
+  var base_col = in.albedo;
+  if (tag < 3.5 && tag != 2.0) {
+    let g1 = surf_noise(in.world_pos.xz * 0.72);
+    let g2 = surf_noise(in.world_pos.xz * 2.85 + vec2<f32>(11.3, -7.1));
+    let grain = 0.86 + 0.20 * g1 + 0.12 * g2;
+    base_col = base_col * grain;
+  }
+
+  let ndl = max(0.0, dot(n, sun_dir));
+  let ndv = max(0.0, dot(n, v));
+  let fresnel = pow(1.0 - ndv, 3.8);
+
+  // Hemispheric sky-bounce ambient (deep crisp shadows in vacuum; soft atmospheric scatter in dense air!)
+  let hemi_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+  let amb_sky = mix(sky_hor * 0.42 + vec3<f32>(0.04, 0.05, 0.07), sky_zen * 0.55 + vec3<f32>(0.05, 0.06, 0.09), hemi_up);
+  let amb_gain = mix(0.24, 0.55, opt_depth);
+  let sun_tint = mix(vec3<f32>(1.05, 1.02, 0.96), vec3<f32>(1.12, 0.95, 0.78), opt_depth * 0.35);
+
+  var lit = base_col * (amb_sky * amb_gain + sun_tint * (ndl * 1.18));
+
+  if (tag > 1.5 && tag < 2.5) {
+    // Liquid ocean surface: non-orthogonal rotated multi-octave waves + crisp Fresnel sky reflection & sun specular glint!
+    let t = cam.cam_pos.w;
+    let p_w = in.world_pos.xz;
+    let ph1 = dot(p_w, vec2<f32>(0.86, 0.51)) * 0.72 + t * 1.9;
+    let ph2 = dot(p_w, vec2<f32>(-0.42, 0.91)) * 1.18 - t * 1.5;
+    let ph3 = dot(p_w, vec2<f32>(0.31, -0.95)) * 1.95 + t * 2.4;
+    let wn = (surf_noise(p_w * 0.65 + vec2<f32>(t * 0.35, -t * 0.28)) - 0.5) * 0.05;
+    let wx = sin(ph1) * 0.024 + cos(ph2) * 0.018 + sin(ph3) * 0.012 + wn;
+    let wz = cos(ph1) * 0.020 - sin(ph2) * 0.022 + cos(ph3) * 0.012 - wn;
+    let nw = normalize(n + vec3<f32>(wx, 0.0, wz));
+    let hw = normalize(sun_dir + v);
+    let w_spec = pow(max(0.0, dot(nw, hw)), 84.0) * 1.35;
+    let w_fres = pow(1.0 - max(0.0, dot(nw, v)), 3.2);
+    lit = mix(lit, sky_hor * 0.95 + vec3<f32>(0.08, 0.16, 0.28), w_fres * 0.70) + sun_tint * w_spec;
+  } else if (tag > 3.5) {
+    // Metallic Rover & Drone hardware: crisp Blinn-Phong specular + rim edge highlight!
+    let m_spec = pow(max(0.0, dot(n, half_v)), 42.0) * 0.65;
+    lit = lit + sun_tint * m_spec + (sky_hor * 0.35 + vec3<f32>(0.12, 0.16, 0.22)) * fresnel * 0.45;
+  } else {
+    // Subtle mineral sheen on ice/basalt slopes
+    let r_spec = pow(max(0.0, dot(n, half_v)), 18.0) * select(0.08, 0.26, tag > 0.5 && tag < 1.5);
+    lit = lit + sun_tint * r_spec;
+  }
+
+  // Per-pixel volcanic basalt-fissure glow enhancement on Magma Ocean worlds (zero blocky vertex borders!)
+  var emiss_eff = emissive;
+  var emiss_col = in.albedo;
+  if (cam.extra2.w > 0.5 && tag < 3.5) {
+    let f1 = surf_noise(in.world_pos.xz * 0.38 + vec2<f32>(3.1, -5.2));
+    let f2 = surf_noise(in.world_pos.xz * 1.15 - vec2<f32>(7.4, 2.8));
+    let vein = 1.0 - smoothstep(0.03, 0.16, abs((f1 * 0.7 + f2 * 0.3) - 0.5));
+    let molten = clamp(emissive * (0.65 + 0.55 * f2) + vein * 1.15, 0.0, 2.2);
+    emiss_eff = molten;
+    emiss_col = mix(vec3<f32>(1.0, 0.24, 0.03), vec3<f32>(1.0, 0.86, 0.32), clamp(molten * 0.62, 0.0, 1.0));
+  }
+  lit = lit + emiss_col * emiss_eff * 1.20;
+
+  // Exponential atmospheric perspective fog + smooth horizontal radial horizon fade (zero jagged patch rim!)
+  let horiz_dist = length(in.world_pos.xz - cam.cam_pos.xz);
+  let fog_density = mix(0.0020, 0.0078, opt_depth);
+  let fog_amt = clamp(1.0 - exp(-dist * fog_density), 0.0, 0.92);
+  let patch_edge = smoothstep(82.0, 146.0, horiz_dist);
+  let total_fog = clamp(max(fog_amt, patch_edge), 0.0, 1.0);
+  let final_col = mix(lit, sky_hor, total_fog);
+  return vec4<f32>(final_col, 1.0);
+}
+`;
+
 // Zero-copy resident GPU particle billboard renderer supporting 5 canonical ULG layouts:
 //   mode 0: L0 Supergalactic TreePM (16 floats/particle) — Millennium-style filaments & superclusters
 //   mode 1: L1 Flat-Rotation Spiral Galaxy (8 floats/star; vel_r.w < 0 = invisible dark-matter halo!)
@@ -416,7 +644,7 @@ fn vs_main(
       pt_size = pt_size_base * select(0.65, 0.95, intact > 0.5);
       alpha = alpha_gain * 0.64;
     }
-  } else {
+  } else if (mode == 10u) {
     // Mode 10: Cosmological Baryon & Radiation (CMB ΔT/T Shell, Reionization H II Bubbles, & Galaxy Cluster X-Ray ICM + DM!)
     let o = iid * 16u;
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
@@ -462,6 +690,47 @@ fn vs_main(
       );
       pt_size = pt_size_base * select(0.75 + 0.48 * min(1.1, x_em), 1.05, is_dm);
       alpha = alpha_gain * select(0.32 + 0.45 * min(1.0, x_em), 0.72, is_dm);
+    }
+  } else {
+    // Mode 11: Planetary Surface Jump-Rocket Exhaust Flames, Ballistic Regolith Dust, & Drone Rotor Downwash!
+    let o = iid * 16u;
+    let is_live = raw_f32[o + 15u];
+    if (is_live < 0.5) {
+      var culled11: VsOut;
+      culled11.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled11.color = vec4<f32>(0.0);
+      culled11.uv = vec2<f32>(0.0);
+      return culled11;
+    }
+    var rp = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    // Apply exact same TinyPlanet spherical curvature drop around active vehicle focus (extra1.xz, curv_inv_2r = extra1.w)
+    let dx_c = rp.x - cam.extra1.x;
+    let dz_c = rp.z - cam.extra1.z;
+    rp.y = rp.y - (dx_c * dx_c + dz_c * dz_c) * cam.extra1.w;
+    p_world = rp * world_scale;
+    let role = raw_f32[o + 3u];
+    let age = raw_f32[o + 7u];
+    let base_rgb = vec3<f32>(raw_f32[o + 8u], raw_f32[o + 9u], raw_f32[o + 10u]);
+    let max_life = max(0.15, raw_f32[o + 11u]);
+    let sz = max(0.10, raw_f32[o + 12u]);
+    let life_f = clamp(age / max_life, 0.0, 1.0);
+    let fade = (1.0 - life_f) * smoothstep(0.0, 0.08, life_f + 0.04);
+    if (role < 0.5) {
+      // Blazing jump-rocket exhaust: cyan-white hot Mach diamond core -> incandescent orange tail!
+      let flame_c = mix(vec3<f32>(0.90, 0.96, 1.0), vec3<f32>(1.0, 0.40, 0.06), clamp(life_f * 2.1, 0.0, 1.0));
+      col = flame_c * (2.1 - 0.9 * life_f);
+      pt_size = pt_size_base * sz * (0.72 + 1.15 * life_f);
+      alpha = alpha_gain * fade * 0.36;
+    } else if (role < 1.5) {
+      // Sunlit ballistic regolith / dust plume (gentle additive weight so dust never blows out to pure white!)
+      col = base_rgb * (0.48 + 0.22 * (1.0 - life_f));
+      pt_size = pt_size_base * sz * (0.48 + 0.92 * life_f);
+      alpha = alpha_gain * fade * 0.052;
+    } else {
+      // Subtle drone rotor downwash dust ring & fine wind-blown atmospheric motes!
+      col = base_rgb * 0.52;
+      pt_size = pt_size_base * sz * (0.42 + 0.55 * life_f);
+      alpha = alpha_gain * fade * 0.068;
     }
   }
 
@@ -1417,6 +1686,49 @@ export function createUlgUniversesRenderer(device, canvas) {
     entries: [{ binding: 0, resource: { buffer: camBuf } }]
   });
 
+  const surfaceSkyMod = mkMod('uv-surface-sky', SURFACE_SKY_WGSL);
+  const surfaceSkyPipe = device.createRenderPipeline({
+    label: 'uv-surface-sky-pipe',
+    layout: 'auto',
+    vertex: { module: surfaceSkyMod, entryPoint: 'vs_main' },
+    fragment: { module: surfaceSkyMod, entryPoint: 'fs_main', targets: [{ format: sceneFormat }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'always' }
+  });
+  const surfaceSkyBg = device.createBindGroup({
+    layout: surfaceSkyPipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: auxCamBuf } }]
+  });
+
+  const surfaceMeshMod = mkMod('uv-surface-mesh', SURFACE_MESH_WGSL);
+  const surfaceMeshPipe = device.createRenderPipeline({
+    label: 'uv-surface-mesh-pipe',
+    layout: 'auto',
+    vertex: {
+      module: surfaceMeshMod,
+      entryPoint: 'vs_main',
+      buffers: [{
+        arrayStride: 48,
+        attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x4' },
+          { shaderLocation: 1, offset: 16, format: 'float32x4' },
+          { shaderLocation: 2, offset: 32, format: 'float32x4' }
+        ]
+      }]
+    },
+    fragment: {
+      module: surfaceMeshMod,
+      entryPoint: 'fs_main',
+      targets: [{ format: sceneFormat }]
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less-equal' }
+  });
+  const surfaceMeshBg = device.createBindGroup({
+    layout: surfaceMeshPipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: auxCamBuf } }]
+  });
+
   const cloudMod = mkMod('uv-cloud', PARTICLE_CLOUD_WGSL);
   const particleCloudPipe = device.createRenderPipeline({
     label: 'uv-cloud-pipe',
@@ -1707,6 +2019,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     particleClouds = [],  // Up to 2 simultaneous zero-copy GPU clouds for seamless cross-scale zoom!
     spheres = null,
     atmoEm = null,        // Optional zero-copy live GPU spherical baroclinic + triboelectric EM buffer!
+    surfaceScene = null,  // Optional live GPU Planetary Surface Terrain + Rover/Drone solid mesh + Atmospheric Sky!
     lightDir = [0.6, 0.75, 0.55],
     mdCloud = null,
     disks = null,
@@ -1793,7 +2106,17 @@ export function createUlgUniversesRenderer(device, canvas) {
       );
     }
 
-    if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
+    if (surfaceScene && surfaceScene.env) {
+      const env = surfaceScene.env;
+      const ld = surfaceScene.lightDir || lightDir;
+      writeCam(
+        auxCamBuf,
+        camera,
+        [env.skyZenithRgb[0], env.skyZenithRgb[1], env.skyZenithRgb[2], env.skyOpticalDepth],
+        [ld[0], ld[1], ld[2], 1.0 / (2.0 * (env.tinyPlanetCurvatureRadiusM || 280.0))],
+        [env.skyHorizonRgb[0], env.skyHorizonRgb[1], env.skyHorizonRgb[2], env.isMagmaOcean ? 1.0 : 0.0]
+      );
+    } else if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
       writeCam(
         auxCamBuf,
         camera,
@@ -1841,9 +2164,29 @@ export function createUlgUniversesRenderer(device, canvas) {
           depthStoreOp: 'store'
         }
       });
-      pass.setPipeline(backdropPipe);
-      pass.setBindGroup(0, backdropBg);
-      pass.draw(3, 1, 0, 0);
+      if (surfaceScene && surfaceScene.env) {
+        pass.setPipeline(surfaceSkyPipe);
+        pass.setBindGroup(0, surfaceSkyBg);
+        pass.draw(3, 1, 0, 0);
+
+        if (surfaceScene.terrainVertBuf && surfaceScene.terrainIdxBuf && surfaceScene.indexCount > 0) {
+          pass.setPipeline(surfaceMeshPipe);
+          pass.setBindGroup(0, surfaceMeshBg);
+          pass.setVertexBuffer(0, surfaceScene.terrainVertBuf);
+          pass.setIndexBuffer(surfaceScene.terrainIdxBuf, 'uint32');
+          pass.drawIndexed(surfaceScene.indexCount, 1, 0, 0, 0);
+        }
+        if (surfaceScene.vehicleVertBuf && surfaceScene.vehicleVertCount > 0) {
+          pass.setPipeline(surfaceMeshPipe);
+          pass.setBindGroup(0, surfaceMeshBg);
+          pass.setVertexBuffer(0, surfaceScene.vehicleVertBuf, 0, surfaceScene.vehicleVertCount * 48);
+          pass.draw(surfaceScene.vehicleVertCount, 1, 0, 0);
+        }
+      } else {
+        pass.setPipeline(backdropPipe);
+        pass.setBindGroup(0, backdropBg);
+        pass.draw(3, 1, 0, 0);
+      }
 
       if (lineVertCount > 0) {
         pass.setPipeline(linePipe);

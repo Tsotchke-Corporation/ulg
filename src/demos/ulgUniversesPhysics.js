@@ -66,6 +66,9 @@ import {
   deriveFluidElectrodynamicsState
 } from '../runtime/astrophysics/planetaryAtmosphereElectricGpu.js';
 import {
+  createPlanetarySurfaceSessionWebGpu
+} from '../runtime/astrophysics/planetarySurfaceVehiclesGpu.js';
+import {
   deriveGate1IsmCoolingAnchorsWebGpu,
   evaluateIsmRadiativeCoolingErgCm3PerS
 } from '../runtime/astrophysics/galacticIsmCoolingGpu.js';
@@ -657,6 +660,24 @@ export function createUlgUniversesPhysics(device, {
   let planetaryTriboelectric = true;
   let cryoPlumeSession = null;
   let cryoPlumeTelemetry = null;
+
+  // Planetary Surface View (TinyPlanetControls + 6-Wheel Jump-Rocket Mars Rover + Atmospheric Drone!)
+  let surfaceActive = false;
+  let surfaceSession = null;
+  let surfaceTelemetry = null;
+  let surfaceControls = {
+    forward: false,
+    backward: false,
+    left: false,
+    right: false,
+    jump: false,
+    down: false,
+    turbo: false,
+    yawLeft: false,
+    yawRight: false,
+    moveX: 0,
+    moveY: 0
+  };
 
   // Level 5: Crystal & Fluid Molecular Dynamics
   let mdSession = null;
@@ -1613,33 +1634,41 @@ export function createUlgUniversesPhysics(device, {
           });
         }
       } else if (activeLevel === 4) {
-        let sunDir = planetaryMode === 'eyeball-locked' ? [1.0, 0.0, 0.0] : [0.65, 0.25, 0.70];
-        if (planetaryMode === 'cryo-plumes' && cryoPlumeSession) {
-          cryoPlumeTelemetry = await cryoPlumeSession.step({
-            dt: 0.028 * Math.max(0.2, Math.min(2.5, timeScale)),
-            substeps: 2,
-            readTelemetry: true
+        if (surfaceActive && surfaceSession) {
+          surfaceTelemetry = await surfaceSession.step({
+            dt: 0.020 * Math.max(0.25, Math.min(2.5, timeScale)),
+            controls: surfaceControls,
+            readTelemetry: (surfaceSession.stepIndex % 4) === 0
           });
-        }
-        if (solarEngine && planetaryMode !== 'eyeball-locked' && planetaryMode !== 'rogue') {
-          await solarEngine.step({ dtSubYr: 0.000012, substeps: Math.max(1, Math.round(4 * timeScale)), readMassive: true });
-          solarConservation = solarEngine.computeConservationDiagnostics();
-          const fSt = solarEngine.getMassiveBodyState64(focusedSolarBodyIndex);
-          const sSt = solarEngine.getMassiveBodyState64(0);
-          const dx = sSt.posAu[0] - fSt.posAu[0];
-          const dy = sSt.posAu[1] - fSt.posAu[1];
-          const dz = sSt.posAu[2] - fSt.posAu[2];
-          const len = Math.hypot(dx, dy, dz) || 1;
-          sunDir = [dx / len, dy / len, dz / len];
-        }
-        // Dynamically step spherical baroclinic fluid + triboelectric lightning ONLY when active!
-        if (planetaryAtmoSession) {
-          planetaryAtmoTelemetry = await planetaryAtmoSession.step({
-            dtSim: 0.042 * Math.max(0.2, Math.min(2.5, timeScale)),
-            substeps: 2,
-            sunDir,
-            readTelemetry: true
-          });
+        } else {
+          let sunDir = planetaryMode === 'eyeball-locked' ? [1.0, 0.0, 0.0] : [0.65, 0.25, 0.70];
+          if (planetaryMode === 'cryo-plumes' && cryoPlumeSession) {
+            cryoPlumeTelemetry = await cryoPlumeSession.step({
+              dt: 0.028 * Math.max(0.2, Math.min(2.5, timeScale)),
+              substeps: 2,
+              readTelemetry: true
+            });
+          }
+          if (solarEngine && planetaryMode !== 'eyeball-locked' && planetaryMode !== 'rogue') {
+            await solarEngine.step({ dtSubYr: 0.000012, substeps: Math.max(1, Math.round(4 * timeScale)), readMassive: true });
+            solarConservation = solarEngine.computeConservationDiagnostics();
+            const fSt = solarEngine.getMassiveBodyState64(focusedSolarBodyIndex);
+            const sSt = solarEngine.getMassiveBodyState64(0);
+            const dx = sSt.posAu[0] - fSt.posAu[0];
+            const dy = sSt.posAu[1] - fSt.posAu[1];
+            const dz = sSt.posAu[2] - fSt.posAu[2];
+            const len = Math.hypot(dx, dy, dz) || 1;
+            sunDir = [dx / len, dy / len, dz / len];
+          }
+          // Dynamically step spherical baroclinic fluid + triboelectric lightning ONLY when active!
+          if (planetaryAtmoSession) {
+            planetaryAtmoTelemetry = await planetaryAtmoSession.step({
+              dtSim: 0.042 * Math.max(0.2, Math.min(2.5, timeScale)),
+              substeps: 2,
+              sunDir,
+              readTelemetry: true
+            });
+          }
         }
       } else if (activeLevel === 5 && mdSession) {
         const steps = Math.max(1, Math.min(8, Math.round(3 * timeScale)));
@@ -1990,6 +2019,71 @@ export function createUlgUniversesPhysics(device, {
     planetaryTriboelectric = Boolean(enabled);
     planetaryAtmoSession?.setEnableTriboelectric?.(planetaryTriboelectric);
   }
+
+  async function enterSurfaceView({ bodyIndex = planetaryBodyIndex, planetaryModeOverride = null } = {}) {
+    const idx = Math.max(1, Math.min(REAL_SOLAR_SYSTEM_CATALOG.length - 1, Math.trunc(Number(bodyIndex) || planetaryBodyIndex || 3)));
+    focusedSolarBodyIndex = idx;
+    if (planetaryModeOverride) {
+      planetaryMode = planetaryModeOverride;
+    }
+    if (!planetaryResult || planetaryBodyIndex !== idx) {
+      await initPlanetaryInterior({ bodyIndex: idx });
+    }
+    const spec = REAL_SOLAR_SYSTEM_CATALOG[idx] || REAL_SOLAR_SYSTEM_CATALOG[3];
+    const nextSurf = createPlanetarySurfaceSessionWebGpu(device, {
+      bodySpec: spec,
+      planetaryResult,
+      planetaryAtmoState,
+      planetaryMode,
+      gridN: quality.id === 'low' ? 81 : 129,
+      cellSizeM: 2.35,
+      particleCount: quality.id === 'low' ? 1024 : 2048,
+      seed: (universeSeed ^ (idx * 7919 + 0x504face)) >>> 0,
+      label: `ulg-universes-surface-${spec.id}`
+    });
+    // Reset controls cleanly on landing
+    surfaceControls = {
+      forward: false, backward: false, left: false, right: false,
+      jump: false, down: false, turbo: false, yawLeft: false, yawRight: false,
+      moveX: 0, moveY: 0
+    };
+    // Warm terrain mesh + articulated Rover & Drone geometry immediately before swap!
+    surfaceTelemetry = await nextSurf.step({ dt: 0.016, controls: surfaceControls, readTelemetry: false });
+    surfaceTelemetry = await nextSurf.step({ dt: 0.016, controls: surfaceControls, readTelemetry: true });
+    const prev = surfaceSession;
+    surfaceSession = nextSurf;
+    surfaceActive = true;
+    if (prev) prev.dispose();
+    return surfaceTelemetry;
+  }
+
+  function exitSurfaceView() {
+    surfaceActive = false;
+    surfaceControls = {
+      forward: false, backward: false, left: false, right: false,
+      jump: false, down: false, turbo: false, yawLeft: false, yawRight: false,
+      moveX: 0, moveY: 0
+    };
+    const prev = surfaceSession;
+    surfaceSession = null;
+    surfaceTelemetry = null;
+    if (prev) prev.dispose();
+  }
+
+  function setSurfaceVehicle(mode) {
+    if (!surfaceSession) return null;
+    return surfaceSession.setActiveVehicle(mode);
+  }
+  function setSurfaceCameraMode(mode) {
+    if (!surfaceSession) return null;
+    return surfaceSession.setCameraMode(mode);
+  }
+  function setSurfaceControls(partial = {}) {
+    surfaceControls = { ...surfaceControls, ...partial };
+  }
+  function addSurfaceLookDelta(dYaw, dPitch) {
+    surfaceSession?.addLookDelta?.(dYaw, dPitch);
+  }
   function getActiveUniversalLaws(activeLevel, log10SpanM) {
     const viewSpanM = Math.pow(10, log10SpanM);
     const spec = REAL_SOLAR_SYSTEM_CATALOG[focusedSolarBodyIndex] || REAL_SOLAR_SYSTEM_CATALOG[3];
@@ -2038,7 +2132,8 @@ export function createUlgUniversesPhysics(device, {
       surfaceTempK: (activeLevel === 2 && solarMode === 'comet-tails') ? 260 : 0,
       sublimationTempK: (activeLevel === 2 && solarMode === 'comet-tails') ? 170 : 1e9,
       maxTidalStrain: (isTidalL2 || (activeLevel === 4 && planetaryMode === 'cryo-plumes')) ? 0.85 : 0,
-      maxSurfaceTempK: (activeLevel === 4 && planetaryMode === 'magma-ocean') || (activeLevel === 2 && (solarMode === 'giant-impact' || solarMode === 'red-giant')) ? 2400 : 0
+      maxSurfaceTempK: (activeLevel === 4 && planetaryMode === 'magma-ocean') || (activeLevel === 2 && (solarMode === 'giant-impact' || solarMode === 'red-giant')) ? 2400 : 0,
+      surfaceViewActive: surfaceActive
     };
     return resolveActiveUniversalLaws(physState);
   }
@@ -2450,6 +2545,7 @@ export function createUlgUniversesPhysics(device, {
     try { magnetosphereSession?.dispose(); } catch {}
     try { planetaryAtmoSession?.dispose(); } catch {}
     try { cryoPlumeSession?.dispose(); } catch {}
+    try { surfaceSession?.dispose(); } catch {}
     try { mdSession?.destroy(); } catch {}
     try { orbitalCloud?.pointsBuffer?.destroy(); } catch {}
     try { tdseSession?.destroy(); } catch {}
@@ -2525,6 +2621,10 @@ export function createUlgUniversesPhysics(device, {
     get planetaryTriboelectric() { return planetaryTriboelectric; },
     get cryoPlumeSession() { return cryoPlumeSession; },
     get cryoPlumeTelemetry() { return cryoPlumeTelemetry; },
+    get surfaceActive() { return surfaceActive; },
+    get surfaceSession() { return surfaceSession; },
+    get surfaceTelemetry() { return surfaceTelemetry; },
+    get surfaceControls() { return surfaceControls; },
     get mdSession() { return mdSession; },
     get mdTelemetry() { return mdTelemetry; },
     get mdElementZ() { return mdElementZ; },
@@ -2582,6 +2682,12 @@ export function createUlgUniversesPhysics(device, {
     setPlanetaryCutaway,
     setPlanetaryTriboelectric,
     setPlanetaryMode,
+    enterSurfaceView,
+    exitSurfaceView,
+    setSurfaceVehicle,
+    setSurfaceCameraMode,
+    setSurfaceControls,
+    addSurfaceLookDelta,
     setStellarTimeAccel,
     setSolarMode,
     setKerrSpinA,

@@ -6,7 +6,7 @@ import {
 } from '../src/visualization/nativeEnvironmentPrefilter.js';
 
 test('worker environment prefilter remains an exact copy of the unchanged page algorithm', async () => {
-  const scene = await readFile(new URL('../src/visualization/sphPhaseScene.js', import.meta.url), 'utf8');
+  const scene = await readFile(new URL('../src/visualization/sphPhaseSceneContracts.js', import.meta.url), 'utf8');
   const marker = 'export function buildGgxPrefilteredLatlongMips(';
   const start = scene.indexOf(marker);
   assert.ok(start >= 0, 'page prefilter must remain available for the duplication guard');

@@ -321,7 +321,9 @@ test('production worker SS provisioning applies the reaction tri-state only at t
 });
 
 test('scene publishes one physical dispersed-medium declaration into direct and worker resident routes', async () => {
-  const source = await readFile(sceneSourcePath, 'utf8');
+  const source = (await readFile(sceneSourcePath, 'utf8'))
+    + '\n'
+    + (await readFile(new URL('../src/visualization/sphPhaseSceneContracts.js', import.meta.url), 'utf8'));
   assert.match(
     source,
     /sphCollectiveOpticalStaticInputsFromViewState\(\{[\s\S]*materialProperties:[\s\S]*materials:[\s\S]*collectiveOpticalRouteDescriptors\s*=\s*collectiveOpticalInputs\.collectiveOpticalRouteDescriptors;[\s\S]*sphDispersedMediumOpticalClosureTable\s*=\s*collectiveOpticalInputs\.dispersedMediumOpticalClosureTable;/,

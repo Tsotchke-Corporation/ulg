@@ -47,8 +47,22 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 
+const SPLIT_MODULE_COMPANIONS = Object.freeze({
+  'src/visualization/sphPhaseScene.js': ['src/visualization/sphPhaseSceneContracts.js'],
+  'src/visualization/sphPhaseDemoMount.js': ['src/visualization/sphPhaseDemoMountHelpers.js'],
+  'ulg-gpu-abi/src/wgsl.js': [
+    'ulg-gpu-abi/src/sphReactionWgsl.js',
+    'ulg-gpu-abi/src/sphRenderWgsl.js',
+    'ulg-gpu-abi/src/mlsMpmWgsl.js',
+    'ulg-gpu-abi/src/schroederHierarchyWgsl.js'
+  ]
+});
+
 function readRepoFile(relativePath) {
-  return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
+  const parts = [relativePath, ...(SPLIT_MODULE_COMPANIONS[relativePath] || [])];
+  return parts
+    .map((p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8'))
+    .join('\n');
 }
 
 test('interactive controls stay disabled until runtime admission, handlers, and initial state are ready', () => {

@@ -7,8 +7,8 @@ const REPO_ROOT = process.cwd();
 
 const REQUIRED_PARALLEL_KERNELS = [
   ['src/runtime/sph/schroederSplitSpareLineageScanGpu.js', 'scan_group_totals', 64],
-  ['ulg-gpu-abi/src/wgsl.js', 'scan_placement_row_groups', 64],
-  ['ulg-gpu-abi/src/wgsl.js', 'finalize_placement_spatial_envelope', 64],
+  ['ulg-gpu-abi/src/sphReactionWgsl.js', 'scan_placement_row_groups', 64],
+  ['ulg-gpu-abi/src/sphReactionWgsl.js', 'finalize_placement_spatial_envelope', 64],
   ['ulg-gpu-abi/src/sphReactionProductEventSpatialClassificationWgsl.js', 'scan_spare_groups', 64],
   ['src/runtime/sph/sphExactVaporParcelLedgerGpu.js', 'scan_members', 64],
   ['src/runtime/sph/sphExactParcelTransportLedgerGpu.js', 'deposit_into_sinks', 64],
@@ -49,9 +49,10 @@ test('Gate 6 Phase B: hot-path prefix-scan and reduction kernels are workgroup-p
   }
 
   // Resident & reaction summary finalizers are parallel workgroup reductions within 16 KiB baseline workgroup memory
-  const wgslSrc = fs.readFileSync(path.join(REPO_ROOT, 'ulg-gpu-abi/src/wgsl.js'), 'utf8');
-  assert.match(wgslSrc, /var<workgroup> rx_sum_r0: array<vec4<f32>, 64>;/);
-  assert.match(wgslSrc, /var<workgroup> res_wg_rows: array<array<vec4<f32>, 22>, 32>;/);
+  const rxWgslSrc = fs.readFileSync(path.join(REPO_ROOT, 'ulg-gpu-abi/src/sphReactionWgsl.js'), 'utf8');
+  const mpmWgslSrc = fs.readFileSync(path.join(REPO_ROOT, 'ulg-gpu-abi/src/mlsMpmWgsl.js'), 'utf8');
+  assert.match(rxWgslSrc, /var<workgroup> rx_sum_r0: array<vec4<f32>, 64>;/);
+  assert.match(mpmWgslSrc, /var<workgroup> res_wg_rows: array<array<vec4<f32>, 22>, 32>;/);
   // 22 * 32 * 16 bytes = 11,264 <= 16,384 baseline WebGPU maxComputeWorkgroupStorageSize
   assert.ok(22 * 32 * 16 <= 16384);
 });

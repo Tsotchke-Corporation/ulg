@@ -352,6 +352,9 @@ test('mounted reaction activation policy is URL-bound and provisions a dormant a
   const source = readFileSync(
     new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url),
     'utf8'
+  ) + '\n' + readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMountHelpers.js', import.meta.url),
+    'utf8'
   );
   assert.match(
     source,
@@ -1661,6 +1664,9 @@ test('mounted schedule cadence survives startup deferral and every recursive con
 test('mounted material cache fingerprints live generic dispersed optics authority and rejects v4 records', () => {
   const source = readFileSync(
     new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url),
+    'utf8'
+  ) + '\n' + readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMountHelpers.js', import.meta.url),
     'utf8'
   );
   assert.match(

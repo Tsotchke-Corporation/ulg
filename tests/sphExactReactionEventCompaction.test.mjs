@@ -9,9 +9,9 @@ const integer = words => words.reduceRight((value, word) => value * (1n << 32n) 
 test('default event compactor preserves the complete legacy shader bytes', () => {
   assert.equal(createSphReactionProductEventCompactWgsl(), sphReactionProductEventCompactWgsl);
   assert.equal(createSphReactionProductEventCompactWgsl({ exactCompanion: null }), sphReactionProductEventCompactWgsl);
-  // Baseline captured before introducing the exact variant.
+  // Baseline pinned after Gate 6 Phase B parallel @workgroup_size(64) Hillis-Steele scan upgrade.
   assert.equal(createHash('sha256').update(sphReactionProductEventCompactWgsl).digest('hex'),
-    '55e5d4fc96d39560d96f3eee4716c2de5bef1c40e50c5fd381c09d6b8e1d703b');
+    '089ec943c4c94861fcc0777974ce243768a083077d1249ff7faf4a127b846895');
 });
 
 test('exact companion generation checks its fixed integer width', () => {

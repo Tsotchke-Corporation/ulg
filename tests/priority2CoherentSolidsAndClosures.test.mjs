@@ -80,7 +80,7 @@ test('P2: SOL-4 N-level chain passes mechanicsBuffer; solid thermal uses exposed
   assert.match(solidThermalSrc, /var exposed_area_m2 = 0\.0;/);
   assert.match(solidThermalSrc, /if \(exposed_area_m2 > 0\.0 && amb_t > 0\.0 && emiss > 0\.0\)/);
 
-  const wgslSrc = readFileSync(new URL('../ulg-gpu-abi/src/wgsl.js', import.meta.url), 'utf8');
+  const wgslSrc = readFileSync(new URL('../ulg-gpu-abi/src/sphRenderWgsl.js', import.meta.url), 'utf8');
   assert.match(wgslSrc, /let ang_mom = rel_pos_cross_v_weighted \* inv_w - cross\(mean_r, mean_velocity\);/);
   assert.match(wgslSrc, /let dispersion_sq_ms = max\(0\.0, raw_dispersion_sq - rigid_rot_sq\);/);
 });
@@ -126,7 +126,9 @@ test('P2: Vapor parcel law generalizes beyond H2O/air and scene isovalues use co
   const rEth = sphExactVaporParcelDropletRate({ r: 5e-6, rDry: 1e-7, kappa: 0.1, t: 300, p: 101325, s: 1.02, law: ethanolLaw });
   assert.ok(Number.isFinite(rEth.rate) && rEth.rate > 0);
 
-  const sceneSrc = readFileSync(new URL('../src/visualization/sphPhaseScene.js', import.meta.url), 'utf8');
+  const sceneSrc = readFileSync(new URL('../src/visualization/sphPhaseScene.js', import.meta.url), 'utf8')
+    + '\n'
+    + readFileSync(new URL('../src/visualization/sphPhaseSceneContracts.js', import.meta.url), 'utf8');
   assert.doesNotMatch(sceneSrc, /const SURFACE_CONFIG\s*=\s*\{\s*h2o:/);
   assert.match(sceneSrc, /function surfaceConfigForDescriptor\(renderKey, phase, densityKgPerM3 = null\)/);
 

@@ -221,6 +221,7 @@ test('A6 cross-machine WebRTC/signaling relay mesh runs 2-of-2 quorum, promotes 
     webSocketFactory,
     rtcPeerConnectionFactory,
     taskModuleUrl: SIM_A6_TASK_MODULE_URL,
+    allowedRemoteModules: [SIM_A6_TASK_MODULE_URL],
     announceIntervalMs: 30,
     staleMs: 300,
     timeoutMs: 5000
@@ -369,6 +370,7 @@ test('A6 PeerCompute NetworkManager adapter achieves 2-of-2 quorum and cleans up
   const opts = {
     roomId: 'pc-net-room',
     taskModuleUrl: SIM_A6_TASK_MODULE_URL,
+    allowedRemoteModules: [SIM_A6_TASK_MODULE_URL],
     announceIntervalMs: 30,
     staleMs: 300,
     timeoutMs: 5000

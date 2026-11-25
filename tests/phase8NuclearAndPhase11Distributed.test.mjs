@@ -120,22 +120,26 @@ test('Phase 11: local WebSocket relay connects requester, responders, and observ
     observerTransport = makeTransport('observer-O');
     observerTransport.onMessage((env) => observerMessages.push(env));
 
+    const allowedRemoteModules = [import.meta.url];
     respB = startClientDerivationResponder({
       peerId: 'resp-B',
       nodeId: 'node-B',
       transport: makeTransport('resp-B'),
+      allowedRemoteModules,
       announceIntervalMs: 60
     });
     respC = startClientDerivationResponder({
       peerId: 'resp-C',
       nodeId: 'node-C',
       transport: makeTransport('resp-C'),
+      allowedRemoteModules,
       announceIntervalMs: 60
     });
     respD = startClientDerivationResponder({
       peerId: 'resp-D',
       nodeId: 'node-D',
       transport: makeTransport('resp-D'),
+      allowedRemoteModules,
       announceIntervalMs: 60
     });
 
@@ -145,6 +149,7 @@ test('Phase 11: local WebSocket relay connects requester, responders, and observ
       replicaPeerIds: ['resp-C', 'resp-D'],
       transport: makeTransport('req-A'),
       taskModuleUrl: import.meta.url,
+      allowedRemoteModules,
       staleMs: 800,
       timeoutMs: 4000
     });

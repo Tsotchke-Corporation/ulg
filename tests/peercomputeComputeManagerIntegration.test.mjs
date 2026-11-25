@@ -569,11 +569,19 @@ function createInMemoryStateProviderMesh(peerIds = []) {
       async broadcast(message, options = {}) {
         const topic = options.topic || null;
         this.broadcastLog.push({ message, options });
+        const payload = message?.data?.update ?? message?.data;
+        const byteLength = ArrayBuffer.isView(payload)
+          ? payload.byteLength
+          : Array.isArray(payload)
+            ? payload.length
+            : typeof payload === 'string'
+              ? Buffer.from(payload, 'base64').byteLength
+              : null;
         deliveries.push({
           from: peerId,
           type: message?.type || null,
           topic,
-          byteLength: Array.isArray(message?.data) ? message.data.length : null
+          byteLength
         });
         for (const [targetPeerId, target] of managers.entries()) {
           if (targetPeerId === peerId) continue;
@@ -583,16 +591,20 @@ function createInMemoryStateProviderMesh(peerIds = []) {
         }
       },
       async sendToPeer(targetPeerId, message) {
+        const payload = message?.data?.update ?? message?.data;
+        const byteLength = ArrayBuffer.isView(payload)
+          ? payload.byteLength
+          : Array.isArray(payload)
+            ? payload.length
+            : typeof payload === 'string'
+              ? Buffer.from(payload, 'base64').byteLength
+              : null;
         deliveries.push({
           from: peerId,
           to: targetPeerId,
           type: message?.type || null,
           topic: null,
-          byteLength: Array.isArray(message?.data?.update)
-            ? message.data.update.length
-            : Array.isArray(message?.data)
-              ? message.data.length
-              : null
+          byteLength
         });
         const target = managers.get(targetPeerId);
         if (!target) throw new Error(`Unknown in-memory provider peer ${targetPeerId}`);
@@ -2848,14 +2860,20 @@ test('ULG resident pass-DAG can commit after redundant NodeKernel remote placeme
   const { createRemoteResultQuorumValidator } = quorumMod;
   const { encodeStateAsUpdate } = yjsMod;
 
-  const requester = makeStartedKernel(NodeKernel, { nodeId: 'ulg-requester-node' });
+  const allowedRemoteModules = [ULG_REMOTE_RESIDENT_PLACEMENT_FIXTURE_URL.href];
+  const requester = makeStartedKernel(NodeKernel, {
+    nodeId: 'ulg-requester-node',
+    allowedRemoteModules
+  });
   const responderB = makeStartedKernel(NodeKernel, {
     nodeId: 'ulg-responder-node-b',
-    enableRemoteComputeResponder: true
+    enableRemoteComputeResponder: true,
+    allowedRemoteModules
   });
   const responderC = makeStartedKernel(NodeKernel, {
     nodeId: 'ulg-responder-node-c',
-    enableRemoteComputeResponder: true
+    enableRemoteComputeResponder: true,
+    allowedRemoteModules
   });
   connectInMemoryKernelMesh({
     requester,
@@ -6040,6 +6058,10 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   if (!computeMod || !nodeMod || !stateMod) return;
   const { ComputeManager } = computeMod;
   const { NodeKernel } = nodeMod;
+  const allowedRemoteModules = [
+    ULG_PEERCOMPUTE_BROWSER_RESIDENT_HOST_MODULE_URL.href,
+    ULG_MLS_MPM_GPU_STEP_MODULE_URL.href
+  ];
   const host = await createPeerComputeResidentAuthorityHost({
     nodeKernelModuleUrl: PEERCOMPUTE_NODE_KERNEL_URL.href,
     computeManagerModuleUrl: PEERCOMPUTE_COMPUTE_MANAGER_URL.href,
@@ -6056,13 +6078,15 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
       maxIncomingPendingConnections: 0,
       enableNetVizDebugTelemetry: false,
       enableNetVizSessionBroadcast: false,
-      enableNetVizSessionDiscovery: false
+      enableNetVizSessionDiscovery: false,
+      allowedRemoteModules
     }
   });
   t.after(() => host.destroy?.());
   const responder = makeStartedKernel(NodeKernel, {
     nodeId: 'ulg-real-compute-remote-seed-responder',
-    enableRemoteTaskGraphResponder: true
+    enableRemoteTaskGraphResponder: true,
+    allowedRemoteModules
   });
   responder.computeManager = new ComputeManager({ enableWorkers: false });
   const messages = [];

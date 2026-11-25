@@ -27385,6 +27385,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   }
   let nativeTaskGraph = null;
   let gpuResidentLaneStagePlanLease = null;
+  let gpuResidentLaneStagePlanLeaseActive = false;
   let gpuResidentLaneStageNodeKernelPlacementPreflight = null;
   let gpuResidentLaneStageNodeKernelExecutionAuthority = null;
   let gpuResidentLaneStagePlacementPreflight = null;
@@ -27889,10 +27890,15 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         }
       };
       preflightGpuResidentLaneStagePlacement(gpuResidentLaneStagePlanLease.leaseId, stagePlanExecutionOptions);
-      gpuResidentLaneStagePlanExecution = await executeGpuResidentLaneStagePlan(
-        gpuResidentLaneStagePlanLease.leaseId,
-        stagePlanExecutionOptions
-      );
+      gpuResidentLaneStagePlanLeaseActive = true;
+      try {
+        gpuResidentLaneStagePlanExecution = await executeGpuResidentLaneStagePlan(
+          gpuResidentLaneStagePlanLease.leaseId,
+          stagePlanExecutionOptions
+        );
+      } finally {
+        gpuResidentLaneStagePlanLeaseActive = false;
+      }
       gpuResidentLaneStagePlanLeaseExecution =
         completeGpuResidentLaneStagePlanLease('ulg-mechanics-stage-plan-executor');
     } catch (error) {
@@ -27944,6 +27950,22 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       else if (stepOptions.navigatorRef) stageTaskOptions.navigatorRef = stepOptions.navigatorRef;
     }
     const task = createTask(stageTaskOptions);
+    if (
+      gpuResidentLaneStagePlanLeaseActive
+      && task?.gpuResidentLane?.laneId
+      && task.gpuResidentLane.laneId === gpuResidentLaneStagePlanLease?.laneId
+    ) {
+      // The enclosing stage-plan lease already holds exclusive family locks on
+      // this exact lane and GpuResidentLaneManager.executeStagePlan enforces
+      // per-stage family conflict deferral across batches. Preserve task-level
+      // and lawGraphNode family declarations while avoiding self-conflict
+      // against our own active parent stage-plan lease.
+      task.gpuResidentLane = {
+        ...task.gpuResidentLane,
+        readFamilies: [],
+        writeFamilies: []
+      };
+    }
     submittedStageTasks.push({
       stageId,
       taskId: task.id,
@@ -29467,10 +29489,15 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         stagePlanExecutionOptions.stageExecutors = laneStageExecutors;
       }
       preflightGpuResidentLaneStagePlacement(gpuResidentLaneStagePlanLease.leaseId, stagePlanExecutionOptions);
-      gpuResidentLaneStagePlanExecution = await executeGpuResidentLaneStagePlan(
-        gpuResidentLaneStagePlanLease.leaseId,
-        stagePlanExecutionOptions
-      );
+      gpuResidentLaneStagePlanLeaseActive = true;
+      try {
+        gpuResidentLaneStagePlanExecution = await executeGpuResidentLaneStagePlan(
+          gpuResidentLaneStagePlanLease.leaseId,
+          stagePlanExecutionOptions
+        );
+      } finally {
+        gpuResidentLaneStagePlanLeaseActive = false;
+      }
       await finalizeUnclaimedGasCellEosOwner(
         effectiveIncludePressureInterfaceStage ? 'not-run' : 'omitted'
       );

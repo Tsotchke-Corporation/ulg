@@ -695,6 +695,28 @@ export function createDerivationPeerTransport({
   };
 }
 
+function buildRemoteModulePolicyConfig({
+  allowedRemoteModules = null,
+  allowedRemoteModuleOrigins = null,
+  allowLocalFileRemoteModules = false,
+  remoteModuleBaseUrl = null
+} = {}) {
+  const config = {};
+  if (Array.isArray(allowedRemoteModules) && allowedRemoteModules.length > 0) {
+    config.allowedRemoteModules = [...allowedRemoteModules];
+  }
+  if (Array.isArray(allowedRemoteModuleOrigins) && allowedRemoteModuleOrigins.length > 0) {
+    config.allowedRemoteModuleOrigins = [...allowedRemoteModuleOrigins];
+  }
+  if (allowLocalFileRemoteModules === true) {
+    config.allowLocalFileRemoteModules = true;
+  }
+  if (typeof remoteModuleBaseUrl === 'string' && remoteModuleBaseUrl.trim()) {
+    config.remoteModuleBaseUrl = remoteModuleBaseUrl.trim();
+  }
+  return config;
+}
+
 export function startClientDerivationResponder({
   channelName = ULG_LIVE_CLIENT_DERIVATION_PEER_MESH_CHANNEL,
   peerId,
@@ -707,7 +729,11 @@ export function startClientDerivationResponder({
   rtcIceServers = [],
   webSocketFactory = null,
   rtcPeerConnectionFactory = null,
-  announceIntervalMs = 250
+  announceIntervalMs = 250,
+  allowedRemoteModules = null,
+  allowedRemoteModuleOrigins = null,
+  allowLocalFileRemoteModules = false,
+  remoteModuleBaseUrl = null
 } = {}) {
   globalThis.__ulgA6PeerId = peerId;
   const { transport: activeTransport, owned } = createDerivationPeerTransport({
@@ -722,7 +748,15 @@ export function startClientDerivationResponder({
     webSocketFactory,
     rtcPeerConnectionFactory
   });
-  const kernel = new NodeKernel({ enableRemoteComputeResponder: true });
+  const kernel = new NodeKernel({
+    enableRemoteComputeResponder: true,
+    ...buildRemoteModulePolicyConfig({
+      allowedRemoteModules,
+      allowedRemoteModuleOrigins,
+      allowLocalFileRemoteModules,
+      remoteModuleBaseUrl
+    })
+  });
   kernel.nodeId = nodeId;
   kernel.isStarted = true;
   kernel.computeManager = new ComputeManager({ enableWorkers: false });
@@ -767,7 +801,11 @@ export function startClientDerivationRequester({
   enableWebRtc = true,
   rtcIceServers = [],
   webSocketFactory = null,
-  rtcPeerConnectionFactory = null
+  rtcPeerConnectionFactory = null,
+  allowedRemoteModules = null,
+  allowedRemoteModuleOrigins = null,
+  allowLocalFileRemoteModules = false,
+  remoteModuleBaseUrl = null
 } = {}) {
   const { transport: activeTransport, owned } = createDerivationPeerTransport({
     transport,
@@ -781,7 +819,14 @@ export function startClientDerivationRequester({
     webSocketFactory,
     rtcPeerConnectionFactory
   });
-  const kernel = new NodeKernel({});
+  const kernel = new NodeKernel({
+    ...buildRemoteModulePolicyConfig({
+      allowedRemoteModules,
+      allowedRemoteModuleOrigins,
+      allowLocalFileRemoteModules,
+      remoteModuleBaseUrl
+    })
+  });
   kernel.nodeId = `requester:${peerId}`;
   kernel.isStarted = true;
   const presence = new Map();
@@ -915,7 +960,11 @@ export function startLiveClientDerivationPeerMesh({
   webSocketFactory = null,
   rtcPeerConnectionFactory = null,
   taskModuleUrl = null,
-  announceIntervalMs = 250
+  announceIntervalMs = 250,
+  allowedRemoteModules = null,
+  allowedRemoteModuleOrigins = null,
+  allowLocalFileRemoteModules = false,
+  remoteModuleBaseUrl = null
 } = {}) {
   const resolvedPeerId = String(peerId || networkManager?.peerId || `ulg-tab-${Math.random().toString(36).slice(2, 10)}`);
   peerId = resolvedPeerId;
@@ -949,12 +998,19 @@ export function startLiveClientDerivationPeerMesh({
       })
     : null;
 
+  const remoteModulePolicy = {
+    allowedRemoteModules,
+    allowedRemoteModuleOrigins,
+    allowLocalFileRemoteModules,
+    remoteModuleBaseUrl
+  };
   const responder = startClientDerivationResponder({
     channelName: resolvedRoomId,
     peerId,
     nodeId: resolvedNodeId,
     transport: shared?.transport ?? null,
-    announceIntervalMs
+    announceIntervalMs,
+    ...remoteModulePolicy
   });
   const discoveryTransport = shared
     ? shared.transport
@@ -1015,7 +1071,8 @@ export function startLiveClientDerivationPeerMesh({
       timeoutMs,
       staleMs,
       taskModuleUrl,
-      transport: shared?.transport ?? null
+      transport: shared?.transport ?? null,
+      ...remoteModulePolicy
     });
     const now = nowMs();
     for (const id of peers) {

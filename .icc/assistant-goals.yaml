@@ -5,11 +5,12 @@
 #
 # HONESTY RULE: Only mark a goal `completed` (`accepted`) after its
 # .icc/completion-oracles.yaml target passes on one reviewed
-# `ulg.campaign.receipt.v1` bundle on disk. All 8/8 active Scale-Ladder &
-# campaign gates are now formally accepted: g5-reservation, g7-release-audit,
-# gate0-foundation-arch, gate1-periodic-table-engine,
+# `ulg.campaign.receipt.v1` bundle on disk. All 9/9 active Scale-Ladder &
+# Architecture 1.0 campaign gates are now formally accepted: g5-reservation,
+# g7-release-audit, gate0-foundation-arch, gate1-periodic-table-engine,
 # gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics,
-# gate4-studio-presentation, and gate5-planetary-to-supergalactic.
+# gate4-studio-presentation, gate5-planetary-to-supergalactic, and
+# gate6-architecture-1-0.
 
 goals:
   - id: gate0-foundation-arch
@@ -75,12 +76,12 @@ goals:
   - id: gate6-architecture-1-0
     task_id: ulg-gate6-architecture-1-0
     priority: high
-    status: in_progress
+    status: completed
     goal: "Gate 6 (ULG Architecture 1.0 Completion): Declarative Law-IR -> WGSL compiler (JS + zero-LLVM C99 eshkol emitter) & Law-DAG epoch scheduler, parallel GPU kernel overhaul + 100K continuum scale proof, zero-private-grid unified continuum physics defaults, mechanical decomposition of 7 monoliths + plan/todo archive hygiene, and live unseen-material OPFS + PeerCompute CAS hot-swap loop"
     oracle: ulg-gate6-architecture-1-0
     depends_on: [gate0-foundation-arch, gate1-periodic-table-engine, gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics, gate4-studio-presentation, gate5-planetary-to-supergalactic]
-    reason: "Phases A-E implemented on feat/gate6-architecture-1-0; running full pre-acceptance verification battery and independent adversarial read-only review before formal ulg-gate6-architecture-1-0 acceptance."
-    tags: [ulg-scale-ladder, gate-6, architecture-1-0, in-progress]
+    reason: "Accepted 2026-11-25 at ULG commit e4631ccb (dirty: false, branch feat/gate6-architecture-1-0, publication hold active) + sibling eshkol commit fc771717d (dirty: false): ICC completion-oracle ulg-gate6-architecture-1-0 3/3 PASS (status: complete, 0 dropped/truncated) on FRESH ICC index after 3-round adversarial independent review (Round 1 FAIL d0513253 f84d775e & Round 2 FAIL 0f621fba b44f0897 preserved verbatim; Round 3 ACCEPT e4631ccb 5e8164b8). Verified JS + zero-LLVM C99 eshkol (-std=c99 -Wall -Wextra -Werror, 256-node multi-slab arena) Law-IR -> WGSL Tait EOS + AD parity & Law-DAG view hoisting (sharedViewIdentityMatched=true, hoistedViewBuilds=1, hoistedViewReuses=1, live=0) on Vulkan; 10 hot-path @workgroup_size(1) kernels parallelized with permanent 233<=233 ratchet & 11264<=16384 B WG storage; 100K live continuum H2O carriers at 5.40 ms/step <= 10 ms/step (0.125 submits/step, 8.125 passes/step, massRelErr=0, summaryStatus=compact-summary-ready); 0 private 4096-bucket hashes & 0 replaceRequiredWgsl(; exact momentum-conserving FLIP unilateral solid-liquid slip live in production (+0 submits); authorityValidationBuffer leak & validate_coarse_velocity_publish physical coarse CFL reject witness fixed; all 5/5 Studio scripts/gpuprobe.sh sweeps PASS with S0_RESIDENT_PERF=1 S0_ATTRIBUTION=1 at CPUQuota=50% (water-realtime 1.2144x RT / 0.00 createBuffer/step; water-cycle/iron/sodium inside all Section 3 budgets; cesium-fluorine continuous past step 28 through schedule:16 / laneSteps=64 / 68 steps in PNG, blocked=false, play=Pause, active green Pause & GPU through window end); all 7 monoliths decomposed into 14 submodules (1132/1132 bit-exact export parity, 38M < 45 MB dist/, AI_ASSETS=0) + 26 plan/todo archives; live unseen KBr & GeO2 GPU derivation -> real OPFS -> PeerCompute CAS bank hot-swap -> cross-reload bit-exact continuum hit & corrupt-cache eviction/epoch recovery (0->1); 10/10 native Vulkan PASS (0 skipped); 6255/6255 host PASS (0 fail, 211 skips); KERNEL_CLEAN. scientificValidation=false & offline G7 advisory preserved. Evidence: /home/cos/.cache/icc/repos/ulg/gate6-acceptance-20261125/ and plan/done/gate6-architecture-1-0.md."
+    tags: [ulg-scale-ladder, gate-6, architecture-1-0, accepted]
 
   - id: g5-reservation
     task_id: ulg-g5-reservation

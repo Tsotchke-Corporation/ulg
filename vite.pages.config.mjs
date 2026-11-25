@@ -245,9 +245,7 @@ export default defineConfig({
       input: {
         pages: fileURLToPath(new URL('./pages.html', import.meta.url)),
         elementsLab: fileURLToPath(new URL('./elements-lab.html', import.meta.url)),
-        supergalactic: fileURLToPath(new URL('./supergalactic.html', import.meta.url)),
-        cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url)),
-        stellarGenesis: fileURLToPath(new URL('./stellar-genesis.html', import.meta.url)),
+        universes: fileURLToPath(new URL('./universes.html', import.meta.url)),
         peercomputeComputeWorker: resolve(
           pagesPeercomputeRoot,
           'src/peercompute/computeManager/computeWorker.js'

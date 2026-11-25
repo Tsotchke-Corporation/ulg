@@ -41,16 +41,23 @@ test('Star Spec anti-hack static gate: zero origin hacks, zero logT_virial targe
   assert.ok(engineSrc.includes('createSchroederScaleAtlasGravitySolverWebGpu'),
     'selfGravitatingHydroGpu.js must wire canonical SchroederScaleAtlas multipole gravity');
 
-  const demoSrc = fs.readFileSync(path.join(ROOT, 'src/demos/stellarGenesisDemo.js'), 'utf8');
-  for (const forbiddenProp of [
-    'isBinary', 'binaryGlowLeft', 'binaryGlowRight',
-    'primaryStarGlow', 'outerCoronaGlow',
-    'bhHorizonMesh', 'bhPhotonRing', 'bhAccretionDisk',
-    'snShockShell', 'snShockRing', 'jetTop', 'jetBot',
-    'protonA', 'protonB', 'h2BondCyl', 'coulombBarrierMesh', 'fusionFlashGlow'
-  ]) {
-    assert.equal(demoSrc.includes(forbiddenProp), false,
-      `stellarGenesisDemo.js must not contain bespoke/canned/scripted prop "${forbiddenProp}"`);
+  const universesFiles = [
+    'src/demos/ulgUniversesDemo.js',
+    'src/demos/ulgUniversesPhysics.js',
+    'src/demos/ulgUniversesRenderer.js'
+  ];
+  for (const rel of universesFiles) {
+    const demoSrc = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    for (const forbiddenProp of [
+      'isBinary', 'binaryGlowLeft', 'binaryGlowRight',
+      'primaryStarGlow', 'outerCoronaGlow',
+      'bhHorizonMesh', 'bhPhotonRing', 'bhAccretionDisk',
+      'snShockShell', 'snShockRing', 'jetTop', 'jetBot',
+      'protonA', 'protonB', 'h2BondCyl', 'coulombBarrierMesh', 'fusionFlashGlow'
+    ]) {
+      assert.equal(demoSrc.includes(forbiddenProp), false,
+        `${rel} must not contain bespoke/canned/scripted prop "${forbiddenProp}"`);
+    }
   }
 
   const presenterSrc = fs.readFileSync(path.join(ROOT, 'src/runtime/residentGpuPresenter.js'), 'utf8');

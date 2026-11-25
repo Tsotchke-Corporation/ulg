@@ -59,17 +59,24 @@ test('Star Spec anti-hack static gate: zero phase_mode, zero origin bowl, zero C
   assert.throws(() => deriveContinuumConstitutiveParams({ phase: 'liquid' }), /fails closed/i);
   assert.equal(createResidentBarnesHutNBodyEngine, createResidentScaleAtlasMultipoleNBodyEngine);
 
-  const demoSrc = fs.readFileSync(path.join(ROOT, 'src/demos/cosmicQuantumZoomDemo.js'), 'utf8');
-  for (const forbiddenDemo of [
-    'galacticCoreGlow',
-    'continuumSpecimenMesh',
-    'continuumGasCloud',
-    'Math.cos(ang) * pl.a',
-    'Math.sin(simClock * 3.1)',
-    "galaxyPreset !== 'binary'"
-  ]) {
-    assert.equal(demoSrc.includes(forbiddenDemo), false,
-      `cosmicQuantumZoomDemo.js must not contain scripted/origin-hack token "${forbiddenDemo}"`);
+  const universesFiles = [
+    'src/demos/ulgUniversesDemo.js',
+    'src/demos/ulgUniversesPhysics.js',
+    'src/demos/ulgUniversesRenderer.js'
+  ];
+  for (const rel of universesFiles) {
+    const demoSrc = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    for (const forbiddenDemo of [
+      'galacticCoreGlow',
+      'continuumSpecimenMesh',
+      'continuumGasCloud',
+      'Math.cos(ang) * pl.a',
+      'Math.sin(simClock * 3.1)',
+      "galaxyPreset !== 'binary'"
+    ]) {
+      assert.equal(demoSrc.includes(forbiddenDemo), false,
+        `${rel} must not contain scripted/origin-hack token "${forbiddenDemo}"`);
+    }
   }
 
   // Strictly GPU-native: all three engines fail closed without a WebGPU GPUDevice

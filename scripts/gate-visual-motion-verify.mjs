@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Headless Vulkan sequential visual & physical pixel-motion verification across
-// Gate 1-2 (`elements-lab.html`), Gate 5D (`supergalactic.html`), and Gate 4
+// Gate 1-2 (`elements-lab.html`), Gate 5D (`universes.html`), and Gate 4
 // ULG Studio (`pages.html` across all 5 active presets).
 //
 // Uses ULG's decoded pixel-delta engine (`scripts/physicalPixelPngEvidence.mjs`)
@@ -118,40 +118,38 @@ async function run() {
     }
 
     // ------------------------------------------------------------------
-    // 2. Gate 5D: supergalactic.html (live FLRW 3D-FFT TreePM cosmic web)
+    // 2. Gate 5D: universes.html (live FLRW 3D-FFT TreePM cosmic web)
     // ------------------------------------------------------------------
     {
       const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
       const page = await ctx.newPage();
       const pageErrors = [];
       page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 300)));
-      await page.goto(`${BASE_URL}supergalactic.html`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await page.goto(`${BASE_URL}universes.html?level=0`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       await page.waitForFunction(
-        () => (window.__ulgSupergalacticState?.stepIndex ?? 0) >= 2,
+        () => (window.__ulgUniversesDemo?.getState?.()?.cosmicWebSteps ?? 0) >= 2,
         null,
         { timeout: 45_000 }
       );
-      const t0State = await page.evaluate(() => ({
-        step: window.__ulgSupergalacticState?.stepIndex,
-        aScale: window.__ulgSupergalacticState?.scaleFactorA,
-        sigma: window.__ulgSupergalacticState?.sigmaDensity
-      }));
-      const sg0Url = await page.evaluate(() => window.__ulgCaptureSupergalacticPng());
+      const t0State = await page.evaluate(() => {
+        const s = window.__ulgUniversesDemo?.getState?.();
+        return { step: s?.cosmicWebSteps, aScale: s?.scaleFactorA, sigma: s?.sigmaDensity };
+      });
+      const sg0Url = await page.evaluate(() => window.__ulgUniversesDemo.capturePng());
       const sg0 = Buffer.from(sg0Url.split(',')[1], 'base64');
-      await writeFile(path.join(OUT_DIR, 'supergalactic-t0.png'), sg0);
+      await writeFile(path.join(OUT_DIR, 'universes-l0-t0.png'), sg0);
       await page.waitForFunction(
-        (prevStep) => (window.__ulgSupergalacticState?.stepIndex ?? 0) >= prevStep + 14,
+        (prevStep) => (window.__ulgUniversesDemo?.getState?.()?.cosmicWebSteps ?? 0) >= prevStep + 14,
         t0State.step,
         { timeout: 45_000 }
       );
-      const t1State = await page.evaluate(() => ({
-        step: window.__ulgSupergalacticState?.stepIndex,
-        aScale: window.__ulgSupergalacticState?.scaleFactorA,
-        sigma: window.__ulgSupergalacticState?.sigmaDensity
-      }));
-      const sg1Url = await page.evaluate(() => window.__ulgCaptureSupergalacticPng());
+      const t1State = await page.evaluate(() => {
+        const s = window.__ulgUniversesDemo?.getState?.();
+        return { step: s?.cosmicWebSteps, aScale: s?.scaleFactorA, sigma: s?.sigmaDensity };
+      });
+      const sg1Url = await page.evaluate(() => window.__ulgUniversesDemo.capturePng());
       const sg1 = Buffer.from(sg1Url.split(',')[1], 'base64');
-      await writeFile(path.join(OUT_DIR, 'supergalactic-t1.png'), sg1);
+      await writeFile(path.join(OUT_DIR, 'universes-l0-t1.png'), sg1);
       const sgDelta = comparePhysicalPixelPngFrames(sg0, sg1);
       report.supergalactic = {
         t0: t0State,

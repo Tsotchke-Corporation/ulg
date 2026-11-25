@@ -17,22 +17,10 @@ export const ULG_LINKS = Object.freeze({
       desc: 'Interactive macroscopic 3D WebGPU MLS-MPM fluid, phase transitions, volumetric optics, and reactive continuum studio.'
     },
     {
-      href: './cosmic-quantum.html',
-      title: 'Cosmic ↔ Quantum',
-      scale: '10⁻¹⁵ → 10⁺²⁵ m',
-      desc: 'Unified 40-order-of-magnitude scale explorer connecting quantum closures to planetary, stellar, galactic, and cosmic scales.'
-    },
-    {
-      href: './stellar-genesis.html',
-      title: 'Stellar Genesis',
-      scale: '10⁺⁸ → 10⁺¹¹ m',
-      desc: 'Live WebGPU thermonuclear fusion networks, Lane–Emden hydrostatic structure, and stellar core evolution.'
-    },
-    {
-      href: './supergalactic.html',
-      title: 'Supergalactic TreePM ↗',
-      scale: '10⁺²² → 10⁺²⁵ m',
-      desc: '1-submit FLRW 3D-FFT TreePM cosmic web, live GPU matter power spectrum P(k), and PeerCompute WebRTC partitioning.'
+      href: './universes.html',
+      title: 'ULG Universes ↗',
+      scale: '10⁺²⁵ → 10⁻¹⁵ m',
+      desc: 'Interactive 40-order-of-magnitude WebGPU explorer spanning FLRW Cosmic Web, Galaxies with SMBH lensing, Star Systems, Stellar Cores, Planetary Cutaways, MD, Dirac–KS Atoms, and Atomic Nuclei.'
     }
   ])
 });

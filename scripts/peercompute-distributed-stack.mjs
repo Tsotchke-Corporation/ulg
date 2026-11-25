@@ -39,7 +39,7 @@ console.log('');
 console.log('Open across 3 browser windows or 2+ machines:');
 console.log(`  Requester:  ${appOrigin}/?preset=iron-ice-quench&peerRelay=${encodedRelay}&peerRoom=${encodedRoom}&peerRole=requester`);
 console.log(`  Responder1: ${appOrigin}/?peerRelay=${encodedRelay}&peerRoom=${encodedRoom}&peerRole=responder`);
-console.log(`  Observer:   ${appOrigin}/cosmic-quantum.html?peerRelay=${encodedRelay}&peerRoom=${encodedRoom}&peerRole=observer`);
+console.log(`  Observer:   ${appOrigin}/universes.html?level=6&peerRelay=${encodedRelay}&peerRoom=${encodedRoom}&peerRole=observer`);
 
 process.on('SIGINT', async () => {
   await relay.close();

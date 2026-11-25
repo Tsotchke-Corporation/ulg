@@ -1120,11 +1120,11 @@ test('general scan and radix shaders remain parallel while the bounded serial ke
   assert.doesNotMatch(webGpuStableRadixWgsl, /@workgroup_size\(1\)[\s\S]*prefix/i);
   assert.match(
     webGpuSerialRadixHistogramScanWgsl,
-    /@compute @workgroup_size\(1\)[\s\S]*fn scan_histogram_serial/
+    /@compute @workgroup_size\(64\)[\s\S]*fn scan_histogram_serial/
   );
   assert.match(
     webGpuSerialRadixHistogramScanWgsl,
-    /radix_histogram_offsets\[index\] = running;[\s\S]*running = running \+ radix_histograms\[index\]/
+    /radix_histogram_offsets\[idx\] = carry \+ \(hist_scan_wg\[lane\] - val\)/
   );
   assert.match(webGpuSortedUniqueWgsl, /fn mark_heads/);
   assert.match(webGpuSortedUniqueWgsl, /fn scatter_unique/);

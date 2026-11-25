@@ -3653,31 +3653,78 @@ fn count_placement_rows(
   }
 }
 
-// Scan only the group totals (ceil(N/64)), never the dense event capacity.
-@compute @workgroup_size(1)
-fn scan_placement_row_groups(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  if (global_id.x != 0u) { return; }
-  var total = 0u;
-  var overflow = 0u;
+var<workgroup> compact_group_scan_carry: u32;
+var<workgroup> compact_group_scan_overflow: atomic<u32>;
+
+// Workgroup-parallel multi-tile scan over the group totals (ceil(N/64)).
+@compute @workgroup_size(64)
+fn scan_placement_row_groups(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  if (workgroup_id.x != 0u) { return; }
+  let lane = local_id.x;
   let group_count = min(params.group_count, arrayLength(&compact_group_counts));
-  for (var group = 0u; group < group_count; group = group + 1u) {
-    if (group >= arrayLength(&compact_group_offsets)) {
-      overflow = overflow + 1u;
-      continue;
-    }
-    compact_group_offsets[group] = total;
-    let next_total = total + compact_group_counts[group];
-    if (next_total < total || next_total > params.row_count) {
-      overflow = overflow + 1u;
-    }
-    total = min(next_total, params.row_count);
+  let offsets_len = arrayLength(&compact_group_offsets);
+  if (lane == 0u) {
+    compact_group_scan_carry = 0u;
+    atomicStore(&compact_group_scan_overflow, 0u);
   }
-  compact_counts[0] = select(total, 0u, overflow != 0u);
-  if (arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScanPassCount}] = 1u;
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.activeEventCount}] = compact_counts[0];
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionLiveFlagCount}] = total;
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionOverflowCount}] = overflow;
+  workgroupBarrier();
+  let tiles = (group_count + 63u) / 64u;
+  for (var tile = 0u; tile < tiles; tile = tile + 1u) {
+    let group = tile * 64u + lane;
+    var val = 0u;
+    if (group < group_count) {
+      if (group >= offsets_len) {
+        atomicAdd(&compact_group_scan_overflow, 1u);
+      } else {
+        val = compact_group_counts[group];
+      }
+    }
+    compact_scan_rows[lane] = val;
+    workgroupBarrier();
+    var offset = 1u;
+    loop {
+      if (offset >= 64u) { break; }
+      var preceding = 0u;
+      if (lane >= offset) { preceding = compact_scan_rows[lane - offset]; }
+      workgroupBarrier();
+      let current = compact_scan_rows[lane];
+      workgroupBarrier();
+      compact_scan_rows[lane] = current + preceding;
+      workgroupBarrier();
+      offset = offset * 2u;
+    }
+    let carry = compact_group_scan_carry;
+    if (group < group_count && group < offsets_len) {
+      let excl = carry + (compact_scan_rows[lane] - val);
+      let incl = carry + compact_scan_rows[lane];
+      compact_group_offsets[group] = min(excl, params.row_count);
+      if (incl < excl || incl > params.row_count) {
+        atomicAdd(&compact_group_scan_overflow, 1u);
+      }
+    }
+    workgroupBarrier();
+    if (lane == 63u) {
+      let next_carry = carry + compact_scan_rows[63u];
+      if (next_carry < carry || next_carry > params.row_count) {
+        atomicAdd(&compact_group_scan_overflow, 1u);
+      }
+      compact_group_scan_carry = min(next_carry, params.row_count);
+    }
+    workgroupBarrier();
+  }
+  if (lane == 0u) {
+    let total = compact_group_scan_carry;
+    let overflow = atomicLoad(&compact_group_scan_overflow);
+    compact_counts[0] = select(total, 0u, overflow != 0u);
+    if (arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScanPassCount}] = 1u;
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.activeEventCount}] = compact_counts[0];
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionLiveFlagCount}] = total;
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionOverflowCount}] = overflow;
+    }
   }
 }
 
@@ -3807,29 +3854,67 @@ fn count_placement_rows(@builtin(global_invocation_id) global_id: vec3<u32>,
     placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionInputVisitCount}u] = params.row_count;
   }
 }
-@compute @workgroup_size(1)
-fn scan_placement_row_groups(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x != 0u) { return; }
-  var error = select(1u,0u,exact_compact_layout_ready()); var total = 0u;
-  if (error == 0u) {
-    for (var group = 0u; group < params.group_count; group++) {
-      let packed = compact_group_counts[group]; let count = packed & 0x7fffffffu;
-      let remaining = params.row_count - group * 64u;
-      if ((packed & 0x80000000u) != 0u || count > min(64u,remaining)) { error = 1u; }
-      compact_group_offsets[group] = total;
-      let next = total + count; if (next < total || next > params.row_count) { error = 1u; }
-      total = next;
-    }
-    if (total > arrayLength(&compact_events) / 8u) { error = 1u; }
+var<workgroup> exact_compact_carry: u32;
+@compute @workgroup_size(64)
+fn scan_placement_row_groups(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+  if (wid.x != 0u) { return; }
+  let lane = lid.x;
+  let ready = exact_compact_layout_ready();
+  if (lane == 0u) {
+    exact_compact_carry = 0u;
+    atomicStore(&exact_compact_error, select(1u, 0u, ready));
   }
-  if (arrayLength(&compact_counts) > 0u) { compact_counts[0u] = select(total,0u,error != 0u); }
-  if (arrayLength(&compact_counts) > 1u) { compact_counts[1u] = error; }
-  if (arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScanPassCount}u] = 1u;
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.activeEventCount}u] = select(total,0u,error != 0u);
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionLiveFlagCount}u] = total;
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionOverflowCount}u] = error;
-    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScatterPassCount}u] = 0u;
+  workgroupBarrier();
+  let group_count = select(0u, params.group_count, ready);
+  let tiles = (group_count + 63u) / 64u;
+  for (var tile = 0u; tile < tiles; tile = tile + 1u) {
+    let group = tile * 64u + lane;
+    var count = 0u;
+    if (group < group_count) {
+      let packed = compact_group_counts[group];
+      count = packed & 0x7fffffffu;
+      let remaining = params.row_count - group * 64u;
+      if ((packed & 0x80000000u) != 0u || count > min(64u, remaining)) {
+        atomicOr(&exact_compact_error, 1u);
+      }
+    }
+    exact_compact_scan[lane] = count;
+    workgroupBarrier();
+    var offset = 1u;
+    loop {
+      if (offset >= 64u) { break; }
+      var preceding = 0u; if (lane >= offset) { preceding = exact_compact_scan[lane - offset]; }
+      workgroupBarrier(); let current = exact_compact_scan[lane]; workgroupBarrier();
+      exact_compact_scan[lane] = current + preceding; workgroupBarrier(); offset *= 2u;
+    }
+    let carry = exact_compact_carry;
+    if (group < group_count) {
+      let excl = carry + (exact_compact_scan[lane] - count);
+      let incl = carry + exact_compact_scan[lane];
+      compact_group_offsets[group] = excl;
+      if (incl < excl || incl > params.row_count) { atomicOr(&exact_compact_error, 1u); }
+    }
+    workgroupBarrier();
+    if (lane == 63u) {
+      let next_carry = carry + exact_compact_scan[63u];
+      if (next_carry < carry || next_carry > params.row_count) { atomicOr(&exact_compact_error, 1u); }
+      exact_compact_carry = next_carry;
+    }
+    workgroupBarrier();
+  }
+  if (lane == 0u) {
+    let total = exact_compact_carry;
+    if (ready && total > arrayLength(&compact_events) / 8u) { atomicOr(&exact_compact_error, 1u); }
+    let error = atomicLoad(&exact_compact_error);
+    if (arrayLength(&compact_counts) > 0u) { compact_counts[0u] = select(total,0u,error != 0u); }
+    if (arrayLength(&compact_counts) > 1u) { compact_counts[1u] = error; }
+    if (arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScanPassCount}u] = 1u;
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.activeEventCount}u] = select(total,0u,error != 0u);
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionLiveFlagCount}u] = total;
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionOverflowCount}u] = error;
+      placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScatterPassCount}u] = 0u;
+    }
   }
 }
 @compute @workgroup_size(64)
@@ -5793,25 +5878,45 @@ fn reduce_placement_spatial_envelope(
   }
 }
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(64)
 fn finalize_placement_spatial_envelope(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
-  if (global_id.x != 0u || arrayLength(&placement_control) == 0u) { return; }
-  placement_control[0] = vec4<f32>(0.0);
-  var maximum_radius_m = 0.0;
-  var maximum_displacement_m = 0.0;
-  var admitted_count = 0u;
+  if (workgroup_id.x != 0u || arrayLength(&placement_control) == 0u) { return; }
+  let lane = local_id.x;
   let partial_count = min(
     (params.particle_count + 63u) / 64u,
     arrayLength(&envelope_partials)
   );
-  for (var partial = 0u; partial < partial_count; partial = partial + 1u) {
+  var maximum_radius_m = 0.0;
+  var maximum_displacement_m = 0.0;
+  var admitted_count = 0u;
+  for (var partial = lane; partial < partial_count; partial = partial + 64u) {
     let row = envelope_partials[partial];
     maximum_radius_m = max(maximum_radius_m, row.x);
     maximum_displacement_m = max(maximum_displacement_m, row.y);
     admitted_count = admitted_count + u32(max(row.z, 0.0));
   }
+  envelope_radius[lane] = maximum_radius_m;
+  envelope_displacement[lane] = maximum_displacement_m;
+  envelope_admitted_count[lane] = admitted_count;
+  workgroupBarrier();
+  var width = 32u;
+  loop {
+    if (width == 0u) { break; }
+    if (lane < width) {
+      envelope_radius[lane] = max(envelope_radius[lane], envelope_radius[lane + width]);
+      envelope_displacement[lane] = max(envelope_displacement[lane], envelope_displacement[lane + width]);
+      envelope_admitted_count[lane] = envelope_admitted_count[lane] + envelope_admitted_count[lane + width];
+    }
+    workgroupBarrier();
+    width = width / 2u;
+  }
+  if (lane != 0u) { return; }
+  let final_radius = envelope_radius[0];
+  let final_displacement = envelope_displacement[0];
+  let final_admitted_count = envelope_admitted_count[0];
   let admitted = params.canonical_spatial_enabled != 0u
     && partial_count == (params.particle_count + 63u) / 64u
     && atomicLoad(
@@ -5823,10 +5928,10 @@ fn finalize_placement_spatial_envelope(
       ) & ${SPH_REACTION_PRODUCT_PLACEMENT_OVERFLOW_FLAGS.MOTION_BOUND_REJECTED}u
     ) == 0u;
   placement_control[0] = vec4<f32>(
-    maximum_radius_m,
-    maximum_displacement_m,
+    final_radius,
+    final_displacement,
     select(0.0, 1.0, admitted),
-    f32(admitted_count)
+    f32(final_admitted_count)
   );
   atomicStore(
     &placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.envelopeFinalizePassCount}],
@@ -6455,73 +6560,98 @@ struct ReactionSummaryParams {
 @group(0) @binding(1) var<storage, read_write> reaction_summary: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> params: ReactionSummaryParams;
 
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  if (global_id.x > 0u) {
-    return;
-  }
-  var changed_material = 0.0;
-  var changed_mass = 0.0;
-  var visible_product_mass = 0.0;
-  var visible_gas_product_mass = 0.0;
-  var output_gas_phase_mass = 0.0;
-  var source_mass = 0.0;
-  var next_mass = 0.0;
-  var thermal_ready = 0.0;
-  var thermal_problem = 0.0;
-  var finite_temperature = 0.0;
-  var canonical_events = 0.0;
-  var consumed_reactant_mass = 0.0;
-  var expected_product_mass = 0.0;
-  var raw_product_mass = 0.0;
-  var ledger_visible_product_mass = 0.0;
-  var ledger_unplaced_product_mass = 0.0;
-  var ledger_gas_product_mass = 0.0;
-  var ledger_visible_gas_product_mass = 0.0;
-  var ledger_unplaced_gas_product_mass = 0.0;
-  var sealed_box_gas_product_moles = 0.0;
-  var reaction_heat = 0.0;
-  var ledger_mass_residual = 0.0;
-  var ledger_ready_events = 0.0;
-  var ledger_problem_events = 0.0;
-  var mutual_pairs = 0.0;
-  var compact_ledger_available = 0.0;
-  for (var partial_index = 0u; partial_index < params.partial_count; partial_index = partial_index + 1u) {
+var<workgroup> rx_sum_r0: array<vec4<f32>, 64>;
+var<workgroup> rx_sum_r1: array<vec4<f32>, 64>;
+var<workgroup> rx_sum_r2: array<vec4<f32>, 64>;
+var<workgroup> rx_sum_r3: array<vec4<f32>, 64>;
+var<workgroup> rx_sum_r4: array<vec4<f32>, 64>;
+var<workgroup> rx_sum_r5: array<vec4<f32>, 64>;
+var<workgroup> rx_sum_r6: array<vec4<f32>, 64>;
+
+@compute @workgroup_size(64)
+fn main(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  if (workgroup_id.x > 0u) { return; }
+  let lane = local_id.x;
+  var acc0 = vec4<f32>(0.0);
+  var acc1 = vec4<f32>(0.0);
+  var acc2 = vec4<f32>(0.0);
+  var acc3 = vec4<f32>(0.0);
+  var acc4 = vec4<f32>(0.0);
+  var acc5 = vec4<f32>(0.0);
+  var acc6 = vec4<f32>(0.0);
+  for (var partial_index = lane; partial_index < params.partial_count; partial_index = partial_index + 64u) {
     let base = partial_index * 8u;
-    let row0 = partial_summaries[base];
-    let row1 = partial_summaries[base + 1u];
-    let row2 = partial_summaries[base + 2u];
-    let row3 = partial_summaries[base + 3u];
-    let row4 = partial_summaries[base + 4u];
-    let row5 = partial_summaries[base + 5u];
-    let row6 = partial_summaries[base + 6u];
-    changed_material = changed_material + row0.x;
-    changed_mass = changed_mass + row0.y;
-    visible_product_mass = visible_product_mass + row0.z;
-    visible_gas_product_mass = visible_gas_product_mass + row0.w;
-    output_gas_phase_mass = output_gas_phase_mass + row1.x;
-    source_mass = source_mass + row1.y;
-    next_mass = next_mass + row1.z;
-    thermal_ready = thermal_ready + row2.x;
-    thermal_problem = thermal_problem + row2.y;
-    finite_temperature = finite_temperature + row2.z;
-    canonical_events = canonical_events + row3.x;
-    consumed_reactant_mass = consumed_reactant_mass + row3.y;
-    expected_product_mass = expected_product_mass + row3.z;
-    raw_product_mass = raw_product_mass + row3.w;
-    ledger_visible_product_mass = ledger_visible_product_mass + row4.x;
-    ledger_unplaced_product_mass = ledger_unplaced_product_mass + row4.y;
-    ledger_gas_product_mass = ledger_gas_product_mass + row4.z;
-    ledger_visible_gas_product_mass = ledger_visible_gas_product_mass + row4.w;
-    ledger_unplaced_gas_product_mass = ledger_unplaced_gas_product_mass + row5.x;
-    sealed_box_gas_product_moles = sealed_box_gas_product_moles + row5.y;
-    reaction_heat = reaction_heat + row5.z;
-    ledger_mass_residual = ledger_mass_residual + row5.w;
-    ledger_ready_events = ledger_ready_events + row6.x;
-    ledger_problem_events = ledger_problem_events + row6.y;
-    mutual_pairs = mutual_pairs + row6.z;
-    compact_ledger_available = max(compact_ledger_available, row6.w);
+    acc0 = acc0 + partial_summaries[base];
+    acc1 = acc1 + partial_summaries[base + 1u];
+    acc2 = acc2 + partial_summaries[base + 2u];
+    acc3 = acc3 + partial_summaries[base + 3u];
+    acc4 = acc4 + partial_summaries[base + 4u];
+    acc5 = acc5 + partial_summaries[base + 5u];
+    let r6 = partial_summaries[base + 6u];
+    acc6 = vec4<f32>(acc6.xyz + r6.xyz, max(acc6.w, r6.w));
   }
+  rx_sum_r0[lane] = acc0;
+  rx_sum_r1[lane] = acc1;
+  rx_sum_r2[lane] = acc2;
+  rx_sum_r3[lane] = acc3;
+  rx_sum_r4[lane] = acc4;
+  rx_sum_r5[lane] = acc5;
+  rx_sum_r6[lane] = acc6;
+  workgroupBarrier();
+  var stride = 32u;
+  loop {
+    if (stride == 0u) { break; }
+    if (lane < stride) {
+      rx_sum_r0[lane] = rx_sum_r0[lane] + rx_sum_r0[lane + stride];
+      rx_sum_r1[lane] = rx_sum_r1[lane] + rx_sum_r1[lane + stride];
+      rx_sum_r2[lane] = rx_sum_r2[lane] + rx_sum_r2[lane + stride];
+      rx_sum_r3[lane] = rx_sum_r3[lane] + rx_sum_r3[lane + stride];
+      rx_sum_r4[lane] = rx_sum_r4[lane] + rx_sum_r4[lane + stride];
+      rx_sum_r5[lane] = rx_sum_r5[lane] + rx_sum_r5[lane + stride];
+      let a = rx_sum_r6[lane];
+      let b = rx_sum_r6[lane + stride];
+      rx_sum_r6[lane] = vec4<f32>(a.xyz + b.xyz, max(a.w, b.w));
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  if (lane != 0u) { return; }
+  let r0 = rx_sum_r0[0];
+  let r1 = rx_sum_r1[0];
+  let r2 = rx_sum_r2[0];
+  let r3 = rx_sum_r3[0];
+  let r4 = rx_sum_r4[0];
+  let r5 = rx_sum_r5[0];
+  let r6 = rx_sum_r6[0];
+  let changed_material = r0.x;
+  let changed_mass = r0.y;
+  let visible_product_mass = r0.z;
+  let visible_gas_product_mass = r0.w;
+  let output_gas_phase_mass = r1.x;
+  let source_mass = r1.y;
+  let next_mass = r1.z;
+  let thermal_ready = r2.x;
+  let thermal_problem = r2.y;
+  let finite_temperature = r2.z;
+  let canonical_events = r3.x;
+  let consumed_reactant_mass = r3.y;
+  let expected_product_mass = r3.z;
+  let raw_product_mass = r3.w;
+  let ledger_visible_product_mass = r4.x;
+  let ledger_unplaced_product_mass = r4.y;
+  let ledger_gas_product_mass = r4.z;
+  let ledger_visible_gas_product_mass = r4.w;
+  let ledger_unplaced_gas_product_mass = r5.x;
+  let sealed_box_gas_product_moles = r5.y;
+  let reaction_heat = r5.z;
+  let ledger_mass_residual = r5.w;
+  let ledger_ready_events = r6.x;
+  let ledger_problem_events = r6.y;
+  let mutual_pairs = r6.z;
+  let compact_ledger_available = r6.w;
   reaction_summary[0u] = vec4<f32>(
     f32(params.particle_count),
     f32(params.reaction_count),
@@ -14293,11 +14423,19 @@ struct ResidentSummaryParams {
 @group(0) @binding(1) var<storage, read_write> resident_summary: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> params: ResidentSummaryParams;
 
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  if (global_id.x > 0u) {
+// Compact 64-lane workgroup memory (22 * 64 * 16 B = 22.5 KiB -> stay <= 16 KiB
+// baseline limit by using @workgroup_size(32): 22 * 32 * 16 B = 11,264 B!).
+var<workgroup> res_wg_rows: array<array<vec4<f32>, 22>, 32>;
+
+@compute @workgroup_size(32)
+fn main(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  if (workgroup_id.x > 0u) {
     return;
   }
+  let lane = local_id.x;
 
   var active_grid_nodes = 0.0;
   var source_mass = 0.0;
@@ -14345,7 +14483,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var h2o_gas_phase_weight = 0.0;
   var h2o_gas_summary_status = 0.0;
 
-  for (var partial_index = 0u; partial_index < params.partial_count; partial_index = partial_index + 1u) {
+  for (var partial_index = lane; partial_index < params.partial_count; partial_index = partial_index + 32u) {
     let base = partial_index * 22u;
     let row0 = partial_summaries[base];
     let row1 = partial_summaries[base + 1u];
@@ -14415,6 +14553,108 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     h2o_gas_phase_weight = h2o_gas_phase_weight + row21.z;
     h2o_gas_summary_status = max(h2o_gas_summary_status, row21.w);
   }
+
+  res_wg_rows[lane][0] = vec4<f32>(0.0, 0.0, active_grid_nodes, source_mass);
+  res_wg_rows[lane][1] = vec4<f32>(next_mass, 0.0, source_momentum.x, source_momentum.y);
+  res_wg_rows[lane][2] = vec4<f32>(source_momentum.z, next_momentum.x, next_momentum.y, next_momentum.z);
+  res_wg_rows[lane][3] = vec4<f32>(0.0, 0.0, 0.0, max_speed);
+  res_wg_rows[lane][4] = vec4<f32>(max_displacement, min_volume_ratio_j, max_volume_ratio_j, 0.0);
+  res_wg_rows[lane][5] = vec4<f32>(phase_mass_solid, phase_mass_liquid, phase_mass_gas, phase_mass_plasma);
+  res_wg_rows[lane][6] = vec4<f32>(temperature_mass_sum, min_temperature_k, max_temperature_k, thermal_ready_count);
+  res_wg_rows[lane][7] = vec4<f32>(thermal_problem_count, finite_temperature_count, phase_mass_total, 0.0);
+  res_wg_rows[lane][8] = vec4<f32>(source_position_mass.x, source_position_mass.y, source_position_mass.z, next_position_mass.x);
+  res_wg_rows[lane][9] = vec4<f32>(next_position_mass.y, next_position_mass.z, source_min.x, source_min.y);
+  res_wg_rows[lane][10] = vec4<f32>(source_min.z, source_max.x, source_max.y, source_max.z);
+  res_wg_rows[lane][11] = vec4<f32>(next_min.x, next_min.y, next_min.z, next_max.x);
+  res_wg_rows[lane][12] = vec4<f32>(next_max.y, next_max.z, source_bounds_status, next_bounds_status);
+  res_wg_rows[lane][13] = vec4<f32>(source_position_mass_total, next_position_mass_total, 0.0, 0.0);
+  res_wg_rows[lane][14] = vec4<f32>(cohort_summary_status, 0.0, 0.0, 0.0);
+  res_wg_rows[lane][15] = vec4<f32>(0.0, base_cohort_mass, base_cohort_position_mass.x, base_cohort_position_mass.y);
+  res_wg_rows[lane][16] = vec4<f32>(base_cohort_position_mass.z, base_cohort_min.x, base_cohort_min.y, base_cohort_min.z);
+  res_wg_rows[lane][17] = vec4<f32>(base_cohort_max.x, base_cohort_max.y, base_cohort_max.z, base_cohort_max_speed);
+  res_wg_rows[lane][18] = vec4<f32>(drop_cohort_mass, drop_cohort_position_mass.x, drop_cohort_position_mass.y, drop_cohort_position_mass.z);
+  res_wg_rows[lane][19] = vec4<f32>(drop_cohort_min.x, drop_cohort_min.y, drop_cohort_min.z, drop_cohort_max.x);
+  res_wg_rows[lane][20] = vec4<f32>(drop_cohort_max.y, drop_cohort_max.z, drop_cohort_max_speed, 0.0);
+  res_wg_rows[lane][21] = vec4<f32>(h2o_gas_mass, h2o_gas_temperature_mass_sum, h2o_gas_phase_weight, h2o_gas_summary_status);
+  workgroupBarrier();
+  var stride = 16u;
+  loop {
+    if (stride == 0u) { break; }
+    if (lane < stride) {
+      let o = lane + stride;
+      res_wg_rows[lane][0] += res_wg_rows[o][0];
+      res_wg_rows[lane][1] += res_wg_rows[o][1];
+      res_wg_rows[lane][2] += res_wg_rows[o][2];
+      res_wg_rows[lane][3] = vec4<f32>(0.0, 0.0, 0.0, max(res_wg_rows[lane][3].w, res_wg_rows[o][3].w));
+      res_wg_rows[lane][4] = vec4<f32>(max(res_wg_rows[lane][4].x, res_wg_rows[o][4].x), min(res_wg_rows[lane][4].y, res_wg_rows[o][4].y), max(res_wg_rows[lane][4].z, res_wg_rows[o][4].z), 0.0);
+      res_wg_rows[lane][5] += res_wg_rows[o][5];
+      res_wg_rows[lane][6] = vec4<f32>(res_wg_rows[lane][6].x + res_wg_rows[o][6].x, min(res_wg_rows[lane][6].y, res_wg_rows[o][6].y), max(res_wg_rows[lane][6].z, res_wg_rows[o][6].z), res_wg_rows[lane][6].w + res_wg_rows[o][6].w);
+      res_wg_rows[lane][7] += res_wg_rows[o][7];
+      res_wg_rows[lane][8] += res_wg_rows[o][8];
+      res_wg_rows[lane][9] = vec4<f32>(res_wg_rows[lane][9].xy + res_wg_rows[o][9].xy, min(res_wg_rows[lane][9].zw, res_wg_rows[o][9].zw));
+      res_wg_rows[lane][10] = vec4<f32>(min(res_wg_rows[lane][10].x, res_wg_rows[o][10].x), max(res_wg_rows[lane][10].yzw, res_wg_rows[o][10].yzw));
+      res_wg_rows[lane][11] = vec4<f32>(min(res_wg_rows[lane][11].xyz, res_wg_rows[o][11].xyz), max(res_wg_rows[lane][11].w, res_wg_rows[o][11].w));
+      res_wg_rows[lane][12] = max(res_wg_rows[lane][12], res_wg_rows[o][12]);
+      res_wg_rows[lane][13] += res_wg_rows[o][13];
+      res_wg_rows[lane][14] = max(res_wg_rows[lane][14], res_wg_rows[o][14]);
+      res_wg_rows[lane][15] += res_wg_rows[o][15];
+      res_wg_rows[lane][16] = vec4<f32>(res_wg_rows[lane][16].x + res_wg_rows[o][16].x, min(res_wg_rows[lane][16].yzw, res_wg_rows[o][16].yzw));
+      res_wg_rows[lane][17] = max(res_wg_rows[lane][17], res_wg_rows[o][17]);
+      res_wg_rows[lane][18] += res_wg_rows[o][18];
+      res_wg_rows[lane][19] = vec4<f32>(min(res_wg_rows[lane][19].xyz, res_wg_rows[o][19].xyz), max(res_wg_rows[lane][19].w, res_wg_rows[o][19].w));
+      res_wg_rows[lane][20] = max(res_wg_rows[lane][20], res_wg_rows[o][20]);
+      res_wg_rows[lane][21] = vec4<f32>(res_wg_rows[lane][21].xyz + res_wg_rows[o][21].xyz, max(res_wg_rows[lane][21].w, res_wg_rows[o][21].w));
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  if (lane != 0u) { return; }
+
+  active_grid_nodes = res_wg_rows[0][0].z;
+  source_mass = res_wg_rows[0][0].w;
+  next_mass = res_wg_rows[0][1].x;
+  source_momentum = vec3<f32>(res_wg_rows[0][1].z, res_wg_rows[0][1].w, res_wg_rows[0][2].x);
+  next_momentum = vec3<f32>(res_wg_rows[0][2].y, res_wg_rows[0][2].z, res_wg_rows[0][2].w);
+  max_speed = res_wg_rows[0][3].w;
+  max_displacement = res_wg_rows[0][4].x;
+  min_volume_ratio_j = res_wg_rows[0][4].y;
+  max_volume_ratio_j = res_wg_rows[0][4].z;
+  phase_mass_solid = res_wg_rows[0][5].x;
+  phase_mass_liquid = res_wg_rows[0][5].y;
+  phase_mass_gas = res_wg_rows[0][5].z;
+  phase_mass_plasma = res_wg_rows[0][5].w;
+  temperature_mass_sum = res_wg_rows[0][6].x;
+  min_temperature_k = res_wg_rows[0][6].y;
+  max_temperature_k = res_wg_rows[0][6].z;
+  thermal_ready_count = res_wg_rows[0][6].w;
+  thermal_problem_count = res_wg_rows[0][7].x;
+  finite_temperature_count = res_wg_rows[0][7].y;
+  phase_mass_total = res_wg_rows[0][7].z;
+  source_position_mass = vec3<f32>(res_wg_rows[0][8].x, res_wg_rows[0][8].y, res_wg_rows[0][8].z);
+  next_position_mass = vec3<f32>(res_wg_rows[0][8].w, res_wg_rows[0][9].x, res_wg_rows[0][9].y);
+  source_min = vec3<f32>(res_wg_rows[0][9].z, res_wg_rows[0][9].w, res_wg_rows[0][10].x);
+  source_max = vec3<f32>(res_wg_rows[0][10].y, res_wg_rows[0][10].z, res_wg_rows[0][10].w);
+  next_min = vec3<f32>(res_wg_rows[0][11].x, res_wg_rows[0][11].y, res_wg_rows[0][11].z);
+  next_max = vec3<f32>(res_wg_rows[0][11].w, res_wg_rows[0][12].x, res_wg_rows[0][12].y);
+  source_bounds_status = res_wg_rows[0][12].z;
+  next_bounds_status = res_wg_rows[0][12].w;
+  source_position_mass_total = res_wg_rows[0][13].x;
+  next_position_mass_total = res_wg_rows[0][13].y;
+  cohort_summary_status = res_wg_rows[0][14].x;
+  base_cohort_mass = res_wg_rows[0][15].y;
+  base_cohort_position_mass = vec3<f32>(res_wg_rows[0][15].z, res_wg_rows[0][15].w, res_wg_rows[0][16].x);
+  base_cohort_min = vec3<f32>(res_wg_rows[0][16].y, res_wg_rows[0][16].z, res_wg_rows[0][16].w);
+  base_cohort_max = vec3<f32>(res_wg_rows[0][17].x, res_wg_rows[0][17].y, res_wg_rows[0][17].z);
+  base_cohort_max_speed = res_wg_rows[0][17].w;
+  drop_cohort_mass = res_wg_rows[0][18].x;
+  drop_cohort_position_mass = vec3<f32>(res_wg_rows[0][18].y, res_wg_rows[0][18].z, res_wg_rows[0][18].w);
+  drop_cohort_min = vec3<f32>(res_wg_rows[0][19].x, res_wg_rows[0][19].y, res_wg_rows[0][19].z);
+  drop_cohort_max = vec3<f32>(res_wg_rows[0][19].w, res_wg_rows[0][20].x, res_wg_rows[0][20].y);
+  drop_cohort_max_speed = res_wg_rows[0][20].z;
+  h2o_gas_mass = res_wg_rows[0][21].x;
+  h2o_gas_temperature_mass_sum = res_wg_rows[0][21].y;
+  h2o_gas_phase_weight = res_wg_rows[0][21].z;
+  h2o_gas_summary_status = res_wg_rows[0][21].w;
 
   if (next_bounds_status == 0.0) {
     min_volume_ratio_j = 0.0;

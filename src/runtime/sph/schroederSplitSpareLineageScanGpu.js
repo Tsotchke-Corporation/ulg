@@ -115,25 +115,54 @@ fn mark_free_spares(
   }
 }
 
-// One invocation: exclusive prefix over the group totals, the total at
-// [group_count], and the free-list row for slot assignment.
-@compute @workgroup_size(1)
-fn scan_group_totals() {
-  var running = 0u;
-  for (var group = 0u; group < params.group_count; group = group + 1u) {
-    let total = group_offsets[group];
-    group_offsets[group] = running;
-    running = running + total;
+// Multi-tile workgroup-parallel exclusive prefix over the group totals,
+// publishing the total at [group_count] and the free-list row for slot assignment.
+var<workgroup> scan_carry: u32;
+
+@compute @workgroup_size(${SCHROEDER_SPLIT_SPARE_SCAN_WORKGROUP_SIZE})
+fn scan_group_totals(@builtin(local_invocation_id) local_id: vec3<u32>) {
+  let lane = local_id.x;
+  let count = params.group_count;
+  if (lane == 0u) { scan_carry = 0u; }
+  workgroupBarrier();
+  let tiles = (count + WORKGROUP - 1u) / WORKGROUP;
+  for (var tile = 0u; tile < tiles; tile = tile + 1u) {
+    let idx = tile * WORKGROUP + lane;
+    let val = select(0u, group_offsets[idx], idx < count);
+    scan[lane] = val;
+    workgroupBarrier();
+    var offset = 1u;
+    loop {
+      if (offset >= WORKGROUP) { break; }
+      var add = 0u;
+      if (lane >= offset) { add = scan[lane - offset]; }
+      workgroupBarrier();
+      scan[lane] = scan[lane] + add;
+      workgroupBarrier();
+      offset = offset * 2u;
+    }
+    let carry = scan_carry;
+    if (idx < count) {
+      group_offsets[idx] = carry + (scan[lane] - val);
+    }
+    workgroupBarrier();
+    if (lane == WORKGROUP - 1u) {
+      scan_carry = carry + scan[lane];
+    }
+    workgroupBarrier();
   }
-  group_offsets[params.group_count] = running;
-  free_list[0] = 0.0;
-  free_list[1] = f32(running);
-  free_list[2] = f32(running);
-  free_list[3] = f32(params.max_slots_per_row);
-  free_list[4] = f32(params.epoch);
-  free_list[5] = 0.0;
-  free_list[6] = 1.0;
-  free_list[7] = 0.0;
+  if (lane == 0u) {
+    let running = scan_carry;
+    group_offsets[count] = running;
+    free_list[0] = 0.0;
+    free_list[1] = f32(running);
+    free_list[2] = f32(running);
+    free_list[3] = f32(params.max_slots_per_row);
+    free_list[4] = f32(params.epoch);
+    free_list[5] = 0.0;
+    free_list[6] = 1.0;
+    free_list[7] = 0.0;
+  }
 }
 
 @compute @workgroup_size(${SCHROEDER_SPLIT_SPARE_SCAN_WORKGROUP_SIZE})

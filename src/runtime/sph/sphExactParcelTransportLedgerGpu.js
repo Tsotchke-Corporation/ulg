@@ -351,27 +351,69 @@ fn deposit_into_carriers(@builtin(global_invocation_id) id: vec3<u32>) {
   carrier_state[row * 2u + 1u] = vec4<f32>(state1.xyz, u);
 }
 
-// Pass 3, one thread: the wall sink takes whole wall parcels; the solute sink
-// takes the dry cores of carrier-deposited parcels.
-@compute @workgroup_size(1)
-fn deposit_into_sinks() {
-  if (atomicLoad(&prep[2u]) == 0u) { return; }
-  var wall_mass = load_sink(0u); var wall_energy = load_sink(1u); var solute = load_sink(2u);
-  for (var p = 0u; p < params.counts.y; p++) {
-    let target_row = parcel_target[p];
-    if (target_row == WALL) {
-      let a = em_add(wall_mass, load_parcel(p, 0u));
-      let b = em_add(a.value, load_parcel(p, 1u));
-      let c = el_add(wall_energy, load_parcel(p, 2u));
-      if ((a.error | b.error | c.error) != 0u) { flag(E_ARITHMETIC); return; }
-      wall_mass = b.value; wall_energy = c.value;
-    } else if (target_row != NONE) {
-      let added = em_add(solute, load_parcel(p, 0u));
-      if (added.error != 0u) { flag(E_ARITHMETIC); return; }
-      solute = added.value;
+// Pass 3, workgroup-parallel exact 9-limb reduction (64 lanes * 3 * 9 * 4 B = 6,912 B):
+// the wall sink takes whole wall parcels; the solute sink takes the dry cores of carrier-deposited parcels.
+var<workgroup> sh_sink_wall_m: array<ExactMass, 64>;
+var<workgroup> sh_sink_wall_e: array<ExactMass, 64>;
+var<workgroup> sh_sink_solute: array<ExactMass, 64>;
+var<workgroup> sh_sink_err: array<u32, 64>;
+
+@compute @workgroup_size(64)
+fn deposit_into_sinks(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let lane = lid.x;
+  let sink_active = atomicLoad(&prep[2u]) != 0u;
+  var wall_mass = ExactMass();
+  var wall_energy = ExactMass();
+  var solute = ExactMass();
+  var err = 0u;
+  if (sink_active) {
+    for (var p = lane; p < params.counts.y; p = p + 64u) {
+      let target_row = parcel_target[p];
+      if (target_row == WALL) {
+        let a = em_add(wall_mass, load_parcel(p, 0u));
+        let b = em_add(a.value, load_parcel(p, 1u));
+        let c = el_add(wall_energy, load_parcel(p, 2u));
+        err |= a.error | b.error | c.error;
+        wall_mass = b.value; wall_energy = c.value;
+      } else if (target_row != NONE) {
+        let added = em_add(solute, load_parcel(p, 0u));
+        err |= added.error;
+        solute = added.value;
+      }
     }
   }
-  store_sink(0u, wall_mass); store_sink(1u, wall_energy); store_sink(2u, solute);
+  sh_sink_wall_m[lane] = wall_mass;
+  sh_sink_wall_e[lane] = wall_energy;
+  sh_sink_solute[lane] = solute;
+  sh_sink_err[lane] = err;
+  workgroupBarrier();
+  var stride = 32u;
+  loop {
+    if (stride == 0u) { break; }
+    if (lane < stride && sink_active) {
+      let a = em_add(sh_sink_wall_m[lane], sh_sink_wall_m[lane + stride]);
+      let b = el_add(sh_sink_wall_e[lane], sh_sink_wall_e[lane + stride]);
+      let c = em_add(sh_sink_solute[lane], sh_sink_solute[lane + stride]);
+      sh_sink_wall_m[lane] = a.value;
+      sh_sink_wall_e[lane] = b.value;
+      sh_sink_solute[lane] = c.value;
+      sh_sink_err[lane] |= sh_sink_err[lane + stride] | a.error | b.error | c.error;
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  if (sink_active && lane == 0u) {
+    let total_m = em_add(load_sink(0u), sh_sink_wall_m[0]);
+    let total_e = el_add(load_sink(1u), sh_sink_wall_e[0]);
+    let total_s = em_add(load_sink(2u), sh_sink_solute[0]);
+    if ((sh_sink_err[0] | total_m.error | total_e.error | total_s.error) != 0u) {
+      flag(E_ARITHMETIC);
+      return;
+    }
+    store_sink(0u, total_m.value);
+    store_sink(1u, total_e.value);
+    store_sink(2u, total_s.value);
+  }
 }
 
 // Pass 4, one thread per parcel: a deposited parcel's rows become exact zero.

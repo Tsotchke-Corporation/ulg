@@ -856,24 +856,69 @@ struct SpareGroupScanParams {
 @group(0) @binding(3) var<uniform> scan_params: SpareGroupScanParams;
 @group(0) @binding(4) var<storage, read_write> placement_completion_receipt: array<atomic<u32>>;
 
-@compute @workgroup_size(1)
-fn scan_spare_groups(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  if (global_id.x != 0u) { return; }
-  var total = 0u;
-  var overflow = 0u;
+var<workgroup> spare_scan_buf: array<u32, 64>;
+var<workgroup> spare_scan_carry: u32;
+var<workgroup> spare_scan_overflow: atomic<u32>;
+
+@compute @workgroup_size(64)
+fn scan_spare_groups(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  if (workgroup_id.x != 0u) { return; }
+  let lane = local_id.x;
   let group_count = min(scan_params.group_count, arrayLength(&group_counts));
-  for (var group = 0u; group < group_count; group = group + 1u) {
-    if (group >= arrayLength(&group_offsets)) {
-      overflow = overflow + 1u;
-      continue;
-    }
-    group_offsets[group] = total;
-    let next_total = total + group_counts[group];
-    if (next_total < total || next_total > scan_params.capacity) {
-      overflow = overflow + 1u;
-    }
-    total = min(next_total, scan_params.capacity);
+  let offsets_len = arrayLength(&group_offsets);
+  if (lane == 0u) {
+    spare_scan_carry = 0u;
+    atomicStore(&spare_scan_overflow, 0u);
   }
+  workgroupBarrier();
+  let tiles = (group_count + 63u) / 64u;
+  for (var tile = 0u; tile < tiles; tile = tile + 1u) {
+    let group = tile * 64u + lane;
+    var val = 0u;
+    if (group < group_count) {
+      if (group >= offsets_len) {
+        atomicAdd(&spare_scan_overflow, 1u);
+      } else {
+        val = group_counts[group];
+      }
+    }
+    spare_scan_buf[lane] = val;
+    workgroupBarrier();
+    var offset = 1u;
+    loop {
+      if (offset >= 64u) { break; }
+      var add = 0u;
+      if (lane >= offset) { add = spare_scan_buf[lane - offset]; }
+      workgroupBarrier();
+      spare_scan_buf[lane] = spare_scan_buf[lane] + add;
+      workgroupBarrier();
+      offset = offset * 2u;
+    }
+    let carry = spare_scan_carry;
+    if (group < group_count && group < offsets_len) {
+      let excl = carry + (spare_scan_buf[lane] - val);
+      let incl = carry + spare_scan_buf[lane];
+      group_offsets[group] = min(excl, scan_params.capacity);
+      if (incl < excl || incl > scan_params.capacity) {
+        atomicAdd(&spare_scan_overflow, 1u);
+      }
+    }
+    workgroupBarrier();
+    if (lane == 63u) {
+      let next_carry = carry + spare_scan_buf[63u];
+      if (next_carry < carry || next_carry > scan_params.capacity) {
+        atomicAdd(&spare_scan_overflow, 1u);
+      }
+      spare_scan_carry = min(next_carry, scan_params.capacity);
+    }
+    workgroupBarrier();
+  }
+  if (lane != 0u) { return; }
+  let total = spare_scan_carry;
+  let overflow = atomicLoad(&spare_scan_overflow);
   if (arrayLength(&spare_control) >= 4u) {
     if (scan_params.mode == 0u) {
       spare_control[0] = select(total, 0u, overflow != 0u);

@@ -1,0 +1,358 @@
+// Canonical Scale-Independent Universal Law Graph Orchestrator & Dynamic Activator
+// (`src/runtime/universalLawGraph.js`).
+//
+// Implements ULG's core thesis:
+//   - Physical laws are general, first-principles GPU operators — NEVER coded for a
+//     specific planet, material, element, or preset.
+//   - Every law declares its fundamental physical families (`gravity`, `electromagnetism`,
+//     `hydrodynamics`, `thermodynamics`, `rigid-solid-mechanics`, `nuclear-quantum`),
+//     its canonical `LAW_ADAPTER_CONTRACT` metadata (`CANONICAL_SS_EPOCH`, zero private
+//     spatial grid debt), and a pure `evaluateActivation(physicalState)` predicate.
+//   - At any scale across all 40 orders of magnitude (`10^-15 m -> 10^+25 m`), the Universal
+//     Law Graph inspects the physical state actually present in the simulation and activates
+//     ONLY the laws whose physical preconditions hold — keeping absent laws dormant (`0` cost)!
+
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES,
+  validateLawAdapterDescriptor
+} from './sph/lawAdapterContract.js';
+import {
+  NEBULAR_MHD_LAW_ADAPTER,
+  registerNebularMhdSimulationModule
+} from './astrophysics/nebularMhdCollapseGpu.js';
+import {
+  PLANETARY_ATMO_EM_LAW_ADAPTER,
+  evaluateFluidElectrodynamicsActivation,
+  registerPlanetaryAtmosphereElectricModule
+} from './astrophysics/planetaryAtmosphereElectricGpu.js';
+import {
+  PROTOPLANETARY_ACCRETION_LAW_ADAPTER,
+  evaluateProtoplanetaryDiskActivation,
+  registerProtoplanetaryDiskSimulationModule
+} from './astrophysics/protoplanetaryDiskFormationGpu.js';
+import {
+  PARTICLE_RIGID_DYNAMICS_LAW_ADAPTER,
+  evaluateParticleRigidActivation,
+  registerParticleRigidDynamicsModule
+} from './sph/particleRigidDynamicsGpu.js';
+
+export const ULG_UNIVERSAL_LAW_GRAPH_SCHEMA = 'peercompute.ulg.universal-law-graph.v1';
+
+export const FUNDAMENTAL_LAW_FAMILIES = Object.freeze({
+  GRAVITY: 'gravity',
+  ELECTROMAGNETISM: 'electromagnetism',
+  HYDRODYNAMICS: 'hydrodynamics',
+  THERMODYNAMICS: 'thermodynamics',
+  RIGID_SOLID_MECHANICS: 'rigid-solid-mechanics',
+  NUCLEAR_QUANTUM: 'nuclear-quantum'
+});
+
+// Additional top-down canonical Law Adapter descriptors for existing Gate 5 & v2 WebGPU engines
+export const FLRW_COSMOLOGY_LAW_ADAPTER = Object.freeze({
+  id: 'flrw-treepm-cosmology',
+  lawNodeId: 'law:astrophysics-flrw-treepm-cosmology',
+  orderConstraint: 'root:cosmological-epoch',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['cosmo-particles', 'flrw-scale-factor', 'fft3d-poisson-grid']),
+  writes: Object.freeze(['cosmo-particles', 'fft3d-poisson-grid']),
+  accumulates: Object.freeze(['cosmo-power-spectrum-pk']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['comoving-mass', 'comoving-linear-momentum']),
+  validityDomain: Object.freeze({ aScaleMin: 0.01, aScaleMax: 2.0, comovingBoxMinMpc: 1.0 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e22, 1e26])
+});
+
+export const GALACTIC_MHD_EVOLUTION_LAW_ADAPTER = Object.freeze({
+  id: 'galactic-mhd-evolution',
+  lawNodeId: 'law:astrophysics-galactic-mhd-evolution',
+  orderConstraint: 'after:flrw-treepm-cosmology',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['galactic-stars-dm-ism', 'ss-scale-atlas-multipole', 'gate1-ism-cooling-anchors']),
+  writes: Object.freeze(['galactic-stars-dm-ism']),
+  accumulates: Object.freeze(['galactic-dynamo-telemetry']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['mass', 'linear-momentum', 'angular-momentum']),
+  validityDomain: Object.freeze({ minBodies: 64, metallicityNonNegative: true }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e18, 1e22])
+});
+
+export const SOLAR_SYSTEM_NBODY_LAW_ADAPTER = Object.freeze({
+  id: 'solar-system-nbody',
+  lawNodeId: 'law:astrophysics-symplectic-nbody-f32x2',
+  orderConstraint: 'after:protoplanetary-accretion',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['nbody-f32x2-bodies']),
+  writes: Object.freeze(['nbody-f32x2-bodies']),
+  accumulates: Object.freeze(['nbody-conservation-ledger']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['mass', 'linear-momentum', 'angular-momentum', 'symplectic-energy']),
+  validityDomain: Object.freeze({ doubleFloatProtectedTwoSum: true, maxDtSubYr: 0.00012 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e7, 1e16])
+});
+
+export const STELLAR_HYDRO_FUSION_LAW_ADAPTER = Object.freeze({
+  id: 'self-gravitating-hydro-fusion',
+  lawNodeId: 'law:astrophysics-stellar-hydro-fusion',
+  orderConstraint: 'after:nebular-mhd-collapse',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['stellar-hydro-parcels', 'closure-plasma-eos', 'gate1-nuclear-qvalues']),
+  writes: Object.freeze(['stellar-hydro-parcels']),
+  accumulates: Object.freeze(['stellar-fusion-telemetry']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['mass', 'nucleon-fractions', 'linear-momentum', 'first-law-energy']),
+  validityDomain: Object.freeze({ requiresPositiveDensity: true, gate1BetaPlusQValues: true }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e8, 1e17])
+});
+
+export const PLANETARY_INTERIOR_POLYTOPE_LAW_ADAPTER = Object.freeze({
+  id: 'planetary-interior-polytope',
+  lawNodeId: 'law:astrophysics-planetary-hydrostatic-polytope',
+  orderConstraint: 'after:solar-system-nbody',
+  adapterMode: LAW_ADAPTER_MODES.CELL_LOCAL,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['gate2-polytope-atlas-bank', 'planetary-mass-composition']),
+  writes: Object.freeze(['planetary-radial-hydrostatic-profile']),
+  accumulates: Object.freeze(['planetary-moi-and-core-radius']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['radial-mass', 'hydrostatic-balance']),
+  validityDomain: Object.freeze({ failClosedPolytopeBounds: true, maxPressurePa: 1e12 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.FAIL_CLOSED,
+  scaleRangeM: Object.freeze([1e5, 1e8])
+});
+
+/**
+ * Canonical Universal Law Graph Nodes spanning all 40 orders of magnitude.
+ * Every node activates dynamically purely from physical state presence!
+ */
+export const UNIVERSAL_LAW_GRAPH_NODES = Object.freeze([
+  Object.freeze({
+    id: 'flrw-treepm-cosmology',
+    methodKey: 'flrw-treepm-cosmology@1',
+    title: 'ΛCDM FLRW 2LPT + 3D-FFT TreePM Cosmology',
+    families: Object.freeze([FUNDAMENTAL_LAW_FAMILIES.GRAVITY, FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS]),
+    scaleRangeM: Object.freeze([1e22, 1e26]),
+    adapter: FLRW_COSMOLOGY_LAW_ADAPTER,
+    evaluateActivation(st = {}) {
+      const boxMpc = Number(st.comovingBoxMpc) || 0;
+      const active = boxMpc >= 1.0 && (Number(st.omegaM) || 0) > 0;
+      return { active, reason: active ? 'expanding-comoving-volume-present' : 'sub-cosmological-scale-dormant' };
+    }
+  }),
+  Object.freeze({
+    id: 'galactic-mhd-evolution',
+    methodKey: 'galactic-mhd-evolution@1',
+    title: 'Galactic Scale-Atlas Multipole, ISM Λ(T, Z) Cooling & α–ω Dynamo',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e18, 1e22]),
+    adapter: GALACTIC_MHD_EVOLUTION_LAW_ADAPTER,
+    evaluateActivation(st = {}) {
+      const nStars = Number(st.galacticBodyCount) || 0;
+      const spanM = Number(st.viewSpanM) || 0;
+      const active = nStars >= 64 || (spanM >= 1e17 && spanM <= 1e23);
+      return { active, reason: active ? 'galactic-halo-disk-present' : 'outside-galactic-regime-dormant' };
+    }
+  }),
+  Object.freeze({
+    id: 'nebular-mhd-collapse',
+    methodKey: 'nebular-mhd-collapse@1',
+    title: '3D Self-Gravitating Resistive MHD Nebular Collapse & Bipolar Jets',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e13, 1e18]),
+    adapter: NEBULAR_MHD_LAW_ADAPTER,
+    evaluateActivation(st = {}) {
+      const cloudMass = Number(st.nebulaCloudMass) || 0;
+      const bMag = Math.abs(Number(st.magneticFieldStrength) || 0);
+      const rm = Number(st.magneticReynolds) || 0;
+      const active = cloudMass > 0 && (bMag > 0 || rm > 1.0 || Boolean(st.ionizedGasPresent));
+      return {
+        active,
+        lorentzActive: bMag > 1e-6,
+        reason: active ? 'magnetized-self-gravitating-cloud-present' : 'no-magnetized-nebula-dormant'
+      };
+    }
+  }),
+  Object.freeze({
+    id: 'protoplanetary-accretion',
+    methodKey: 'protoplanetary-accretion@1',
+    title: 'Protoplanetary Disk Gas Drag, Snow-Line Sublimation & Pebble Accretion',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS
+    ]),
+    scaleRangeM: Object.freeze([1e10, 1e14]),
+    adapter: PROTOPLANETARY_ACCRETION_LAW_ADAPTER,
+    evaluateActivation: evaluateProtoplanetaryDiskActivation
+  }),
+  Object.freeze({
+    id: 'solar-system-nbody',
+    methodKey: 'solar-system-nbody@1',
+    title: 'Real-Scale Double-Float (f32x2) Symplectic Mutual N-Body Gravity',
+    families: Object.freeze([FUNDAMENTAL_LAW_FAMILIES.GRAVITY]),
+    scaleRangeM: Object.freeze([1e7, 1e16]),
+    adapter: SOLAR_SYSTEM_NBODY_LAW_ADAPTER,
+    evaluateActivation(st = {}) {
+      const n = Number(st.gravitatingBodyCount) || 0;
+      const active = n >= 2;
+      return { active, reason: active ? 'multi-body-gravitational-system-present' : 'single-or-zero-body-dormant' };
+    }
+  }),
+  Object.freeze({
+    id: 'self-gravitating-hydro-fusion',
+    methodKey: 'self-gravitating-hydro@1',
+    title: 'Self-Gravitating Compressible Plasma & Gate 1 Thermonuclear Fusion',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.NUCLEAR_QUANTUM
+    ]),
+    scaleRangeM: Object.freeze([1e8, 1e17]),
+    adapter: STELLAR_HYDRO_FUSION_LAW_ADAPTER,
+    evaluateActivation(st = {}) {
+      const tCore = Number(st.coreTempK) || 0;
+      const massKg = Number(st.bodyMassKg) || 0;
+      const active = tCore >= 1e6 || massKg >= 1e28;
+      return { active, reason: active ? 'fusion-capable-plasma-core-present' : 'sub-stellar-temperature-dormant' };
+    }
+  }),
+  Object.freeze({
+    id: 'planetary-interior-polytope',
+    methodKey: 'planetary-interior-polytope@1',
+    title: 'Fail-Closed Gate 2 Polytope-Atlas Hydrostatic Interior Equilibrium',
+    families: Object.freeze([FUNDAMENTAL_LAW_FAMILIES.GRAVITY, FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS]),
+    scaleRangeM: Object.freeze([1e5, 1e8]),
+    adapter: PLANETARY_INTERIOR_POLYTOPE_LAW_ADAPTER,
+    evaluateActivation(st = {}) {
+      const massKg = Number(st.bodyMassKg) || 0;
+      const radiusM = Number(st.bodyRadiusM) || 0;
+      const active = massKg >= 1e20 && radiusM >= 1e5 && massKg < 1e28;
+      return { active, reason: active ? 'self-gravitating-planetary-interior-present' : 'non-hydrostatic-body-dormant' };
+    }
+  }),
+  Object.freeze({
+    id: 'planetary-atmosphere-em',
+    methodKey: 'planetary-atmosphere-em@1',
+    title: 'Spherical Baroclinic Fluid, Particulate Triboelectricity, Paschen Breakdown & Core Geodynamo',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e4, 1e8]),
+    adapter: PLANETARY_ATMO_EM_LAW_ADAPTER,
+    evaluateActivation(st = {}) {
+      const act = evaluateFluidElectrodynamicsActivation(st);
+      return {
+        active: act.anyActive,
+        details: act,
+        reason: act.anyActive ? `active:${act.activeLaws.join(',')}` : 'vacuum-nonmagnetized-body-dormant'
+      };
+    }
+  }),
+  Object.freeze({
+    id: 'particle-rigid-dynamics',
+    methodKey: 'particle-rigid-dynamics@1',
+    title: 'Particle-Composite SE(3) DLM Symplectic Rigid-Body & Hertz-Mindlin/JKR Contact Dynamics',
+    families: Object.freeze([FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS, FUNDAMENTAL_LAW_FAMILIES.GRAVITY]),
+    scaleRangeM: Object.freeze([1e-3, 1e8]),
+    adapter: PARTICLE_RIGID_DYNAMICS_LAW_ADAPTER,
+    evaluateActivation: evaluateParticleRigidActivation
+  })
+]);
+
+/**
+ * Evaluate which Universal Law Graph nodes dynamically activate for ANY physical state
+ * (strictly state-driven — ZERO preset/planet/material name checks!).
+ */
+export function resolveActiveUniversalLaws(physicalState = {}) {
+  const active = [];
+  const dormant = [];
+  const activeFamilies = new Set();
+  for (const node of UNIVERSAL_LAW_GRAPH_NODES) {
+    const verdict = node.evaluateActivation(physicalState);
+    if (verdict?.active) {
+      active.push(Object.freeze({
+        id: node.id,
+        methodKey: node.methodKey,
+        title: node.title,
+        families: node.families,
+        reason: verdict.reason || 'active',
+        details: verdict.details || null
+      }));
+      for (const fam of node.families) activeFamilies.add(fam);
+    } else {
+      dormant.push(Object.freeze({
+        id: node.id,
+        methodKey: node.methodKey,
+        reason: verdict?.reason || 'dormant'
+      }));
+    }
+  }
+  return Object.freeze({
+    schema: ULG_UNIVERSAL_LAW_GRAPH_SCHEMA,
+    active: Object.freeze(active),
+    dormant: Object.freeze(dormant),
+    activeFamilies: Object.freeze([...activeFamilies])
+  });
+}
+
+/**
+ * Validate every Universal Law Graph adapter against ULG's canonical SS Law Adapter Contract
+ * (confirming `0` errors and `0` legacy-private-grid debt!).
+ */
+export function validateUniversalLawGraphContracts() {
+  const results = [];
+  const errors = [];
+  const debt = [];
+  for (const node of UNIVERSAL_LAW_GRAPH_NODES) {
+    const check = validateLawAdapterDescriptor(node.adapter, { requireExtendedMetadata: true });
+    results.push({ id: node.id, valid: check.valid, errors: check.errors, debt: check.debt });
+    for (const e of check.errors) errors.push(`${node.id}:${e}`);
+    for (const d of check.debt) debt.push(`${node.id}:${d}`);
+  }
+  return Object.freeze({
+    schema: ULG_UNIVERSAL_LAW_GRAPH_SCHEMA,
+    valid: errors.length === 0 && debt.length === 0,
+    nodeCount: UNIVERSAL_LAW_GRAPH_NODES.length,
+    errors: Object.freeze(errors),
+    debt: Object.freeze(debt),
+    results: Object.freeze(results)
+  });
+}
+
+/**
+ * Register all canonical Top-Down & Particle-Rigid WebGPU simulation modules on
+ * ULG's `SimulationModuleRegistry` (`defaultSimulationModuleRegistry`).
+ */
+export function registerAllTopDownLawModules(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return [];
+  const registered = [
+    registerNebularMhdSimulationModule(registry),
+    registerPlanetaryAtmosphereElectricModule(registry),
+    registerProtoplanetaryDiskSimulationModule(registry),
+    registerParticleRigidDynamicsModule(registry)
+  ].filter(Boolean);
+  return registered;
+}

@@ -1,21 +1,12 @@
-// Pure Direct-WebGPU Multiscale Renderer for ULG Universes (`src/demos/ulgUniversesRenderer.js`).
+// Pure Direct-WebGPU Continuous-Zoom Multiscale Renderer for ULG Universes
+// (`src/demos/ulgUniversesRenderer.js`).
 //
-// Zero Three.js overhead, zero per-frame CPU particle readbacks, zero serial 1-thread compute passes:
-//   1. Deep-space procedural starfield & nebula backdrop (`backdropPipe`)
-//   2. Zero-copy GPU-resident glowing particle clouds (`particleCloudPipe`) reading
-//      directly from L0 TreePM (stride 16), L1 Scale-Atlas Galaxy (stride 8),
-//      L3 Self-Gravitating Hydro Plasma (stride 16), and L6 Dirac-KS Orbital Cloud (stride 4)
-//   3. Depth-correct `@builtin(frag_depth)` analytical ray-sphere lit shader (`litSpherePipe`)
-//      for L2 Star System bodies, L4 GPU-solved Planetary Cutaway Interior Globe, and L6 Molecule Nuclei
-//   4. Zero-copy GPU-resident MD atom sphere shader (`mdSpherePipe`) reading
-//      `mdSession.positionsBuffer` & `mdSession.velocitiesBuffer` directly on GPU
-//   5. Translucent annular disk shader (`diskPipe`) for L1 Relativistic Doppler-Beamed
-//      SMBH Accretion Disk & L2 Planetary Rings
-//   6. 3D line renderer (`linePipe`) for L2 osculating Keplerian orbits, Travel Path, & L5 MD cell
-//   7. 3D Volumetric Raymarcher (`volumePipe`) for L7 Woods-Saxon Nuclear Proton/Neutron Skin
-//   8. Fullscreen Post-Processing Pass (`postPipe`): WGSL Schwarzschild Einstein-ring
-//      gravitational lensing, Hyperdrive radial warp streaks, Big Bang flash, ACES tone-mapping,
-//      and optional Retro CRT scanlines + pixelation!
+// Zero Three.js overhead, zero per-frame CPU particle readbacks, zero serial 1-thread compute passes,
+// ONE coalesced GPUCommandEncoder & 1 `queue.submit` per frame!
+// Supports simultaneous multi-scale crossfading (up to 2 zero-copy resident GPU particle clouds
+// + depth-correct photorealistic FBM/Rayleigh/cutaway spheres + zero-copy MD crystal atoms
+// + relativistic Doppler accretion disks / planetary rings + 3D lines + 3D nuclear volume
+// + fullscreen Schwarzschild lensing, Hyperdrive streaks, ACES tone-mapping, and Retro CRT).
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,
@@ -35,7 +26,7 @@ struct CameraUniforms {
   cam_pos: vec4<f32>,    // xyz = camera world position, w = timeSec
   cam_right: vec4<f32>,  // xyz = right basis, w = aspect
   cam_up: vec4<f32>,     // xyz = up basis, w = fovTanHalf
-  cam_fwd: vec4<f32>,    // xyz = forward basis, w = scaleAux
+  cam_fwd: vec4<f32>,    // xyz = forward basis, w = log10SpanM
   extra0: vec4<f32>,     // mode-specific floats
   extra1: vec4<f32>,     // mode-specific floats
   extra2: vec4<f32>,     // mode-specific floats
@@ -78,10 +69,10 @@ fn star_layer(dir: vec3<f32>, scale: f32, thresh: f32) -> vec3<f32> {
   let h = hash31(cell);
   if (h < thresh) { return vec3<f32>(0.0); }
   let jitter = vec3<f32>(hash31(cell + 17.1), hash31(cell + 41.7), hash31(cell + 73.3)) - 0.5;
-  let d = length(f - jitter * 0.55);
-  let spark = exp(-d * d * 58.0) * smoothstep(thresh, 1.0, h);
+  let d = length(f - jitter * 0.52);
+  let spark = exp(-d * d * 78.0) * smoothstep(thresh, 1.0, h);
   let temp = hash31(cell + 99.9);
-  let col = mix(vec3<f32>(0.68, 0.82, 1.0), vec3<f32>(1.0, 0.86, 0.68), temp);
+  let col = mix(vec3<f32>(0.68, 0.82, 1.0), vec3<f32>(1.0, 0.84, 0.64), temp);
   return col * spark;
 }
 
@@ -94,29 +85,28 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     + cam.cam_right.xyz * (in.ndc.x * aspect * fov)
     + cam.cam_up.xyz * (in.ndc.y * fov)
   );
-  let level_f = cam.extra0.x;
-  let gal_band = exp(-pow(dir.y * 2.4 + dir.x * 0.65, 2.0) * 3.8);
-  let neb1 = 0.5 + 0.5 * sin(dir.x * 4.2 + dir.z * 3.1) * cos(dir.y * 3.7 - dir.x * 2.5);
-  let neb2 = 0.5 + 0.5 * cos(dir.z * 5.8 - dir.y * 4.1);
+  let log_span = cam.cam_fwd.w;
+  // Subtle Milky Way galactic band visible at solar/planetary scales, darker vacuum at cosmic/quantum
+  let gal_vis = smoothstep(23.0, 17.0, log_span) * smoothstep(-4.0, 4.0, log_span);
+  let gal_band = exp(-pow(dir.y * 2.8 + dir.x * 0.72, 2.0) * 4.5);
+  let dust = 0.5 + 0.5 * sin(dir.x * 4.5 + dir.z * 3.2) * cos(dir.y * 3.9 - dir.x * 2.8);
+  let base_void = mix(vec3<f32>(0.005, 0.009, 0.020), vec3<f32>(0.004, 0.007, 0.015), smoothstep(0.0, -8.0, log_span));
+  var col = base_void + vec3<f32>(0.028, 0.036, 0.068) * gal_band * dust * (0.25 + 0.75 * gal_vis);
 
-  let deep_col = mix(vec3<f32>(0.008, 0.014, 0.032), vec3<f32>(0.025, 0.042, 0.088), gal_band * neb1);
-  let accent_tint = select(
-    vec3<f32>(0.06, 0.03, 0.11),
-    vec3<f32>(0.015, 0.055, 0.095),
-    level_f >= 4.5
-  );
-  var col = deep_col + accent_tint * gal_band * neb2 * 0.42;
-
-  // Multi-scale crisp world-space background starfield (fades gently at quantum/nuclear scales)
-  let star_vis = select(1.0, 0.35, level_f >= 4.5);
-  col = col + star_layer(dir, 52.0, 0.968) * 1.15 * star_vis;
-  col = col + star_layer(dir, 118.0, 0.976) * 0.72 * star_vis;
-  col = col + star_layer(dir, 210.0, 0.985) * 0.35 * star_vis;
+  let star_vis = smoothstep(-6.0, 6.0, log_span) * 0.85 + 0.15;
+  col = col + star_layer(dir, 58.0, 0.972) * 1.15 * star_vis;
+  col = col + star_layer(dir, 130.0, 0.978) * 0.68 * star_vis;
+  col = col + star_layer(dir, 230.0, 0.986) * 0.32 * star_vis;
   return vec4<f32>(col, 1.0);
 }
 `;
 
-// Zero-copy resident GPU particle billboard renderer supporting 4 canonical ULG buffer layouts!
+// Zero-copy resident GPU particle billboard renderer supporting 5 canonical ULG layouts:
+//   mode 0: L0 Supergalactic TreePM (16 floats/particle) — Millennium-style filaments & superclusters
+//   mode 1: L1 Flat-Rotation Spiral Galaxy (8 floats/star; vel_r.w < 0 = invisible dark-matter halo!)
+//   mode 2: L3 Self-Gravitating Hydro Plasma (16 floats/parcel) — blackbody + nuclear fusion glow
+//   mode 3: L6 Quantum Orbital Point Cloud (4 floats/point) — signed phase / shell parity
+//   mode 4: L2 Solar System Real-Scale N-Body Asteroids & Minor Bodies (16 floats/body, f32x2 double-float!)
 const PARTICLE_CLOUD_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
 
@@ -130,16 +120,14 @@ struct VsOut {
 };
 
 fn blackbody_rgb(log10_t: f32) -> vec3<f32> {
-  if (log10_t < 2.2) {
-    return vec3<f32>(0.55, 0.34, 0.88);
-  }
+  if (log10_t < 2.2) { return vec3<f32>(0.42, 0.24, 0.78); }
   if (log10_t < 3.45) {
     let f = clamp((log10_t - 2.2) / 1.25, 0.0, 1.0);
-    return mix(vec3<f32>(0.78, 0.30, 0.18), vec3<f32>(1.0, 0.56, 0.22), f);
+    return mix(vec3<f32>(0.78, 0.28, 0.14), vec3<f32>(1.0, 0.56, 0.20), f);
   }
   if (log10_t < 4.1) {
     let f = clamp((log10_t - 3.45) / 0.65, 0.0, 1.0);
-    return mix(vec3<f32>(1.0, 0.62, 0.25), vec3<f32>(1.0, 0.96, 0.82), f);
+    return mix(vec3<f32>(1.0, 0.62, 0.24), vec3<f32>(1.0, 0.96, 0.84), f);
   }
   let f = clamp((log10_t - 4.1) / 2.2, 0.0, 1.0);
   return mix(vec3<f32>(0.96, 0.98, 1.0), vec3<f32>(0.42, 0.78, 1.0), f);
@@ -166,53 +154,92 @@ fn vs_main(
   var alpha = alpha_gain;
 
   if (mode == 0u) {
-    // L0: Supergalactic TreePM (16 floats/particle)
+    // L0: Supergalactic 2LPT + TreePM (16 floats/particle) — IllustrisTNG / Millennium cosmic web
     let o = iid * 16u;
-    p_world = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]) * world_scale;
-    let rho = clamp(raw_f32[o + 7u], 0.06, 1.0);
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    let box_sz = max(10.0, cam.extra1.w);
+    // Smooth observable-horizon spherical survey vignette (eliminates harsh periodic box wall edges!)
+    let r_box = length(raw_p) / box_sz;
+    let sphere_fade = 1.0 - smoothstep(0.32, 0.495, r_box);
+    if (sphere_fade < 0.01) {
+      var culled0: VsOut;
+      culled0.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled0.color = vec4<f32>(0.0);
+      culled0.uv = vec2<f32>(0.0);
+      return culled0;
+    }
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let rho = clamp(raw_f32[o + 7u], 0.04, 1.0);
     let is_baryon = raw_f32[o + 12u] > 0.5;
-    let col_dm = mix(vec3<f32>(0.18, 0.34, 0.92), vec3<f32>(0.34, 0.88, 1.0), rho);
-    let col_node = mix(col_dm, vec3<f32>(1.0, 0.90, 0.52), smoothstep(0.46, 0.98, rho));
-    col = select(col_node, mix(vec3<f32>(0.95, 0.36, 0.24), vec3<f32>(1.0, 0.84, 0.45), rho), is_baryon);
-    pt_size = pt_size_base * (0.65 + 1.55 * rho);
-    alpha = alpha_gain * (0.28 + 0.72 * rho);
+    let col_void = vec3<f32>(0.14, 0.18, 0.62);
+    let col_fil = vec3<f32>(0.18, 0.64, 1.0);
+    let col_node = vec3<f32>(1.0, 0.72, 0.28);
+    var c_dm = mix(col_void, col_fil, smoothstep(0.08, 0.56, rho));
+    c_dm = mix(c_dm, col_node, smoothstep(0.60, 0.96, rho));
+    let c_bar = mix(vec3<f32>(0.94, 0.38, 0.22), vec3<f32>(1.0, 0.80, 0.36), smoothstep(0.18, 0.90, rho));
+    col = select(c_dm, c_bar, is_baryon) * (0.78 + 1.05 * pow(rho, 0.90));
+    pt_size = pt_size_base * (0.56 + 0.92 * pow(rho, 0.85));
+    alpha = alpha_gain * (0.28 + 0.72 * pow(rho, 0.92)) * sphere_fade;
   } else if (mode == 1u) {
-    // L1: Galactic Scale-Atlas Multipole (8 floats/star: pos, mass, vel, radius)
+    // L1: Realistic Flat-Rotation Spiral Galaxy (8 floats/star: pos, mass, vel, popTag)
+    // popTag < 0 => invisible dark-matter NFW halo particle (provides REAL GPU gravity for flat rotation curve!)
     let o = iid * 8u;
-    p_world = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]) * world_scale;
+    let pop_tag = raw_f32[o + 7u];
+    if (pop_tag < 0.0) {
+      var culled: VsOut;
+      culled.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled.color = vec4<f32>(0.0);
+      culled.uv = vec2<f32>(0.0);
+      return culled;
+    }
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
     let m = raw_f32[o + 3u];
-    let vel = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
-    let speed = length(vel);
-    // Physically classify stellar population from live orbital speed & mass (ZERO origin distance check!)
-    let hot = clamp((speed - 3.6) / 6.5, 0.0, 1.0);
-    let is_smbh = m > 50.0;
-    let blue_arm = vec3<f32>(0.42, 0.78, 1.0);
-    let warm_disk = vec3<f32>(1.0, 0.84, 0.58);
-    let amber_core = vec3<f32>(1.0, 0.62, 0.30);
-    let mass_w = clamp(m * 14.0, 0.0, 1.0);
-    col = mix(mix(amber_core, warm_disk, mass_w), blue_arm, hot * 0.85);
-    if (is_smbh) {
-      col = vec3<f32>(1.0, 0.94, 0.80);
-      pt_size = pt_size_base * 0.4;
-      alpha = 0.0; // SMBH rendered by relativistic accretion disk + lensing shader
+    // pop_tag encodes astrophysical population (HDR linear colors tone-mapped cleanly via ACES!):
+    //   [0.01..0.35]: warm golden-amber bulge & old disk K/M/G stars
+    //   [0.35..0.78]: young blue-white spiral-arm O/B/A stars
+    //   [0.78..1.10]: rose-magenta H-alpha / H II star-forming knots
+    let warm_bulge = vec3<f32>(1.0, 0.68, 0.34);
+    let gold_core = vec3<f32>(1.0, 0.84, 0.52);
+    let ob_blue = vec3<f32>(0.42, 0.74, 1.0);
+    let h2_rose = vec3<f32>(1.0, 0.32, 0.58);
+    if (pop_tag < 0.35) {
+      let f = clamp(pop_tag / 0.35, 0.0, 1.0);
+      col = mix(gold_core, warm_bulge, f);
+      pt_size = pt_size_base * (0.45 + 0.55 * (1.0 - f));
+      alpha = alpha_gain * (0.24 + 0.34 * (1.0 - f));
+    } else if (pop_tag < 0.78) {
+      let f = clamp((pop_tag - 0.35) / 0.43, 0.0, 1.0);
+      col = mix(vec3<f32>(0.86, 0.91, 1.0), ob_blue, f);
+      pt_size = pt_size_base * (0.44 + 0.72 * f);
+      alpha = alpha_gain * (0.28 + 0.56 * f);
     } else {
-      pt_size = pt_size_base * (0.55 + 1.35 * clamp(raw_f32[o + 7u] * 14.0, 0.2, 1.6));
-      alpha = alpha_gain * (0.35 + 0.65 * clamp(mass_w + 0.35 * hot, 0.0, 1.0));
+      let f = clamp((pop_tag - 0.78) / 0.32, 0.0, 1.0);
+      col = mix(h2_rose, vec3<f32>(1.0, 0.56, 0.78), f);
+      pt_size = pt_size_base * (0.95 + 0.75 * f);
+      alpha = alpha_gain * (0.36 + 0.44 * f);
+    }
+    if (m > 25.0) {
+      // Galactic nucleus soft warm amber glow (zero giant black hole at 100 kly!)
+      col = vec3<f32>(1.0, 0.88, 0.62);
+      pt_size = pt_size_base * 1.8;
+      alpha = alpha_gain * 0.55;
     }
   } else if (mode == 2u) {
     // L3: Self-Gravitating Hydro Plasma (16 floats/parcel)
     let o = iid * 16u;
-    p_world = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]) * world_scale;
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
     let log_t = raw_f32[o + 8u];
     let log_rho = raw_f32[o + 9u];
     let log_eps = raw_f32[o + 11u];
     let fusion_glow = smoothstep(-2.0, 4.0, log_eps);
     let dens_w = clamp((log_rho + 18.0) / 22.0, 0.15, 1.0);
-    col = mix(blackbody_rgb(log_t), vec3<f32>(0.65, 0.96, 1.0), fusion_glow * 0.55);
-    col = col * (0.9 + 0.85 * fusion_glow);
-    pt_size = pt_size_base * (0.7 + 1.2 * dens_w);
-    alpha = alpha_gain * (0.32 + 0.68 * dens_w);
-  } else {
+    col = mix(blackbody_rgb(log_t), vec3<f32>(0.58, 0.94, 1.0), fusion_glow * 0.62);
+    col = col * (0.95 + 1.15 * fusion_glow);
+    pt_size = pt_size_base * (0.68 + 1.15 * dens_w);
+    alpha = alpha_gain * (0.32 + 0.64 * dens_w);
+  } else if (mode == 3u) {
     // L6: Quantum Orbital Point Cloud (4 floats/point: vec4(x, y, z, packed_meta))
     let o = iid * 4u;
     p_world = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]) * world_scale;
@@ -221,9 +248,67 @@ fn vs_main(
     let pos_phase = packed_meta >= 0.0;
     let c_pos = cam.extra1.rgb;
     let c_neg = cam.extra2.rgb;
-    col = select(c_neg, c_pos, pos_phase) * (0.65 + 0.85 * mag);
+    col = select(c_neg, c_pos, pos_phase) * (0.70 + 0.95 * mag);
     pt_size = pt_size_base * (0.72 + 0.55 * mag);
     alpha = alpha_gain * (0.30 + 0.70 * mag);
+  } else if (mode == 4u) {
+    // Mode 4: L2 Real-Scale Solar System Minor Bodies / Main & Kuiper Belt Asteroids (f32x2 double-float!)
+    let skip_n = u32(round(cam.extra1.w));
+    if (iid < skip_n) {
+      var culled: VsOut;
+      culled.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled.color = vec4<f32>(0.0);
+      culled.uv = vec2<f32>(0.0);
+      return culled;
+    }
+    let o = iid * 16u;
+    let dx = (raw_f32[o + 0u] - cam.extra1.x) + (raw_f32[o + 4u] - cam.extra2.x);
+    let dy = (raw_f32[o + 1u] - cam.extra1.y) + (raw_f32[o + 5u] - cam.extra2.y);
+    let dz = (raw_f32[o + 2u] - cam.extra1.z) + (raw_f32[o + 6u] - cam.extra2.z);
+    p_world = vec3<f32>(dx, dy, dz) * world_scale;
+    let kind_f = raw_f32[o + 11u];
+    col = select(vec3<f32>(0.78, 0.70, 0.56), vec3<f32>(0.54, 0.76, 1.0), kind_f > 6.5);
+    pt_size = pt_size_base;
+    alpha = alpha_gain * 0.75;
+  } else if (mode == 5u) {
+    // Mode 5: L3 3D Self-Gravitating Resistive MHD Nebular Collapse & Magnetocentrifugal Bipolar Jets!
+    let o = iid * 16u;
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let b_mag = raw_f32[o + 7u];
+    let rho = raw_f32[o + 11u];
+    let u_int = raw_f32[o + 12u];
+    let jet_out = raw_f32[o + 13u];
+    let dens_f = clamp(log(1.0 + rho * 2.8) * 0.58, 0.0, 1.0);
+    let jet_f = smoothstep(0.04, 0.45, jet_out) * smoothstep(0.05, 0.35, b_mag);
+    let mag_f = clamp(b_mag * 0.72, 0.0, 1.0);
+    // Warm dusty molecular cloud & golden collapsing accretion disk -> electric cyan/violet MHD jet plasma!
+    let dust_col = mix(vec3<f32>(0.76, 0.28, 0.32), vec3<f32>(1.0, 0.64, 0.20), dens_f);
+    let core_col = mix(dust_col, vec3<f32>(1.0, 0.92, 0.66), smoothstep(0.45, 0.95, dens_f + u_int * 0.22));
+    let jet_col = mix(vec3<f32>(0.24, 0.82, 1.0), vec3<f32>(0.76, 0.46, 1.0), mag_f);
+    col = mix(core_col, jet_col * 1.55, clamp(jet_f * 0.90 + mag_f * 0.18 * (1.0 - dens_f), 0.0, 1.0));
+    pt_size = pt_size_base * (0.58 + 0.82 * dens_f + 0.75 * jet_f);
+    alpha = alpha_gain * (0.26 + 0.56 * dens_f + 0.62 * jet_f);
+  } else {
+    // Mode 6: L2 Protoplanetary Accretion Disk Pebbles (warm silicate dust inside snow line, icy sapphire outside!)
+    let o = iid * 16u;
+    let is_live = raw_f32[o + 15u];
+    if (is_live < 0.5 || raw_f32[o + 3u] <= 0.0) {
+      var culled: VsOut;
+      culled.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled.color = vec4<f32>(0.0);
+      culled.uv = vec2<f32>(0.0);
+      return culled;
+    }
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let temp_k = raw_f32[o + 8u];
+    let ice_f = clamp(raw_f32[o + 9u], 0.0, 1.0);
+    let hot_inner = mix(vec3<f32>(0.92, 0.52, 0.24), vec3<f32>(1.0, 0.82, 0.48), clamp((temp_k - 220.0) / 360.0, 0.0, 1.0));
+    let icy_outer = vec3<f32>(0.48, 0.80, 1.0);
+    col = mix(hot_inner, icy_outer, ice_f);
+    pt_size = pt_size_base * (0.78 + 0.45 * ice_f);
+    alpha = alpha_gain * (0.48 + 0.36 * (1.0 - ice_f * 0.35));
   }
 
   let world_corner = p_world
@@ -242,21 +327,25 @@ fn vs_main(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
-  let core = exp(-5.2 * r2);
-  let halo = exp(-1.9 * r2) * 0.35;
+  let core = exp(-6.2 * r2);
+  let halo = exp(-2.2 * r2) * 0.28;
   let w = core + halo;
   return vec4<f32>(in.color.rgb * w * in.color.a, in.color.a * w);
 }
 `;
 
-// Analytical depth-correct ray-sphere lit shader for L2 Star System, L4 Cutaway Planet Globe, & L6 Nuclei
+// Photorealistic analytical depth-correct ray-sphere lit shader:
+//   - Multi-octave 3D Value/Gradient FBM terrain, oceans, clouds, polar caps, & Rayleigh atmosphere
+//   - True physical radii + subtle telescopic pinpoint albedo glint ONLY when disk < ~2.5 px!
+//   - True 3D octant cutaway for GPU-solved hydrostatic planetary interiors
+//   - Crisp metallic/ruby-amber proton & cool-silver neutron spheres for L7 quantized nucleons
 const LIT_SPHERE_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
 
 // 4 vec4s (64 bytes) per sphere instance:
-//   pos_r:  vec4(x, y, z, radius)
-//   color0: vec4(r, g, b, kind)   kind: 0=star, 1=rocky/ocean, 2=gas-giant, 3=ice/moon, 4=cutaway-planet, 5=atom
-//   color1: vec4(r2, g2, b2, spec/atm)
+//   pos_r:  vec4(x, y, z, true_radius)
+//   color0: vec4(r, g, b, kind)   kind: 0=star, 1=terrestrial/ocean/rocky, 2=gas-giant/haze, 3=ice/moon, 4=cutaway-planet, 5=black-hole/nucleus, 6=nucleon
+//   color1: vec4(r2, g2, b2, atm_strength)
 //   params: vec4(r_core_norm, r_mantle_norm, cutaway_active, seed)
 struct SphereInstance {
   pos_r: vec4<f32>,
@@ -267,6 +356,9 @@ struct SphereInstance {
 
 @group(0) @binding(0) var<uniform> cam: CameraUniforms;
 @group(0) @binding(1) var<storage, read> spheres: array<SphereInstance>;
+// Zero-copy live GPU Planetary Baroclinic Atmosphere + Triboelectric Lightning + Aurora grid!
+// 2 vec4 per cell: [i*2+0]=em0(rhoQ, phi, eMag, flash), [i*2+1]=vis(cloud, dust, lightningGlow, auroraGlow)
+@group(0) @binding(2) var<storage, read> atmo_em_grid: array<vec4<f32>>;
 
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
@@ -276,6 +368,9 @@ struct VsOut {
   @location(3) color0: vec4<f32>,
   @location(4) color1: vec4<f32>,
   @location(5) params: vec4<f32>,
+  @location(6) quad_uv: vec2<f32>,
+  @location(7) pinpoint_w: f32,
+  @location(8) @interpolate(flat) inst_id: u32,
 };
 
 struct FsOut {
@@ -296,13 +391,23 @@ fn vs_main(
   let sp = spheres[iid];
   let center = sp.pos_r.xyz;
   let radius = sp.pos_r.w;
+  let kind = u32(round(sp.color0.w));
 
-  let to_cam = normalize(cam.cam_pos.xyz - center);
+  let to_cam_v = cam.cam_pos.xyz - center;
+  let dist = max(1e-5, length(to_cam_v));
+  let to_cam = to_cam_v / dist;
   let right = normalize(cross(cam.cam_up.xyz, to_cam));
   let up = cross(to_cam, right);
-  let dist = length(cam.cam_pos.xyz - center);
-  let inflate = radius * select(1.42, 1.18, dist > radius * 2.5);
-  let world_quad = center + to_cam * (radius * 0.15) + right * (uv.x * inflate) + up * (uv.y * inflate);
+
+  // Compute approximate apparent radius in screen height fraction:
+  let app_frac = radius / max(1e-5, dist * cam.cam_up.w);
+  let min_glint_frac = select(0.0062, 0.013, kind == 0u);
+  let pinpoint_w = smoothstep(min_glint_frac * 2.2, min_glint_frac * 0.55, app_frac);
+  let min_world_half = dist * cam.cam_up.w * min_glint_frac;
+
+  let base_inflate = radius * select(1.48, 1.24, dist > radius * 2.6);
+  let inflate = max(base_inflate, select(0.0, min_world_half, kind <= 4u));
+  let world_quad = center + to_cam * min(radius * 0.15, dist * 0.05) + right * (uv.x * inflate) + up * (uv.y * inflate);
 
   var out: VsOut;
   out.pos = cam.view_proj * vec4<f32>(world_quad, 1.0);
@@ -312,14 +417,65 @@ fn vs_main(
   out.color0 = sp.color0;
   out.color1 = sp.color1;
   out.params = sp.params;
+  out.quad_uv = uv;
+  out.pinpoint_w = select(0.0, pinpoint_w, kind <= 4u);
+  out.inst_id = iid;
   return out;
 }
 
-fn fbm3(p: vec3<f32>) -> f32 {
-  let a = sin(p.x * 2.7 + p.y * 1.9) * cos(p.z * 2.3 - p.x * 1.4);
-  let b = sin(p.y * 5.3 - p.z * 4.7) * cos(p.x * 4.9 + p.y * 3.1) * 0.5;
-  let c = sin(p.z * 11.1 + p.x * 9.7) * 0.25;
-  return 0.5 + 0.35 * (a + b + c);
+fn sample_live_atmo_vis(n_hit: vec3<f32>, w_u: u32, h_u: u32) -> vec4<f32> {
+  let lon = atan2(n_hit.z, n_hit.x); // [-pi, pi]
+  let lat = asin(clamp(n_hit.y, -1.0, 1.0)); // [-pi/2, pi/2]
+  let u = fract(lon / 6.28318530718 + 0.5);
+  let v = clamp(0.5 - lat / 3.14159265359, 0.0, 0.9999);
+  let gx = u * f32(w_u) - 0.5;
+  let gy = v * f32(h_u) - 0.5;
+  let x0 = i32(floor(gx));
+  let y0 = i32(floor(gy));
+  let fx = fract(gx);
+  let fy = fract(gy);
+  let wi = i32(w_u);
+  let hi = i32(h_u);
+  let ix0 = u32(((x0 % wi) + wi) % wi);
+  let ix1 = u32((((x0 + 1) % wi) + wi) % wi);
+  let iy0 = u32(clamp(y0, 0, hi - 1));
+  let iy1 = u32(clamp(y0 + 1, 0, hi - 1));
+  let c00 = atmo_em_grid[(iy0 * w_u + ix0) * 2u + 1u];
+  let c10 = atmo_em_grid[(iy0 * w_u + ix1) * 2u + 1u];
+  let c01 = atmo_em_grid[(iy1 * w_u + ix0) * 2u + 1u];
+  let c11 = atmo_em_grid[(iy1 * w_u + ix1) * 2u + 1u];
+  return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+fn hash3(p_in: vec3<f32>) -> f32 {
+  var p = fract(p_in * 0.3183099 + vec3<f32>(0.1, 0.2, 0.3));
+  p = p * 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+fn vnoise3(x: vec3<f32>) -> f32 {
+  let i = floor(x);
+  let f = fract(x);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash3(i + vec3<f32>(0.0, 0.0, 0.0)), hash3(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
+        mix(hash3(i + vec3<f32>(0.0, 1.0, 0.0)), hash3(i + vec3<f32>(1.0, 1.0, 0.0)), u.x), u.y),
+    mix(mix(hash3(i + vec3<f32>(0.0, 0.0, 1.0)), hash3(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
+        mix(hash3(i + vec3<f32>(0.0, 1.0, 1.0)), hash3(i + vec3<f32>(1.0, 1.0, 1.0)), u.x), u.y),
+    u.z
+  );
+}
+
+fn fbm5(p_in: vec3<f32>) -> f32 {
+  var p = p_in;
+  var sum = 0.0;
+  var amp = 0.5;
+  for (var i = 0u; i < 5u; i = i + 1u) {
+    sum = sum + amp * vnoise3(p);
+    p = p * 2.07 + vec3<f32>(13.7, -9.2, 5.4);
+    amp = amp * 0.5;
+  }
+  return sum;
 }
 
 fn is_cutaway_octant(p_loc: vec3<f32>, cut_active: f32) -> bool {
@@ -340,39 +496,60 @@ fn fs_main(in: VsOut) -> FsOut {
   let cut_active = in.params.z;
 
   if (disc < 0.0) {
-    // Soft corona glow ONLY for stars (kind 0)
-    if (kind == 0u) {
-      let closest = max(0.0, -b);
-      let d_min = length(ro + rd * closest) / max(1e-4, r);
-      if (d_min < 1.38) {
-        let corona = exp(-(d_min - 1.0) * 6.5) * 0.72;
-        var out_c: FsOut;
-        out_c.color = vec4<f32>(in.color0.rgb * corona * 1.4, corona);
-        let clip_c = cam.view_proj * vec4<f32>(in.center + ro + rd * closest, 1.0);
-        out_c.depth = clamp(clip_c.z / max(1e-5, clip_c.w), 0.0, 0.9999);
-        return out_c;
+    // 1. Sub-pixel astronomical pinpoint glint when true physical disk is < ~2.5 px at AU distances
+    if (in.pinpoint_w > 0.02) {
+      let q2 = dot(in.quad_uv, in.quad_uv);
+      if (q2 < 1.0) {
+        let g_core = exp(-8.0 * q2);
+        let g_halo = exp(-2.6 * q2) * select(0.32, 0.58, kind == 0u);
+        let glint_col = mix(in.color0.rgb, vec3<f32>(1.0, 0.98, 0.94), select(0.45, 0.65, kind == 0u));
+        let alpha = clamp((g_core + g_halo) * in.pinpoint_w * select(0.95, 1.25, kind == 0u), 0.0, 1.0);
+        var out_g: FsOut;
+        out_g.color = vec4<f32>(glint_col * (g_core * 1.45 + g_halo) * in.pinpoint_w, alpha);
+        let clip_g = cam.view_proj * vec4<f32>(in.center, 1.0);
+        out_g.depth = clamp(clip_g.z / max(1e-5, clip_g.w), 0.0, 0.9999);
+        return out_g;
       }
+    }
+    // 2. Physical solar corona glow for stars (kind 0) & Rayleigh atmospheric halo for planets (kind 1/4)
+    let closest = max(0.0, -b);
+    let d_min = length(ro + rd * closest) / max(1e-6, r);
+    if (kind == 0u && d_min < 1.45) {
+      let corona = exp(-(d_min - 1.0) * 6.8) * 0.78;
+      var out_c: FsOut;
+      out_c.color = vec4<f32>(in.color0.rgb * corona * 1.5, corona);
+      let clip_c = cam.view_proj * vec4<f32>(in.center + ro + rd * closest, 1.0);
+      out_c.depth = clamp(clip_c.z / max(1e-5, clip_c.w), 0.0, 0.9999);
+      return out_c;
+    }
+    if ((kind == 1u || kind == 4u) && in.color1.w > 0.25 && d_min < 1.07) {
+      let h_atmo = exp(-(d_min - 1.0) * 42.0) * in.color1.w * 0.62;
+      let lit_side = clamp(dot(normalize(ro + rd * closest), light_dir) * 0.8 + 0.35, 0.0, 1.0);
+      var out_a: FsOut;
+      out_a.color = vec4<f32>(vec3<f32>(0.34, 0.68, 1.0) * h_atmo * lit_side, h_atmo * lit_side);
+      let clip_a = cam.view_proj * vec4<f32>(in.center + ro + rd * closest, 1.0);
+      out_a.depth = clamp(clip_a.z / max(1e-5, clip_a.w), 0.0, 0.9999);
+      return out_a;
     }
     discard;
   }
 
   let sqrt_d = sqrt(disc);
   var t_hit = -b - sqrt_d;
-  if (t_hit < 0.001) { t_hit = -b + sqrt_d; }
-  if (t_hit < 0.001) { discard; }
+  if (t_hit < 0.000001) { t_hit = -b + sqrt_d; }
+  if (t_hit < 0.000001) { discard; }
 
   var p_hit = ro + rd * t_hit;
   var n_hit = normalize(p_hit);
   var is_interior = false;
 
-  // True 3D Cutaway Plane intersection for L4 Planetary Interior Globe
-  if (kind == 4u && is_cutaway_octant(p_hit, cut_active)) {
+  // True 3D Cutaway Plane intersection when user enables L4 Planetary Interior Cutaway
+  if ((kind == 4u || kind == 1u || kind == 2u) && is_cutaway_octant(p_hit, cut_active)) {
     var best_t = 1e20;
     var best_n = vec3<f32>(0.0, 1.0, 0.0);
-    // Test 3 coordinate planes x=0, y=0, z=0 inside sphere radius
     if (abs(rd.x) > 1e-5) {
       let tx = -ro.x / rd.x;
-      if (tx > 0.001 && tx < best_t) {
+      if (tx > 1e-6 && tx < best_t) {
         let q = ro + rd * tx;
         if (dot(q, q) <= r * r && q.y >= 0.0 && q.z >= 0.0) {
           best_t = tx;
@@ -382,7 +559,7 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     if (abs(rd.y) > 1e-5) {
       let ty = -ro.y / rd.y;
-      if (ty > 0.001 && ty < best_t) {
+      if (ty > 1e-6 && ty < best_t) {
         let q = ro + rd * ty;
         if (dot(q, q) <= r * r && q.x >= 0.0 && q.z >= 0.0) {
           best_t = ty;
@@ -392,7 +569,7 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     if (abs(rd.z) > 1e-5) {
       let tz = -ro.z / rd.z;
-      if (tz > 0.001 && tz < best_t) {
+      if (tz > 1e-6 && tz < best_t) {
         let q = ro + rd * tz;
         if (dot(q, q) <= r * r && q.x >= 0.0 && q.y >= 0.0) {
           best_t = tz;
@@ -413,69 +590,159 @@ fn fs_main(in: VsOut) -> FsOut {
   let view_dir = -rd;
   let ndv = max(0.0, dot(n_hit, view_dir));
   let ndl = max(0.0, dot(n_hit, light_dir));
+  let soft_term = smoothstep(-0.08, 0.14, dot(n_hit, light_dir));
   let half_v = normalize(light_dir + view_dir);
-  let spec = pow(max(0.0, dot(n_hit, half_v)), 36.0);
-  let fresnel = pow(1.0 - ndv, 3.2);
+  let spec = pow(max(0.0, dot(n_hit, half_v)), 44.0);
+  let fresnel = pow(1.0 - ndv, 3.6);
+  let seed_v = vec3<f32>(in.params.w * 2.13, in.params.w * 1.47, in.params.w * 3.19);
 
   var col = vec3<f32>(0.8);
 
   if (kind == 0u) {
-    // Convective stellar photosphere with limb darkening
-    let gran = fbm3(n_hit * 4.5 + vec3<f32>(in.params.w * 2.1, cam.cam_pos.w * 0.08, 0.0));
-    let limb = pow(ndv, 0.45);
-    col = mix(in.color1.rgb, in.color0.rgb, 0.45 + 0.55 * gran) * (0.72 + 0.65 * limb);
+    // Realistic convective solar photosphere with multi-scale granulation & limb darkening
+    let g1 = fbm5(n_hit * 8.5 + seed_v + vec3<f32>(cam.cam_pos.w * 0.04, 0.0, 0.0));
+    let g2 = fbm5(n_hit * 22.0 - seed_v);
+    let gran = clamp(0.65 * g1 + 0.35 * g2, 0.0, 1.0);
+    let limb = pow(ndv, 0.52);
+    col = mix(in.color1.rgb, in.color0.rgb, 0.35 + 0.65 * gran) * (0.58 + 0.85 * limb);
   } else if (is_interior) {
     // Exact GPU-solved planetary cutaway shells!
-    let r_norm = length(p_hit) / max(1e-4, r);
+    let r_norm = length(p_hit) / max(1e-6, r);
     let r_core = clamp(in.params.x, 0.12, 0.85);
     let r_mantle = clamp(in.params.y, r_core + 0.04, 0.99);
-    let r_inner = r_core * 0.48;
+    let r_inner = r_core * 0.46;
+    let conv = fbm5(p_hit / max(1e-6, r) * 7.5 + seed_v);
     var shell_col = in.color0.rgb;
     if (r_norm < r_inner) {
-      // Solid crystalline Fe inner core (hot white-gold)
-      shell_col = vec3<f32>(1.0, 0.92, 0.64);
+      shell_col = vec3<f32>(1.0, 0.93, 0.68) * (0.92 + 0.14 * conv);
     } else if (r_norm < r_core) {
-      // Molten metallic Fe outer core (incandescent amber-orange)
       let f = (r_norm - r_inner) / max(0.02, r_core - r_inner);
-      shell_col = mix(vec3<f32>(1.0, 0.68, 0.22), vec3<f32>(0.94, 0.36, 0.12), f);
+      shell_col = mix(vec3<f32>(1.0, 0.68, 0.20), vec3<f32>(0.94, 0.34, 0.10), f) * (0.85 + 0.25 * conv);
     } else if (r_norm < r_mantle) {
-      // High-pressure silicate mantle (deep crimson-ochre to olivine)
       let f = (r_norm - r_core) / max(0.02, r_mantle - r_core);
-      shell_col = mix(vec3<f32>(0.76, 0.24, 0.14), vec3<f32>(0.42, 0.32, 0.24), f);
+      shell_col = mix(vec3<f32>(0.76, 0.24, 0.12), vec3<f32>(0.38, 0.26, 0.18), f) * (0.78 + 0.35 * conv);
     } else {
-      // Crust / Hydrosphere shell
       shell_col = in.color1.rgb;
     }
-    // Crisp dark contour lines at exact GPU-solved layer transitions
-    let edge_core = smoothstep(0.008, 0.018, abs(r_norm - r_core));
-    let edge_mantle = smoothstep(0.008, 0.018, abs(r_norm - r_mantle));
+    let edge_core = smoothstep(0.007, 0.016, abs(r_norm - r_core));
+    let edge_mantle = smoothstep(0.007, 0.016, abs(r_norm - r_mantle));
     shell_col = shell_col * (0.55 + 0.45 * edge_core * edge_mantle);
-    let shade = 0.48 + 0.52 * max(0.25, dot(n_hit, normalize(vec3<f32>(0.55, 0.7, 0.45))));
+    let shade = 0.52 + 0.48 * max(0.25, dot(n_hit, normalize(vec3<f32>(0.55, 0.72, 0.45))));
     col = shell_col * shade;
   } else if (kind == 2u) {
-    // Banded Gas Giant with zonal jets
-    let band = 0.5 + 0.5 * sin(n_hit.y * 19.0 + fbm3(n_hit * 5.0 + in.params.w) * 2.2);
-    let base = mix(in.color0.rgb, in.color1.rgb, band);
-    let atm = vec3<f32>(0.52, 0.72, 1.0) * fresnel * in.color1.w;
-    col = base * (0.12 + 0.92 * ndl) + atm * (0.2 + 0.8 * ndl);
+    // Banded Gas / Dense-Cloud World with live GPU zonal jets, lightning superbolts, & polar aurorae!
+    let turb = fbm5(n_hit * 5.2 + seed_v);
+    let lat = n_hit.y * 16.0 + (turb - 0.5) * 3.0;
+    let band = 0.5 + 0.5 * sin(lat) * cos(lat * 0.45 + turb * 1.6);
+    let fine_jet = fbm5(vec3<f32>(n_hit.x * 4.5, n_hit.y * 22.0, n_hit.z * 4.5) + seed_v);
+    var base = mix(in.color1.rgb * 0.82, in.color0.rgb * 1.08, clamp(0.18 + 0.58 * band + 0.26 * fine_jet, 0.0, 1.0));
+    var em_fx = vec3<f32>(0.0);
+    if (cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z))) {
+      let av = sample_live_atmo_vis(n_hit, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
+      // Modulate storm-band bright ammonia decks & cyclonic ovals without washing out color bands
+      let storm_w = smoothstep(0.28, 0.78, av.x);
+      base = mix(base, mix(in.color0.rgb, vec3<f32>(0.98, 0.93, 0.84), 0.55), storm_w * 0.34);
+      let bolt = smoothstep(0.38, 1.15, av.z);
+      em_fx = em_fx + vec3<f32>(0.68, 0.90, 1.0) * bolt * (1.8 + 1.4 * (1.0 - ndl));
+      // Electric blue-violet auroral oval glowing cleanly around magnetic cusps
+      let aur = clamp(av.w, 0.0, 1.2);
+      em_fx = em_fx + mix(vec3<f32>(0.24, 0.78, 1.0), vec3<f32>(0.62, 0.36, 1.0), clamp(abs(n_hit.y), 0.0, 1.0)) * aur * (0.38 + 0.82 * (1.0 - ndl));
+    }
+    let atm = vec3<f32>(0.58, 0.76, 1.0) * fresnel * in.color1.w;
+    col = base * (0.04 + 0.98 * ndl) * soft_term + base * 0.03 + atm * (0.15 + 0.85 * ndl) + em_fx;
   } else if (kind == 1u || kind == 4u) {
-    // Terrestrial / Ocean world with continents, water specular, & Rayleigh limb
-    let cont = fbm3(n_hit * 3.4 + vec3<f32>(in.params.w * 3.7));
-    let is_land = cont > 0.50;
-    let base = select(in.color1.rgb, in.color0.rgb, is_land);
-    let water_spec = select(spec * 0.55, spec * 0.08, is_land);
-    let atm = vec3<f32>(0.36, 0.72, 1.0) * fresnel * in.color1.w;
-    col = base * (0.12 + 0.92 * ndl) + vec3<f32>(1.0, 0.96, 0.9) * water_spec * ndl + atm * (0.25 + 0.75 * ndl);
-  } else {
-    // Ice / Metallic Atom / Molecule Nucleus / Pitch-Black Event Horizon Shadow
+    // Photorealistic Terrestrial / Ocean / Mars / Mercury world with 5-octave FBM continents, relief, polar caps, & clouds
+    let elev = fbm5(n_hit * 3.4 + seed_v);
+    let detail = fbm5(n_hit * 14.0 + seed_v * 1.7);
+    let has_ocean = in.color1.b > in.color1.r + 0.14;
+    var surf = in.color0.rgb;
+    var water_spec = 0.0;
+
+    if (has_ocean) {
+      let sea_lvl = 0.51;
+      if (elev < sea_lvl) {
+        let depth_f = clamp((sea_lvl - elev) / 0.26, 0.0, 1.0);
+        surf = mix(vec3<f32>(0.08, 0.42, 0.68), in.color1.rgb * 0.72, depth_f);
+        water_spec = spec * 0.68;
+      } else {
+        let h_land = clamp((elev - sea_lvl) / 0.32, 0.0, 1.0);
+        let desert = vec3<f32>(0.68, 0.58, 0.38);
+        let mtn = vec3<f32>(0.48, 0.46, 0.44);
+        let arid = smoothstep(0.25, 0.72, detail) * (1.0 - abs(n_hit.y));
+        surf = mix(in.color0.rgb * (0.75 + 0.45 * detail), desert, arid * 0.55);
+        surf = mix(surf, mtn, smoothstep(0.42, 0.85, h_land));
+        surf = mix(surf, vec3<f32>(0.92, 0.95, 0.98), smoothstep(0.76, 0.95, h_land));
+      }
+      // Polar ice caps
+      let polar = smoothstep(0.76, 0.90, abs(n_hit.y) + (detail - 0.5) * 0.14);
+      surf = mix(surf, vec3<f32>(0.90, 0.94, 0.98), polar);
+    } else {
+      // Rocky / Mars / Mercury world with craters & dust basins
+      let crater = smoothstep(0.32, 0.68, detail);
+      surf = mix(in.color1.rgb, in.color0.rgb, clamp(elev * 1.15 - 0.1 + 0.25 * crater, 0.0, 1.0));
+      let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + (detail - 0.5) * 0.08);
+      surf = mix(surf, vec3<f32>(0.88, 0.90, 0.94), polar * select(0.0, 0.85, in.color1.w > 0.12));
+    }
+
+    // Live zero-copy GPU baroclinic clouds, billowing dust storms, Paschen lightning, & polar aurorae!
+    let live_atmo = cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z));
+    var em_lightning = vec3<f32>(0.0);
+    var em_aurora = vec3<f32>(0.0);
+    if (live_atmo) {
+      let av = sample_live_atmo_vis(n_hit, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
+      // Crisp broken swirling baroclinic cloud bands (clear oceans & continents between cyclonic fronts!)
+      let cloud_d = smoothstep(0.20, 0.76, av.x) * 0.86;
+      // Vivid billowing rust-amber aeolian dust fronts
+      let dust_d = smoothstep(0.14, 0.68, av.y) * 0.82;
+      surf = mix(surf, vec3<f32>(0.88, 0.48, 0.22), dust_d * select(0.78, 0.20, has_ocean));
+      surf = mix(surf, vec3<f32>(0.97, 0.98, 1.0), cloud_d * 0.88);
+      water_spec = water_spec * (1.0 - max(cloud_d, dust_d));
+      // Real Paschen dielectric-breakdown lightning bolts (electric cyan in moist clouds, violet-gold in CO2 dust!)
+      let bolt = smoothstep(0.36, 1.15, av.z);
+      let bolt_col = mix(vec3<f32>(0.82, 0.54, 1.0), vec3<f32>(0.62, 0.94, 1.0), select(0.20, 1.0, has_ocean));
+      em_lightning = bolt_col * bolt * (2.0 + 1.8 * (1.0 - ndl));
+      // Core-geodynamo polar auroral oval curtains (emerald-green 557.7nm O I -> violet N2+)!
+      let aur = clamp(av.w, 0.0, 1.15);
+      em_aurora = mix(vec3<f32>(0.14, 0.96, 0.56), vec3<f32>(0.58, 0.30, 1.0), clamp((abs(n_hit.y) - 0.80) * 4.0, 0.0, 1.0)) * aur * (0.42 + 0.90 * (1.0 - ndl));
+    } else if (in.color1.w > 0.45) {
+      let c_raw = fbm5(n_hit * 4.8 + vec3<f32>(cam.cam_pos.w * 0.012, 2.4, -1.9) + seed_v);
+      let cloud = smoothstep(0.52, 0.74, c_raw) * 0.78;
+      surf = mix(surf, vec3<f32>(0.95, 0.97, 1.0), cloud);
+      water_spec = water_spec * (1.0 - cloud);
+    }
+
+    let rayleigh = mix(vec3<f32>(0.76, 0.52, 0.34), vec3<f32>(0.32, 0.68, 1.0), select(0.25, 1.0, has_ocean));
+    let atm = rayleigh * fresnel * in.color1.w * 0.95;
+    col = surf * (0.03 + 0.98 * ndl) * soft_term + surf * 0.03 + vec3<f32>(1.0, 0.96, 0.88) * water_spec * ndl + atm * (0.14 + 0.86 * ndl) + em_lightning + em_aurora;
+  } else if (kind == 3u) {
+    // Cratered Moon / Icy World / Ice Giant (live GPU clouds/lightning/aurora if atmosphere active!)
+    let n1 = fbm5(n_hit * 6.0 + seed_v);
+    let n2 = fbm5(n_hit * 18.0 - seed_v);
+    var base = mix(in.color1.rgb, in.color0.rgb, clamp(0.2 + 0.7 * n1 + 0.25 * n2, 0.0, 1.0));
+    var em_ice = vec3<f32>(0.0);
+    if (cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z))) {
+      let av = sample_live_atmo_vis(n_hit, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
+      base = mix(base, vec3<f32>(0.88, 0.94, 1.0), clamp(av.x * 0.52, 0.0, 0.60));
+      let bolt = smoothstep(0.32, 1.15, av.z);
+      em_ice = em_ice + vec3<f32>(0.68, 0.92, 1.0) * bolt * (1.7 + 1.2 * (1.0 - ndl));
+      em_ice = em_ice + vec3<f32>(0.24, 0.96, 0.72) * clamp(av.w, 0.0, 1.4) * (0.42 + 0.85 * (1.0 - ndl));
+    }
+    let atm = vec3<f32>(0.42, 0.76, 1.0) * fresnel * in.color1.w;
+    col = base * (0.04 + 0.96 * ndl) * soft_term + base * 0.03 + vec3<f32>(1.0) * spec * 0.16 * ndl + atm * (0.15 + 0.85 * ndl) + em_ice;
+  } else if (kind == 5u) {
+    // Event horizon shadow OR glowing atomic nucleus pin
     let is_black_hole = dot(in.color0.rgb, in.color0.rgb) < 0.001;
     if (is_black_hole) {
-      let photon_rim = pow(1.0 - ndv, 4.5);
-      col = vec3<f32>(1.0, 0.88, 0.62) * photon_rim * 1.45;
+      let photon_rim = pow(1.0 - ndv, 4.8);
+      col = vec3<f32>(1.0, 0.88, 0.64) * photon_rim * 1.4;
     } else {
-      let base = mix(in.color0.rgb, in.color1.rgb, 0.25 + 0.5 * fresnel);
-      col = base * (0.22 + 0.78 * ndl) + vec3<f32>(1.0, 0.98, 0.95) * spec * 0.62 + base * fresnel * 0.28;
+      let base = mix(in.color0.rgb, in.color1.rgb, 0.25 + 0.45 * fresnel);
+      col = base * (0.3 + 0.75 * ndl) + vec3<f32>(1.0) * spec * 0.65;
     }
+  } else {
+    // Kind 6: Quantized L7 Nuclear Protons (warm ruby-amber) & Neutrons (cool sapphire-silver)
+    let base = mix(in.color0.rgb, in.color1.rgb, 0.22 + 0.55 * fresnel);
+    col = base * (0.28 + 0.76 * ndl) + vec3<f32>(1.0, 0.96, 0.92) * spec * 0.72 + in.color0.rgb * fresnel * 0.35;
   }
 
   let world_hit = in.center + p_hit;
@@ -488,6 +755,7 @@ fn fs_main(in: VsOut) -> FsOut {
 `;
 
 // Zero-copy WebGPU MD Atom Sphere Shader reading `mdSession.positionsBuffer` & `velocitiesBuffer` directly!
+// Preserves true Gate 1 optical reflectance for solid crystals while smoothly highlighting molten/vapor atoms!
 const MD_SPHERE_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
 
@@ -501,6 +769,7 @@ struct VsOut {
   @location(1) radius: f32,
   @location(2) world_quad: vec3<f32>,
   @location(3) tint: vec3<f32>,
+  @location(4) alpha_fade: f32,
 };
 
 struct FsOut {
@@ -523,20 +792,23 @@ fn vs_main(
   let half_box = cam.extra0.xyz;
   let world_scale = cam.extra0.w;
   let radius = cam.extra1.w;
+  let alpha_fade = clamp(cam.extra2.x, 0.0, 1.0);
   let ideal_coord = max(4.0, cam.extra2.w);
 
   let center = (p_raw.xyz - half_box) * world_scale;
-  let coord_frac = clamp(p_raw.w / ideal_coord, 0.0, 1.2);
+  let raw_coord = p_raw.w;
+  // On frame 0 before first neighbor build raw_coord can be 0; treat 0 as crystal base color!
+  let coord_frac = select(clamp(raw_coord / ideal_coord, 0.0, 1.2), 1.0, raw_coord < 0.01);
   let speed = length(v_raw.xyz);
-  let heat = clamp(speed * 2.2, 0.0, 1.0);
+  let heat = clamp(speed * 1.4, 0.0, 1.0);
 
-  // Blend Gate 1 optical reflectance (solid crystal) -> warm amber (liquid) -> electric cyan (vapor)
+  // True Gate 1 optical reflectance for solid crystals; warm amber glow on melted low-coord atoms
   let base_rgb = cam.extra1.rgb;
-  let liq_rgb = mix(base_rgb, vec3<f32>(1.0, 0.52, 0.18), 0.55);
-  let vap_rgb = vec3<f32>(0.38, 0.86, 1.0);
-  var tint = mix(vap_rgb, liq_rgb, smoothstep(0.15, 0.55, coord_frac));
-  tint = mix(tint, base_rgb, smoothstep(0.55, 0.92, coord_frac));
-  tint = mix(tint, vec3<f32>(1.0, 0.85, 0.55), heat * 0.25);
+  let liq_rgb = mix(base_rgb, vec3<f32>(1.0, 0.56, 0.20), 0.52);
+  let vap_rgb = mix(base_rgb, vec3<f32>(0.42, 0.84, 1.0), 0.55);
+  var tint = mix(vap_rgb, liq_rgb, smoothstep(0.08, 0.35, coord_frac));
+  tint = mix(tint, base_rgb, smoothstep(0.35, 0.72, coord_frac));
+  tint = mix(tint, vec3<f32>(1.0, 0.82, 0.48), heat * 0.22);
 
   let to_cam = normalize(cam.cam_pos.xyz - center);
   let right = normalize(cross(cam.cam_up.xyz, to_cam));
@@ -549,6 +821,7 @@ fn vs_main(
   out.radius = radius;
   out.world_quad = world_quad;
   out.tint = tint;
+  out.alpha_fade = alpha_fade;
   return out;
 }
 
@@ -564,28 +837,26 @@ fn fs_main(in: VsOut) -> FsOut {
   if (t_hit < 0.001) { discard; }
   let p_hit = ro + rd * t_hit;
   let n = normalize(p_hit);
-  let light = normalize(vec3<f32>(0.6, 0.8, 0.5));
+  let light = normalize(vec3<f32>(0.62, 0.80, 0.52));
+  let light2 = normalize(vec3<f32>(-0.55, -0.30, 0.75));
   let view = -rd;
   let ndl = max(0.0, dot(n, light));
-  let spec = pow(max(0.0, dot(n, normalize(light + view))), 42.0);
-  let rim = pow(1.0 - max(0.0, dot(n, view)), 2.8);
-  let col = in.tint * (0.24 + 0.80 * ndl) + vec3<f32>(1.0, 0.98, 0.95) * spec * 0.58 + in.tint * rim * 0.25;
+  let ndl2 = max(0.0, dot(n, light2));
+  let spec = pow(max(0.0, dot(n, normalize(light + view))), 52.0);
+  let rim = pow(1.0 - max(0.0, dot(n, view)), 3.0);
+  let col = in.tint * (0.20 + 0.78 * ndl + 0.18 * ndl2) + vec3<f32>(1.0, 0.98, 0.94) * spec * 0.68 + in.tint * rim * 0.24;
   let clip = cam.view_proj * vec4<f32>(in.center + p_hit, 1.0);
   var out: FsOut;
-  out.color = vec4<f32>(col, 1.0);
+  out.color = vec4<f32>(col * in.alpha_fade, in.alpha_fade);
   out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 0.9999);
   return out;
 }
 `;
 
-// Relativistic Doppler-Beamed Accretion Disk (L1 SMBH) & Planetary Rings (L2 Gas Giant)
+// Relativistic Doppler-Beamed Accretion Disk (Galactic Core SMBH) & Planetary Rings (Saturn)
 const DISK_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
 
-// 3 vec4s (48 bytes) per disk:
-//   center_r_in: vec4(x, y, z, r_inner)
-//   normal_r_out: vec4(nx, ny, nz, r_outer)
-//   color_kind: vec4(r, g, b, kind)   kind: 0=relativistic-accretion-disk, 1=planetary-ring
 struct DiskInstance {
   center_r_in: vec4<f32>,
   normal_r_out: vec4<f32>,
@@ -637,21 +908,18 @@ fn vs_main(
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let r = length(in.local_xy);
-  if (r > in.r_out) { discard; }
+  if (r > in.r_out || r < in.r_in) { discard; }
   let kind = u32(round(in.color_kind.w));
 
   if (kind == 0u) {
-    // Relativistic Doppler-Beamed Accretion Disk outside the pitch-black Event Horizon sphere
-    if (r < in.r_in) { discard; }
     let u = clamp((r - in.r_in) / max(1e-4, in.r_out - in.r_in), 0.0, 1.0);
     let ang = atan2(in.local_xy.y, in.local_xy.x);
-    let shear = 0.55 + 0.45 * sin(ang * 3.0 + 14.0 / (u + 0.25) - cam.cam_pos.w * 2.4);
-    // Tangent velocity vector in disk plane -> relativistic Doppler beaming
+    let shear = 0.55 + 0.45 * sin(ang * 3.0 + 16.0 / (u + 0.22) - cam.cam_pos.w * 2.2);
     let rel_p = in.world_pos - in.center;
     let tang = normalize(vec3<f32>(-rel_p.z, 0.0, rel_p.x) + vec3<f32>(1e-5));
     let view_dir = normalize(cam.cam_pos.xyz - in.world_pos);
-    let beta = 0.42 / sqrt(max(0.2, u + 0.18));
-    let doppler = clamp(1.0 + beta * dot(tang, view_dir), 0.35, 1.85);
+    let beta = 0.44 / sqrt(max(0.18, u + 0.16));
+    let doppler = clamp(1.0 + beta * dot(tang, view_dir), 0.35, 1.92);
     let beam = doppler * doppler;
 
     let hot_inner = vec3<f32>(0.90, 0.96, 1.0);
@@ -664,19 +932,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let alpha = clamp(radial_fade * (0.48 + 0.52 * shear) * 0.92, 0.0, 1.0);
     return vec4<f32>(col * beam * (0.62 + 0.52 * shear) * alpha, alpha);
   } else {
-    // Planetary ring system with Cassini division & subtle banding
-    if (r < in.r_in) { discard; }
+    // Saturn Cassini-division ring system
     let u = clamp((r - in.r_in) / max(1e-4, in.r_out - in.r_in), 0.0, 1.0);
-    let cassini = 1.0 - 0.85 * exp(-pow((u - 0.58) * 28.0, 2.0));
-    let ringlets = 0.72 + 0.28 * sin(u * 68.0) * cos(u * 23.0);
-    let fade = smoothstep(0.0, 0.08, u) * (1.0 - smoothstep(0.88, 1.0, u));
-    let alpha = clamp(fade * cassini * ringlets * 0.68, 0.0, 0.85);
+    let cassini = 1.0 - 0.88 * exp(-pow((u - 0.60) * 32.0, 2.0));
+    let encke = 1.0 - 0.60 * exp(-pow((u - 0.88) * 55.0, 2.0));
+    let ringlets = 0.72 + 0.28 * sin(u * 76.0) * cos(u * 27.0);
+    let fade = smoothstep(0.0, 0.08, u) * (1.0 - smoothstep(0.92, 1.0, u));
+    let alpha = clamp(fade * cassini * encke * ringlets * 0.74, 0.0, 0.86);
     return vec4<f32>(in.color_kind.rgb * (0.85 + 0.25 * ringlets) * alpha, alpha);
   }
 }
 `;
 
-// Crisp 3D Line renderer for Keplerian orbits, Travel Path, & MD simulation cell
 const LINE_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
 
@@ -706,7 +973,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
-// 3D Volumetric Raymarcher for L7 Atomic Nucleus (Woods-Saxon proton core + neutron skin + TDSE halo)
+// Translucent 3D Woods-Saxon Nuclear Potential + Live Visscher TDSE Wave Crest surrounding quantized nucleons!
 const NUCLEAR_VOL_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
 
@@ -756,9 +1023,11 @@ fn sample_vol(p_unit: vec3<f32>, dim: u32) -> vec4<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let dim = u32(round(cam.extra0.x));
-  let box_r = max(1.0, cam.extra0.y);
+  let box_r = max(0.5, cam.extra0.y);
   let tdse_tun = cam.extra0.z;
-  let tdse_crest_r = clamp(cam.extra0.w, 0.35, 0.96);
+  let tdse_crest_r = clamp(cam.extra0.w, 0.36, 0.95);
+  let alpha_mul = clamp(cam.extra1.x, 0.0, 1.0);
+  if (alpha_mul < 0.01) { discard; }
 
   let fov = cam.cam_up.w;
   let aspect = cam.cam_right.w;
@@ -769,7 +1038,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     + cam.cam_up.xyz * (in.ndc.y * fov)
   );
 
-  // Ray-box intersection against [-1, 1]^3
   let inv_rd = 1.0 / (rd + select(vec3<f32>(0.0), vec3<f32>(1e-6), abs(rd) < vec3<f32>(1e-6)));
   let t0 = (-1.0 - ro) * inv_rd;
   let t1 = (1.0 - ro) * inv_rd;
@@ -779,7 +1047,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let t_exit = min(tmax_v.x, min(tmax_v.y, tmax_v.z));
   if (t_exit <= t_enter) { discard; }
 
-  let steps = 56u;
+  let steps = 44u;
   let dt = (t_exit - t_enter) / f32(steps);
   var accum = vec3<f32>(0.0);
   var trans = 1.0;
@@ -793,35 +1061,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dens = v.w;
     let rr = length(p);
 
-    // Proton core (rich fiery amber-orange) vs Neutron skin (vivid electric cyan)
-    let skin = clamp((rho_n - rho_p) * 5.2 + smoothstep(0.36, 0.64, rr) * 0.65, 0.0, 1.0);
-    let nuc_col = mix(vec3<f32>(1.0, 0.40, 0.10), vec3<f32>(0.14, 0.84, 1.0), skin);
-    // Live GPU Visscher TDSE tunneling probability wave crest shell!
-    let shell_ring = exp(-pow((rr - tdse_crest_r) * 18.0, 2.0)) * (0.28 + 0.72 * clamp(tdse_tun * 5.0, 0.0, 1.0));
+    // Translucent Woods-Saxon potential aura + bright neutron-skin edge + emerald TDSE tunneling shell
+    let edge_shell = dens * (1.0 - dens) * 4.0;
+    let skin_col = mix(vec3<f32>(1.0, 0.45, 0.16), vec3<f32>(0.18, 0.84, 1.0), clamp((rho_n - rho_p) * 4.8 + 0.45, 0.0, 1.0));
+    let tdse_ring = exp(-pow((rr - tdse_crest_r) * 20.0, 2.0)) * (0.25 + 0.85 * clamp(tdse_tun * 5.0, 0.0, 1.0));
     let shell_col = vec3<f32>(0.24, 1.0, 0.72);
 
-    let sigma = (dens * 2.8 + shell_ring * 1.1) * dt;
-    let emit = (nuc_col * pow(dens, 1.25) * 1.45 + shell_col * shell_ring * 1.85) * dt;
+    let sigma = (edge_shell * 0.55 + tdse_ring * 0.65) * dt;
+    let emit = (skin_col * edge_shell * 0.85 + shell_col * tdse_ring * 1.65) * dt;
     accum = accum + trans * emit;
     trans = trans * exp(-sigma);
-    if (trans < 0.015) { break; }
+    if (trans < 0.05) { break; }
   }
-  let alpha = clamp(1.0 - trans, 0.0, 1.0);
+  let alpha = clamp((1.0 - trans) * alpha_mul, 0.0, 0.82);
   if (alpha < 0.004) { discard; }
-  return vec4<f32>(accum, alpha);
+  return vec4<f32>(accum * alpha_mul, alpha);
 }
 `;
 
-// Fullscreen Post-Processing Pass: Schwarzschild Lensing + Hyperdrive Warp + Big Bang Flash + ACES + Retro CRT!
+// Fullscreen Post-Processing Pass: Schwarzschild Lensing + Hyperdrive Streaks + Big Bang Flash + ACES + Retro CRT
 const POST_WGSL = /* wgsl */ `
 struct PostUniforms {
   resolution: vec2<f32>,
-  bh_uv: vec2<f32>,         // Projected screen UV [0..1] of active SMBH
-  bh_strength: f32,         // Einstein radius squared strength (0 = disabled)
-  warp_amount: f32,         // Hyperdrive radial streak strength [0..1]
-  flash_amount: f32,        // Big Bang primordial flash [0..1]
-  crt_enabled: f32,         // 1.0 = Retro CRT scanlines & vignette ON
-  pixel_size: f32,          // Pixelation step [1..6] when CRT enabled
+  bh_uv: vec2<f32>,
+  bh_strength: f32,
+  warp_amount: f32,
+  flash_amount: f32,
+  crt_enabled: f32,
+  pixel_size: f32,
   time_sec: f32,
   pad0: f32,
   pad1: f32,
@@ -863,63 +1130,57 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   var uv = in.uv;
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
 
-  // Optional Retro CRT pixelation quantization
   if (u.crt_enabled > 0.5 && u.pixel_size > 1.0) {
     let step_uv = vec2<f32>(u.pixel_size) / max(vec2<f32>(1.0), u.resolution);
     uv = (floor(uv / step_uv) + 0.5) * step_uv;
   }
 
-  // Exact Schwarzschild Einstein-ring deflection around projected active SMBH UV
+  // Exact Schwarzschild Einstein-ring deflection around projected SMBH UV (active ONLY at SMBH Core scale!)
   var photon_glow = vec3<f32>(0.0);
   if (u.bh_strength > 1e-6) {
     let d_aspect = vec2<f32>((uv.x - u.bh_uv.x) * aspect, uv.y - u.bh_uv.y);
     let r2 = dot(d_aspect, d_aspect);
     let r = sqrt(max(1e-6, r2));
     let rs = sqrt(u.bh_strength) * 0.65;
-    let outside_shadow = smoothstep(rs * 0.72, rs * 1.18, r);
-    let falloff = exp(-r2 * 24.0) * outside_shadow;
-    let deflect = (u.bh_strength / max(r2 + rs * rs * 0.85, 0.0006)) * falloff;
+    let outside_shadow = smoothstep(rs * 0.85, rs * 1.25, r);
+    let falloff = exp(-r2 * 18.0) * outside_shadow;
+    let deflect = (u.bh_strength / max(r2 + rs * rs * 0.75, 0.0005)) * falloff;
     let dir_uv = vec2<f32>(d_aspect.x / aspect, d_aspect.y) / max(r, 1e-4);
-    uv = clamp(uv - dir_uv * min(0.085, deflect * 0.095), vec2<f32>(0.001), vec2<f32>(0.999));
-    // Crisp golden-white Einstein photon ring just outside the shadow radius
-    let ring = exp(-pow((r - rs * 1.15) / max(0.005, rs * 0.22), 2.0)) * 0.52;
-    photon_glow = vec3<f32>(1.0, 0.86, 0.62) * ring;
+    uv = clamp(uv - dir_uv * min(0.095, deflect * 0.11), vec2<f32>(0.001), vec2<f32>(0.999));
+    let ring = exp(-pow((r - rs * 1.16) / max(0.005, rs * 0.22), 2.0)) * 0.48;
+    photon_glow = vec3<f32>(1.0, 0.86, 0.64) * ring;
   }
 
   var col = textureSample(scene_tex, scene_samp, uv).rgb + photon_glow;
 
-  // Hyperdrive chromatic radial warp streaks (active ONLY during warp transitions)
   if (u.warp_amount > 0.005) {
     let from_c = uv - vec2<f32>(0.5, 0.5);
     var streak = vec3<f32>(0.0);
-    for (var s = 1u; s <= 5u; s = s + 1u) {
-      let f = f32(s) * 0.018 * u.warp_amount;
-      let uv_r = clamp(uv - from_c * (f * 1.15), vec2<f32>(0.001), vec2<f32>(0.999));
+    for (var s = 1u; s <= 4u; s = s + 1u) {
+      let f = f32(s) * 0.012 * u.warp_amount;
+      let uv_r = clamp(uv - from_c * (f * 1.12), vec2<f32>(0.001), vec2<f32>(0.999));
       let uv_g = clamp(uv - from_c * f, vec2<f32>(0.001), vec2<f32>(0.999));
-      let uv_b = clamp(uv - from_c * (f * 0.85), vec2<f32>(0.001), vec2<f32>(0.999));
+      let uv_b = clamp(uv - from_c * (f * 0.88), vec2<f32>(0.001), vec2<f32>(0.999));
       streak.r += textureSample(scene_tex, scene_samp, uv_r).r;
       streak.g += textureSample(scene_tex, scene_samp, uv_g).g;
       streak.b += textureSample(scene_tex, scene_samp, uv_b).b;
     }
-    col = mix(col, (col + streak * 0.28) * (1.0 + 0.45 * u.warp_amount), clamp(u.warp_amount, 0.0, 0.85));
+    col = mix(col, (col + streak * 0.24) * (1.0 + 0.30 * u.warp_amount), clamp(u.warp_amount, 0.0, 0.72));
   }
 
-  // Big Bang flash decay
   if (u.flash_amount > 0.002) {
     let rad = length((in.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0));
     let burst = exp(-rad * rad * 1.8) * u.flash_amount;
-    col = col + vec3<f32>(1.0, 0.92, 0.78) * burst * 2.2;
+    col = col + vec3<f32>(1.0, 0.92, 0.78) * burst * 2.0;
   }
 
   col = aces_tonemap(col * 1.12);
 
-  // Optional Retro CRT scanlines, phosphor tint & subtle vignette
   if (u.crt_enabled > 0.5) {
     let scan = 0.82 + 0.18 * sin(in.uv.y * u.resolution.y * 1.65);
     let vig_d = length((in.uv - vec2<f32>(0.5)) * 1.38);
     let vig = clamp(1.0 - vig_d * vig_d * 0.45, 0.35, 1.0);
     col = col * scan * vig;
-    // Gentle cool-phosphor glow tint
     col = mix(col, col * vec3<f32>(0.92, 1.04, 1.02), 0.35);
   }
 
@@ -951,9 +1212,8 @@ export function createUlgUniversesRenderer(device, canvas) {
   }
   configureSwapchain();
 
-  const sceneFormat = 'rgba8unorm';
+  const sceneFormat = 'rgba16float';
   const depthFormat = 'depth24plus';
-
   let width = 0;
   let height = 0;
   let sceneTex = null;
@@ -961,52 +1221,24 @@ export function createUlgUniversesRenderer(device, canvas) {
   let depthTex = null;
   let depthView = null;
 
-  const camBuf = device.createBuffer({
-    label: 'uv-cam-uniform',
-    size: 176, // mat4 (64) + 7 * vec4 (112) = 176
-    usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
-  });
-  const stageCamBuf = device.createBuffer({
-    label: 'uv-stage-cam-uniform',
-    size: 176,
-    usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
-  });
-  const postUniformBuf = device.createBuffer({
-    label: 'uv-post-uniform',
-    size: 48,
-    usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
-  });
+  // 4 small dedicated uniform buffers -> simultaneous multi-scale crossfading in 1 queue.submit/frame!
+  const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const cloudCamBufA = device.createBuffer({ label: 'uv-cam-cloud-a', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const cloudCamBufB = device.createBuffer({ label: 'uv-cam-cloud-b', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const postUniformBuf = device.createBuffer({ label: 'uv-post-uniform', size: 48, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 
-  // Dynamic reusable instance/geometry buffers
-  const MAX_SPHERES = 128;
-  const sphereBuf = device.createBuffer({
-    label: 'uv-spheres',
-    size: MAX_SPHERES * 64,
-    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
-  });
+  const MAX_SPHERES = 320; // Supports up to U-238 (238 nucleons) + planets/moons/stars!
+  const sphereBuf = device.createBuffer({ label: 'uv-spheres', size: MAX_SPHERES * 64, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const MAX_DISKS = 16;
-  const diskBuf = device.createBuffer({
-    label: 'uv-disks',
-    size: MAX_DISKS * 48,
-    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
-  });
-  const MAX_LINE_VERTS = 16384;
-  const lineBuf = device.createBuffer({
-    label: 'uv-lines',
-    size: MAX_LINE_VERTS * 28, // vec3 pos (12) + vec4 col (16) = 28 bytes
-    usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST
-  });
+  const diskBuf = device.createBuffer({ label: 'uv-disks', size: MAX_DISKS * 48, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
+  const MAX_LINE_VERTS = 24576;
+  const lineBuf = device.createBuffer({ label: 'uv-lines', size: MAX_LINE_VERTS * 28, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
 
-  // Nuclear 3D volume storage buffer (resized on demand)
-  let nuclearVolBuf = device.createBuffer({
-    label: 'uv-nuclear-vol',
-    size: 32 * 32 * 32 * 16,
-    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
-  });
+  let nuclearVolBuf = device.createBuffer({ label: 'uv-nuclear-vol', size: 32 * 32 * 32 * 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   let nuclearVolCapacityBytes = 32 * 32 * 32 * 16;
 
-  // Create Render Pipelines
   const mkMod = (label, code) => device.createShaderModule({ label, code });
 
   const backdropMod = mkMod('uv-backdrop', BACKDROP_WGSL);
@@ -1062,20 +1294,41 @@ export function createUlgUniversesRenderer(device, canvas) {
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less-equal' }
   });
-  const litSphereBg = device.createBindGroup({
-    layout: litSpherePipe.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: camBuf } },
-      { binding: 1, resource: { buffer: sphereBuf } }
-    ]
-  });
+  const dummyAtmoBuf = device.createBuffer({ label: 'uv-dummy-atmo-em', size: 64, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
+  const sphereBgCache = new WeakMap();
+  function getLitSphereBindGroup(atmoBuf) {
+    const buf = atmoBuf || dummyAtmoBuf;
+    let bg = sphereBgCache.get(buf);
+    if (!bg) {
+      bg = device.createBindGroup({
+        layout: litSpherePipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: camBuf } },
+          { binding: 1, resource: { buffer: sphereBuf } },
+          { binding: 2, resource: { buffer: buf } }
+        ]
+      });
+      sphereBgCache.set(buf, bg);
+    }
+    return bg;
+  }
 
   const mdMod = mkMod('uv-md-sphere', MD_SPHERE_WGSL);
   const mdSpherePipe = device.createRenderPipeline({
     label: 'uv-md-sphere-pipe',
     layout: 'auto',
     vertex: { module: mdMod, entryPoint: 'vs_main' },
-    fragment: { module: mdMod, entryPoint: 'fs_main', targets: [{ format: sceneFormat }] },
+    fragment: {
+      module: mdMod,
+      entryPoint: 'fs_main',
+      targets: [{
+        format: sceneFormat,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+        }
+      }]
+    },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less-equal' }
   });
@@ -1163,7 +1416,7 @@ export function createUlgUniversesRenderer(device, canvas) {
   let volumeBg = device.createBindGroup({
     layout: volumePipe.getBindGroupLayout(0),
     entries: [
-      { binding: 0, resource: { buffer: stageCamBuf } },
+      { binding: 0, resource: { buffer: auxCamBuf } },
       { binding: 1, resource: { buffer: nuclearVolBuf } }
     ]
   });
@@ -1178,21 +1431,23 @@ export function createUlgUniversesRenderer(device, canvas) {
   });
   let postBg = null;
 
-  // WeakMap bind-group caches for zero-churn steady-state resident buffer rendering
-  const cloudBgCache = new WeakMap();
+  const cloudBgCacheA = new WeakMap();
+  const cloudBgCacheB = new WeakMap();
   const mdBgCache = new WeakMap();
 
-  function getCloudBindGroup(buf) {
-    let bg = cloudBgCache.get(buf);
+  function getCloudBindGroup(buf, slot) {
+    const cache = slot === 0 ? cloudBgCacheA : cloudBgCacheB;
+    const uBuf = slot === 0 ? cloudCamBufA : cloudCamBufB;
+    let bg = cache.get(buf);
     if (!bg) {
       bg = device.createBindGroup({
         layout: particleCloudPipe.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: { buffer: stageCamBuf } },
+          { binding: 0, resource: { buffer: uBuf } },
           { binding: 1, resource: { buffer: buf } }
         ]
       });
-      cloudBgCache.set(buf, bg);
+      cache.set(buf, bg);
     }
     return bg;
   }
@@ -1203,7 +1458,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       bg = device.createBindGroup({
         layout: mdSpherePipe.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: { buffer: stageCamBuf } },
+          { binding: 0, resource: { buffer: auxCamBuf } },
           { binding: 1, resource: { buffer: posBuf } },
           { binding: 2, resource: { buffer: velBuf } }
         ]
@@ -1259,7 +1514,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       volumeBg = device.createBindGroup({
         layout: volumePipe.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: { buffer: stageCamBuf } },
+          { binding: 0, resource: { buffer: auxCamBuf } },
           { binding: 1, resource: { buffer: nuclearVolBuf } }
         ]
       });
@@ -1278,7 +1533,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     camData.set([camera.pos[0], camera.pos[1], camera.pos[2], camera.timeSec || 0], 16);
     camData.set([camera.right[0], camera.right[1], camera.right[2], camera.aspect], 20);
     camData.set([camera.up[0], camera.up[1], camera.up[2], camera.fovTanHalf], 24);
-    camData.set([camera.fwd[0], camera.fwd[1], camera.fwd[2], camera.level || 0], 28);
+    camData.set([camera.fwd[0], camera.fwd[1], camera.fwd[2], camera.log10SpanM ?? 24.8], 28);
     camData.set(extra0 || [0, 0, 0, 0], 32);
     camData.set(extra1 || [0, 0, 0, 0], 36);
     camData.set(extra2 || [0, 0, 0, 0], 40);
@@ -1287,18 +1542,18 @@ export function createUlgUniversesRenderer(device, canvas) {
 
   function renderFrame({
     camera,
-    particleCloud = null, // { buffer, count, mode, worldScale, pointSize, alphaGain, colorPos, colorNeg }
-    spheres = null,       // Array of { pos, radius, color0, kind, color1, atm, rCore, rMantle, cutaway, seed }
+    particleClouds = [],  // Up to 2 simultaneous zero-copy GPU clouds for seamless cross-scale zoom!
+    spheres = null,
+    atmoEm = null,        // Optional zero-copy live GPU spherical baroclinic + triboelectric EM buffer!
     lightDir = [0.6, 0.75, 0.55],
-    mdCloud = null,       // { positionsBuffer, velocitiesBuffer, count, halfBox, worldScale, radius, baseRgb, idealCoord }
-    disks = null,         // Array of { center, rIn, normal, rOut, color, kind }
-    lines = null,         // Float32Array packed [x,y,z, r,g,b,a, ...] (7 floats per vertex)
-    nuclearVol = null,    // { dim, boxRadius, tdseTunneled, tdseCrestNorm }
-    post = {}             // { bhUv, bhStrength, warpAmount, flashAmount, crtEnabled, pixelSize, timeSec }
+    mdCloud = null,
+    disks = null,
+    lines = null,
+    nuclearVol = null,
+    post = {}
   }) {
     ensureRenderTargets(canvas.width, canvas.height);
 
-    // Prepare instance buffers BEFORE command encoding
     let sphereCount = 0;
     if (Array.isArray(spheres) && spheres.length > 0) {
       sphereCount = Math.min(MAX_SPHERES, spheres.length);
@@ -1350,41 +1605,46 @@ export function createUlgUniversesRenderer(device, canvas) {
     let lineVertCount = 0;
     if (lines && lines.length >= 14) {
       lineVertCount = Math.min(MAX_LINE_VERTS, Math.floor(lines.length / 7));
-      const slice = lines.subarray(0, lineVertCount * 7);
-      lineStaging.set(slice, 0);
+      lineStaging.set(lines.subarray(0, lineVertCount * 7), 0);
       device.queue.writeBuffer(lineBuf, 0, lineStaging.subarray(0, lineVertCount * 7));
     }
 
-    // Write ALL uniform buffers upfront -> ONE single coalesced GPUCommandEncoder & 1 queue.submit/frame!
+    const hasAtmo = Boolean(atmoEm && atmoEm.buffer && atmoEm.width > 0 && atmoEm.height > 0);
     writeCam(
       camBuf,
       camera,
       [camera.level || 0, 0, 0, 0],
       [lightDir[0], lightDir[1], lightDir[2], 0],
-      [0, 0, 0, 0]
+      hasAtmo ? [atmoEm.width, atmoEm.height, atmoEm.sphereIndex ?? 0, 1.0] : [1, 1, -1, 0.0]
     );
-    if (particleCloud && particleCloud.buffer && particleCloud.count > 0) {
+
+    const activeClouds = (particleClouds || []).filter((c) => c && c.buffer && c.count > 0).slice(0, 2);
+    for (let slot = 0; slot < activeClouds.length; slot += 1) {
+      const c = activeClouds[slot];
+      const uBuf = slot === 0 ? cloudCamBufA : cloudCamBufB;
       writeCam(
-        stageCamBuf,
+        uBuf,
         camera,
-        [particleCloud.mode, particleCloud.worldScale, particleCloud.pointSize, particleCloud.alphaGain],
-        [...(particleCloud.colorPos || [0.22, 0.86, 1.0]), 0],
-        [...(particleCloud.colorNeg || [1.0, 0.68, 0.24]), 0]
+        [c.mode, c.worldScale, c.pointSize, c.alphaGain],
+        c.extra1 || [...(c.colorPos || [0, 0, 0]), 0],
+        c.extra2 || [...(c.colorNeg || [0, 0, 0]), 0]
       );
-    } else if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
+    }
+
+    if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
       writeCam(
-        stageCamBuf,
+        auxCamBuf,
         camera,
         [mdCloud.halfBox[0], mdCloud.halfBox[1], mdCloud.halfBox[2], mdCloud.worldScale],
         [mdCloud.baseRgb[0], mdCloud.baseRgb[1], mdCloud.baseRgb[2], mdCloud.radius],
-        [0, 0, 0, mdCloud.idealCoord || 12]
+        [mdCloud.alphaFade ?? 1.0, 0, 0, mdCloud.idealCoord || 12]
       );
     } else if (nuclearVol && nuclearVol.dim > 0) {
       writeCam(
-        stageCamBuf,
+        auxCamBuf,
         camera,
         [nuclearVol.dim, nuclearVol.boxRadius || 3.4, nuclearVol.tdseTunneled || 0, nuclearVol.tdseCrestNorm || 0.72],
-        [0, 0, 0, 0],
+        [nuclearVol.alphaMul ?? 1.0, 0, 0, 0],
         [0, 0, 0, 0]
       );
     }
@@ -1404,12 +1664,11 @@ export function createUlgUniversesRenderer(device, canvas) {
     device.queue.writeBuffer(postUniformBuf, 0, postData);
 
     const enc = device.createCommandEncoder({ label: 'uv-frame-fused' });
-    // Render Pass 1: Backdrop + Lines + Spheres + Disks + Active Zero-Copy Stage (Cloud / MD / Nuclear Vol)
     {
       const pass = enc.beginRenderPass({
         colorAttachments: [{
           view: sceneView,
-          clearValue: { r: 0.01, g: 0.015, b: 0.03, a: 1.0 },
+          clearValue: { r: 0.005, g: 0.009, b: 0.02, a: 1.0 },
           loadOp: 'clear',
           storeOp: 'store'
         }],
@@ -1433,8 +1692,14 @@ export function createUlgUniversesRenderer(device, canvas) {
 
       if (sphereCount > 0) {
         pass.setPipeline(litSpherePipe);
-        pass.setBindGroup(0, litSphereBg);
+        pass.setBindGroup(0, getLitSphereBindGroup(hasAtmo ? atmoEm.buffer : null));
         pass.draw(6, sphereCount, 0, 0);
+      }
+
+      if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
+        pass.setPipeline(mdSpherePipe);
+        pass.setBindGroup(0, getMdBindGroup(mdCloud.positionsBuffer, mdCloud.velocitiesBuffer));
+        pass.draw(6, mdCloud.count, 0, 0);
       }
 
       if (diskCount > 0) {
@@ -1443,15 +1708,14 @@ export function createUlgUniversesRenderer(device, canvas) {
         pass.draw(6, diskCount, 0, 0);
       }
 
-      if (particleCloud && particleCloud.buffer && particleCloud.count > 0) {
+      for (let slot = 0; slot < activeClouds.length; slot += 1) {
+        const c = activeClouds[slot];
         pass.setPipeline(particleCloudPipe);
-        pass.setBindGroup(0, getCloudBindGroup(particleCloud.buffer));
-        pass.draw(6, particleCloud.count, 0, 0);
-      } else if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
-        pass.setPipeline(mdSpherePipe);
-        pass.setBindGroup(0, getMdBindGroup(mdCloud.positionsBuffer, mdCloud.velocitiesBuffer));
-        pass.draw(6, mdCloud.count, 0, 0);
-      } else if (nuclearVol && nuclearVol.dim > 0) {
+        pass.setBindGroup(0, getCloudBindGroup(c.buffer, slot));
+        pass.draw(6, c.count, 0, 0);
+      }
+
+      if (nuclearVol && nuclearVol.dim > 0) {
         pass.setPipeline(volumePipe);
         pass.setBindGroup(0, volumeBg);
         pass.draw(3, 1, 0, 0);
@@ -1459,7 +1723,6 @@ export function createUlgUniversesRenderer(device, canvas) {
       pass.end();
     }
 
-    // Render Pass 2: Fullscreen Post-Processing onto Swapchain (Schwarzschild Lensing + Hyperdrive + ACES + CRT)
     {
       const swapView = ctx.getCurrentTexture().createView();
       const postPass = enc.beginRenderPass({
@@ -1481,7 +1744,7 @@ export function createUlgUniversesRenderer(device, canvas) {
   function dispose() {
     sceneTex?.destroy();
     depthTex?.destroy();
-    for (const b of [camBuf, stageCamBuf, postUniformBuf, sphereBuf, diskBuf, lineBuf, nuclearVolBuf]) {
+    for (const b of [camBuf, cloudCamBufA, cloudCamBufB, auxCamBuf, postUniformBuf, sphereBuf, dummyAtmoBuf, diskBuf, lineBuf, nuclearVolBuf]) {
       try { b.destroy(); } catch {}
     }
   }

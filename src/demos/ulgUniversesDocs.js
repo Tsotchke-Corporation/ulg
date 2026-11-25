@@ -1,6 +1,9 @@
 // Scientific Scale Ladder & Documentation for ULG Universes (`universes.html`).
-// Defines all 8 nested real-WebGPU physical regimes spanning 40 orders of magnitude
-// (`10^+25 m` Cosmic Web -> `10^-15 m` Atomic Nucleus) with honest provenance.
+// Continuous 40-Order-of-Magnitude physical scale coordinate (`log10SpanM` from +25.5 -> -15.2)
+// spanning 8 real WebGPU physics engines with seamless overlapping zoom handoffs.
+
+export const LOG10_SPAN_MAX = 25.4; // ~2.5 x 10^25 m (~800 Mpc)
+export const LOG10_SPAN_MIN = -14.8; // ~16 fm
 
 export const UNIVERSES_SCALES = Object.freeze([
   Object.freeze({
@@ -9,89 +12,99 @@ export const UNIVERSES_SCALES = Object.freeze([
     shortLabel: 'Web',
     name: 'Supergalactic Cosmic Web',
     exponentLabel: '10²⁵ m',
-    log10SpanM: 25.0,
+    log10SpanM: 24.8,
+    minLog10: 21.8,
+    maxLog10: 25.5,
     diveVerb: 'APPROACHING GALAXY',
-    diveButton: '⚡ HYPERDRIVE TO GALAXY',
+    diveButton: '⚡ ZOOM TO GALAXY',
     engineSchema: 'ulg.astrophysics.supergalactic-flrw-treepm.v1',
     plotTitle: 'GPU MATTER POWER SPECTRUM P(k)',
     equations:
       '∇²Φ = (3/2) Ω_m (H₀² / a) δ(x, t)   [3D-FFT Poisson via fft3dWebGpu]\n' +
       'dp/da = −(1 / a² H(a)) ∇Φ   (Symplectic KDK FLRW Comoving Integrator)',
     summary:
-      'Evolves full-Nyquist Zel’dovich primordial dark-matter and baryon filaments inside a 200 Mpc/h expanding FLRW periodic universe in a single WebGPU queue.submit per step, sharing the exact same Gate 0B 3D Radix-2 FFT engine used in 10⁻⁹ m periodic crystal DFT.',
-    kernels: 'buildZeldovichCosmologyICsWebGpu · createSupergalacticTreePmSessionWebGpu · reduce_power_spectrum_pk (16-bin live GPU P(k))'
+      'Evolves full-Nyquist 2LPT (Second-Order Lagrangian Perturbation Theory) dark-matter and baryon filaments inside a 200 Mpc/h expanding ΛCDM universe in a single WebGPU queue.submit per step, sharing ULG’s Gate 0B 3D Radix-2 FFT engine. Scroll inward continuously to fly straight into a supercluster spiral galaxy.',
+    kernels: 'build2LptCosmologyICsWebGpu · createSupergalacticTreePmSessionWebGpu · reduce_power_spectrum_pk (16-bin GPU P(k))'
   }),
   Object.freeze({
     level: 1,
     id: 'galaxy',
     shortLabel: 'Galaxy',
-    name: 'Galactic Disk & SMBH',
+    name: 'Spiral Galaxy & Halo',
     exponentLabel: '10²¹ m',
     log10SpanM: 21.0,
-    diveVerb: 'APPROACHING STAR SYSTEM',
-    diveButton: '⚡ HYPERDRIVE TO SYSTEM',
+    minLog10: 15.8,
+    maxLog10: 22.8,
+    diveVerb: 'APPROACHING SOLAR SYSTEM',
+    diveButton: '⚡ ZOOM TO TARGET',
     engineSchema: 'webgpu-schroeder-scale-atlas-multipole',
     plotTitle: 'GATE 1 ISM COOLING CURVE Λ(T, Z)',
     equations:
       'a_i = −G Σ_cell M_cell (r_i − r_cell) / (|r_i − r_cell|² + ε²)^(3/2)   [SchroederScaleAtlas]\n' +
-      'Λ(T, Z) = Λ_fine(C,O) + Λ_Lyα(H) + Λ_He + Λ_met(Z) + Λ_brems(T)',
+      'v_c(r) ≈ const (NFW dark-matter halo + exponential disk + bulge) · Λ(T, Z) from Gate 1 H/He/C/O',
     summary:
-      'Simulates 8K–65K GPU-resident stars with ULG’s canonical parallel SchroederScaleAtlas multipole gravity (zero private octrees, zero per-frame readback), paired with live Gate 1 H/He/C/O ionization cooling anchors and real-time WGSL Schwarzschild Einstein-ring lensing around the central supermassive black hole.',
-    kernels: 'createResidentScaleAtlasMultipoleNBodyEngine · deriveGate1IsmCoolingAnchorsWebGpu · WGSL Schwarzschild post-pass'
+      'Simulates 16K–65K GPU-resident stars in a physically realistic flat-rotation-curve disk galaxy with ULG’s parallel SchroederScaleAtlas multipole gravity (zero cartoon oversized black hole at 100 kly!). Scroll continuously into the Galactic Center to resolve the relativistic SMBH with Schwarzschild lensing, or into a disk star to enter a true-scale Solar System.',
+    kernels: 'createResidentScaleAtlasMultipoleNBodyEngine · deriveGate1IsmCoolingAnchorsWebGpu'
   }),
   Object.freeze({
     level: 2,
     id: 'star-system',
     shortLabel: 'System',
-    name: 'Planetary Star System',
+    name: 'Solar System & Protoplanetary Formation',
     exponentLabel: '10¹² m',
-    log10SpanM: 12.0,
+    log10SpanM: 12.6,
+    minLog10: 7.9,
+    maxLog10: 16.8,
     diveVerb: 'APPROACHING WORLD',
-    diveButton: '⚡ DIVE INTO TARGET',
-    engineSchema: 'ulg.astrophysics.planetary-symplectic-gpu.v1',
-    plotTitle: 'ORBITAL ENERGY & EQUILIBRIUM T(r)',
+    diveButton: '⚡ ZOOM TO SELECTED BODY',
+    engineSchema: 'ulg.astrophysics.solar-system-nbody-webgpu.v1',
+    plotTitle: 'SYMPLECTIC N-BODY & ACCRETION DISK',
     equations:
-      'v(t + ½dt) = v(t) + ½dt · a(r(t)),   r(t + dt) = r(t) + dt · v(t + ½dt)\n' +
-      'T_eq(a) = T_* √(R_* / 2a) (1 − A)^(1/4)   ·   Σ m_i v_i = 0 (exact barycentric recoil)',
+      'd²r_i/dt² = −G Σ_{j≠i} m_j (r_i − r_j) / |r_i − r_j|³   [f32x2 Symplectic GPU N-Body]\n' +
+      'v_gas = (1−η)v_K · T(r) < T_snow → H₂O ice condensation · DLM Particle-Rigid Planetesimals',
     summary:
-      'Integrates the host star and orbiting terrestrial, ocean, gas-giant, and ice worlds strictly via WebGPU symplectic tiled N-body gravity (zero hardcoded circular Math.sin orbits). Click the star to dive into its thermonuclear core (L3), or pick any planet to inspect its hydrostatic interior (L4).',
-    kernels: 'createResidentTiledNBodyEngine (shared-memory tiled @workgroup_size(64) Velocity-Verlet)'
+      'Toggle between the Mature Real-Scale Solar System (100% WebGPU double-float symplectic N-body at exact astronomical radii, Earth = 0.00916 R☉) and live Protoplanetary Disk Formation (gas-drag pebble drift, radiative snow line, Hill-sphere pebble accretion, and composite DLM particle-rigid planetesimal collisions).',
+    kernels: 'createSolarSystemNBodyEngineWebGpu · createProtoplanetaryDiskFormationSessionWebGpu · createParticleRigidDynamicsSessionWebGpu'
   }),
   Object.freeze({
     level: 3,
     id: 'stellar-core',
-    shortLabel: 'Star',
-    name: 'Stellar Core & Genesis',
+    shortLabel: 'Star/MHD',
+    name: 'MHD Nebular Collapse & Stellar Fusion',
     exponentLabel: '10⁹ m',
-    log10SpanM: 9.0,
+    log10SpanM: 9.2,
+    minLog10: 7.4,
+    maxLog10: 10.6,
     diveVerb: 'SAMPLING PLANETARY MATTER',
-    diveButton: '⚡ DIVE TO PLANET / ASH',
-    engineSchema: 'peercompute.ulg.self-gravitating-hydro-gpu.v1',
-    plotTitle: 'GAMOW TUNNELING WINDOW & FUSION ε',
+    diveButton: '⚡ ZOOM TO EARTH / MATTER',
+    engineSchema: 'ulg.astrophysics.nebular-mhd-collapse-webgpu.v1',
+    plotTitle: 'GAMOW FUSION WINDOW / MHD MAGNETIC ENERGY',
     equations:
-      'du/dt = −(P/ρ)∇·v + q_visc + ε_pp + ε_CNO + ε_3α − ε_photodis − Λ_rad\n' +
-      'P_Gamow(E) ∝ exp(−E/kT) · exp(−√(E_G / E))   ·   Q_pp, Q_3α from Gate 1 B(Z, A)',
+      '∂B/∂t = ∇×(v×B) + η∇²B − ∇ψ,   F_L = (∇×B)×B / μ₀   [3D Resistive MHD + Dedner GLM]\n' +
+      'du/dt = −(P/ρ)∇·v + q_visc + ε_pp + ε_CNO + ε_3α − Λ_rad   [self-gravitating-hydro@1]',
     summary:
-      'Runs ULG’s live self-gravitating compressible reacting-fluid GPU engine (self-gravitating-hydro@1) coupled to ClosureRegistry plasma EOS, exact Gate 1 nuclear β⁺/EC Q-values, and WebGPU RK4 Lane–Emden polytrope solutions. Zero canned star meshes — every glowing plasma parcel is rendered directly from GPU state.',
-    kernels: 'createSelfGravitatingHydroEngine · evaluateStellarNuclearNetworkWebGpu · solveLaneEmdenPolytropeWebGpu'
+      'Switch between live 3D Self-Gravitating Resistive MHD Nebular Collapse (watching rotating magnetized clouds wind poloidal B-fields into helical towers and launch magnetocentrifugal J×B bipolar jets) and live Stellar Core Thermonuclear Fusion (self-gravitating-hydro@1 + Gate 1 nuclear Q-values + Lane–Emden).',
+    kernels: 'createNebularMhdCollapseSessionWebGpu · createSelfGravitatingHydroEngine · evaluateStellarNuclearNetworkWebGpu'
   }),
   Object.freeze({
     level: 4,
     id: 'planetary-interior',
     shortLabel: 'Planet',
-    name: 'Planetary Interior & Surface',
-    exponentLabel: '10⁶ m',
-    log10SpanM: 6.0,
-    diveVerb: 'SAMPLING CRYSTAL LATTICE',
-    diveButton: '⚡ SAMPLE LAYER IN MD',
-    engineSchema: 'ulg.astrophysics.planetary-interior-webgpu.v1',
-    plotTitle: 'HYDROSTATIC P(r) & ρ(r) PROFILE',
+    name: 'Planetary World, Atmosphere & Electrodynamics',
+    exponentLabel: '10⁷ m',
+    log10SpanM: 7.2,
+    minLog10: -5.8,
+    maxLog10: 8.6,
+    diveVerb: 'DIVING TO CRYSTAL LATTICE',
+    diveButton: '⚡ ZOOM TO ATOMIC LATTICE',
+    engineSchema: 'ulg.astrophysics.planetary-atmosphere-em-webgpu.v1',
+    plotTitle: 'HYDROSTATIC P(r) & ATMOSPHERIC EM',
     equations:
-      'dM/dr = 4π r² ρ_polytope(P, T),   dP/dr = −G M(r) ρ_polytope(P, T) / r²\n' +
-      'ρ(P, T) = eval_polytope_atlas_bank_2d(A x ≤ b)   [fail-closed up to 1 TPa]',
+      'dv/dt + 2Ω×v = −∇P/ρ · ∇²φ = −ρ_q/ε₀ · |E| > E_Paschen(P) → Lightning Discharge\n' +
+      'dM/dr = 4π r² ρ_polytope(P, T),   B_dip(Ω, r_core, σ_Fe) → Magnetospheric Aurorae',
     summary:
-      'Integrates radial hydrostatic equilibrium directly on WebGPU using inline Gate 2 Convex Polytope Atlases fitted from Gate 1 DFT bundles (Fe core, SiO₂ mantle, H₂O ocean/crust). The 3D cutaway radii match the live GPU-solved core/mantle boundaries; pick any layer to dive into live atomic MD.',
-    kernels: 'buildPlanetaryPolytopeAtlasWebGpu · solvePlanetaryInteriorWebGpu (inline WGSL eval_polytope_atlas_bank_2d)'
+      'Dynamically activates ULG’s general spherical baroclinic atmosphere, particulate triboelectric charging, GPU Poisson E-field, Paschen dielectric-breakdown lightning, and core-geodynamo aurorae purely from the focused world’s physical state (dormant on airless worlds!). Toggle Interior Cutaway for Gate 2 Polytope Atlas core/mantle shells.',
+    kernels: 'createPlanetaryAtmosphereElectricSessionWebGpu · solvePlanetaryInteriorWebGpu (eval_polytope_atlas_bank_2d)'
   }),
   Object.freeze({
     level: 5,
@@ -99,17 +112,19 @@ export const UNIVERSES_SCALES = Object.freeze([
     shortLabel: 'MD',
     name: 'Crystal & Fluid Molecular Dynamics',
     exponentLabel: '10⁻⁸ m',
-    log10SpanM: -8.0,
+    log10SpanM: -8.2,
+    minLog10: -9.5,
+    maxLog10: -5.2,
     diveVerb: 'RESOLVING ELECTRON SHELLS',
-    diveButton: '⚡ DIVE TO QUANTUM ATOM',
+    diveButton: '⚡ ZOOM TO QUANTUM ATOM',
     engineSchema: 'ulg.gpumath.molecular-dynamics-webgpu.v1',
     plotTitle: 'LIVE GPU RADIAL DISTRIBUTION g(r)',
     equations:
       'm_i d²r_i/dt² = −∇_i [ Σ φ_pair(r_ij) + Σ F_EAM(ρ_i) + Σ V_3(r_ij, r_ik) ] + m_i g\n' +
-      'O(N) lock-free linked-cell Verlet + real-time Berendsen thermostat & GPU g(r) reduction',
+      'O(N) lock-free linked-cell Verlet + Berendsen thermostat & live 64-bin GPU g(r)',
     summary:
-      'Evolves a real 3D crystal or melt of the sampled planetary/stellar element strictly on WebGPU using Gate 1 DFT-derived pair/EAM/Stillinger–Weber potentials. Heat it through melting and vaporization, toggle live GPU gravity, and watch coordination ⟨Z⟩ and the 64-bin GPU g(r) peak broaden in real time.',
-    kernels: 'createMolecularDynamicsSessionWebGpu · buildCrystalMdState · zero-copy positionsBuffer/velocitiesBuffer rendering'
+      'Evolves 1,000–4,000 live atoms of the sampled planetary material strictly on WebGPU using Gate 1 DFT-derived pair/EAM/Stillinger–Weber potentials and physical Gate 1 optical reflectance. Heat through melting & vaporization, toggle GPU gravity, or keep scrolling inward straight into a single atom’s electron shells.',
+    kernels: 'createMolecularDynamicsSessionWebGpu · buildCrystalMdState · zero-copy positionsBuffer/velocitiesBuffer'
   }),
   Object.freeze({
     level: 6,
@@ -118,15 +133,17 @@ export const UNIVERSES_SCALES = Object.freeze([
     name: 'Relativistic Dirac–KS Atom & Molecule',
     exponentLabel: '10⁻¹⁰ m',
     log10SpanM: -10.0,
+    minLog10: -13.2,
+    maxLog10: -9.0,
     diveVerb: 'PROBING STRONG FORCE CORE',
-    diveButton: '⚡ DIVE TO NUCLEUS',
+    diveButton: '⚡ ZOOM TO NUCLEUS',
     engineSchema: 'ulg.electronic.orbital-cloud-webgpu.v1',
     plotTitle: 'DIRAC–KS 4πr²ρ(r) & SUBSHELL LEVELS',
     equations:
       '[c α·p + β m c² + V_nuc(R_nuc) + V_H(ρ) + V_xc(ρ)] ψ_κ = ε_κ ψ_κ   [4-comp Dirac–KS]\n' +
       '|ψ_nlm(r, θ, φ)|² = |R_nl(r)|² |Y_lm(θ, φ)|²   (separable GPU inverse-CDF cloud)',
     summary:
-      'Solves 4-component relativistic radial Dirac–Kohn–Sham equations directly on WebGPU (0 per-SCF CPU readbacks), then samples 60K–180K continuous 3D wavefunction points into a resident GPU buffer. Toggle Relativistic Spin-Orbit ON/OFF on Gold (Z=79) to see 5d/6s contraction shift its physical sRGB color.',
+      'Solves 4-component relativistic radial Dirac–Kohn–Sham equations on WebGPU (0 per-SCF readbacks) and samples 60K–180K continuous 3D wavefunction points into a resident GPU buffer. Keep scrolling inward through 5 orders of magnitude of empty intra-atomic space to resolve the femtometer nucleus.',
     kernels: 'deriveElementBundleWebGpu · solveAtomFullWebGpu · sampleAtomicOrbitalCloudWebGpu · solveMoleculeRhfWebGpu'
   }),
   Object.freeze({
@@ -135,16 +152,18 @@ export const UNIVERSES_SCALES = Object.freeze([
     shortLabel: 'Nucleus',
     name: 'Atomic Nucleus & Quantum Tunneling',
     exponentLabel: '10⁻¹⁵ m',
-    log10SpanM: -15.0,
-    diveVerb: 'RETURNING TO COSMIC WEB',
-    diveButton: '↻ LOOP TO COSMIC WEB',
+    log10SpanM: -14.3,
+    minLog10: -15.2,
+    maxLog10: -12.6,
+    diveVerb: 'ZOOMING OUT TO COSMOS',
+    diveButton: '↻ FLY OUT TO COSMIC WEB',
     engineSchema: 'ulg.nuclear.tunneling-tdse-webgpu.v1',
     plotTitle: 'SYMPLECTIC VISSCHER TDSE |ψ(r, t)|²',
     equations:
       'iℏ ∂ψ/∂t = [−(ℏ²/2μ) ∂²/∂r² + V_WS(r) + V_Coulomb(r)] ψ(r, t)   [Visscher symplectic]\n' +
       'ρ_p,n(r) = ρ₀ / [1 + exp((r − R_p,n) / a)]   ·   B(Z, A) feeds L3 Stellar Q-values',
     summary:
-      'Raymarches the 3D Woods–Saxon proton core and neutron skin volume generated on WebGPU by solveNuclearStructureWebGpu while evolving a live 1D symplectic Visscher quantum α-tunneling wavepacket through the nuclear Coulomb barrier. Its binding energy B(Z, A) directly closes the causal loop back up to L3 stellar fusion!',
+      'Visualizes Z quantized protons and N quantized neutrons packed inside the GPU-solved Woods–Saxon charge/neutron-skin radii surrounded by a live symplectic Visscher 1D quantum α-tunneling probability wavepacket. Its binding energy B(Z, A) closes the causal loop back up to L3 stellar fusion.',
     kernels: 'solveNuclearStructureWebGpu · createNuclearTunnelingTdseWebGpu (nuclear-tunneling-tdse@1)'
   })
 ]);
@@ -167,61 +186,82 @@ export const UNIVERSES_ELEMENT_CHOICES = Object.freeze([
 export const QUALITY_PRESETS = Object.freeze({
   low: Object.freeze({
     id: 'low',
-    cosmoGridPerSide: 14,
+    cosmoGridPerSide: 22,
     cosmoFftN: 16,
-    galaxyStars: 8192,
+    galaxyStars: 16384,
+    solarAsteroids: 256,
     stellarParticles: 2048,
-    mdCells: 4,
+    mdCells: 6,
     orbitalPoints: 48000,
     nuclearVolDim: 24
   }),
   med: Object.freeze({
     id: 'med',
-    cosmoGridPerSide: 18,
+    cosmoGridPerSide: 28,
     cosmoFftN: 32,
-    galaxyStars: 16384,
+    galaxyStars: 32768,
+    solarAsteroids: 512,
     stellarParticles: 4096,
-    mdCells: 5,
+    mdCells: 7,
     orbitalPoints: 96000,
     nuclearVolDim: 28
   }),
   high: Object.freeze({
     id: 'high',
-    cosmoGridPerSide: 22,
+    cosmoGridPerSide: 32,
     cosmoFftN: 32,
-    galaxyStars: 32768,
+    galaxyStars: 49152,
+    solarAsteroids: 1024,
     stellarParticles: 6144,
-    mdCells: 6,
+    mdCells: 8,
     orbitalPoints: 160000,
     nuclearVolDim: 32
   }),
   ultra: Object.freeze({
     id: 'ultra',
-    cosmoGridPerSide: 26,
+    cosmoGridPerSide: 36,
     cosmoFftN: 32,
     galaxyStars: 65536,
+    solarAsteroids: 1536,
     stellarParticles: 8192,
-    mdCells: 8,
+    mdCells: 9,
     orbitalPoints: 240000,
     nuclearVolDim: 32
   })
 });
 
+export function formatPhysicalSpan(log10SpanM) {
+  const m = Math.pow(10, log10SpanM);
+  if (log10SpanM >= 22.0) return `${(m / 3.08567758e22).toFixed(1)} Mpc`;
+  if (log10SpanM >= 19.0) return `${(m / 9.46073047e18).toFixed(1)} kly`;
+  if (log10SpanM >= 15.8) return `${(m / 9.46073047e15).toFixed(2)} ly`;
+  if (log10SpanM >= 10.6) return `${(m / 1.495978707e11).toFixed(2)} AU`;
+  if (log10SpanM >= 8.7) return `${(m / 6.957e8).toFixed(2)} R☉`;
+  if (log10SpanM >= 4.0) return `${Math.round(m / 1e3).toLocaleString()} km`;
+  if (log10SpanM >= 0.0) return `${m.toFixed(1)} m`;
+  if (log10SpanM >= -3.0) return `${(m * 1e3).toFixed(1)} mm`;
+  if (log10SpanM >= -6.0) return `${(m * 1e6).toFixed(1)} μm`;
+  if (log10SpanM >= -9.2) return `${(m * 1e9).toFixed(2)} nm`;
+  if (log10SpanM >= -11.5) return `${(m * 1e10).toFixed(2)} Å`;
+  if (log10SpanM >= -13.0) return `${(m * 1e12).toFixed(2)} pm`;
+  return `${(m * 1e15).toFixed(1)} fm`;
+}
+
 export function buildAboutUlgUniversesHtml() {
   return `
-    <p><strong>ULG Universes</strong> is a single-canvas, browser-native WebGPU showcase spanning <strong>40 orders of magnitude</strong> — from the <code>10⁺²⁵ m</code> expanding supergalactic cosmic web down to the <code>10⁻¹⁵ m</code> atomic nucleus.</p>
-    <p>Unlike procedural cosmos visualizers driven by scripted orbital loops or hardcoded colors, <strong>every single scale runs a real canonical ULG WebGPU compute engine</strong> on one shared <code>GPUDevice</code> with zero-copy GPU buffer presentation:</p>
+    <p><strong>ULG Universes</strong> is a single-canvas, <strong>continuous-zoom 40-order-of-magnitude</strong> WebGPU cosmos spanning <code>10⁺²⁵ m</code> supergalactic filaments down to <code>10⁻¹⁵ m</code> atomic nuclei.</p>
+    <p>Scroll the mouse wheel, pinch, or drag the 40-OOM scale scrubber to fly continuously across physical scales without hard scene cuts. Every scale runs a real ULG WebGPU compute solver with true relative astronomical/atomic proportions:</p>
     <ul>
-      <li><strong>L0 Cosmic Web (10²⁵ m):</strong> 1-submit FLRW 3D-FFT TreePM cosmology + live 16-bin GPU matter power spectrum <code>P(k)</code>.</li>
-      <li><strong>L1 Galaxy &amp; SMBH (10²¹ m):</strong> Parallel <code>SchroederScaleAtlas</code> multipole gravity (8K–65K stars) + Gate 1 ISM radiative cooling <code>Λ(T, Z)</code> + live WGSL Schwarzschild lensing.</li>
-      <li><strong>L2 Star System (10¹² m):</strong> Symplectic tiled WebGPU Velocity-Verlet N-body with exact barycentric recoil and osculating Keplerian trails.</li>
-      <li><strong>L3 Stellar Core (10⁹ m):</strong> Live self-gravitating compressible reacting-fluid hydro + Gate 1 nuclear fusion Q-values + RK4 Lane–Emden polytropes.</li>
-      <li><strong>L4 Planetary Interior (10⁶ m):</strong> Fail-closed inline WGSL Convex Polytope Atlas radial hydrostatic solver driving live 3D cutaway core/mantle shells.</li>
-      <li><strong>L5 Crystal &amp; Fluid MD (10⁻⁸ m):</strong> <code>O(N)</code> lock-free linked-cell GPU Molecular Dynamics with Gate 1 DFT potentials, melting/boiling thermostat, gravity toggle, and live GPU <code>g(r)</code>.</li>
-      <li><strong>L6 Quantum Atom (10⁻¹⁰ m):</strong> 4-component radial Dirac–Kohn–Sham (0 SCF readbacks) + GPU inverse-CDF 3D orbital point cloud + optional molecular RHF &amp; PeerCompute 2-of-2 quorum mesh.</li>
-      <li><strong>L7 Atomic Nucleus (10⁻¹⁵ m):</strong> 3D Woods–Saxon proton/neutron skin raymarcher + live symplectic Visscher 1D quantum α-tunneling TDSE whose binding energy <code>B(Z, A)</code> feeds L3 stellar fusion.</li>
+      <li><strong>L0 Cosmic Web (10²⁵ m):</strong> <code>28³–36³</code> particles on 1-submit FLRW 3D-FFT TreePM cosmology + live 16-bin GPU <code>P(k)</code>.</li>
+      <li><strong>L1 Spiral Galaxy (10²¹ m):</strong> <code>16K–65K</code> flat-rotation-curve disk + NFW halo stars on parallel <code>SchroederScaleAtlas</code> multipole gravity + Gate 1 ISM cooling <code>Λ(T, Z)</code>. Zoom into the Galactic Center to resolve the relativistic SMBH with WGSL Schwarzschild lensing.</li>
+      <li><strong>L2 Solar System (10¹² m → 10⁷ m):</strong> <strong>100% mutual WebGPU double-float (<code>f32x2</code>) symplectic N-body</strong> for the Sun, all 8 planets, Earth’s Moon, Io/Europa/Ganymede, Titan, 1P/Halley, and 512 Main/Kuiper Belt asteroids — rendered at <strong>exact astronomical radii</strong> (Earth 109× smaller than Sun).</li>
+      <li><strong>L3 Stellar Core (10⁹ m):</strong> Live <code>self-gravitating-hydro@1</code> plasma + Gate 1 nuclear Q-values + RK4 Lane–Emden polytropes.</li>
+      <li><strong>L4 Planetary World (10⁷ m):</strong> Seamless zoom onto the live Solar System planet with multi-octave FBM continents, oceans, clouds, Rayleigh atmosphere, and toggleable GPU Polytope Atlas hydrostatic cutaway.</li>
+      <li><strong>L5 Crystal &amp; Fluid MD (10⁻⁸ m):</strong> <code>1,000–4,000</code> live <code>O(N)</code> linked-cell GPU MD atoms with Gate 1 optical reflectance, thermostat, and GPU gravity.</li>
+      <li><strong>L6 Quantum Atom (10⁻¹⁰ m):</strong> 4-component Dirac–KS (0 SCF readbacks) + GPU inverse-CDF orbital cloud + RHF molecule + PeerCompute 2-of-2 quorum mesh.</li>
+      <li><strong>L7 Atomic Nucleus (10⁻¹⁵ m):</strong> Quantized 3D protons &amp; neutrons inside the GPU Woods–Saxon potential well + live symplectic Visscher 1D quantum α-tunneling TDSE.</li>
     </ul>
-    <p style="font-size:12px;color:#94a3b8;"><strong>Scientific Honesty Disclosure:</strong> Runtime closures explicitly carry <code>scientificValidation: false</code>; G7 scientific benchmark audits against NIST, CODATA, AME2020, PREM, and cosmological references remain offline and advisory.</p>
+    <p style="font-size:12px;color:#94a3b8;"><strong>Scientific Honesty Disclosure:</strong> Runtime closures explicitly carry <code>scientificValidation: false</code>; G7 scientific benchmark comparisons remain offline and advisory.</p>
   `;
 }
 
@@ -232,7 +272,7 @@ export function buildAboutScaleHtml(scale) {
     <div class="uv-eq-box">${scale.equations}</div>
     <p><strong>Active ULG WebGPU Engines:</strong> <code>${scale.kernels}</code></p>
     <p><strong>Schema / Method ID:</strong> <code>${scale.engineSchema}</code></p>
-    <p><strong>Controls:</strong> Drag to orbit, scroll to zoom, click any 3D object to inspect its emission spectrum &amp; composition, and click <strong>Initiate Hyperdrive</strong> (or double-click) to dive into the next scale level.</p>
+    <p><strong>Controls:</strong> Scroll wheel / pinch / drag the continuous 40-OOM slider to zoom smoothly across scales. Drag to orbit, click any target to focus &amp; inspect, and double-click to smoothly fly down into it.</p>
     <p style="font-size:12px;color:#94a3b8;"><strong>Provenance:</strong> GPU-native compute &amp; zero-copy rendering · <code>cameraAutoSpin: false</code> default · <code>scientificValidation: false</code> (advisory G7).</p>
   `;
 }

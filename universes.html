@@ -142,6 +142,30 @@
     }
     .uv-scale-rail::-webkit-scrollbar { display: none; }
 
+    .uv-zoom-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+    .uv-zoom-bar input[type="range"] {
+      flex: 1;
+      min-width: 140px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      height: 4px;
+    }
+    .uv-zoom-readout {
+      color: #e0f2fe;
+      font-weight: 600;
+      min-width: 74px;
+      text-align: right;
+      white-space: nowrap;
+    }
+
     .uv-rung-btn {
       appearance: none;
       border: 1px solid transparent;
@@ -706,6 +730,12 @@
         </span>
       </div>
       <nav class="uv-scale-rail uv-glass" id="uv-scale-rail" aria-label="40-Order-of-Magnitude Scale Ladder"></nav>
+      <div class="uv-zoom-bar uv-glass" title="Continuous 40-Order-of-Magnitude Zoom Scrubber — drag or scroll the mouse wheel anywhere to zoom seamlessly from 10⁺²⁵ m to 10⁻¹⁵ m">
+        <span>10²⁵m</span>
+        <input id="uv-zoom-slider" type="range" min="-14.8" max="25.4" step="0.02" value="24.8" dir="rtl" aria-label="Continuous 40-OOM Scale Zoom" />
+        <span>10⁻¹⁵m</span>
+        <span class="uv-zoom-readout" id="uv-zoom-readout">204 Mpc</span>
+      </div>
     </div>
 
     <div class="uv-actions">
@@ -894,7 +924,7 @@
   <!-- Bottom-Right Breadcrumb & Controls Hint -->
   <div class="uv-bottom-right">
     <div class="uv-breadcrumb uv-glass" id="uv-breadcrumb"><strong>Cosmic Web</strong></div>
-    <div class="uv-hint-pill uv-glass">Drag: Orbit · Wheel: Zoom · Click: Pick Target · Double-Click: Dive</div>
+    <div class="uv-hint-pill uv-glass">Scroll: Continuous 40-OOM Zoom · Drag: Orbit · Click: Focus Target · Dbl-Click: Fly In</div>
   </div>
 
   <!-- Hyperdrive Transition Overlay -->

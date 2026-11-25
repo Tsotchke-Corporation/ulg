@@ -1,0 +1,1 @@
+import{Fc as e}from"./sphMechanicsRefreshGpuKernel-CuCkXH7Y.js";export{e as isSubmittedSchroederSpatialReactionProductPlacementArtifact};

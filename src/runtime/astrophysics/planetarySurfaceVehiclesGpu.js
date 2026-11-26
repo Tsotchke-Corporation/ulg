@@ -68,7 +68,8 @@ import {
 } from './surfaceFloraPlacementGpu.js';
 import {
   buildLifeLabXenobiologyUrl,
-  deriveXenobiologyProfile
+  deriveXenobiologyProfile,
+  synthesizeAbductedSpecimenRecord
 } from '../biology/xenobiologySynthesizer.js';
 
 export const ULG_PLANETARY_SURFACE_SCHEMA = 'ulg.astrophysics.planetary-surface-vehicles-webgpu.v1';
@@ -126,6 +127,7 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
   planetaryResult = null,
   planetaryAtmoState = null,
   planetaryMode = 'standard',
+  landingSite = null,
   seed = 20261125
 } = {}) {
   const G = 6.67430e-11;
@@ -146,10 +148,12 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
   let pressurePa = Math.max(0, Number(atmo?.surfacePressurePa ?? bodySpec.surfacePressurePa) || 0);
   if (isMagmaOcean && pressurePa < 5e4) pressurePa = 1.8e5; // Outgassed steam/CO2 Hadean atmosphere
   if (isCryoMoon) pressurePa = 0.0; // Vacuum icy exosphere over cryovolcanic crust
-  const tempK = Math.max(
+  const baseTempK = Math.max(
     35,
     isMagmaOcean ? 1850 : (isRogue ? 75 : (Number(bodySpec.tempK) || 288))
   );
+  // Apply chosen orbital landing-site latitude/biome temperature offset (polar ice cap vs arid plateau!)
+  const tempK = Math.max(35, baseTempK + (Number(landingSite?.tempOffsetK) || 0));
   // Effective molar mass (kg/mol): H2/He gas giants (~0.0024), CO2 thin/super-greenhouse (~0.044), N2/O2 (~0.029)
   const molarMassKgPerMol = !hasSolidCrust
     ? 0.0024
@@ -246,11 +250,16 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
   const craterStrength = hasSolidCrust
     ? Math.max(0.08, Math.min(1.0, 1.0 - skyOpticalDepth * 0.78 - (hasLiquidOcean ? 0.20 : 0)))
     : 0.0;
-  // Mountain/canyon-scale relief inversely proportional to gravity (40–84 m tall ridges so a 60 ft / 18.3 m UFO & 2.8 m Rover feel authentically scaled!)
+  // Mountain/canyon-scale relief inversely proportional to gravity, modulated by chosen orbital landing biome!
+  const ampScaleSite = Math.max(0.65, Math.min(1.6, Number(landingSite?.ampScale) || 1.0));
   const terrainAmpM = hasSolidCrust
-    ? Math.max(24.0, Math.min(82.0, 42.0 * Math.pow(9.81 / gravityMS2, 0.32)))
+    ? Math.max(24.0, Math.min(96.0, 42.0 * Math.pow(9.81 / gravityMS2, 0.32) * ampScaleSite))
     : 14.0;
-  const seaLevelM = hasLiquidOcean ? -6.0 : -999.0;
+  // Orbital-to-surface correspondence: landing on a blue ocean from space raises seaLevelM so you float over
+  // rolling waves; landing on a continental mountain drops seaLevelM cleanly below local valleys!
+  const seaLevelM = hasLiquidOcean
+    ? (-6.0 + (Number(landingSite?.seaLevelOffsetM) || 0))
+    : -999.0;
   // Wind speed derived from atmospheric pressure & insolation (zero in vacuum!)
   const baseWindMS = rhoAtmKgM3 > 1e-4
     ? Math.min(18.0, (2.2 + 9.5 * dustTint + 3.5 * skyOpticalDepth) * (isEyeball ? 1.4 : 1.0))
@@ -302,10 +311,15 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     droneWeightN,
     droneFlightCapable,
     droneThrustToWeight,
-    color0: Object.freeze([c0[0], c0[1], c0[2]]),
+    color0: Object.freeze([
+      landingSite?.isDesert ? Math.min(1, c0[0] * 1.15 + 0.16) : (landingSite?.isPolarIce ? 0.86 : c0[0]),
+      landingSite?.isDesert ? Math.min(1, c0[1] * 0.96 + 0.08) : (landingSite?.isPolarIce ? 0.91 : c0[1]),
+      landingSite?.isDesert ? Math.max(0.12, c0[2] * 0.65) : (landingSite?.isPolarIce ? 0.96 : c0[2])
+    ]),
     color1: Object.freeze([c1[0], c1[1], c1[2]]),
     crustPrimaryRgb: Object.freeze([c0[0], c0[1], c0[2]]),
     crustSecondaryRgb: Object.freeze([c1[0], c1[1], c1[2]]),
+    landingSite: landingSite || null,
     tinyPlanetCurvatureRadiusM,
     seed: (seed >>> 0) || 1,
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
@@ -1129,7 +1143,8 @@ fn sample_ocean_field(x: f32, z: f32) -> vec4<f32> {
 fn eval_crust_height(x: f32, z: f32) -> f32 {
   let is_solid = (params.mode_flags & 1u) != 0u;
   if (!is_solid) {
-    return fbm2(x * 0.0065, z * 0.0065, params.seed_f) * params.terrain_amp - 28.0;
+    // Opaque deep swirling gas-giant ammonia/water cloud deck anchored cleanly beneath the saucer!
+    return fbm2(x * 0.0065, z * 0.0065, params.seed_f) * params.terrain_amp + params.sea_level;
   }
   let r0 = length(vec2<f32>(x, z));
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
@@ -1724,6 +1739,66 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo =
     }
   }
 
+  // --- 5. LIVE ROAMING ALIEN / TERRESTRIAL FAUNA & INTERACTIVE ABDUCTABLE TREES (TRACTOR-BEAMABLE!) ---
+  if (Array.isArray(extras.organisms)) {
+    for (const org of extras.organisms) {
+      if (!org || org.abducted) continue;
+      const [ox, oy, oz] = org.pos;
+      const dist2 = (ox - refX) * (ox - refX) + (oz - refZ) * (oz - refZ);
+      if (dist2 > 280 * 280) continue;
+      const yaw = org.yaw || 0;
+      const cy = Math.cos(yaw); const sy = Math.sin(yaw);
+      const oFwd = [sy, 0, cy];
+      const oRight = [cy, 0, -sy];
+      const oUp = [0, 1, 0];
+      const pt = (lx, ly, lz) => applyCurv([
+        ox + oRight[0] * lx + oFwd[0] * lz,
+        oy + ly,
+        oz + oRight[2] * lx + oFwd[2] * lz
+      ]);
+      const sc = org.scale || 1.0;
+      const col = org.rgb || [0.22, 0.56, 0.24];
+      const emiss = org.abducting ? 0.65 : (org.emissive || 0.0);
+      if (org.kind === 'flora') {
+        // Articulated vascular tree / alien frond specimen (trunk + layered canopy crown!)
+        const hT = 5.4 * sc;
+        pushFrustumCylinder(out, pt(0, hT * 0.28, 0), oUp, oRight, oFwd, 0.34 * sc, 0.22 * sc, hT * 0.56, 6, [0.34, 0.24, 0.16], emiss * 0.3, 0.0, false);
+        pushFrustumCylinder(out, pt(0, hT * 0.66, 0), oUp, oRight, oFwd, 1.85 * sc, 0.95 * sc, hT * 0.38, 7, col, emiss, 0.0, true);
+        pushFrustumCylinder(out, pt(0, hT * 0.96, 0), oUp, oRight, oFwd, 1.15 * sc, 0.15 * sc, hT * 0.34, 7, [Math.min(1, col[0] * 1.15), Math.min(1, col[1] * 1.15), Math.min(1, col[2] * 1.15)], emiss, 0.0, true);
+      } else if (org.morph === 'glider') {
+        // Buoyant low-g / dense-air Aero-Glider with translucent gas sac & trailing bio-tentacles!
+        const bob = Math.sin((org.phase || 0) * 2.2) * 0.55;
+        pushFrustumCylinder(out, pt(0, 2.2 + bob, 0), oUp, oRight, oFwd, 1.15 * sc, 0.65 * sc, 1.1 * sc, 8, col, 0.22 + emiss, 0.0, true);
+        pushOrientedBox(out, pt(0, 1.65 + bob, 0), oRight, oUp, oFwd, 3.2 * sc, 0.12 * sc, 1.1 * sc, [Math.min(1, col[0] + 0.18), Math.min(1, col[1] + 0.14), Math.min(1, col[2] + 0.18)], 0.18 + emiss);
+        pushOrientedBox(out, pt(-0.35 * sc, 0.8 + bob, -0.3 * sc), oRight, oUp, oFwd, 0.12 * sc, 1.1 * sc, 0.12 * sc, col, 0.1 + emiss);
+        pushOrientedBox(out, pt(0.35 * sc, 0.8 + bob, -0.3 * sc), oRight, oUp, oFwd, 0.12 * sc, 1.1 * sc, 0.12 * sc, col, 0.1 + emiss);
+      } else {
+        // Articulated roaming Quadruped / Hexapod Fauna with animated striding legs, torso, head, eyes & tail!
+        const legSwing = Math.sin((org.phase || 0) * 5.2) * 0.28 * sc;
+        const bodyY = (org.morph === 'hexapod' ? 0.78 : 1.12) * sc;
+        pushOrientedBox(out, pt(0, bodyY, 0), oRight, oUp, oFwd, 0.92 * sc, 0.66 * sc, 1.75 * sc, col, emiss);
+        // Head + glowing eyes
+        pushOrientedBox(out, pt(0, bodyY + 0.34 * sc, 1.05 * sc), oRight, oUp, oFwd, 0.58 * sc, 0.50 * sc, 0.68 * sc, [Math.min(1, col[0] * 1.15), Math.min(1, col[1] * 1.12), Math.min(1, col[2] * 1.08)], emiss);
+        pushOrientedBox(out, pt(-0.20 * sc, bodyY + 0.44 * sc, 1.38 * sc), oRight, oUp, oFwd, 0.12 * sc, 0.12 * sc, 0.08 * sc, [0.98, 0.92, 0.32], 1.15);
+        pushOrientedBox(out, pt(0.20 * sc, bodyY + 0.44 * sc, 1.38 * sc), oRight, oUp, oFwd, 0.12 * sc, 0.12 * sc, 0.08 * sc, [0.98, 0.92, 0.32], 1.15);
+        // Tail
+        pushOrientedBox(out, pt(0, bodyY + 0.12 * sc, -1.08 * sc), oRight, oUp, oFwd, 0.18 * sc, 0.18 * sc, 0.72 * sc, col, emiss);
+        // 4 (or 6) animated legs!
+        const zPairs = org.morph === 'hexapod' ? [-0.66, 0.0, 0.66] : [-0.62, 0.62];
+        for (let pi = 0; pi < zPairs.length; pi += 1) {
+          const lz = zPairs[pi] * sc;
+          const sw = (pi & 1) === 0 ? legSwing : -legSwing;
+          pushOrientedBox(out, pt(-0.42 * sc, bodyY * 0.46, lz + sw), oRight, oUp, oFwd, 0.18 * sc, bodyY * 0.92, 0.20 * sc, [col[0] * 0.75, col[1] * 0.75, col[2] * 0.75], emiss * 0.5);
+          pushOrientedBox(out, pt(0.42 * sc, bodyY * 0.46, lz - sw), oRight, oUp, oFwd, 0.18 * sc, bodyY * 0.92, 0.20 * sc, [col[0] * 0.75, col[1] * 0.75, col[2] * 0.75], emiss * 0.5);
+        }
+      }
+      // Glowing capture ring halo around any organism currently being tractor-beamed up into the saucer!
+      if (org.abducting) {
+        pushFrustumCylinder(fxOut, pt(0, 1.4 * sc, 0), oUp, oRight, oFwd, 2.2 * sc, 2.2 * sc, 0.28, 12, [0.35, 1.0, 0.72], 1.4, 0.0, false);
+      }
+    }
+  }
+
   return {
     opaque: new Float32Array(out),
     fx: new Float32Array(fxOut)
@@ -1735,6 +1810,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   planetaryResult = null,
   planetaryAtmoState = null,
   planetaryMode = 'standard',
+  landingSite = null,
   gridN = 129,
   cellSizeM = 9.5,
   particleCount = 2048,
@@ -1748,7 +1824,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createPlanetarySurfaceSessionWebGpu requires a live WebGPU GPUDevice');
   }
-  const env = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, seed });
+  const env = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, landingSite, seed });
   const n = Math.max(33, Math.min(129, Math.trunc(gridN)));
   const ringVertCount = n * n;
   const totalVertCount = ringVertCount * 2; // 2-ring +-6 km GPU clipmap packed in ONE terrain_verts buffer!
@@ -1962,6 +2038,49 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   const activeMissiles = [];       // { pos, vel, age, alive, isRemote, ownerId }
   const pendingHarvest = { silicates: 0, volatiles: 0, metals: 0, exotics: 0 };
   const pendingPeerHits = [];      // { targetPeerId, weapon, damage, wavelengthNm }
+  const pendingAbductions = [];
+  const abductedSpecimens = [];
+
+  // Populate live roaming Fauna (animals) & interactive abductable Flora (trees) on biosphere-viable worlds!
+  const surfaceOrganisms = [];
+  if (env.hasSolidCrust && !env.isMagmaOcean && (env.xenobiology?.biosphereViability ?? 0) >= 0.25 && !landingSite?.isOcean) {
+    const xeno = env.xenobiology;
+    const faunaMorph = (env.gravityMS2 < 4.5 || env.rhoAtmKgM3 > 2.2)
+      ? 'glider'
+      : (env.gravityMS2 > 11.5 ? 'hexapod' : 'quadruped');
+    const pig = xeno.pigmentRgb || [0.18, 0.56, 0.22];
+    const faunaRgb = xeno.solvent === 'CH4'
+      ? [0.68, 0.48, 0.86]
+      : (xeno.solvent === 'NH3' ? [0.34, 0.78, 0.72] : [0.76, 0.58, 0.36]);
+    const buck = Math.max(0.65, Math.min(1.85, xeno.bucklingHeightScale || 1.0));
+    const nFauna = landingSite?.isPolarIce ? 6 : 12;
+    const nFlora = landingSite?.isPolarIce ? 6 : 16;
+    for (let oi = 0; oi < nFauna + nFlora; oi += 1) {
+      const isFauna = oi < nFauna;
+      const ang = ((oi * 2.399963) + (seed % 97) * 0.1) % (Math.PI * 2);
+      const rad = isFauna ? (16.0 + (oi % 6) * 14.5 + (oi >= 6 ? 18 : 0)) : (20.0 + ((oi - nFauna) % 8) * 15.0 + 12.0);
+      const ox = Math.cos(ang) * rad;
+      const oz = Math.sin(ang) * rad;
+      const gh = evaluatePlanetaryCrustElevation(ox, oz, env);
+      if (env.hasLiquidOcean && gh < env.seaLevelM + 0.6 && faunaMorph !== 'glider') continue;
+      const baseH = evaluatePlanetaryTerrainHeight(ox, oz, env);
+      surfaceOrganisms.push({
+        id: `org-${isFauna ? 'fauna' : 'flora'}-${oi}`,
+        kind: isFauna ? 'fauna' : 'flora',
+        morph: isFauna ? faunaMorph : 'tree',
+        pos: [ox, baseH + (faunaMorph === 'glider' && isFauna ? 4.5 : 0.0), oz],
+        yaw: ang + 1.1,
+        speed: isFauna ? (faunaMorph === 'glider' ? 3.8 : 2.6 + (oi % 3) * 0.7) : 0,
+        phase: oi * 1.37,
+        scale: isFauna ? (0.85 + (oi % 4) * 0.16) : (0.85 + (oi % 5) * 0.18) * buck,
+        rgb: isFauna ? faunaRgb : [pig[0], pig[1], pig[2]],
+        emissive: xeno.solvent === 'CH4' ? 0.25 : 0.0,
+        abducting: false,
+        abducted: false,
+        seed: (seed ^ Math.imul(oi + 17, 2654435761)) >>> 0
+      });
+    }
+  }
 
   // Restore saved surface exploration pose cleanly when returning from sampled L5/L6/L7 views!
   if (initialCheckpoint && typeof initialCheckpoint === 'object') {
@@ -2199,7 +2318,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     const h = { ...pendingHarvest };
     pendingHarvest.silicates = 0; pendingHarvest.volatiles = 0; pendingHarvest.metals = 0; pendingHarvest.exotics = 0;
     const hits = pendingPeerHits.splice(0, pendingPeerHits.length);
-    return { harvested: h, peerHits: hits };
+    const abductions = pendingAbductions.splice(0, pendingAbductions.length);
+    return { harvested: h, peerHits: hits, abductions };
   }
 
   function setUfoAltitudeKm(altKm) {
@@ -2634,8 +2754,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     return { eye: [eyeX, eyeY, eyeZ], target, up: [0, 1, 0], focusPos: vehPos };
   }
 
-  let liveSeaIceFrac = 0.0;
-  let liveSnowlineM = env.terrainAmpM * 0.56;
+  let liveSeaIceFrac = landingSite?.isPolarIce ? 0.95 : 0.0;
+  let liveSnowlineM = landingSite?.isPolarIce ? -45.0 : env.terrainAmpM * 0.56;
   let liveAutumnShift = 0.0;
 
   async function step({ dt = 0.016, controls = {}, climate = null, readTelemetry = true } = {}) {
@@ -2645,8 +2765,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     stepIndex += 1;
 
     if (climate && typeof climate === 'object') {
-      if (Number.isFinite(Number(climate.iceCoverFrac))) liveSeaIceFrac = Math.max(0, Math.min(1, Number(climate.iceCoverFrac)));
-      if (Number.isFinite(Number(climate.snowlineM))) liveSnowlineM = Number(climate.snowlineM);
+      if (Number.isFinite(Number(climate.iceCoverFrac))) {
+        liveSeaIceFrac = Math.max(landingSite?.isPolarIce ? 0.90 : 0, Math.min(1, Number(climate.iceCoverFrac)));
+      }
+      if (Number.isFinite(Number(climate.snowlineM))) {
+        liveSnowlineM = landingSite?.isPolarIce ? Math.min(-35.0, Number(climate.snowlineM)) : Number(climate.snowlineM);
+      }
       if (Number.isFinite(Number(climate.autumnShift))) liveAutumnShift = Math.max(0, Math.min(1, Number(climate.autumnShift)));
     }
 
@@ -2666,11 +2790,16 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     const seedF = ((env.seed % 997) * 0.13) + 1.7;
     const curvInv2R = env.hasSolidCrust ? (1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM)) : 0.0;
 
+    const effectiveSeaLevelM = env.hasSolidCrust ? env.seaLevelM : (ufo.pos[1] - 42.0);
+    const effectiveCurvInv2R = env.hasSolidCrust
+      ? (1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM))
+      : (1.0 / (2.0 * 9500.0));
+
     const ab = new ArrayBuffer(192);
     new Uint32Array(ab, 0, 4).set([n, pCount, modeFlags, stepIndex]);
     new Float32Array(ab, 16, 44).set([
       snapX, snapZ, cellSizeM, seedF,
-      env.terrainAmpM, env.craterStrength, env.seaLevelM, curvInv2R,
+      env.terrainAmpM, env.craterStrength, effectiveSeaLevelM, effectiveCurvInv2R,
       env.gravityMS2, env.rhoAtmKgM3, windX, windZ,
       dtSafe, rover.rocketThrottle, rover.speedMS, drone.throttle,
       rover.pos[0], rover.pos[1], rover.pos[2], rover.yaw,
@@ -2702,6 +2831,83 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     pendingHarvest.volatiles += boulderRes.harvested.volatiles;
     pendingHarvest.metals += boulderRes.harvested.metals;
     pendingHarvest.exotics += boulderRes.harvested.exotics;
+
+    // 1B. Step Live Roaming Fauna & Interactive Trees + Tractor-Beam Specimen Abduction into Saucer Bio-Bay!
+    let activeAbductionTarget = null;
+    if (surfaceOrganisms.length > 0) {
+      let bestOrg = null;
+      let bestScore = 1e9;
+      if (tractorActive && ufo.visible) {
+        for (const org of surfaceOrganisms) {
+          if (org.abducted) continue;
+          const dx = org.pos[0] - ufo.pos[0];
+          const dz = org.pos[2] - ufo.pos[2];
+          const hd = Math.hypot(dx, dz);
+          if (hd < 34.0) {
+            // Slightly prefer roaming fauna if both fauna & a tree are under the beam!
+            const sc = hd * (org.kind === 'fauna' ? 0.85 : 1.0);
+            if (sc < bestScore) { bestScore = sc; bestOrg = org; }
+          }
+        }
+      }
+      for (const org of surfaceOrganisms) {
+        if (org.abducted) continue;
+        org.phase += dtSafe;
+        if (org === bestOrg) {
+          org.abducting = true;
+          activeAbductionTarget = org;
+          // Lift & spiral organism smoothly UP the golden tractor beam cone into the saucer's specimen bay!
+          const toUfoX = ufo.pos[0] - org.pos[0];
+          const toUfoY = (ufo.pos[1] - 1.2) - org.pos[1];
+          const toUfoZ = ufo.pos[2] - org.pos[2];
+          const d3 = Math.hypot(toUfoX, toUfoY, toUfoZ);
+          if (d3 <= 3.8) {
+            org.abducted = true;
+            org.abducting = false;
+            const rec = synthesizeAbductedSpecimenRecord({
+              kind: org.kind,
+              worldName: bodySpec?.name || 'Exoplanet',
+              env,
+              xeno: env.xenobiology,
+              latDeg: climate?.observerLatDeg ?? landingSite?.latDeg ?? 32.0,
+              lonDeg: (landingSite?.lonDeg ?? 0.0) + (climate?.observerLonOffsetDeg ?? 0.0),
+              seed: org.seed
+            });
+            abductedSpecimens.push(rec);
+            pendingAbductions.push(rec);
+            continue;
+          }
+          const pullSpd = 15.5;
+          org.pos[0] += (toUfoX / Math.max(0.1, d3)) * pullSpd * dtSafe;
+          org.pos[1] += Math.max(6.5, (toUfoY / Math.max(0.1, d3)) * pullSpd) * dtSafe;
+          org.pos[2] += (toUfoZ / Math.max(0.1, d3)) * pullSpd * dtSafe;
+          org.yaw += 2.6 * dtSafe;
+        } else {
+          org.abducting = false;
+          if (org.kind === 'fauna') {
+            org.yaw += Math.sin(org.phase * 0.45 + org.seed * 0.001) * 0.45 * dtSafe;
+            const nx = org.pos[0] + Math.sin(org.yaw) * org.speed * dtSafe;
+            const nz = org.pos[2] + Math.cos(org.yaw) * org.speed * dtSafe;
+            const gh = deformMpm.evaluateGroundHeight(nx, nz);
+            const isWater = env.hasLiquidOcean && gh <= env.seaLevelM + 0.35 && org.morph !== 'glider';
+            if (isWater || Math.hypot(nx - focus[0], nz - focus[2]) > 260.0) {
+              org.yaw += 1.45;
+            } else {
+              org.pos[0] = nx;
+              org.pos[2] = nz;
+              const targetY = gh + (org.morph === 'glider' ? 5.2 + Math.sin(org.phase * 1.4) * 1.2 : 0.0);
+              org.pos[1] += (targetY - org.pos[1]) * Math.min(1, dtSafe * 7.0);
+            }
+          } else {
+            // Settle released tree softly back onto ground if tractor beam released mid-lift
+            const gh = deformMpm.evaluateGroundHeight(org.pos[0], org.pos[2]);
+            if (org.pos[1] > gh + 0.05) {
+              org.pos[1] = Math.max(gh, org.pos[1] - 12.0 * dtSafe);
+            }
+          }
+        }
+      }
+    }
 
     // 2. Integrate Active Rim-Launched Guided Missiles -> Terrain / Boulder / Remote-UFO Detonation + GPU MLS-MPM Blast!
     for (let mi = activeMissiles.length - 1; mi >= 0; mi -= 1) {
@@ -2914,7 +3120,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       shieldFlash: externalShieldFlash,
       missiles: activeMissiles,
       remoteUfos: externalRemoteUfos,
-      probes: externalProbes
+      probes: externalProbes,
+      organisms: surfaceOrganisms
     });
     vehicleVertCount = Math.min(MAX_VEHICLE_VERTS, Math.floor(meshBundle.opaque.length / 12));
     if (vehicleVertCount > 0) {
@@ -3063,6 +3270,11 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       activeMissileCount: activeMissiles.length,
       aliveBoulderCount: deformMpm.aliveBoulderCount,
       bouldersCaptured: boulderRes.capturedCount,
+      abductedCount: abductedSpecimens.length,
+      latestAbductedSpecimen: abductedSpecimens.length ? abductedSpecimens[abductedSpecimens.length - 1] : null,
+      abductingOrganismName: activeAbductionTarget ? (activeAbductionTarget.kind === 'fauna' ? 'Fauna Organism' : 'Flora Tree') : null,
+      livingOrganismCount: surfaceOrganisms.reduce((acc, o) => acc + (o.abducted ? 0 : 1), 0),
+      landingSite: env.landingSite || null,
       totalCratersCarved: deformMpm.totalCratersCarved,
       craterReplayCount: deformMpm.craterReplayCount,
       boulderSkinGpuActive: Boolean(deformMpm.boulderSkinGpuActive),
@@ -3135,6 +3347,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     get stepIndex() { return stepIndex; },
     getCraterStamps: () => deformMpm.getCraterStamps(),
     applyRemoteCraterStamp: (st) => deformMpm.applyRemoteCraterStamp(st),
+    getAbductedSpecimens: () => [...abductedSpecimens],
+    getOrganisms: () => surfaceOrganisms,
     getResidentTerrainVertBuffer: () => terrainVertBuf,
     getResidentTerrainIndexBuffer: () => terrainIdxBuf,
     getResidentVehicleVertBuffer: () => vehicleVertBuf,

@@ -2,7 +2,7 @@
 // Continuous 40-Order-of-Magnitude physical scale coordinate (`log10SpanM` from +25.5 -> -15.2)
 // spanning 8 real WebGPU physics engines with seamless overlapping zoom handoffs.
 
-export const LOG10_SPAN_MAX = 25.4; // ~2.5 x 10^25 m (~800 Mpc)
+export const LOG10_SPAN_MAX = 26.95; // ~8.9 x 10^26 m (93.0 Gly = 28.5 Gpc Observable Universe Diameter!)
 export const LOG10_SPAN_MIN = -14.8; // ~16 fm
 
 export const UNIVERSES_SCALES = Object.freeze([
@@ -10,11 +10,11 @@ export const UNIVERSES_SCALES = Object.freeze([
     level: 0,
     id: 'cosmic-web',
     shortLabel: 'Web',
-    name: 'Supergalactic Cosmic Web',
-    exponentLabel: '10²⁵ m',
-    log10SpanM: 24.8,
+    name: 'Observable Universe Cosmic Web',
+    exponentLabel: '10²⁷ m',
+    log10SpanM: 26.6,
     minLog10: 21.8,
-    maxLog10: 25.5,
+    maxLog10: 26.95,
     diveVerb: 'APPROACHING GALAXY',
     diveButton: '⚡ ZOOM TO GALAXY',
     engineSchema: 'ulg.astrophysics.supergalactic-flrw-treepm.v1',
@@ -241,6 +241,7 @@ export const QUALITY_PRESETS = Object.freeze({
 
 export function formatPhysicalSpan(log10SpanM) {
   const m = Math.pow(10, log10SpanM);
+  if (log10SpanM >= 25.4) return `${(m / 9.46073047e24).toFixed(1)} Gly`;
   if (log10SpanM >= 22.0) return `${(m / 3.08567758e22).toFixed(1)} Mpc`;
   if (log10SpanM >= 19.0) return `${(m / 9.46073047e18).toFixed(1)} kly`;
   if (log10SpanM >= 15.8) return `${(m / 9.46073047e15).toFixed(2)} ly`;
@@ -258,10 +259,10 @@ export function formatPhysicalSpan(log10SpanM) {
 
 export function buildAboutUlgUniversesHtml() {
   return `
-    <p><strong>ULG Universes</strong> is a single-canvas, <strong>continuous-zoom 40-order-of-magnitude</strong> WebGPU cosmos spanning <code>10⁺²⁵ m</code> supergalactic filaments down to <code>10⁻¹⁵ m</code> atomic nuclei — paired with a continuous <strong>Cosmic Epoch Spine</strong> from CMB Recombination (<code>z = 1100</code>) through Cosmic Dawn (<code>z = 10</code>), Cosmic Noon / Quasar Peak (<code>z = 2.8</code>), and Present Day (<code>z = 0</code>) into the <code>+5 Gyr</code> Red-Giant &amp; Remnant Era.</p>
+    <p><strong>ULG Universes</strong> is a single-canvas, <strong>continuous-zoom 40-order-of-magnitude</strong> (42 OOM) WebGPU cosmos spanning the full <code>10⁺²⁷ m</code> (<code>93 Gly</code>) Observable Universe Cosmic Web down to <code>10⁻¹⁵ m</code> atomic nuclei — paired with a continuous <strong>Cosmic Epoch Spine</strong> from CMB Recombination (<code>z = 1100</code>) through Cosmic Dawn (<code>z = 10</code>), Cosmic Noon / Quasar Peak (<code>z = 2.8</code>), and Present Day (<code>z = 0</code>) into the <code>+5 Gyr</code> Red-Giant &amp; Remnant Era.</p>
     <p>Every astronomical entity emerges dynamically from ULG’s <strong>16-node Universal Law Graph</strong> on WebGPU — zero hardcoded entity/planet hacks or scripted animations:</p>
     <ul>
-      <li><strong>L0 Cosmology (10²⁵ m):</strong> 2LPT 1-submit FLRW 3D-FFT TreePM Cosmic Web + Eisenstein–Hu BAO/CMB ΔT/T shell (<code>z=1100</code>), Pop III Reionization bubbles (<code>z=10</code>), and Bullet-Cluster X-ray ICM / 2D gravitational lensing.</li>
+      <li><strong>L0 Observable Universe Cosmic Web (10²⁷ m · 93 Gly):</strong> 2LPT 1-submit FLRW 3D-FFT TreePM Cosmic Web + CMB Particle Horizon Shell (<code>R_H = 46.5 Gly</code>, <code>z=1100</code>), Pop III Reionization bubbles (<code>z=10</code>), and Bullet-Cluster X-ray ICM / 2D gravitational lensing.</li>
       <li><strong>L1 Galaxies &amp; Clusters (10²¹ m):</strong> <code>16K–65K</code> GPU stars on parallel <code>SchroederScaleAtlas</code> multipole gravity across Spiral, Barred Spiral, Major Merger, Elliptical, High-z Clumpy Protogalaxy, Tidally Disrupted Dwarf &amp; Halo Stream, and Core-Collapsed Globular Cluster + Gate 1 ISM cooling <code>Λ(T, Z)</code>.</li>
       <li><strong>L2 Planetary, Small-Body &amp; Relativistic Systems (10¹² m → 10⁷ m):</strong> Double-float (<code>f32x2</code>) symplectic Solar System N-body, Protoplanetary Disk Accretion, Roche-Limit Ring Disruption &amp; Shepherd Moons, Giant Moon-Forming Impact, Active Dual-Tail Comets, Hot-Jupiter XUV Photoevaporation, Red-Giant Engulfment, Kerr Blandford–Znajek Quasar/Blazar Jets (live Doppler beaming), Roche X-Ray Binaries, Type Ia Detonations, and 2.5PN GW-Chirp BNS Kilonova &amp; BBH Mergers.</li>
       <li><strong>L3 Stars, Nebulae &amp; Compact Remnants (10⁹ m):</strong> Thermonuclear Fusion Core, 3D Resistive MHD Nebular Collapse &amp; Bipolar Jets, Strömgren Photoionized H II Pillars, Bipolar Planetary Nebulae, SNR / Crab PWN, Millisecond Pulsars, Hall-Crustal-Yield Magnetar Giant Flares, and live WebGPU GR TOV Unified Degenerate EOS (White Dwarf → Neutron Star → Black Hole).</li>

@@ -356,6 +356,10 @@
             <div class="ctrl-head"><span>Osmotic Pressure ΔP_osm</span><b id="val-mem-osm">0.00</b></div>
             <input id="sl-mem-osm" type="range" min="-1.2" max="1.2" step="0.05" value="0.0" />
           </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>3D Vesicle Cutaway (clipZ)</span><b id="val-mem-clip">Full</b></div>
+            <input id="sl-mem-clip" type="range" min="-5.5" max="8.0" step="0.25" value="8.0" title="Slice cleanly through the 3D protocell vesicle to inspect its inner lipid bilayer cross-section" />
+          </div>
           <div class="btn-row">
             <button class="sm-btn" id="btn-mem-null" type="button" title="Set hydrophobic coupling ε_hp = 0 to prove dispersion null limit">ε_hp=0 Dissolve</button>
             <button class="sm-btn" id="btn-mem-reset" type="button">↺ Reset</button>

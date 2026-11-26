@@ -132,6 +132,12 @@ struct VsOut {
   @location(1) color: vec3<f32>,
   @location(2) charge: f32,
   @location(3) world_pos: vec3<f32>,
+  @location(4) rad_w: f32,
+};
+
+struct FsOut {
+  @location(0) color: vec4<f32>,
+  @builtin(frag_depth) depth: f32,
 };
 
 fn esp_color(q: f32) -> vec3<f32> {
@@ -156,32 +162,39 @@ fn vs_org_atom(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   let lic_rad = 0.175;
   let rad = select(select(base_rad, vdw_rad, rep_mode == 1u), lic_rad, rep_mode == 2u) * u.field_info.w;
   let to_cam = normalize(u.cam_pos_mode.xyz - a.pos_m.xyz);
-  let wpos = a.pos_m.xyz + to_cam * (rad * 0.72) + (u.cam_right_esp.xyz * qv.x + u.cam_up_time.xyz * qv.y) * rad;
+  let wpos = a.pos_m.xyz + to_cam * (rad * 0.35) + (u.cam_right_esp.xyz * qv.x + u.cam_up_time.xyz * qv.y) * (rad * 1.08);
   var out: VsOut;
   out.pos = u.view_proj * vec4<f32>(wpos, 1.0);
-  out.local_uv = qv;
+  out.local_uv = qv * 1.08;
   out.color = mix(a.vis_z.rgb, esp_color(a.vel_q.w), u.cam_right_esp.w);
   out.charge = a.vel_q.w;
   out.world_pos = a.pos_m.xyz;
+  out.rad_w = rad;
   return out;
 }
 
 @fragment
-fn fs_org_atom(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_org_atom(in: VsOut) -> FsOut {
   let r2 = dot(in.local_uv, in.local_uv);
   if (r2 > 1.0) { discard; }
   let nz = sqrt(max(0.0, 1.0 - r2));
   let n_view = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
+  let to_cam = normalize(u.cam_pos_mode.xyz - in.world_pos);
+  let p_surf = in.world_pos + (u.cam_right_esp.xyz * in.local_uv.x + u.cam_up_time.xyz * in.local_uv.y + to_cam * nz) * in.rad_w;
+  let clip = u.view_proj * vec4<f32>(p_surf, 1.0);
   let l1 = normalize(vec3<f32>(0.55, 0.72, 0.58));
   let l2 = normalize(vec3<f32>(-0.65, -0.35, 0.55));
   let diff1 = max(dot(n_view, l1), 0.0);
   let diff2 = max(dot(n_view, l2), 0.0) * 0.35;
   let h1 = normalize(l1 + vec3<f32>(0.0, 0.0, 1.0));
-  let spec = pow(max(dot(n_view, h1), 0.0), 42.0) * 0.85;
-  let fres = pow(max(0.0, 1.0 - nz), 3.0) * 0.42;
+  let spec = pow(max(dot(n_view, h1), 0.0), 46.0) * 0.92;
+  let fres = pow(max(0.0, 1.0 - nz), 3.0) * 0.45;
   let rim_tint = select(vec3<f32>(0.38, 0.76, 1.0), vec3<f32>(1.0, 0.45, 0.32), in.charge < -0.18);
-  let col = in.color * (0.24 + 0.92 * diff1 + diff2) + vec3<f32>(spec) + rim_tint * fres;
-  return vec4<f32>(col, 1.0);
+  let col = in.color * (0.24 + 0.94 * diff1 + diff2) + vec3<f32>(spec) + rim_tint * fres;
+  var out: FsOut;
+  out.color = vec4<f32>(col, 1.0);
+  out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
+  return out;
 }
 `;
 
@@ -355,6 +368,13 @@ struct VsOut {
   @location(0) local_uv: vec2<f32>,
   @location(1) color: vec3<f32>,
   @location(2) aux: f32,
+  @location(3) world_pos: vec3<f32>,
+  @location(4) rad_w: f32,
+};
+
+struct FsOut {
+  @location(0) color: vec4<f32>,
+  @builtin(frag_depth) depth: f32,
 };
 
 @vertex
@@ -365,31 +385,51 @@ fn vs_bio_bead(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   );
   let qv = quad[vid];
   let b = beads[iid];
+  var out: VsOut;
+  // Interactive 3D Protocell Vesicle Cutaway Plane (extra_info.x = clipZ; >= 100 disables!)
+  if (u.extra_info.x < 90.0 && b.pos_a.z > u.extra_info.x) {
+    out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    out.local_uv = vec2<f32>(0.0);
+    out.color = vec3<f32>(0.0);
+    out.aux = 0.0;
+    out.world_pos = vec3<f32>(0.0);
+    out.rad_w = 0.0;
+    return out;
+  }
   let rad = max(0.06, b.col_r.w) * u.field_info.w;
   let to_cam = normalize(u.cam_pos_mode.xyz - b.pos_a.xyz);
-  let wpos = b.pos_a.xyz + to_cam * (rad * 0.65) + (u.cam_right_esp.xyz * qv.x + u.cam_up_time.xyz * qv.y) * rad;
-  var out: VsOut;
+  let wpos = b.pos_a.xyz + to_cam * (rad * 0.35) + (u.cam_right_esp.xyz * qv.x + u.cam_up_time.xyz * qv.y) * (rad * 1.08);
   out.pos = u.view_proj * vec4<f32>(wpos, 1.0);
-  out.local_uv = qv;
+  out.local_uv = qv * 1.08;
   out.color = b.col_r.rgb;
   out.aux = b.vel_b.w;
+  out.world_pos = b.pos_a.xyz;
+  out.rad_w = rad;
   return out;
 }
 
 @fragment
-fn fs_bio_bead(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_bio_bead(in: VsOut) -> FsOut {
   let r2 = dot(in.local_uv, in.local_uv);
   if (r2 > 1.0) { discard; }
   let nz = sqrt(max(0.0, 1.0 - r2));
   let n_view = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
+  let to_cam = normalize(u.cam_pos_mode.xyz - in.world_pos);
+  let p_surf = in.world_pos + (u.cam_right_esp.xyz * in.local_uv.x + u.cam_up_time.xyz * in.local_uv.y + to_cam * nz) * in.rad_w;
+  let clip = u.view_proj * vec4<f32>(p_surf, 1.0);
   let l1 = normalize(vec3<f32>(0.48, 0.78, 0.56));
   let l2 = normalize(vec3<f32>(-0.55, -0.30, 0.62));
-  let diff = max(dot(n_view, l1), 0.0) * 0.92 + max(dot(n_view, l2), 0.0) * 0.30;
+  let diff = max(dot(n_view, l1), 0.0) * 0.94 + max(dot(n_view, l2), 0.0) * 0.32;
   let h1 = normalize(l1 + vec3<f32>(0.0, 0.0, 1.0));
-  let spec = pow(max(dot(n_view, h1), 0.0), 34.0) * 0.65;
-  let fres = pow(max(0.0, 1.0 - nz), 2.8) * 0.38;
-  let col = in.color * (0.26 + diff) + vec3<f32>(spec) + in.color * fres * 0.85;
-  return vec4<f32>(col, 1.0);
+  let spec = pow(max(dot(n_view, h1), 0.0), 38.0) * 0.72;
+  let fres = pow(max(0.0, 1.0 - nz), 2.8) * 0.44;
+  // Subtle glowing cutaway cross-section rim right near clipZ plane!
+  let cut_rim = select(0.0, (1.0 - smoothstep(0.0, 0.85, abs(in.world_pos.z - u.extra_info.x))) * 0.55, u.extra_info.x < 90.0);
+  let col = in.color * (0.26 + diff) + vec3<f32>(spec) + in.color * fres * 0.88 + vec3<f32>(0.24, 0.96, 0.84) * cut_rim;
+  var out: FsOut;
+  out.color = vec4<f32>(col, 1.0);
+  out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
+  return out;
 }
 `;
 
@@ -436,8 +476,8 @@ fn vs_bio_link(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   let d = pb - pa;
   let dist = length(d);
   var out: VsOut;
-  // Cull wrapped / detached links cleanly
-  if (dist < 1e-4 || dist > 3.6) {
+  // Cull wrapped / detached links OR links past the interactive vesicle cutaway plane!
+  if (dist < 1e-4 || dist > 3.6 || (u.extra_info.x < 90.0 && max(pa.z, pb.z) > u.extra_info.x)) {
     out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
     out.along_across = vec2<f32>(0.0);
     out.color = vec3<f32>(0.0);
@@ -448,7 +488,8 @@ fn vs_bio_link(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   let view_dir = normalize(u.cam_pos_mode.xyz - mid);
   var side = cross(axis, view_dir);
   if (length(side) < 1e-4) { side = u.cam_right_esp.xyz; } else { side = normalize(side); }
-  let thick = select(0.16, 0.10, link_mode == 2u) * u.field_info.w;
+  // Sculpted 3D protein backbone ribbon (link_mode == 1) vs slender lipid acyl chains (link_mode == 2)
+  let thick = select(0.24, 0.11, link_mode == 2u) * u.field_info.w;
   let wpos = mid + side * (qv.y * thick);
   out.pos = u.view_proj * vec4<f32>(wpos, 1.0);
   out.along_across = qv;
@@ -498,8 +539,8 @@ fn sample_field_bilinear(uv_in: vec2<f32>) -> vec4<f32> {
 // Render 128x128 smooth quad plane in 3D space ([-6.4, +6.4] on X-Z plane, displaced vertically by field value!)
 @vertex
 fn vs_field(@builtin(vertex_index) vid: u32) -> VsOut {
-  let gx = 96u;
-  let gy = 96u;
+  let gx = 128u;
+  let gy = 128u;
   let cell = vid / 6u;
   let corner = vid % 6u;
   let cx = cell % gx;
@@ -545,7 +586,9 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
   let eps = 1.0 / max(u.field_info.y, 64.0);
   let s = sample_field_bilinear(in.uv);
   let sx = sample_field_bilinear(in.uv + vec2<f32>(eps, 0.0));
+  let sxm = sample_field_bilinear(in.uv - vec2<f32>(eps, 0.0));
   let sy = sample_field_bilinear(in.uv + vec2<f32>(0.0, eps));
+  let sym = sample_field_bilinear(in.uv - vec2<f32>(0.0, eps));
   let fmode = u32(u.field_info.x + 0.5);
 
   var col = vec3<f32>(0.05, 0.08, 0.14);
@@ -563,8 +606,8 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
     let dom = mix(d_col, l_col, smoothstep(-0.35, 0.35, ee));
     let racemic = vec3<f32>(0.04, 0.05, 0.09);
     col = mix(racemic, dom * (0.35 + 0.85 * min(1.0, L + D)), smoothstep(0.08, 0.62, purity));
-    dhx = (sx.x - sx.y) - (s.x - s.y);
-    dhy = (sy.x - sy.y) - (s.x - s.y);
+    dhx = 0.5 * ((sx.x - sx.y) - (sxm.x - sxm.y));
+    dhy = 0.5 * ((sy.x - sy.y) - (sym.x - sym.y));
   } else if (fmode == 1u) {
     // Belousov-Zhabotinsky Oregonator Spiral Waves: midnight indigo -> blazing cyan -> incandescent gold!
     let u_act = clamp(s.x, 0.0, 1.2);
@@ -573,8 +616,8 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
     col = mix(col, vec3<f32>(0.18, 0.28, 0.78), smoothstep(0.06, 0.55, v_inh));
     col = mix(col, vec3<f32>(0.12, 0.92, 1.0), smoothstep(0.18, 0.65, u_act));
     col = mix(col, vec3<f32>(1.35, 0.92, 0.28), smoothstep(0.60, 0.96, u_act));
-    dhx = sx.x - s.x;
-    dhy = sy.x - s.x;
+    dhx = 0.5 * (sx.x - sxm.x);
+    dhy = 0.5 * (sy.x - sym.x);
   } else if (fmode == 2u) {
     // Prebiotic RAF Autocatalytic Network: warm amber feedstock + emerald autocatalyst + glowing violet polymer!
     let f_feed = clamp(s.x, 0.0, 1.2);
@@ -584,8 +627,8 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
       + vec3<f32>(0.42, 0.24, 0.06) * f_feed * 0.65
       + vec3<f32>(0.10, 0.95, 0.56) * x_cat * 0.95
       + vec3<f32>(0.68, 0.36, 1.25) * y_pol * 0.95;
-    dhx = (sx.y + sx.z) - (s.y + s.z);
-    dhy = (sy.y + sy.z) - (s.y + s.z);
+    dhx = 0.5 * ((sx.y + sx.z) - (sxm.y + sxm.z));
+    dhy = 0.5 * ((sy.y + sy.z) - (sym.y + sym.z));
   } else if (fmode == 3u) {
     // Hodgkin-Huxley Excitable Membrane Voltage V_m (-75 mV -> +35 mV) + refractory K+ h/n trail!
     let vn = clamp((s.x + 75.0) / 110.0, 0.0, 1.15);
@@ -595,8 +638,8 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
     col = mix(col, vec3<f32>(0.12, 0.72, 1.0), smoothstep(0.18, 0.55, vn));
     col = mix(col, vec3<f32>(1.45, 0.88, 0.22), smoothstep(0.55, 0.92, vn));
     col = mix(col, vec3<f32>(1.65, 1.55, 1.35), smoothstep(0.88, 1.08, vn));
-    dhx = (sx.x - s.x) * 0.02;
-    dhy = (sy.x - s.x) * 0.02;
+    dhx = 0.5 * (sx.x - sxm.x) * 0.02;
+    dhy = 0.5 * (sy.x - sym.x) * 0.02;
   } else {
     // Turing Morphogenesis: deep navy basin -> emerald teal -> glowing golden morphogen ridges!
     let v_act = clamp(s.y * 2.3, 0.0, 1.3);
@@ -604,8 +647,8 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
     col = mix(col, vec3<f32>(0.06, 0.54, 0.58), smoothstep(0.08, 0.48, v_act));
     col = mix(col, vec3<f32>(0.22, 0.96, 0.64), smoothstep(0.42, 0.82, v_act));
     col = mix(col, vec3<f32>(1.28, 0.96, 0.34), smoothstep(0.78, 1.12, v_act));
-    dhx = (sx.y - s.y) * 2.4;
-    dhy = (sy.y - s.y) * 2.4;
+    dhx = 0.5 * (sx.y - sxm.y) * 2.4;
+    dhy = 0.5 * (sy.y - sym.y) * 2.4;
   }
 
   let n = normalize(vec3<f32>(-dhx * 16.0, 1.0, -dhy * 16.0));
@@ -622,10 +665,52 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
-// 7. HDR ACES Tonemap & Gamma Blit Pass
+// 7. 2-Pass Half-Resolution Kawase HDR Bloom + ACES Tonemap & Gamma Blit Pass
+const BLOOM_WGSL = /* wgsl */ `
+struct BloomParams {
+  inv_res: vec2<f32>,
+  threshold: f32,
+  mode: f32,
+};
+@group(0) @binding(0) var<uniform> bp: BloomParams;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(2) var src_samp: sampler;
+
+struct VsOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_bloom(@builtin(vertex_index) vid: u32) -> VsOut {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  var out: VsOut;
+  out.pos = vec4<f32>(p[vid], 0.0, 1.0);
+  out.uv = vec2<f32>(p[vid].x * 0.5 + 0.5, 0.5 - p[vid].y * 0.5);
+  return out;
+}
+
+@fragment
+fn fs_bloom(in: VsOut) -> @location(0) vec4<f32> {
+  let d = bp.inv_res * select(1.25, 2.25, bp.mode > 0.5);
+  let c0 = textureSample(src_tex, src_samp, in.uv + vec2<f32>(-d.x, -d.y)).rgb;
+  let c1 = textureSample(src_tex, src_samp, in.uv + vec2<f32>( d.x, -d.y)).rgb;
+  let c2 = textureSample(src_tex, src_samp, in.uv + vec2<f32>(-d.x,  d.y)).rgb;
+  let c3 = textureSample(src_tex, src_samp, in.uv + vec2<f32>( d.x,  d.y)).rgb;
+  let avg = (c0 + c1 + c2 + c3) * 0.25;
+  if (bp.mode < 0.5) {
+    let lum = dot(avg, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let w = max(0.0, lum - bp.threshold) / max(1e-4, lum);
+    return vec4<f32>(avg * w, 1.0);
+  }
+  return vec4<f32>(avg, 1.0);
+}
+`;
+
 const TONEMAP_WGSL = /* wgsl */ `
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_samp: sampler;
+@group(0) @binding(2) var bloom_tex: texture_2d<f32>;
 
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
@@ -653,7 +738,8 @@ fn aces_film(x: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_tone(in: VsOut) -> @location(0) vec4<f32> {
   let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
-  let mapped = aces_film(hdr * 1.12);
+  let bloom = textureSample(bloom_tex, hdr_samp, in.uv).rgb;
+  let mapped = aces_film((hdr + bloom * 0.42) * 1.12);
   let srgb = pow(max(mapped, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
   return vec4<f32>(srgb, 1.0);
 }
@@ -673,6 +759,13 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
   const depthState = { depthWriteEnabled: true, depthCompare: 'less', format: 'depth24plus' };
   const depthReadOnly = { depthWriteEnabled: false, depthCompare: 'less', format: 'depth24plus' };
   const hdrTarget = [{ format: 'rgba16float' }];
+  const hdrAlphaTarget = [{
+    format: 'rgba16float',
+    blend: {
+      color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+    }
+  }];
   const additiveTarget = [{
     format: 'rgba16float',
     blend: {
@@ -697,11 +790,22 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
     depthWriteEnabled: false, depthCompare: 'always', format: 'depth24plus'
   });
   const orgAtomPipe = makePipeline('chembio-org-atom', ORG_ATOM_WGSL, 'vs_org_atom', 'fs_org_atom', hdrTarget, depthState);
-  const orgBondPipe = makePipeline('chembio-org-bond', ORG_BOND_WGSL, 'vs_org_bond', 'fs_org_bond', hdrTarget, depthState);
+  const orgBondPipe = makePipeline('chembio-org-bond', ORG_BOND_WGSL, 'vs_org_bond', 'fs_org_bond', hdrAlphaTarget, depthState);
   const piMoPipe = makePipeline('chembio-pi-mo', PI_MO_CLOUD_WGSL, 'vs_pi_mo', 'fs_pi_mo', additiveTarget, depthReadOnly);
   const bioBeadPipe = makePipeline('chembio-bio-bead', BIO_BEAD_WGSL, 'vs_bio_bead', 'fs_bio_bead', hdrTarget, depthState);
   const bioLinkPipe = makePipeline('chembio-bio-link', BIO_LINK_WGSL, 'vs_bio_link', 'fs_bio_link', hdrTarget, depthState);
   const fieldPipe = makePipeline('chembio-field', FIELD_PLANE_WGSL, 'vs_field', 'fs_field', hdrTarget, depthState);
+
+  const bloomMod = device.createShaderModule({ label: 'chembio-bloom', code: BLOOM_WGSL });
+  const bloomPipe = device.createRenderPipeline({
+    label: 'chembio-bloom',
+    layout: 'auto',
+    vertex: { module: bloomMod, entryPoint: 'vs_bloom' },
+    fragment: { module: bloomMod, entryPoint: 'fs_bloom', targets: hdrTarget },
+    primitive: { topology: 'triangle-list', cullMode: 'none' }
+  });
+  const bloomExtractBuf = device.createBuffer({ label: 'chembio-bloom-ext', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const bloomBlurBuf = device.createBuffer({ label: 'chembio-bloom-blur', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
 
   const toneMod = device.createShaderModule({ label: 'chembio-tonemap', code: TONEMAP_WGSL });
   const tonePipe = device.createRenderPipeline({
@@ -719,6 +823,10 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
 
   let hdrTex = null;
   let depthTex = null;
+  let bloomTexA = null;
+  let bloomTexB = null;
+  let bloomExtractBg = null;
+  let bloomBlurBg = null;
   let toneBindGroup = null;
   let curW = 0;
   let curH = 0;
@@ -743,11 +851,15 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
   function ensureTargets() {
     const w = Math.max(64, canvas.width | 0);
     const h = Math.max(64, canvas.height | 0);
-    if (w === curW && h === curH && hdrTex && depthTex) return;
+    if (w === curW && h === curH && hdrTex && depthTex && bloomTexA && bloomTexB) return;
     curW = w;
     curH = h;
     if (hdrTex) try { hdrTex.destroy(); } catch {}
     if (depthTex) try { depthTex.destroy(); } catch {}
+    if (bloomTexA) try { bloomTexA.destroy(); } catch {}
+    if (bloomTexB) try { bloomTexB.destroy(); } catch {}
+    const bw = Math.max(32, w >> 1);
+    const bh = Math.max(32, h >> 1);
     hdrTex = device.createTexture({
       size: [w, h],
       format: 'rgba16float',
@@ -758,11 +870,32 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
       format: 'depth24plus',
       usage: 0x10 // RENDER_ATTACHMENT
     });
+    bloomTexA = device.createTexture({ size: [bw, bh], format: 'rgba16float', usage: 0x10 | 0x04 });
+    bloomTexB = device.createTexture({ size: [bw, bh], format: 'rgba16float', usage: 0x10 | 0x04 });
+    device.queue.writeBuffer(bloomExtractBuf, 0, new Float32Array([1 / w, 1 / h, 0.82, 0.0]));
+    device.queue.writeBuffer(bloomBlurBuf, 0, new Float32Array([1 / bw, 1 / bh, 0.0, 1.0]));
+    bloomExtractBg = device.createBindGroup({
+      layout: bloomPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: bloomExtractBuf } },
+        { binding: 1, resource: hdrTex.createView() },
+        { binding: 2, resource: sampler }
+      ]
+    });
+    bloomBlurBg = device.createBindGroup({
+      layout: bloomPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: bloomBlurBuf } },
+        { binding: 1, resource: bloomTexA.createView() },
+        { binding: 2, resource: sampler }
+      ]
+    });
     toneBindGroup = device.createBindGroup({
       layout: tonePipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: hdrTex.createView() },
-        { binding: 1, resource: sampler }
+        { binding: 1, resource: sampler },
+        { binding: 2, resource: bloomTexB.createView() }
       ]
     });
   }
@@ -822,7 +955,7 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
     uniformF32[29] = scene.fieldW ?? 128;
     uniformF32[30] = scene.fieldH ?? 128;
     uniformF32[31] = scene.sphereScale ?? 1.0;
-    uniformF32[32] = scene.countA ?? 0;
+    uniformF32[32] = Number.isFinite(Number(scene.clipZ)) ? Number(scene.clipZ) : 999.0;
     uniformF32[33] = scene.bioLinkMode ?? 0;
     uniformF32[34] = scene.piPointSize ?? 0.17;
     uniformF32[35] = bgStyle;
@@ -859,7 +992,7 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
       ]);
       pass.setPipeline(fieldPipe);
       pass.setBindGroup(0, fbg);
-      pass.draw(96 * 96 * 6);
+      pass.draw(128 * 128 * 6);
     }
 
     // Optional Organic Molecule (Bonds + Atoms + Additive pi-MO Cloud)
@@ -915,7 +1048,24 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
 
     pass.end();
 
-    // Pass 2: ACES Tonemap to Swapchain
+    // Pass 2: 2-Pass Half-Res Kawase HDR Bloom
+    const b1 = enc.beginRenderPass({
+      colorAttachments: [{ view: bloomTexA.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }]
+    });
+    b1.setPipeline(bloomPipe);
+    b1.setBindGroup(0, bloomExtractBg);
+    b1.draw(3);
+    b1.end();
+
+    const b2 = enc.beginRenderPass({
+      colorAttachments: [{ view: bloomTexB.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }]
+    });
+    b2.setPipeline(bloomPipe);
+    b2.setBindGroup(0, bloomBlurBg);
+    b2.draw(3);
+    b2.end();
+
+    // Pass 3: ACES Tonemap + Bloom Composite to Swapchain
     const swapView = ctx.getCurrentTexture().createView();
     const tpass = enc.beginRenderPass({
       colorAttachments: [{
@@ -937,8 +1087,12 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
     if (disposed) return;
     disposed = true;
     try { uniformBuf.destroy(); } catch {}
+    try { bloomExtractBuf.destroy(); } catch {}
+    try { bloomBlurBuf.destroy(); } catch {}
     if (hdrTex) try { hdrTex.destroy(); } catch {}
     if (depthTex) try { depthTex.destroy(); } catch {}
+    if (bloomTexA) try { bloomTexA.destroy(); } catch {}
+    if (bloomTexB) try { bloomTexB.destroy(); } catch {}
   }
 
   return Object.freeze({

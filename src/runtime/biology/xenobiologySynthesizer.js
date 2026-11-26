@@ -324,18 +324,109 @@ export const XENOBIOLOGY_PLANET_PRESETS = Object.freeze([
   })
 ]);
 
-export function buildLifeLabXenobiologyUrl(profile, mode = 'protocell-vesicle') {
+/**
+ * Synthesize a complete first-principles abducted biological specimen record
+ * (Tree / Flora or Roaming Animal / Fauna) directly from live planetary physics
+ * so tractor-beaming an organism aboard the saucer can be inspected in `life-lab.html`!
+ */
+export function synthesizeAbductedSpecimenRecord({
+  kind = 'fauna',
+  worldName = 'Exoplanet',
+  env = {},
+  xeno = null,
+  latDeg = 32.0,
+  lonDeg = 0.0,
+  seed = 1337
+} = {}) {
+  const prof = xeno || deriveXenobiologyProfile({
+    worldName,
+    tempK: env.tempK ?? 288,
+    pressurePa: env.pressurePa ?? 101325,
+    gravityMS2: env.gravityMS2 ?? 9.81,
+    rhoAtmKgM3: env.rhoAtmKgM3 ?? 1.22,
+    seed
+  });
+  const g = Math.max(0.25, Number(env.gravityMS2 ?? prof.gravityMS2) || 9.81);
+  const rho = Math.max(0, Number(env.rhoAtmKgM3) || 1.22);
+  const isFauna = kind === 'fauna';
+  const solv = prof.solvent || 'H2O';
+  const solvPrefix = solv === 'CH4' ? 'Cryo-Azoto' : (solv === 'NH3' ? 'Ammono' : (solv === 'H2SO4' ? 'Sulfo' : 'Bio'));
+
+  let morphClass;
+  let speciesName;
+  if (isFauna) {
+    if (g < 4.5 || rho > 2.2) {
+      morphClass = 'Buoyant Gas-Sac Glider';
+      speciesName = `${solvPrefix} Aero-Glider`;
+    } else if (g > 11.5) {
+      morphClass = 'Armored High-g Hexapod';
+      speciesName = `${solvPrefix} Litho-Hexapod`;
+    } else {
+      morphClass = 'Articulated Terrestrial Grazer';
+      speciesName = `${solvPrefix} Quadruped Grazer`;
+    }
+  } else {
+    const tEff = Number(prof.stellarTeffK) || 5778;
+    const canopyTone = solv === 'CH4' ? 'Tholin-Frond' : (tEff < 3900 ? 'Crimson-Leaf' : (tEff > 6400 ? 'Violet-Canopy' : 'Chlorophyll'));
+    morphClass = g < 5.0 ? 'Tall Slender Low-g Spire Tree' : (g > 12.0 ? 'Buttressed High-g Canopy Tree' : 'Broadleaf / Conifer Vascular Tree');
+    speciesName = `${canopyTone} Arbor`;
+  }
+
+  // Deterministically mutate a few residues from the world's base solvent biopolymer sequence so each abducted
+  // specimen carries a unique, physically thermostable HP-model sequence!
+  const baseSeq = String(prof.labParams?.foldSeq || 'HPPHH+PHHPPHH-PPHHPPH+PPH-PHHPPH');
+  const alphabet = isFauna ? ['H', 'P', '+', '-', 'H', 'P'] : ['H', 'H', 'P', 'P', '+', '-'];
+  const chars = baseSeq.split('');
+  for (let k = 0; k < 5; k += 1) {
+    const idx = Math.floor(hash01((seed + k * 97 + (isFauna ? 7 : 31)) >>> 0) * chars.length);
+    chars[idx] = alphabet[Math.floor(hash01((seed + k * 211) >>> 0) * alphabet.length)];
+  }
+  const fasta = chars.join('');
+  const recommendedBioMode = isFauna ? 'excitable-spiral' : 'amphipathic-helix-bundle';
+
+  return Object.freeze({
+    id: `spec-${kind}-${(seed >>> 0).toString(36)}`,
+    kind: isFauna ? 'fauna' : 'flora',
+    speciesName,
+    morphClass,
+    worldName,
+    solvent: solv,
+    solventFormula: prof.solventFormula || solv,
+    solventLabel: prof.solventLabel || solv,
+    membraneType: prof.membraneType || 'Phospholipid Bilayer',
+    tempK: Math.round(prof.labParams?.memTempK ?? env.tempK ?? 288),
+    gravityMS2: Number(g.toFixed(2)),
+    pressurePa: Math.round(env.pressurePa ?? prof.pressurePa ?? 101325),
+    stellarTeffK: Math.round(prof.stellarTeffK || 5778),
+    uvFluxNorm: prof.uvFluxNorm ?? 1.0,
+    fasta,
+    recommendedBioMode,
+    latDeg: Number(Number(latDeg || 0).toFixed(1)),
+    lonDeg: Number(Number(lonDeg || 0).toFixed(1)),
+    profile: prof
+  });
+}
+
+export function buildLifeLabXenobiologyUrl(profile, mode = 'protocell-vesicle', specimen = null) {
   const q = new URLSearchParams({
     xeno: '1',
-    world: String(profile?.worldName || 'Exoplanet'),
-    T: String(Math.round(profile?.labParams?.memTempK || 288)),
-    P: String(Math.round(profile?.pressurePa || 101325)),
-    g: String(profile?.gravityMS2 || 9.81),
-    solvent: String(profile?.solvent || 'H2O'),
-    teff: String(Math.round(profile?.stellarTeffK || 5778)),
-    uv: String(profile?.uvFluxNorm || 1.0),
-    mode
+    world: String(specimen?.worldName || profile?.worldName || 'Exoplanet'),
+    T: String(Math.round(specimen?.tempK || profile?.labParams?.memTempK || 288)),
+    P: String(Math.round(specimen?.pressurePa || profile?.pressurePa || 101325)),
+    g: String(specimen?.gravityMS2 || profile?.gravityMS2 || 9.81),
+    solvent: String(specimen?.solvent || profile?.solvent || 'H2O'),
+    teff: String(Math.round(specimen?.stellarTeffK || profile?.stellarTeffK || 5778)),
+    uv: String(specimen?.uvFluxNorm || profile?.uvFluxNorm || 1.0),
+    mode: specimen?.recommendedBioMode || mode
   });
+  if (specimen) {
+    q.set('specimenKind', String(specimen.kind || 'fauna'));
+    q.set('species', String(specimen.speciesName || 'Abducted Organism'));
+    if (specimen.morphClass) q.set('morph', String(specimen.morphClass));
+    if (specimen.fasta) q.set('fasta', String(specimen.fasta));
+    if (Number.isFinite(specimen.latDeg)) q.set('lat', String(specimen.latDeg));
+    if (Number.isFinite(specimen.lonDeg)) q.set('lon', String(specimen.lonDeg));
+  }
   return `./life-lab.html?${q.toString()}`;
 }
 
@@ -350,7 +441,7 @@ export function parseXenobiologyFromSearch(search = '') {
   const uv = Number(sp.get('uv')) || 1.0;
   const worldName = sp.get('world') || 'Alien World';
   const mode = sp.get('mode') || 'protocell-vesicle';
-  const profile = deriveXenobiologyProfile({
+  const baseProfile = deriveXenobiologyProfile({
     worldName,
     tempK: T,
     pressurePa: solventHint === 'H2SO4' ? Math.max(P, 1e6) : (solventHint === 'CH4' ? Math.max(P, 1e5) : P),
@@ -360,5 +451,30 @@ export function parseXenobiologyFromSearch(search = '') {
     stellarTeffK: teff,
     uvFluxNorm: uv
   });
-  return { profile, mode };
+  const species = sp.get('species') || '';
+  const specimenKind = sp.get('specimenKind') || '';
+  const fasta = sp.get('fasta') || '';
+  const morph = sp.get('morph') || '';
+  const abductedSpecimen = species
+    ? Object.freeze({
+      kind: specimenKind || 'fauna',
+      speciesName: species,
+      morphClass: morph || (specimenKind === 'flora' ? 'Vascular Flora' : 'Motile Fauna'),
+      worldName,
+      fasta: fasta || baseProfile.labParams.foldSeq,
+      latDeg: Number(sp.get('lat')) || 0,
+      lonDeg: Number(sp.get('lon')) || 0
+    })
+    : null;
+  const profile = abductedSpecimen
+    ? Object.freeze({
+      ...baseProfile,
+      abductedSpecimen,
+      labParams: Object.freeze({
+        ...baseProfile.labParams,
+        foldSeq: abductedSpecimen.fasta
+      })
+    })
+    : baseProfile;
+  return { profile, mode, abductedSpecimen };
 }

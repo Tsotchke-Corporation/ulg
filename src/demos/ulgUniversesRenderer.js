@@ -33,8 +33,27 @@ struct CameraUniforms {
   extra1: vec4<f32>,     // mode-specific floats
   extra2: vec4<f32>,     // mode-specific floats
   em_sensor: vec4<f32>,  // x = log10LambdaMin [-13..+1], y = log10LambdaMax, z = sensorActive (0|1), w = gain
-  em_aux: vec4<f32>,     // x = ambientTempK, y = sunFluxOrEclipse, z = skyOptDepth, w = flags (bit0=skipSurfaceFog)
+  em_aux: vec4<f32>,     // x = ambientTempK, y = sunFluxOrEclipse, z = skyOptDepth, w = flags (bit0=skipSurfaceFog, bit1=reversedLogDepth)
 };
+
+// Unified Reversed Logarithmic Depth Buffer [0.1 m .. 10^14 m (~668 AU)]!
+// Maps w in [0 .. 1e14 m] onto WebGPU [1.0 .. 0.0] reversed-Z with zero z-fighting so
+// 0.2 m surface rocks, 5 km mountains, 384,400 km moons, 150,000,000 km Suns, and outer planets
+// coexist at TRUE physical meters in one depth buffer without any fixed-distance skybox hacks!
+const LOG_DEPTH_INV_FAR: f32 = 0.0215021426; // 1.0 / log2(1.0e14 + 1.0)
+fn apply_log_depth_vs(clip: vec4<f32>, flags_f: f32) -> vec4<f32> {
+  let flags = u32(round(max(0.0, flags_f)));
+  if ((flags & 2u) == 0u || clip.w <= 0.0) { return clip; }
+  let z_rev_log = clamp(1.0 - log2(max(1e-4, clip.w + 1.0)) * LOG_DEPTH_INV_FAR, 1e-6, 0.999999);
+  return vec4<f32>(clip.x, clip.y, z_rev_log * clip.w, clip.w);
+}
+fn eval_frag_depth(clip: vec4<f32>, flags_f: f32) -> f32 {
+  let flags = u32(round(max(0.0, flags_f)));
+  if ((flags & 2u) != 0u && clip.w > 0.0) {
+    return clamp(1.0 - log2(max(1e-4, clip.w + 1.0)) * LOG_DEPTH_INV_FAR, 1e-6, 0.999999);
+  }
+  return clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
+}
 `;
 
 // Shared Overflow-Safe Full-Spectrum EM Sensor Spectral Mapper (10^-13 m Gamma -> 10^+1 m Radio).
@@ -50,19 +69,17 @@ fn em_planck_response(log_lam: f32, temp_k: f32) -> f32 {
   // x = h c / (lambda k_B T); log10(h c / k_B) = -1.842006
   let log10_x = clamp(-1.842006 - log_lam - log(t_safe) * 0.43429448, -8.0, 1.86);
   let x = pow(10.0, log10_x);
-  // Reference Wien peak x_ref = 4.965 => 1/(exp(4.965)-1) = 0.007027.
-  // Ratio of true Planck occupation number n(x) = 1/(exp(x)-1) to Wien-peak occupation gives
-  // honest hot-vs-cold thermal contrast in Thermal IR, UV, X-Ray, and CMB Microwave!
-  var occ = 0.0;
-  if (x < 0.003) {
-    // Rayleigh-Jeans tail (radio/microwave): gently attenuate thermal noise so 21cm/synchrotron shine cleanly
-    let rj = (1.0 / max(1e-5, x)) * 0.007027;
-    occ = log(1.0 + rj * 0.004) * 0.35;
+  // Exact dimensionless Planck spectral brightness B_nu(x) / B_nu(x_peak) = (x^3 / (exp(x) - 1)) / 1.421435:
+  //   - Peaks cleanly at 1.0 when x = 2.82144 (exact Wien frequency peak!)
+  //   - Falls smoothly as x^2 -> 0 in Rayleigh-Jeans radio (so 2.725 K empty space is pitch-black in 21cm Radio!)
+  //   - Falls exponentially as x^3 exp(-x) -> 0 on the Wien short-wavelength side (honest thermal contrast!)
+  var rel = 0.0;
+  if (x < 0.01) {
+    rel = (x * x) / (1.421435 * (1.0 + 0.5 * x));
   } else {
-    let ratio = (1.0 / max(1e-6, exp(x) - 1.0)) / 0.007027;
-    occ = log(1.0 + ratio * 1.45) * 0.46;
+    rel = ((x * x * x) / max(1e-6, exp(x) - 1.0)) / 1.421435;
   }
-  return clamp(occ, 0.0, 3.2);
+  return clamp(pow(max(0.0, rel), 0.55) * 1.15, 0.0, 2.4);
 }
 
 fn em_channel_at(
@@ -188,12 +205,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     + star_layer(dir, 230.0, 0.986) * 0.32 * star_vis;
   col = col + stars;
 
-  // In full-spectrum EM mode, CMB 2.725 K isotropic microwave background + Galactic 21cm HI plane shine!
+  // In full-spectrum EM mode, CMB 2.725 K microwave glow stays subtle (0.24x) in mm-wave & dark in 21cm Radio!
   if (cam.em_sensor.z > 0.5) {
-    let cmb_aniso = 2.725 + 0.18 * sin(dir.x * 7.5 + dir.y * 5.2) * cos(dir.z * 6.8 - dir.x * 4.1);
-    let hi_plane = gal_band * (0.35 + 0.65 * dust) * 0.55;
+    let cmb_aniso = 2.725 + 0.22 * sin(dir.x * 7.5 + dir.y * 5.2) * cos(dir.z * 6.8 - dir.x * 4.1);
+    let hi_plane = gal_band * (0.35 + 0.65 * dust) * 0.14;
     let star_lum = dot(stars, vec3<f32>(0.3, 0.5, 0.2));
-    col = em_sensor_map_rgb(col, mix(cmb_aniso, 6500.0, clamp(star_lum, 0.0, 1.0)), star_lum * 0.6, star_lum * 0.2, hi_plane, 0.0);
+    let em_bg = em_sensor_map_rgb(col, mix(cmb_aniso, 6500.0, clamp(star_lum, 0.0, 1.0)), star_lum * 0.5, star_lum * 0.18, hi_plane, 0.0);
+    col = em_bg * mix(0.22, 0.95, clamp(star_lum * 2.5, 0.0, 1.0));
   }
   return vec4<f32>(col, 1.0);
 }
@@ -344,7 +362,7 @@ struct VsOut {
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
   var out: VsOut;
-  out.pos = cam.view_proj * vec4<f32>(in.pos_curv.xyz, 1.0);
+  out.pos = apply_log_depth_vs(cam.view_proj * vec4<f32>(in.pos_curv.xyz, 1.0), cam.em_aux.w);
   out.world_pos = in.pos_curv.xyz;
   out.norm = in.norm_tag.xyz;
   out.albedo = in.col_emiss.rgb;
@@ -427,25 +445,27 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let ndv = max(0.0, dot(n, v));
   let fresnel = pow(max(0.0, 1.0 - ndv), 3.8);
 
-  let skip_fog = cam.em_aux.w > 0.5;
+  let skip_fog = (u32(round(max(0.0, cam.em_aux.w))) & 1u) != 0u;
   let eclipse_f = select(clamp(cam.em_aux.y, 0.06, 1.0), 1.0, skip_fog);
   let sun_day = select(smoothstep(-0.10, 0.18, sun_dir.y) * eclipse_f, 1.0, skip_fog);
   let twi_d = (sun_dir.y - 0.03) / 0.14;
   let sunset_w = select(exp(-(twi_d * twi_d)) * opt_depth * eclipse_f, 0.0, skip_fog);
 
-  // Hemispheric sky-bounce ambient (deep crisp shadows in vacuum & space; dynamic day/sunset/night cycle on surface!)
+  // Hemispheric sky-bounce ambient (genuinely dark starlit night on planet/comet dark side!)
   let hemi_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
   let amb_sky_day = mix(sky_hor * 0.42 + vec3<f32>(0.04, 0.05, 0.07), sky_zen * 0.55 + vec3<f32>(0.05, 0.06, 0.09), hemi_up);
-  let amb_sky_night = vec3<f32>(0.025, 0.038, 0.068);
+  let amb_sky_night = mix(vec3<f32>(0.007, 0.010, 0.018), vec3<f32>(0.020, 0.030, 0.054), opt_depth);
   let amb_sky = select(mix(amb_sky_night, amb_sky_day, sun_day), vec3<f32>(0.24, 0.28, 0.34), skip_fog);
-  let amb_gain = select(mix(0.24, 0.55, opt_depth), 0.42, skip_fog);
+  let amb_gain = select(mix(0.20, 0.55, opt_depth * sun_day + 0.15), 0.42, skip_fog);
   let sun_tint = mix(
     mix(vec3<f32>(1.05, 1.02, 0.96), vec3<f32>(1.12, 0.95, 0.78), opt_depth * 0.35),
     vec3<f32>(1.25, 0.56, 0.24),
     sunset_w * 0.68
   );
 
-  var lit = base_col * (amb_sky * amb_gain + sun_tint * (ndl * 1.18 * sun_day));
+  // Subtle emerald-cyan UFO ventral landing pool on pitch-black night sides so terrain stays navigable in true darkness!
+  let night_pool = select(exp(-dist * dist / (110.0 * 110.0)) * (1.0 - sun_day) * 0.24, 0.0, skip_fog || tag > 3.5);
+  var lit = base_col * (amb_sky * amb_gain + sun_tint * (ndl * 1.18 * sun_day) + vec3<f32>(0.34, 0.92, 0.72) * night_pool);
 
   if (tag > 1.5 && tag < 2.5) {
     // Liquid ocean/sea surface (general H2O / CH4 / NH3 / H2SO4 solvent shaded from vertex albedo + live GPU waves!)
@@ -569,12 +589,18 @@ fn vs_main(in: VsIn, @builtin(instance_index) iid: u32) -> VsOut {
   let lz = in.pos_part.z * r_sc;
   let rx = lx * cy - lz * sy;
   let rz = lx * sy + lz * cy;
-  let wp = inst.pos_scale.xyz + vec3<f32>(rx, ly, rz);
+  // Exact live per-frame TinyPlanet spherical curvature matching generate_surface_terrain_mesh to 0.000 m!
+  // cam.extra1.w = 1/(2R), cam.extra2.w = focusX, cam.em_aux.z = focusZ
+  let dx_c = inst.pos_scale.x - cam.extra2.w;
+  let dz_c = inst.pos_scale.z - cam.em_aux.z;
+  let curv_drop = (dx_c * dx_c + dz_c * dz_c) * cam.extra1.w;
+  let base_curved = vec3<f32>(inst.pos_scale.x, inst.pos_scale.y - curv_drop, inst.pos_scale.z);
+  let wp = base_curved + vec3<f32>(rx, ly, rz);
   let nx = in.norm_kind.x * cy - in.norm_kind.z * sy;
   let nz = in.norm_kind.x * sy + in.norm_kind.z * cy;
 
   var out: VsOut;
-  out.pos = cam.view_proj * vec4<f32>(wp, 1.0);
+  out.pos = apply_log_depth_vs(cam.view_proj * vec4<f32>(wp, 1.0), cam.em_aux.w);
   out.world_pos = wp;
   out.norm = normalize(vec3<f32>(nx, in.norm_kind.y, nz));
   out.col_emiss = inst.col_emiss;
@@ -658,7 +684,7 @@ struct VsOut {
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
   var out: VsOut;
-  out.pos = cam.view_proj * vec4<f32>(in.pos_curv.xyz, 1.0);
+  out.pos = apply_log_depth_vs(cam.view_proj * vec4<f32>(in.pos_curv.xyz, 1.0), cam.em_aux.w);
   out.world_pos = in.pos_curv.xyz;
   out.norm = in.norm_tag.xyz;
   out.col_alpha = in.col_alpha;
@@ -709,7 +735,22 @@ struct VsOut {
   @location(1) uv: vec2<f32>,
   @location(2) shape: f32, // 0 = crisp glowing star/spark, 1 = soft volumetric 3D cloud billow, 2 = CFD flow streak
   @location(3) em_sig: vec4<f32>, // x = tempK, y = uv_aur, z = xray_synch, w = radio_hi
+  @location(4) em_gam: f32,       // gamma-ray pulse / 511 keV emission
 };
+
+// Exact 32-bit Murmur3 integer avalanche hash -> full 24-bit uniform [0, 1) (ZERO f32 sin() mantissa collapse!)
+// Salting with independent u32 constants gives completely uncorrelated class, frequency, phase, and pulse width per star!
+fn gal_hash_u32(v_in: u32) -> f32 {
+  var x = v_in;
+  x = (x ^ (x >> 16u)) * 0x7feb352du;
+  x = (x ^ (x >> 15u)) * 0x846ca68bu;
+  x = x ^ (x >> 16u);
+  return f32(x & 0x00ffffffu) * (1.0 / 16777216.0);
+}
+
+fn gal_star_hash(iid: u32) -> f32 {
+  return gal_hash_u32(iid ^ 0x13579bdfu);
+}
 
 fn blackbody_rgb(log10_t: f32) -> vec3<f32> {
   if (log10_t < 2.2) { return vec3<f32>(0.42, 0.24, 0.78); }
@@ -749,11 +790,16 @@ fn vs_main(
   var streak_len = 0.0;
 
   if (mode == 0u) {
-    // L0: Supergalactic 2LPT + TreePM (16 floats/particle) — IllustrisTNG / Millennium cosmic web
-    // When world_scale < 0.0, projects onto celestial skybox sphere (radius = -world_scale) from galaxy's exact Cosmic-Web location!
+    // L0: Physical Expanding FLRW 2LPT + TreePM Cosmic Web (16 floats/particle)
+    // extra2.x = FLRW scale factor a(t) in [0.04..1.15]; extra2.y = Big Bang physical expansion flag (0 or 1)!
     let o = iid * 16u;
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    let raw_v = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
     let box_sz = max(10.0, cam.extra1.w);
+    let a_scale = select(1.0, max(0.02, cam.extra2.x), cam.extra2.x > 0.001);
+    let bb_mode = clamp(cam.extra2.y, 0.0, 1.0);
+    // Physical metric expansion: r_phys(t) = a(t) * x_comoving expands visibly from compact fireball to full Cosmic Web!
+    let a_expand = mix(1.0, clamp(pow(a_scale, 0.72), 0.11, 1.08), bb_mode);
     let is_sky = world_scale < 0.0;
     let rel_c = raw_p - cam.extra1.xyz;
     let d_rel_c = length(rel_c);
@@ -767,7 +813,7 @@ fn vs_main(
       culled0.uv = vec2<f32>(0.0);
       return culled0;
     }
-    p_world = select(rel_c * world_scale, cam.cam_pos.xyz + (rel_c / max(1e-3, d_rel_c)) * (-world_scale), is_sky);
+    p_world = select(rel_c * (world_scale * a_expand), cam.cam_pos.xyz + (rel_c / max(1e-3, d_rel_c)) * (-world_scale), is_sky);
     let rho = clamp(raw_f32[o + 7u], 0.04, 1.0);
     let is_baryon = raw_f32[o + 12u] > 0.5;
     let col_void = vec3<f32>(0.14, 0.18, 0.62);
@@ -777,9 +823,36 @@ fn vs_main(
     c_dm = mix(c_dm, col_node, smoothstep(0.60, 0.96, rho));
     let c_bar = mix(vec3<f32>(0.94, 0.38, 0.22), vec3<f32>(1.0, 0.80, 0.36), smoothstep(0.18, 0.90, rho));
     let sky_att = select(1.0, clamp(42.0 / (16.0 + d_rel_c), 0.35, 1.85), is_sky);
-    col = select(c_dm, c_bar, is_baryon) * (0.78 + 1.05 * pow(rho, 0.90));
+    var web_col = select(c_dm, c_bar, is_baryon) * (0.78 + 1.05 * pow(rho, 0.90));
+
+    // Continuous FLRW Big Bang fireball blackbody shift T(z) = 2.7255 / a(t):
+    //   a < 0.10: blinding blue-white primordial plasma -> a ~ 0.18: golden recombination -> a ~ 0.38: crimson cosmic dawn -> present web!
+    if (bb_mode > 0.5 && !is_sky) {
+      let early_w = 1.0 - smoothstep(0.08, 0.58, a_scale);
+      let hot_plasma = vec3<f32>(0.82, 0.94, 1.45);
+      let recomb_gold = vec3<f32>(1.38, 0.86, 0.34);
+      let dawn_crim = vec3<f32>(1.05, 0.32, 0.42);
+      var era_col = mix(hot_plasma, recomb_gold, smoothstep(0.05, 0.18, a_scale));
+      era_col = mix(era_col, dawn_crim, smoothstep(0.20, 0.42, a_scale));
+      web_col = mix(web_col, era_col * (0.85 + 0.75 * rho), early_w);
+    }
+
+    col = web_col;
     pt_size = pt_size_base * (0.56 + 0.92 * pow(rho, 0.85)) * select(1.0, 0.68 + 0.52 * sky_att, is_sky);
     alpha = alpha_gain * (0.28 + 0.72 * pow(rho, 0.92)) * sphere_fade * sky_att;
+    // Pass 2 L0 Visual LOD: soft volumetric DM filament clouds + velocity-aligned infall streaks!
+    if (!is_sky) {
+      let v_mag = length(raw_v);
+      if (bb_mode < 0.5 && v_mag > 0.65 && (iid & 3u) == 0u) {
+        streak_axis = raw_v / v_mag;
+        streak_len = clamp(pt_size * (1.8 + v_mag * 0.75), pt_size * 1.4, pt_size * 4.2);
+        shape = 2.0;
+      } else if (!is_baryon && rho > 0.42 && (iid & 1u) == 0u) {
+        shape = 1.0;
+        pt_size = pt_size * 1.55;
+        alpha = alpha * 0.62;
+      }
+    }
   } else if (mode == 1u) {
     // L1: Realistic Flat-Rotation Spiral Galaxy (8 floats/star: pos, mass, vel, popTag)
     // popTag < 0 => invisible dark-matter NFW halo particle (provides REAL GPU gravity for flat rotation curve!)
@@ -813,11 +886,21 @@ fn vs_main(
       col = mix(gold_core, warm_bulge, f);
       pt_size = pt_size_base * (0.45 + 0.55 * (1.0 - f));
       alpha = alpha_gain * (0.24 + 0.34 * (1.0 - f));
+      if (!is_sky && pop_tag < 0.14 && (iid & 3u) == 0u) {
+        // Soft volumetric golden bulge radiance
+        shape = 1.0;
+        pt_size = pt_size * 1.9;
+        alpha = alpha * 0.45;
+      }
     } else if (pop_tag < 0.78) {
       let f = clamp((pop_tag - 0.35) / 0.43, 0.0, 1.0);
-      col = mix(vec3<f32>(0.86, 0.91, 1.0), ob_blue, f);
+      // Carbonaceous dust-lane extinction along inner spiral arm edges (enhances spiral contrast!)
+      let r_gal = length(raw_p.xz);
+      let arm_phi = atan2(raw_p.z, raw_p.x);
+      let dust_lane = smoothstep(0.62, 0.96, sin(arm_phi * 2.0 - log(max(0.4, r_gal)) * 4.4)) * smoothstep(1.2, 4.5, r_gal) * (1.0 - smoothstep(7.5, 11.5, r_gal));
+      col = mix(vec3<f32>(0.86, 0.91, 1.0), ob_blue, f) * (1.0 - dust_lane * 0.46);
       pt_size = pt_size_base * (0.44 + 0.72 * f);
-      alpha = alpha_gain * (0.28 + 0.56 * f);
+      alpha = alpha_gain * (0.28 + 0.56 * f) * (1.0 - dust_lane * 0.30);
     } else {
       let f = clamp((pop_tag - 0.78) / 0.32, 0.0, 1.0);
       col = mix(h2_rose, vec3<f32>(1.0, 0.56, 0.78), f);
@@ -833,6 +916,46 @@ fn vs_main(
     if (is_sky) {
       pt_size = pt_size * (0.65 + 0.55 * sky_att);
       alpha = alpha * sky_att;
+    } else if (cam.em_sensor.z > 0.5) {
+      // Multi-Wavelength Galactic Exotic Sources stand out dramatically when EM Sensor carets shift out of Optical!
+      let l_min = min(cam.em_sensor.x, cam.em_sensor.y);
+      let l_max = max(cam.em_sensor.x, cam.em_sensor.y);
+      let in_radio = smoothstep(-2.8, -1.0, l_max);
+      let in_gamma = 1.0 - smoothstep(-12.2, -10.4, l_min);
+      let in_xray = smoothstep(-11.8, -10.2, l_max) * (1.0 - smoothstep(-8.8, -7.4, l_min));
+      let in_uv = smoothstep(-8.2, -7.4, l_max) * (1.0 - smoothstep(-6.7, -6.2, l_min));
+      let gh = gal_star_hash(iid);
+      let is_pulsar = (gh > 0.986 && pop_tag >= 0.20);
+      let is_xrb = (gh > 0.974 && gh <= 0.986 && pop_tag >= 0.10);
+      let t_sec = cam.cam_pos.w;
+      if (is_pulsar) {
+        // Independent 32-bit salted hashes -> completely asynchronous per-pulsar spin frequency (0.22..4.84 Hz, 22x spread),
+        // independent random initial phase [0..2pi), and distinct lighthouse beam duty width!
+        let h_freq = gal_hash_u32(iid ^ 0x9e3779b9u);
+        let h_phase = gal_hash_u32(iid ^ 0x517cc1b7u);
+        let h_duty = gal_hash_u32(iid ^ 0x243f6a88u);
+        let f_hz = 0.22 * pow(22.0, h_freq);
+        let phase = h_phase * 6.2831853;
+        let sharp = 6.0 + h_duty * 18.0;
+        let beam = pow(max(0.0, cos(t_sec * f_hz * 6.2831853 + phase)), sharp);
+        let boost_band = max(in_radio, in_gamma);
+        pt_size = min(pt_size_base * 2.35, pt_size * (1.0 + boost_band * (0.95 + 1.45 * beam)));
+        alpha = clamp(alpha * (0.45 + boost_band * (0.85 + 1.95 * beam)), 0.05, 1.0);
+      } else if (is_xrb) {
+        // Accreting Stellar-Mass Black-Hole / Neutron-Star X-Ray Binary with independent MRI QPO frequency & phase!
+        let x_freq = 1.4 + gal_hash_u32(iid ^ 0x6a09e667u) * 8.2;
+        let x_phase = gal_hash_u32(iid ^ 0xbb67ae85u) * 6.2831853;
+        let qpo = 0.55 + 0.45 * sin(t_sec * x_freq + x_phase);
+        pt_size = pt_size * (1.0 + in_xray * (1.9 + 1.4 * qpo));
+        alpha = clamp(alpha * (0.60 + in_xray * (1.5 + 1.8 * qpo)), 0.05, 1.0);
+      } else if (pop_tag >= 0.78) {
+        // Massive OB Starburst / H II knots blaze in UV & Far-IR!
+        pt_size = pt_size * (1.0 + in_uv * 1.15);
+      } else {
+        // Dim ordinary main-sequence stars slightly in extreme non-optical bands so pulsars & X-ray binaries pop clearly!
+        let exotic_band = clamp(in_gamma + in_xray * 0.85 + in_radio * 0.45, 0.0, 0.88);
+        alpha = alpha * (1.0 - exotic_band * 0.62);
+      }
     }
   } else if (mode == 2u) {
     // L3: Self-Gravitating Hydro Plasma (16 floats/parcel)
@@ -1189,11 +1312,20 @@ fn vs_main(
       + streak_axis * (uv.x * streak_len)
       + side * (uv.y * pt_size * 0.42);
   } else {
+    // Clamp non-sky particle billboard radius vs camera distance so a star passing right past the lens
+    // never explodes into a screen-filling blob!
+    let d_cam_p = length(p_world - cam.cam_pos.xyz);
+    let safe_pt_sz = select(min(pt_size, max(0.015, d_cam_p * 0.085)), pt_size, world_scale < 0.0 || shape > 0.5);
     world_corner = p_world
-      + cam.cam_right.xyz * (uv.x * pt_size)
-      + cam.cam_up.xyz * (uv.y * pt_size);
+      + cam.cam_right.xyz * (uv.x * safe_pt_sz)
+      + cam.cam_up.xyz * (uv.y * safe_pt_sz);
   }
-  let clip = cam.view_proj * vec4<f32>(world_corner, 1.0);
+  let clip_raw = cam.view_proj * vec4<f32>(world_corner, 1.0);
+  var clip = apply_log_depth_vs(clip_raw, cam.em_aux.w);
+  // True celestial backdrop starfield sits at farthest reversed-Z infinity just behind true-metric planets/suns!
+  if (world_scale < 0.0 && clip.w > 0.0) {
+    clip.z = 1.0e-6 * clip.w;
+  }
 
   var out: VsOut;
   out.pos = clip;
@@ -1205,6 +1337,7 @@ fn vs_main(
   var em_uv = 0.0;
   var em_xr = 0.0;
   var em_rad = 0.0;
+  var em_gam = 0.0;
   if (mode == 0u) {
     let o0 = iid * 16u;
     let is_bar = raw_f32[o0 + 12u] > 0.5;
@@ -1215,9 +1348,44 @@ fn vs_main(
   } else if (mode == 1u) {
     let o1 = iid * 8u;
     let pt1 = raw_f32[o1 + 7u];
-    em_t = select(select(3800.0, 14000.0, pt1 >= 0.35), 24000.0, pt1 >= 0.78);
-    em_uv = select(0.08, 1.15, pt1 >= 0.35);
-    em_rad = select(0.85, 0.35, pt1 >= 0.35); // 21cm HI neutral gas along disk & spiral arms
+    let m1 = raw_f32[o1 + 3u];
+    let gh = gal_star_hash(iid);
+    let is_pulsar = (gh > 0.986 && pt1 >= 0.20);
+    let is_xrb = (gh > 0.974 && gh <= 0.986 && pt1 >= 0.10);
+    let t_sec = cam.cam_pos.w;
+    if (m1 > 25.0) {
+      // Central SMBH Sgr A* relativistic core: bright Radio synchrotron + X-Ray + Gamma!
+      em_t = 3.5e7; em_uv = 1.8; em_xr = 4.2; em_rad = 4.8; em_gam = 3.5;
+    } else if (is_pulsar) {
+      let h_freq = gal_hash_u32(iid ^ 0x9e3779b9u);
+      let h_phase = gal_hash_u32(iid ^ 0x517cc1b7u);
+      let h_duty = gal_hash_u32(iid ^ 0x243f6a88u);
+      let f_hz = 0.22 * pow(22.0, h_freq);
+      let phase = h_phase * 6.2831853;
+      let sharp = 6.0 + h_duty * 18.0;
+      let beam = pow(max(0.0, cos(t_sec * f_hz * 6.2831853 + phase)), sharp);
+      em_t = 8.0e5;
+      em_rad = 1.4 + 10.5 * beam;
+      em_gam = 1.2 + 9.2 * beam;
+      em_xr = 0.4 + 2.0 * beam;
+    } else if (is_xrb) {
+      let x_freq = 1.4 + gal_hash_u32(iid ^ 0x6a09e667u) * 8.2;
+      let x_phase = gal_hash_u32(iid ^ 0xbb67ae85u) * 6.2831853;
+      let qpo = 0.55 + 0.45 * sin(t_sec * x_freq + x_phase);
+      em_t = 2.2e7;
+      em_xr = 5.5 + 4.0 * qpo;
+      em_uv = 1.6;
+      em_rad = 0.75 * qpo;
+    } else {
+      em_t = select(select(3800.0, 14000.0, pt1 >= 0.35), 42000.0, pt1 >= 0.78);
+      em_uv = select(select(0.06, 0.95, pt1 >= 0.35), 3.4, pt1 >= 0.78);
+      // 21 cm neutral Hydrogen (H I) spiral arms & cold molecular dust filaments!
+      let rp1 = vec2<f32>(raw_f32[o1], raw_f32[o1 + 2u]);
+      let r_g1 = length(rp1);
+      let phi1 = atan2(rp1.y, rp1.x);
+      let hi_arm = smoothstep(0.35, 0.92, sin(phi1 * 2.0 - log(max(0.4, r_g1)) * 4.4)) * smoothstep(1.0, 4.0, r_g1);
+      em_rad = select(0.45 + 1.45 * hi_arm, 0.25 + 0.65 * hi_arm, pt1 >= 0.78);
+    }
   } else if (mode == 2u) {
     let o2 = iid * 16u;
     let lt2 = clamp(raw_f32[o2 + 8u], 1.5, 8.2);
@@ -1228,6 +1396,7 @@ fn vs_main(
     em_t = 1.2e7;
     em_xr = 1.65;
     em_rad = 1.45; // Relativistic synchrotron jet & hot Kerr disk!
+    em_gam = 1.15;
   } else if (mode == 10u) {
     let o10 = iid * 16u;
     let flags10 = u32(round(raw_f32[o10 + 14u]));
@@ -1247,6 +1416,7 @@ fn vs_main(
     em_t = max(80.0, cam.em_aux.x) + select(0.0, 1600.0, shape < 0.5);
   }
   out.em_sig = vec4<f32>(em_t, em_uv, em_xr, em_rad);
+  out.em_gam = em_gam;
   return out;
 }
 
@@ -1274,7 +1444,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let halo = exp(-2.2 * r2) * 0.28;
     w = core + halo;
   }
-  rgb = em_sensor_map_rgb(rgb, in.em_sig.x, in.em_sig.y, in.em_sig.z, in.em_sig.w, 0.0);
+  rgb = em_sensor_map_rgb(rgb, in.em_sig.x, in.em_sig.y, in.em_sig.z, in.em_sig.w, in.em_gam);
   return vec4<f32>(rgb * w * in.color.a, in.color.a * w);
 }
 `;
@@ -1359,7 +1529,7 @@ fn vs_main(
   let world_quad = center + to_cam * min(radius * 0.15, dist * 0.05) + right * (uv.x * inflate) + up * (uv.y * inflate);
 
   var out: VsOut;
-  out.pos = cam.view_proj * vec4<f32>(world_quad, 1.0);
+  out.pos = apply_log_depth_vs(cam.view_proj * vec4<f32>(world_quad, 1.0), cam.em_aux.w);
   out.center = center;
   out.radius = radius;
   out.world_quad = world_quad;
@@ -1458,16 +1628,21 @@ fn fs_main(in: VsOut) -> FsOut {
   let ro = cam.cam_pos.xyz - in.center;
   let rd = normalize(in.world_quad - cam.cam_pos.xyz);
   let r = in.radius;
-  // Precision-safe ray-sphere discriminant (zero f32 cancellation for 200 km distant suns/moons!)
-  let b = dot(ro, rd);
-  let perp = ro - rd * b;
-  let disc = r * r - dot(perp, perp);
+  // Scale-normalized precision-safe ray-sphere intersection: ZERO f32 overflow or cancellation
+  // from 0.2 m all the way out to 10^14 m true-metric Suns, Moons, and outer gas giants!
+  let ro_len = max(1.0, length(ro));
+  let s_inv = 1.0 / ro_len;
+  let ro_n = ro * s_inv;
+  let r_n = r * s_inv;
+  let b_n = dot(ro_n, rd);
+  let perp_n = ro_n - rd * b_n;
+  let disc_n = r_n * r_n - dot(perp_n, perp_n);
 
   let kind = u32(round(in.color0.w));
   let light_dir = normalize(cam.extra1.xyz);
   let cut_active = in.params.z;
 
-  if (disc < 0.0) {
+  if (disc_n < 0.0) {
     // 1. Sub-pixel astronomical pinpoint glint when true physical disk is < ~2.5 px at AU distances
     if (in.pinpoint_w > 0.02) {
       let q2 = dot(in.quad_uv, in.quad_uv);
@@ -1483,13 +1658,15 @@ fn fs_main(in: VsOut) -> FsOut {
         }
         out_g.color = vec4<f32>(g_rgb, alpha);
         let clip_g = cam.view_proj * vec4<f32>(in.center, 1.0);
-        out_g.depth = clamp(clip_g.z / max(1e-5, clip_g.w), 0.0, 1.0);
+        out_g.depth = eval_frag_depth(clip_g, cam.em_aux.w);
         return out_g;
       }
     }
     // 2. Physical solar corona glow for stars (kind 0) & Rayleigh atmospheric halo for planets (kind 1/4)
-    let closest = max(0.0, -b);
-    let d_min = length(ro + rd * closest) / max(1e-6, r);
+    let closest_n = max(0.0, -b_n);
+    let d_min = length(ro_n + rd * closest_n) / max(1e-7, r_n);
+    let halo_clip = cam.view_proj * vec4<f32>(in.center, 1.0);
+    let halo_depth = max(1.0e-6, eval_frag_depth(halo_clip, cam.em_aux.w) * 0.999);
     if (kind == 0u && d_min < 1.45) {
       let corona = exp(-(d_min - 1.0) * 6.8) * 0.78 * (1.0 - clamp(in.sp_info.z * 0.75, 0.0, 0.8));
       var out_c: FsOut;
@@ -1499,28 +1676,28 @@ fn fs_main(in: VsOut) -> FsOut {
         c_rgb = em_sensor_map_rgb(c_rgb, 1.5e6, corona * 1.4, corona * 1.8, corona * 0.3, 0.0);
       }
       out_c.color = vec4<f32>(c_rgb, corona);
-      // Reversed-Z far halo depth (just in front of z=0 sky, strictly behind all foreground planets/rings/jets!)
-      out_c.depth = 0.000001;
+      out_c.depth = halo_depth;
       return out_c;
     }
     if ((kind == 1u || kind == 4u) && in.color1.w > 0.25 && d_min < 1.07) {
       let h_atmo = exp(-(d_min - 1.0) * 42.0) * in.color1.w * 0.62;
-      let lit_side = clamp(dot(normalize(ro + rd * closest), light_dir) * 0.8 + 0.35, 0.0, 1.0);
+      let lit_side = clamp(dot(normalize(ro_n + rd * closest_n), light_dir) * 0.8 + 0.35, 0.0, 1.0);
       var out_a: FsOut;
       out_a.color = vec4<f32>(vec3<f32>(0.34, 0.68, 1.0) * h_atmo * lit_side, h_atmo * lit_side);
-      out_a.depth = 0.000001;
+      out_a.depth = halo_depth;
       return out_a;
     }
     discard;
   }
 
-  let sqrt_d = sqrt(disc);
-  var t_hit = -b - sqrt_d;
-  if (t_hit < 0.000001) { t_hit = -b + sqrt_d; }
-  if (t_hit < 0.000001) { discard; }
+  let sqrt_dn = sqrt(disc_n);
+  var t_hit_n = -b_n - sqrt_dn;
+  if (t_hit_n < 1.0e-7) { t_hit_n = -b_n + sqrt_dn; }
+  if (t_hit_n < 1.0e-7) { discard; }
+  var t_hit = t_hit_n * ro_len;
 
-  var p_hit = ro + rd * t_hit;
-  var n_hit = normalize(p_hit);
+  var p_hit = (ro_n + rd * t_hit_n) * ro_len;
+  var n_hit = normalize(ro_n + rd * t_hit_n);
   var is_interior = false;
 
   // True 3D Cutaway Plane intersection when user enables L4 Planetary Interior Cutaway
@@ -1589,12 +1766,17 @@ fn fs_main(in: VsOut) -> FsOut {
   let dyson_tau = clamp(in.sp_info.z, 0.0, 0.94);
 
   if (kind == 0u) {
-    // Realistic convective solar photosphere with multi-scale granulation, limb darkening, & Kardashev II Dyson swarm occultation!
+    // Realistic convective solar photosphere with multi-scale granulation, magnetic sunspots/faculae, limb darkening, & Dyson swarm occultation!
     let g1 = fbm5(n_hit * 8.5 + seed_v + vec3<f32>(cam.cam_pos.w * 0.04, 0.0, 0.0));
     let g2 = fbm5(n_hit * 22.0 - seed_v);
     let gran = clamp(0.65 * g1 + 0.35 * g2, 0.0, 1.0);
+    let lat_belt = exp(-pow((abs(n_hit.y) - 0.28) * 5.2, 2.0));
+    let spot_n = fbm5(n_hit * 5.2 + seed_v * 1.7 + vec3<f32>(cam.cam_pos.w * 0.015, 0.0, 0.0));
+    let sunspot = smoothstep(0.74, 0.86, spot_n) * lat_belt;
+    let faculae = smoothstep(0.64, 0.74, spot_n) * (1.0 - sunspot) * lat_belt * (1.0 - ndv * 0.55);
     let limb = pow(max(0.0, ndv), 0.52);
     col = mix(in.color1.rgb, in.color0.rgb, 0.35 + 0.65 * gran) * (0.58 + 0.85 * limb);
+    col = mix(col, in.color1.rgb * 0.22, sunspot * 0.82) + vec3<f32>(1.0, 0.95, 0.78) * faculae * 0.38;
     if (dyson_tau > 0.01) {
       // Orbiting geometric Dyson swarm rings/collectors dim visible photosphere by exp(-tau_Dyson) and radiate 420 K IR waste heat!
       let d_lat = abs(sin(n_hit.y * 18.0 + cam.cam_pos.w * 0.35));
@@ -1903,11 +2085,11 @@ fn fs_main(in: VsOut) -> FsOut {
   }
 
   col = em_sensor_map_rgb(col, em_temp_k, em_uv, em_xr, em_rad, 0.0);
-  let world_hit = in.center + p_hit;
+  let world_hit = cam.cam_pos.xyz + rd * t_hit;
   let clip = cam.view_proj * vec4<f32>(world_hit, 1.0);
   var out: FsOut;
   out.color = vec4<f32>(col, 1.0);
-  out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
+  out.depth = eval_frag_depth(clip, cam.em_aux.w);
   return out;
 }
 `;
@@ -1975,7 +2157,7 @@ fn vs_main(
   let world_quad = center + to_cam * (radius * 0.15) + right * (uv.x * radius * 1.24) + up * (uv.y * radius * 1.24);
 
   var out: VsOut;
-  out.pos = cam.view_proj * vec4<f32>(world_quad, 1.0);
+  out.pos = apply_log_depth_vs(cam.view_proj * vec4<f32>(world_quad, 1.0), cam.em_aux.w);
   out.center = center;
   out.radius = radius;
   out.world_quad = world_quad;
@@ -2001,9 +2183,13 @@ fn fs_main(in: VsOut) -> FsOut {
   let view = -rd;
   let ndl = max(0.0, dot(n, light));
   let ndl2 = max(0.0, dot(n, light2));
-  let spec = pow(max(0.0, dot(n, normalize(light + view))), 52.0);
-  let rim = pow(max(0.0, 1.0 - max(0.0, dot(n, view))), 3.0);
-  var col = in.tint * (0.20 + 0.78 * ndl + 0.18 * ndl2) + vec3<f32>(1.0, 0.98, 0.94) * spec * 0.68 + in.tint * rim * 0.24;
+  let ndv_m = max(0.0, dot(n, view));
+  let spec = pow(max(0.0, dot(n, normalize(light + view))), 56.0);
+  // Schlick Fresnel + deep-lattice cavity ambient occlusion for crisp crystal facets!
+  let f0 = 0.08;
+  let schlick = f0 + (1.0 - f0) * pow(max(0.0, 1.0 - ndv_m), 4.0);
+  let cav_ao = 0.72 + 0.28 * smoothstep(-0.35, 0.85, n.y);
+  var col = in.tint * (0.20 + 0.80 * ndl + 0.20 * ndl2) * cav_ao + vec3<f32>(1.0, 0.98, 0.94) * spec * 0.78 + mix(in.tint, vec3<f32>(0.72, 0.90, 1.0), 0.45) * schlick * 0.42;
   col = em_sensor_map_rgb(col, max(50.0, cam.em_aux.x), 0.0, 0.0, 0.0, 0.0);
   let clip = cam.view_proj * vec4<f32>(in.center + p_hit, 1.0);
   var out: FsOut;
@@ -2056,7 +2242,7 @@ fn vs_main(
   let world_pos = d.center_r_in.xyz + (t1 * uv.x + t2 * uv.y) * r_out;
 
   var out: VsOut;
-  out.pos = cam.view_proj * vec4<f32>(world_pos, 1.0);
+  out.pos = apply_log_depth_vs(cam.view_proj * vec4<f32>(world_pos, 1.0), cam.em_aux.w);
   out.local_xy = uv * r_out;
   out.r_in = d.center_r_in.w;
   out.r_out = r_out;
@@ -2139,7 +2325,7 @@ struct VsOut {
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
   var out: VsOut;
-  out.pos = cam.view_proj * vec4<f32>(in.pos, 1.0);
+  out.pos = apply_log_depth_vs(cam.view_proj * vec4<f32>(in.pos, 1.0), cam.em_aux.w);
   out.color = in.color;
   return out;
 }
@@ -2224,13 +2410,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let t_exit = min(tmax_v.x, min(tmax_v.y, tmax_v.z));
   if (t_exit <= t_enter) { discard; }
 
-  let steps = 44u;
+  // 64-step raymarch with Interleaved Gradient Noise (IGN) jitter eliminating slice banding!
+  let steps = 64u;
   let dt = (t_exit - t_enter) / f32(steps);
+  let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
   var accum = vec3<f32>(0.0);
   var trans = 1.0;
 
   for (var s = 0u; s < steps; s = s + 1u) {
-    let t = t_enter + (f32(s) + 0.5) * dt;
+    let t = t_enter + (f32(s) + ign) * dt;
     let p = ro + rd * t;
     let v = sample_vol(p, dim);
     let rho_p = v.x;
@@ -2453,6 +2641,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   }));
   const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 208, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const floraCamBuf = device.createBuffer({ label: 'uv-cam-flora', size: 208, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const spaceMeshCamBuf = device.createBuffer({ label: 'uv-cam-space-mesh', size: 208, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const postUniformBuf = device.createBuffer({ label: 'uv-post-uniform', size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bloomExtractUniformBuf = device.createBuffer({ label: 'uv-bloom-extract-u', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
@@ -2565,7 +2754,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       bg = device.createBindGroup({
         layout: surfaceFloraPipe.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: { buffer: auxCamBuf } },
+          { binding: 0, resource: { buffer: floraCamBuf } },
           { binding: 1, resource: { buffer: instanceBuf } }
         ]
       });
@@ -2995,7 +3184,9 @@ export function createUlgUniversesRenderer(device, canvas) {
       ]
       : [-6.42, -6.12, 0.0, 1.0];
     const baseAmbientTempK = Number(surfaceScene?.ambientTempK ?? surfaceScene?.env?.tempK ?? mdCloud?.tempK ?? 288.0);
-    const baseEmAux = [baseAmbientTempK, Number(surfaceScene?.eclipseFactor ?? 1.0), Number(surfaceScene?.env?.skyOpticalDepth ?? 0.0), 0.0];
+    // Enable unified Reversed Logarithmic Depth Buffer (0.1 m -> 10^14 m) on ALL surface passes (bit 1 = 2.0)!
+    const logDepthFlag = (surfaceScene && surfaceScene.env) ? 2.0 : 0.0;
+    const baseEmAux = [baseAmbientTempK, Number(surfaceScene?.eclipseFactor ?? 1.0), Number(surfaceScene?.env?.skyOpticalDepth ?? 0.0), logDepthFlag];
 
     let sphereCount = 0;
     if (Array.isArray(spheres) && spheres.length > 0) {
@@ -3110,14 +3301,25 @@ export function createUlgUniversesRenderer(device, canvas) {
     if (surfaceScene && surfaceScene.env) {
       const env = surfaceScene.env;
       const ld = surfaceScene.lightDir || lightDir;
+      const curvInv2R = env.hasSolidCrust ? (1.0 / (2.0 * (env.tinyPlanetCurvatureRadiusM || 2800.0))) : 0.0;
       writeCam(
         auxCamBuf,
         camera,
         [env.skyZenithRgb[0], env.skyZenithRgb[1], env.skyZenithRgb[2], env.skyOpticalDepth],
-        [ld[0], ld[1], ld[2], 1.0 / (2.0 * (env.tinyPlanetCurvatureRadiusM || 2800.0))],
+        [ld[0], ld[1], ld[2], curvInv2R],
         [env.skyHorizonRgb[0], env.skyHorizonRgb[1], env.skyHorizonRgb[2], env.isMagmaOcean ? 1.0 : 0.0],
         emSensorVec,
         baseEmAux
+      );
+      const fp = surfaceScene.focusPos || camera.pos;
+      writeCam(
+        floraCamBuf,
+        camera,
+        [env.skyZenithRgb[0], env.skyZenithRgb[1], env.skyZenithRgb[2], env.skyOpticalDepth],
+        [ld[0], ld[1], ld[2], curvInv2R],
+        [env.skyHorizonRgb[0], env.skyHorizonRgb[1], env.skyHorizonRgb[2], fp[0] || 0],
+        emSensorVec,
+        [baseEmAux[0], baseEmAux[1], fp[2] || 0, baseEmAux[3]]
       );
     } else if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
       writeCam(

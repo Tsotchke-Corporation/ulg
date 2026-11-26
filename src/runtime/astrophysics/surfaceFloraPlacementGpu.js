@@ -279,11 +279,9 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
 
-  let dx = wx - params.focus_x;
-  let dz = wz - params.focus_z;
-  let y_curved = h - (dx * dx + dz * dz) * params.curv_inv_2r;
-
-  inst.pos_scale = vec4<f32>(wx, y_curved, wz, scale_h);
+  // Store raw uncurved ground height h — spherical curvature -(dx^2+dz^2)*curv_inv_2r is applied
+  // LIVE every frame in SURFACE_FLORA_INSTANCED_WGSL so trees NEVER sink into terrain or hop when moving!
+  inst.pos_scale = vec4<f32>(wx, h, wz, scale_h);
   inst.rot_kind = vec4<f32>(yaw, rad_scale, kind, snow_w);
   inst.col_emiss = vec4<f32>(col, emiss);
   instances[idx] = inst;

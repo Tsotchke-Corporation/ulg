@@ -80,21 +80,55 @@ test('P3: Dynamic Surface Celestial Sky computes diurnal sunrise/sunset, eclipse
       surfaceSimSec: h * 3600,
       observerLatDeg: 32
     });
-    assert.ok(sky.spheres.length >= 2, 'Sky must contain host star + moons/planets');
     const sunY = sky.lightDir[1];
     if (sunY < minSinAlt) minSinAlt = sunY;
     if (sunY > maxSinAlt) maxSinAlt = sunY;
     minHour = Math.min(minHour, sky.climate.localHour);
     maxHour = Math.max(maxHour, sky.climate.localHour);
-    // Monotonic Reversed-Z sky proxy shell radius bounds (25..260 km)
+    // True physical metric distance inside ULG's unified Reversed Logarithmic Depth Buffer [5e4 m .. 1e14 m]!
     for (const sp of sky.spheres) {
       const dist = Math.hypot(sp.pos[0], sp.pos[1], sp.pos[2]);
-      assert.ok(dist >= 20_000 && dist <= 260_000, `Sky body distance ${dist} outside monotonic proxy shell`);
+      assert.ok(dist >= 50_000 && dist <= 1.0e14, `Sky body distance ${dist} outside unified 10^14 m logarithmic depth range`);
+    }
+    const sunSp = sky.spheres.find((s) => s.kind === 0);
+    if (sunY > 0.05) {
+      assert.ok(sunSp, 'Host star sphere must be visible above horizon in daylight');
+      const sunDistM = Math.hypot(sunSp.pos[0], sunSp.pos[1], sunSp.pos[2]);
+      assert.ok(sunDistM > 1.0e11 && sunDistM < 2.0e11, `Sun must be at true ~1 AU metric distance (got ${sunDistM} m)`);
+    } else if (sunY < -0.10) {
+      assert.equal(sunSp, undefined, 'Host star below horizon must be physically occluded by the opaque planet');
     }
   }
   assert.ok(maxSinAlt > 0.35 && minSinAlt < -0.25,
     `Planetary spin must drive real sunrises & sunsets (minY=${minSinAlt.toFixed(3)}, maxY=${maxSinAlt.toFixed(3)})`);
   assert.ok(maxHour - minHour > 16, `Local solar clock must advance around the day (min=${minHour}, max=${maxHour})`);
+
+  // Flying across the curved surface (craftPosM) must physically cross the terminator onto the pitch-black night side!
+  const dayStart = buildLiveSurfaceCelestialSky({
+    solarEngine: engine,
+    catalog: REAL_SOLAR_SYSTEM_CATALOG,
+    focusIdx: earthIdx,
+    cameraPos: [0, 30, 0],
+    craftPosM: [0, 30, 0],
+    navRadiusM: 2800,
+    env,
+    surfaceSimSec: 0,
+    observerLatDeg: 28
+  });
+  const nightFlown = buildLiveSurfaceCelestialSky({
+    solarEngine: engine,
+    catalog: REAL_SOLAR_SYSTEM_CATALOG,
+    focusIdx: earthIdx,
+    cameraPos: [6200, 30, 0],
+    craftPosM: [6200, 30, 0],
+    navRadiusM: 2800,
+    env,
+    surfaceSimSec: 0,
+    observerLatDeg: 28
+  });
+  assert.ok(dayStart.primarySunElevDeg > 10, `Landing origin must start in daylight (got ${dayStart.primarySunElevDeg} deg)`);
+  assert.ok(nightFlown.primarySunElevDeg < -10 && nightFlown.climate.isNightSide === true,
+    `Flying across spherical horizon must reach true dark side (got elev=${nightFlown.primarySunElevDeg} deg)`);
 
   // Exact Solar Eclipse test: place Moon directly between Earth and Sun along -X line
   const eclipseEngine = makeMockSolarEngine(REAL_SOLAR_SYSTEM_CATALOG, {

@@ -116,28 +116,37 @@ export function deriveGalaxyEnvironmentFromCosmicContext({
   const h = hashCoords(regionPosMpc[0] || 0, regionPosMpc[1] || 0, regionPosMpc[2] || 0, seed ^ 0x101);
   const rand = mulberry32(h);
 
-  // Morphology emerges from redshift + cosmic-web density (morphology-density relation!)
+  // Realistic Dressler (1980) Morphology–Density Relation across Cosmic-Web overdensity & epoch z:
+  // Cluster cores -> Giant Ellipticals & Mergers; Groups -> Barred Spirals & Ellipticals;
+  // Filaments -> Grand-Design & Barred Spirals; Voids & Halos -> Globular Clusters & Dwarf Tidal Streams!
   let morphology = 'disk';
   let morphologyLabel = 'Grand-Design Spiral';
   if (z >= 4.5) {
     morphology = 'proto';
     morphologyLabel = 'Primordial High-z Protogalaxy';
   } else if (z >= 1.4) {
-    morphology = delta > 2.4 ? 'binary' : 'proto';
+    morphology = delta > 2.2 ? 'binary' : 'proto';
     morphologyLabel = morphology === 'binary' ? 'Cosmic-Noon Starburst Merger' : 'High-z Clumpy Starburst Disk';
   } else if (z < -0.15) {
-    // Far-future accelerated Λ-era: depleted gas, mostly red ellipticals & aging spirals
-    morphology = delta > 1.3 ? 'sphere' : 'barred';
-    morphologyLabel = morphology === 'sphere' ? 'Evolved Giant Elliptical' : 'Aging Barred Spiral';
-  } else if (delta > 2.8) {
-    morphology = rand() < 0.72 ? 'sphere' : 'binary';
-    morphologyLabel = morphology === 'sphere' ? 'Cluster-Core Giant Elliptical' : 'Interacting Major Merger Pair';
-  } else if (delta < 0.48) {
-    morphology = rand() < 0.55 ? 'dwarf-stream' : 'globular';
-    morphologyLabel = morphology === 'dwarf-stream' ? 'Void-Edge Dwarf & Tidal Stream' : 'Metal-Poor Globular Cluster';
+    // Far-future accelerated Λ-era: depleted gas, mostly red ellipticals, globulars & aging barred spirals
+    const rF = rand();
+    morphology = delta > 1.25 ? 'sphere' : (rF < 0.35 ? 'globular' : 'barred');
+    morphologyLabel = morphology === 'sphere' ? 'Evolved Giant Elliptical (E2)' : (morphology === 'globular' ? 'Ancient Halo Globular Cluster' : 'Aging Barred Spiral');
+  } else if (delta > 2.15) {
+    morphology = rand() < 0.68 ? 'sphere' : 'binary';
+    morphologyLabel = morphology === 'sphere' ? 'Cluster-Core Giant Elliptical (E2)' : 'Interacting Major Merger Pair';
+  } else if (delta < 0.68) {
+    morphology = rand() < 0.52 ? 'globular' : 'dwarf-stream';
+    morphologyLabel = morphology === 'globular' ? 'Metal-Poor Globular Cluster (GC)' : 'Void-Edge Dwarf & Tidal Stream';
+  } else if (delta > 1.42) {
+    const rG = rand();
+    if (rG < 0.34) { morphology = 'sphere'; morphologyLabel = 'Group Elliptical / Lenticular (E4/S0)'; }
+    else if (rG < 0.72) { morphology = 'barred'; morphologyLabel = 'Barred Spiral (SBb)'; }
+    else { morphology = 'disk'; morphologyLabel = 'Grand-Design Spiral (Sa/Sb)'; }
   } else {
-    morphology = rand() < 0.42 ? 'barred' : 'disk';
-    morphologyLabel = morphology === 'barred' ? 'Barred Spiral (SBb)' : 'Grand-Design Spiral (Sc/Sb)';
+    const rS = rand();
+    if (rS < 0.54) { morphology = 'disk'; morphologyLabel = 'Grand-Design Spiral (Sc/Sb)'; }
+    else { morphology = 'barred'; morphologyLabel = 'Barred Spiral (SBb)'; }
   }
 
   // Mass-metallicity & redshift chemical enrichment relation (Maiolino+ 2008 / Zahid+ 2014)
@@ -227,7 +236,18 @@ export function deriveStarSystemFromGalacticLocation({
   // Galactic coordinate mapping: 1 sim unit ~ 1.65 kpc (Orion Spur at rSim ~ 5.2 -> ~8.5 kpc!)
   const rKpc = Math.max(0.2, rSim * 1.65);
   const zKpc = zAbsSim * 1.65;
-  const h = hashCoords(starPosGal[0] || 0, starPosGal[1] || 0, starPosGal[2] || 0, (seed ^ ((starIndex + 1) * 2654435761)) >>> 0);
+  // Immutable star identity hash: when `starIndex > 0` (a real orbiting GPU star!), hash strictly
+  // from `(seed, starIndex)` with full 32-bit Murmur3 avalanche so orbiting stars NEVER change their
+  // name, spectral class, or planets as they move, while preserving uniform statistical distributions!
+  let h;
+  if (starIndex > 0) {
+    let x = ((seed >>> 0) ^ Math.imul((starIndex >>> 0) + 0x9e3779b9, 0x85ebca6b)) >>> 0;
+    x = Math.imul(x ^ (x >>> 16), 0x7feb352d) >>> 0;
+    x = Math.imul(x ^ (x >>> 15), 0x846ca68b) >>> 0;
+    h = (x ^ (x >>> 16)) >>> 0;
+  } else {
+    h = hashCoords(starPosGal[0] || 0, starPosGal[1] || 0, starPosGal[2] || 0, (seed ^ 2654435761) >>> 0);
+  }
   const rand = mulberry32(h);
 
   // Radial & vertical galactic metallicity gradient:
@@ -408,11 +428,45 @@ export function deriveStarSystemFromGalacticLocation({
     ? 'Galactic Bulge'
     : (isHalo ? 'Stellar Halo' : (isYoungArm ? 'Spiral-Arm H II Nursery' : 'Galactic Disk'));
 
+  // Astrophysics-grounded L3 regime & nebula coupling (zero hardcoded look-ups):
+  //   - Core-collapse NS / BH remnants -> Pulsar or SNR/PWN (if young)
+  //   - White dwarfs -> ~28% young Bipolar Planetary Nebula, otherwise TOV degenerate WD
+  //   - Young gas-rich spiral-arm nurseries (f_gas > 0.14) -> O/B photoionizing H II Pillars or MHD protostellar jets
+  //   - Quenched ellipticals / globular clusters (f_gas < 0.14) -> zero H II nebulae (old stellar fusion / remnants)
+  const primary = stars[0];
+  let recommendedL3Regime = 'fusion';
+  let nebulaBadge = 'MLS-MPM Nuclear Fusion Star';
+  if (primary.stage === 'neutron-star') {
+    recommendedL3Regime = systemAgeGyr < 0.08 ? 'snr-pwn' : 'pulsar';
+    nebulaBadge = recommendedL3Regime === 'snr-pwn' ? 'Core-Collapse SNR / PWN' : 'Relativistic Magnetized Pulsar';
+  } else if (primary.stage === 'stellar-black-hole') {
+    recommendedL3Regime = 'snr-pwn';
+    nebulaBadge = 'Hypernova Remnant / Black Hole';
+  } else if (primary.stage === 'white-dwarf') {
+    if (rand() < 0.28) {
+      recommendedL3Regime = 'planetary-nebula';
+      nebulaBadge = 'Bipolar Planetary Nebula';
+    } else {
+      recommendedL3Regime = 'white-dwarf-tov';
+      nebulaBadge = 'Degenerate White Dwarf (TOV)';
+    }
+  } else if (isYoungArm && gEnv.gasFraction > 0.14) {
+    if (mPrimary0 >= 2.8 && systemAgeGyr < 0.15) {
+      recommendedL3Regime = 'h2-pillars';
+      nebulaBadge = 'Strömgren H II Pillars';
+    } else if (systemAgeGyr < 0.08) {
+      recommendedL3Regime = 'nebular-mhd';
+      nebulaBadge = 'MHD Protostellar Nebula & Jets';
+    }
+  }
+
   return Object.freeze({
     schema: ULG_CAUSAL_NEBULAR_CASCADE_SCHEMA,
     systemId: `${prefix.toLowerCase()}-${catNum}`,
     systemName,
     galacticRegion,
+    recommendedL3Regime,
+    nebulaBadge,
     rKpc: Number(rKpc.toFixed(2)),
     zKpc: Number(zKpc.toFixed(2)),
     systemAgeGyr: Number(systemAgeGyr.toFixed(2)),

@@ -1011,6 +1011,79 @@
       color: #ffffff;
     }
 
+    /* Explorer Cargo & Specimen Bay Inventory */
+    .uv-cargo-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 210px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    .uv-cargo-item {
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.72);
+      border-radius: 9px;
+      padding: 7px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 11px;
+    }
+    .uv-cargo-item-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-weight: 700;
+      color: #e0f2fe;
+    }
+    .uv-cargo-item-sub {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .uv-cargo-item-actions {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+    .uv-cargo-item-actions a, .uv-cargo-item-actions button {
+      appearance: none;
+      text-decoration: none;
+      border: 1px solid rgba(52, 211, 153, 0.45);
+      background: rgba(16, 185, 129, 0.18);
+      color: #a7f3d0;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 7px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .uv-cargo-item-actions button.release {
+      border-color: rgba(248, 113, 113, 0.35);
+      background: rgba(239, 68, 68, 0.14);
+      color: #fca5a5;
+    }
+    .uv-cargo-res-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+    }
+    .uv-cargo-res-cell {
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.65);
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+    }
+    .uv-cargo-res-cell span { display: block; font-size: 9.5px; color: var(--muted); }
+    .uv-cargo-res-cell strong { color: #e0f2fe; font-size: 12px; }
+
     @media (hover: hover) and (pointer: fine) {
       .uv-touch-pads.active:not(.force-visible) { display: none; }
     }
@@ -1037,14 +1110,15 @@
       <nav class="uv-scale-rail uv-glass" id="uv-scale-rail" aria-label="40-Order-of-Magnitude Scale Ladder"></nav>
       <nav class="uv-epoch-rail uv-glass" id="uv-epoch-rail" aria-label="Cosmic Evolutionary Epoch"></nav>
       <div class="uv-zoom-bar uv-glass" title="Continuous 40-Order-of-Magnitude Zoom Scrubber — drag or scroll the mouse wheel anywhere to zoom seamlessly from 10⁺²⁵ m to 10⁻¹⁵ m">
-        <span>10²⁵m</span>
-        <input id="uv-zoom-slider" type="range" min="-14.8" max="25.4" step="0.02" value="24.8" dir="rtl" aria-label="Continuous 40-OOM Scale Zoom" />
+        <span>10²⁷m</span>
+        <input id="uv-zoom-slider" type="range" min="-14.8" max="26.95" step="0.02" value="26.6" dir="rtl" aria-label="Continuous 42-OOM Scale Zoom" />
         <span>10⁻¹⁵m</span>
         <span class="uv-zoom-readout" id="uv-zoom-readout">204 Mpc</span>
       </div>
     </div>
 
     <div class="uv-actions">
+      <button id="uv-cargo-btn" class="uv-btn" type="button" title="Open Explorer Cargo &amp; Specimen Inventory: abducted flora/fauna, sampled materials, harvested elements &amp; Kardashev fleet (Shortcut: I)">🎒 Cargo</button>
       <button id="uv-em-sensor-btn" class="uv-btn" type="button" title="Toggle Full-Spectrum Dual-Caret EM Sensor Stack (Gamma 10⁻¹³ m → Radio 10 m mapped to visible colors)">🌈 EM</button>
       <button id="uv-cockpit-btn" class="uv-btn" type="button" title="Toggle 3rd-Person Flying Saucer vs Inside-the-Green-Glass-Dome 3D Cockpit View (Shortcut: V)">🛸 Cockpit</button>
       <button id="uv-xr-btn" class="uv-btn" type="button" title="Enter native WebXR WebGPU headset mode (XRGPUBinding) or Side-by-Side Stereo VR Preview">🥽 XR</button>
@@ -1080,6 +1154,31 @@
       <button type="button" data-em-preset="cmb">🌌 CMB μW</button>
     </div>
   </section>
+
+  <!-- Collapsible Explorer Cargo & Specimen Bay Inventory Drawer -->
+  <aside id="uv-cargo-drawer" class="uv-drawer uv-glass" aria-label="Explorer Cargo &amp; Specimen Inventory">
+    <div class="uv-drawer-head">
+      <span class="uv-drawer-title">🎒 Saucer Cargo &amp; Specimen Bay</span>
+      <button class="uv-btn subtle icon-only" data-close-drawer="uv-cargo-drawer" type="button" title="Close Cargo Inventory">✕</button>
+    </div>
+
+    <div class="uv-section-label">🧬 Abducted Life Specimens (Tractor Beam)</div>
+    <div id="uv-cargo-specimens" class="uv-cargo-list">
+      <div class="uv-cargo-item-sub">No life forms aboard yet. Land on a living world and hold <strong>T</strong> (Tractor Beam) over trees or roaming animals to abduct &amp; examine them in Bio Lab.</div>
+    </div>
+
+    <div class="uv-section-label">🧪 Collected Material &amp; Compound Samples</div>
+    <div id="uv-cargo-samples" class="uv-cargo-list">
+      <div class="uv-cargo-item-sub">No material samples collected yet. Press <strong>G</strong> on any surface, asteroid, comet, or cloud deck to sample.</div>
+    </div>
+
+    <div class="uv-section-label">⛏️ Harvested Elements &amp; Kardashev Fleet</div>
+    <div id="uv-cargo-resources" class="uv-cargo-res-grid"></div>
+    <div class="uv-seg-group" style="margin-top:6px;">
+      <button id="uv-cargo-probe-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">🤖 Launch Probe</button>
+      <button id="uv-cargo-dyson-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">☀️ Build Dyson</button>
+    </div>
+  </aside>
 
   <!-- Collapsible Sim Controls Drawer -->
   <aside id="uv-sim-drawer" class="uv-drawer uv-glass" aria-label="Simulation Controls">

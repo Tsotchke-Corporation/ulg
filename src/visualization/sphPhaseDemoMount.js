@@ -5632,7 +5632,7 @@ export async function mountSphPhaseDemoOverlay({
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       enableWorkers: initialResidentWorkersEnabled,
       requireWorkers: true,
-      workerBootstrapTimeoutMs: 5000,
+      workerBootstrapTimeoutMs: 20000,
       enableWebGPU: true,
       fallbackToDirectManagers: false
     })

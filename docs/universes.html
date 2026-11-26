@@ -917,11 +917,178 @@
       color: var(--muted);
       white-space: nowrap;
     }
+    /* Full-Spectrum Dual-Caret EM Sensor Stack Floating Bar */
+    #uv-em-sensor-bar {
+      position: fixed;
+      top: 56px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 24;
+      display: none;
+      flex-direction: column;
+      gap: 7px;
+      padding: 10px 14px;
+      width: min(560px, calc(100vw - 24px));
+    }
+    #uv-em-sensor-bar.open { display: flex; }
+    .uv-em-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+    .uv-em-track {
+      position: relative;
+      height: 28px;
+      border-radius: 8px;
+      background: linear-gradient(90deg,
+        #3b0764 0%, #6d28d9 16%, #2563eb 34%,
+        #06b6d4 46%, #22c55e 48.5%, #eab308 50%, #ef4444 51.5%,
+        #991b1b 64%, #78350f 78%, #1e293b 100%);
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      user-select: none;
+      touch-action: none;
+      cursor: pointer;
+    }
+    .uv-em-window {
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      border-radius: 5px;
+      background: linear-gradient(90deg, rgba(139,92,246,0.78), rgba(56,189,248,0.78), rgba(34,197,94,0.78), rgba(250,204,21,0.78), rgba(239,68,68,0.82));
+      border: 1.5px solid #ffffff;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.55);
+      cursor: grab;
+    }
+    .uv-em-caret {
+      position: absolute;
+      top: -4px;
+      bottom: -4px;
+      width: 14px;
+      margin-left: -7px;
+      border-radius: 5px;
+      background: #f8fafc;
+      border: 2px solid #0284c7;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.65);
+      cursor: ew-resize;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      color: #0f172a;
+      font-weight: 900;
+    }
+    .uv-em-ticks {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+      padding: 0 2px;
+    }
+    .uv-em-presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    .uv-em-presets button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.84);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .uv-em-presets button:hover, .uv-em-presets button.active {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.28);
+      color: #ffffff;
+    }
+
+    /* Explorer Cargo & Specimen Bay Inventory */
+    .uv-cargo-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 210px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    .uv-cargo-item {
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.72);
+      border-radius: 9px;
+      padding: 7px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 11px;
+    }
+    .uv-cargo-item-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-weight: 700;
+      color: #e0f2fe;
+    }
+    .uv-cargo-item-sub {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .uv-cargo-item-actions {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+    .uv-cargo-item-actions a, .uv-cargo-item-actions button {
+      appearance: none;
+      text-decoration: none;
+      border: 1px solid rgba(52, 211, 153, 0.45);
+      background: rgba(16, 185, 129, 0.18);
+      color: #a7f3d0;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 7px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .uv-cargo-item-actions button.release {
+      border-color: rgba(248, 113, 113, 0.35);
+      background: rgba(239, 68, 68, 0.14);
+      color: #fca5a5;
+    }
+    .uv-cargo-res-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+    }
+    .uv-cargo-res-cell {
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.65);
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+    }
+    .uv-cargo-res-cell span { display: block; font-size: 9.5px; color: var(--muted); }
+    .uv-cargo-res-cell strong { color: #e0f2fe; font-size: 12px; }
+
     @media (hover: hover) and (pointer: fine) {
       .uv-touch-pads.active:not(.force-visible) { display: none; }
     }
   </style>
-  <script type="module" crossorigin src="./assets/universes-D9z5MazK.js"></script>
+  <script type="module" crossorigin src="./assets/universes-y47g1lOX.js"></script>
 </head>
 <body>
   <canvas id="uv-canvas"></canvas>
@@ -944,14 +1111,16 @@
       <nav class="uv-scale-rail uv-glass" id="uv-scale-rail" aria-label="40-Order-of-Magnitude Scale Ladder"></nav>
       <nav class="uv-epoch-rail uv-glass" id="uv-epoch-rail" aria-label="Cosmic Evolutionary Epoch"></nav>
       <div class="uv-zoom-bar uv-glass" title="Continuous 40-Order-of-Magnitude Zoom Scrubber — drag or scroll the mouse wheel anywhere to zoom seamlessly from 10⁺²⁵ m to 10⁻¹⁵ m">
-        <span>10²⁵m</span>
-        <input id="uv-zoom-slider" type="range" min="-14.8" max="25.4" step="0.02" value="24.8" dir="rtl" aria-label="Continuous 40-OOM Scale Zoom" />
+        <span>10²⁷m</span>
+        <input id="uv-zoom-slider" type="range" min="-14.8" max="26.95" step="0.02" value="26.6" dir="rtl" aria-label="Continuous 42-OOM Scale Zoom" />
         <span>10⁻¹⁵m</span>
         <span class="uv-zoom-readout" id="uv-zoom-readout">204 Mpc</span>
       </div>
     </div>
 
     <div class="uv-actions">
+      <button id="uv-cargo-btn" class="uv-btn" type="button" title="Open Explorer Cargo &amp; Specimen Inventory: abducted flora/fauna, sampled materials, harvested elements &amp; Kardashev fleet (Shortcut: I)">🎒 Cargo</button>
+      <button id="uv-em-sensor-btn" class="uv-btn" type="button" title="Toggle Full-Spectrum Dual-Caret EM Sensor Stack (Gamma 10⁻¹³ m → Radio 10 m mapped to visible colors)">🌈 EM</button>
       <button id="uv-cockpit-btn" class="uv-btn" type="button" title="Toggle 3rd-Person Flying Saucer vs Inside-the-Green-Glass-Dome 3D Cockpit View (Shortcut: V)">🛸 Cockpit</button>
       <button id="uv-xr-btn" class="uv-btn" type="button" title="Enter native WebXR WebGPU headset mode (XRGPUBinding) or Side-by-Side Stereo VR Preview">🥽 XR</button>
       <button id="uv-share-btn" class="uv-btn" type="button" title="Copy a seedable URL link to your exact universe, epoch, position, and multiplayer room">🔗 Share</button>
@@ -962,6 +1131,55 @@
       <button id="uv-help-btn" class="uv-btn icon-only" type="button" title="Help, equations for this scale, other ULG labs, and GitHub links">?</button>
     </div>
   </header>
+
+  <!-- Full-Spectrum Dual-Caret EM Sensor Stack (10^-13 m Gamma -> 10^1 m Radio) -->
+  <section id="uv-em-sensor-bar" class="uv-glass" aria-label="Full-Spectrum Dual-Caret EM Sensor Stack">
+    <div class="uv-em-head">
+      <span><strong style="color:#38bdf8;">EM SENSOR STACK</strong> · <span id="uv-em-readout">👁 Human Visible (380–750 nm)</span></span>
+      <button id="uv-em-close-btn" class="uv-btn subtle icon-only" type="button" title="Close EM Sensor bar">✕</button>
+    </div>
+    <div id="uv-em-track" class="uv-em-track" title="Drag left/right carets [λ_min, λ_max] or slide the spectral bar between them across 14 decades of EM wavelengths">
+      <div id="uv-em-window" class="uv-em-window"></div>
+      <div id="uv-em-caret-min" class="uv-em-caret" title="Short-wavelength caret λ_min (mapped to Violet/Blue)">◀</div>
+      <div id="uv-em-caret-max" class="uv-em-caret" title="Long-wavelength caret λ_max (mapped to Red)">▶</div>
+    </div>
+    <div class="uv-em-ticks">
+      <span>γ 10⁻¹³m</span><span>X-Ray</span><span>UV</span><span style="color:#6ee7b7;">VIS</span><span>Thermal IR</span><span>μW/CMB</span><span>Radio 10m</span>
+    </div>
+    <div class="uv-em-presets" id="uv-em-presets">
+      <button type="button" class="active" data-em-preset="vis">👁 Visible</button>
+      <button type="button" data-em-preset="ir">🔥 Thermal IR</button>
+      <button type="button" data-em-preset="uv">⚡ UV / Aurora</button>
+      <button type="button" data-em-preset="xray">☢️ X-Ray / γ</button>
+      <button type="button" data-em-preset="radio">📡 21cm Radio</button>
+      <button type="button" data-em-preset="cmb">🌌 CMB μW</button>
+    </div>
+  </section>
+
+  <!-- Collapsible Explorer Cargo & Specimen Bay Inventory Drawer -->
+  <aside id="uv-cargo-drawer" class="uv-drawer uv-glass" aria-label="Explorer Cargo &amp; Specimen Inventory">
+    <div class="uv-drawer-head">
+      <span class="uv-drawer-title">🎒 Saucer Cargo &amp; Specimen Bay</span>
+      <button class="uv-btn subtle icon-only" data-close-drawer="uv-cargo-drawer" type="button" title="Close Cargo Inventory">✕</button>
+    </div>
+
+    <div class="uv-section-label">🧬 Abducted Life Specimens (Tractor Beam)</div>
+    <div id="uv-cargo-specimens" class="uv-cargo-list">
+      <div class="uv-cargo-item-sub">No life forms aboard yet. Land on a living world and hold <strong>T</strong> (Tractor Beam) over trees or roaming animals to abduct &amp; examine them in Bio Lab.</div>
+    </div>
+
+    <div class="uv-section-label">🧪 Collected Material &amp; Compound Samples</div>
+    <div id="uv-cargo-samples" class="uv-cargo-list">
+      <div class="uv-cargo-item-sub">No material samples collected yet. Press <strong>G</strong> on any surface, asteroid, comet, or cloud deck to sample.</div>
+    </div>
+
+    <div class="uv-section-label">⛏️ Harvested Elements &amp; Kardashev Fleet</div>
+    <div id="uv-cargo-resources" class="uv-cargo-res-grid"></div>
+    <div class="uv-seg-group" style="margin-top:6px;">
+      <button id="uv-cargo-probe-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">🤖 Launch Probe</button>
+      <button id="uv-cargo-dyson-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">☀️ Build Dyson</button>
+    </div>
+  </aside>
 
   <!-- Collapsible Sim Controls Drawer -->
   <aside id="uv-sim-drawer" class="uv-drawer uv-glass" aria-label="Simulation Controls">
@@ -1180,16 +1398,18 @@
         <input id="uv-lambda-slider" type="range" min="-13" max="1" step="0.05" value="-6.27" style="width:82px;accent-color:#34d399;" />
         <span id="uv-lambda-readout" style="min-width:78px;color:#6ee7b7;font-weight:700;">532 nm VIS</span>
       </label>
-      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#fde68a;" title="Tune EM laser output power from 1 kW (10³ W) to 100 TW (10¹⁴ W)">
+      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#fde68a;" title="Tune EM laser / Antimatter output power from 1 kW up to Kardashev Reactor Cap (10¹² → 10²⁶ W)">
         <span>P</span>
-        <input id="uv-power-slider" type="range" min="3" max="14" step="0.2" value="8.4" style="width:62px;accent-color:#f59e0b;" />
-        <span id="uv-power-readout" style="min-width:48px;font-weight:700;">250 MW</span>
+        <input id="uv-power-slider" type="range" min="3" max="26" step="0.2" value="8.4" style="width:62px;accent-color:#f59e0b;" />
+        <span id="uv-power-readout" style="min-width:54px;font-weight:700;">250 MW</span>
       </label>
       <button id="uv-probe-btn" class="uv-surf-pill sample" type="button" title="Spend 40 kg Metals + 40 kg Silicates to deploy a self-replicating Von Neumann Probe (Key: P)">🤖 Probe (P)</button>
       <span id="uv-kardashev-badge" style="font-family:var(--mono);font-size:10px;color:#6ee7b7;padding:0 4px;">K 0.72 · 0 Probes</span>
     </div>
     <div class="uv-surf-pills">
       <button id="uv-surf-sample-btn" class="uv-surf-pill sample" type="button" title="Press G to activate the yellow tractor beam, sample directly below your craft, and inspect its atomic lattice, compounds, and elements">🔬 SAMPLE BELOW (G)</button>
+      <button id="uv-surf-timewarp-btn" class="uv-surf-pill" type="button" title="Cycle Surface Orbital Time-Warp (1× → 10³× → 10⁵× → 10⁶×) to watch real sunrises, sunsets, orbiting moons, eclipses, and seasonal winters!">⏩ 1× SKY</button>
+      <a id="uv-surf-xeno-btn" class="uv-surf-pill sample" href="./life-lab.html" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;" title="Open this planet's native solvent, temperature, and stellar pigment directly in the Biophysics &amp; Xenobiology Lab">🧬 BIO LAB ↗</a>
       <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to ascend in UFO/Drone or fire Rover Jump Rockets">⬆ ASCEND (Space)</button>
       <button id="uv-surf-descend-btn" class="uv-surf-pill" type="button" title="Hold Ctrl/C to dive deeper toward surface or atmospheric strata">⬇ DIVE (C)</button>
       <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to Beam Down Rover via tractor beam, deploy Drone, or return to the 60-ft UFO">🚙 BEAM DOWN ROVER (F)</button>

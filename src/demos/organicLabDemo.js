@@ -600,6 +600,7 @@ export async function mountOrganicLabDemo() {
       refreshAcidBaseAndPlots();
       updateHudAndProvenance();
       renderCurrentScene();
+      syncMobileContextBar();
     } finally {
       busy = false;
     }
@@ -998,9 +999,48 @@ export async function mountOrganicLabDemo() {
       hdr.setAttribute('aria-expanded', isNowOpen ? 'true' : 'false');
     });
   });
+  function closeMobileDrawers() {
+    el('org-sidebar')?.classList.remove('mobile-open');
+    el('org-dock')?.classList.remove('mobile-open');
+    el('mobile-drawer-backdrop')?.classList.remove('open');
+  }
+
+  function syncMobileContextBar() {
+    const bar = el('mobile-context-bar');
+    if (!bar) return;
+    const isSpatial = SPATIAL_MODES.has(currentMode);
+    if (isSpatial) {
+      bar.innerHTML = `
+        <button type="button" class="mobile-ctx-btn" data-mctx="play">${paused ? '▶ Play' : '⏸ Pause'}</button>
+        <button type="button" class="mobile-ctx-btn" data-mctx="reset">↺ Reseed</button>
+        <button type="button" class="mobile-ctx-btn" data-mctx="controls">☰ Controls</button>`;
+      bar.querySelector('[data-mctx="play"]')?.addEventListener('click', () => el('btn-play')?.click());
+      bar.querySelector('[data-mctx="reset"]')?.addEventListener('click', () => el('btn-rd-reset')?.click());
+      bar.querySelector('[data-mctx="controls"]')?.addEventListener('click', () => el('mobile-nav-btn')?.click());
+    } else {
+      const repShort = repMode === 0 ? 'Ball' : (repMode === 1 ? 'CPK' : 'Stick');
+      bar.innerHTML = `
+        <button type="button" class="mobile-ctx-btn" data-mctx="play">${paused ? '▶' : '⏸'}</button>
+        <button type="button" class="mobile-ctx-btn" data-mctx="rep">⚛ ${repShort}</button>
+        <button type="button" class="mobile-ctx-btn ${showPiMo ? 'active' : ''}" data-mctx="pi">π-MO</button>
+        <button type="button" class="mobile-ctx-btn ${measureMode ? 'active' : ''}" data-mctx="measure">📏</button>
+        <button type="button" class="mobile-ctx-btn mirror" data-mctx="mirror">🪞 R↔S</button>`;
+      bar.querySelector('[data-mctx="play"]')?.addEventListener('click', () => el('btn-play')?.click());
+      bar.querySelector('[data-mctx="rep"]')?.addEventListener('click', () => applyRepresentationMode((repMode + 1) % 3));
+      bar.querySelector('[data-mctx="pi"]')?.addEventListener('click', () => {
+        showPiMo = !showPiMo;
+        if (el('chk-pi')) el('chk-pi').checked = showPiMo;
+        renderCurrentScene();
+        syncMobileContextBar();
+      });
+      bar.querySelector('[data-mctx="measure"]')?.addEventListener('click', () => setMeasureModeActive(!measureMode));
+      bar.querySelector('[data-mctx="mirror"]')?.addEventListener('click', () => el('btn-mirror')?.click());
+    }
+  }
+
   document.querySelectorAll('.mode-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      el('org-sidebar').classList.remove('mobile-open');
+      closeMobileDrawers();
       selectMode(btn.dataset.mode);
     });
   });
@@ -1039,7 +1079,7 @@ export async function mountOrganicLabDemo() {
     refreshAcidBaseAndPlots();
   });
   el('chk-auto-xi').addEventListener('change', (e) => { autoCycleReaction = e.target.checked; });
-  el('chk-pi').addEventListener('change', (e) => { showPiMo = e.target.checked; renderCurrentScene(); });
+  el('chk-pi').addEventListener('change', (e) => { showPiMo = e.target.checked; renderCurrentScene(); syncMobileContextBar(); });
   el('chk-esp').addEventListener('change', (e) => { espMode = e.target.checked; renderCurrentScene(); });
 
   function applyRepresentationMode(mode) {
@@ -1049,6 +1089,7 @@ export async function mountOrganicLabDemo() {
       b.classList.toggle('active', Number(b.dataset.rep) === repMode);
     });
     renderCurrentScene();
+    syncMobileContextBar();
   }
   document.querySelectorAll('#rep-mode-row [data-rep]').forEach((b) => {
     b.addEventListener('click', () => applyRepresentationMode(Number(b.dataset.rep)));
@@ -1059,6 +1100,7 @@ export async function mountOrganicLabDemo() {
     el('btn-measure')?.classList.toggle('active', measureMode);
     updateMeasureBanner();
     drawStageOverlay();
+    syncMobileContextBar();
   }
   el('btn-measure')?.addEventListener('click', () => setMeasureModeActive(!measureMode));
   el('btn-measure-clear')?.addEventListener('click', () => {
@@ -1162,6 +1204,7 @@ export async function mountOrganicLabDemo() {
     paused = !paused;
     el('btn-play').textContent = paused ? '▶ Play' : '⏸ Pause';
     el('btn-rd-play').textContent = paused ? '▶ Play' : '⏸ Pause';
+    syncMobileContextBar();
   });
   el('btn-rd-play').addEventListener('click', () => el('btn-play').click());
   el('btn-reset').addEventListener('click', () => selectMode(currentMode));
@@ -1195,14 +1238,27 @@ export async function mountOrganicLabDemo() {
     if (e.key === 'Escape') {
       el('help-popover')?.classList.remove('open');
       el('about-modal')?.classList.remove('open');
+      closeMobileDrawers();
     }
   });
   el('toggle-plots-btn').addEventListener('click', () => {
-    el('org-shell').classList.toggle('plots-collapsed');
-    el('org-dock').classList.toggle('mobile-open');
+    if (window.innerWidth <= 1020) {
+      el('org-sidebar')?.classList.remove('mobile-open');
+      const isOpen = el('org-dock')?.classList.toggle('mobile-open');
+      el('mobile-drawer-backdrop')?.classList.toggle('open', Boolean(isOpen));
+    } else {
+      el('org-shell').classList.toggle('plots-collapsed');
+    }
     handleResize();
   });
-  el('mobile-nav-btn').addEventListener('click', () => el('org-sidebar').classList.toggle('mobile-open'));
+  el('mobile-nav-btn').addEventListener('click', () => {
+    el('org-dock')?.classList.remove('mobile-open');
+    const isOpen = el('org-sidebar')?.classList.toggle('mobile-open');
+    el('mobile-drawer-backdrop')?.classList.toggle('open', Boolean(isOpen));
+  });
+  el('mobile-drawer-backdrop')?.addEventListener('click', closeMobileDrawers);
+  el('mobile-sidebar-close')?.addEventListener('click', closeMobileDrawers);
+  el('mobile-dock-close')?.addEventListener('click', closeMobileDrawers);
 
   // Boot initial flagship regime: Sulflower Molecular Bearing (C16S8 @ Calix[11]furan)!
   await selectMode('sulflower-bearing');

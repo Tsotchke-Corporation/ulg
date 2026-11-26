@@ -2763,9 +2763,11 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   let liveSeaIceFrac = landingSite?.isPolarIce ? 0.95 : 0.0;
   let liveSnowlineM = landingSite?.isPolarIce ? -45.0 : env.terrainAmpM * 0.56;
   let liveAutumnShift = 0.0;
+  let lastClimate = null;
 
   async function step({ dt = 0.016, controls = {}, climate = null, readTelemetry = true } = {}) {
     if (disposed) return lastTelemetry;
+    if (climate && typeof climate === 'object') lastClimate = climate;
     const dtSafe = Math.max(0.004, Math.min(0.045, Number(dt) || 0.016));
     simTimeS += dtSafe;
     stepIndex += 1;
@@ -3380,6 +3382,33 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     });
   }
 
+  function abductOrganismById(orgId, { queueEvent = false } = {}) {
+    let org = null;
+    if (typeof orgId === 'number' && Number.isInteger(orgId)) {
+      const alive = surfaceOrganisms.filter((o) => !o.abducted);
+      org = alive[orgId] || surfaceOrganisms[orgId] || null;
+    } else if (orgId != null) {
+      org = surfaceOrganisms.find((o) => o.id === String(orgId) && !o.abducted) || null;
+    }
+    if (!org || org.abducted) return null;
+    org.abducted = true;
+    org.abducting = false;
+    triggerTractorPulse(1.4);
+    const rec = synthesizeAbductedSpecimenRecord({
+      kind: org.kingdom || org.kind,
+      speciesRecord: org.speciesRecord || null,
+      worldName: bodySpec?.name || 'Exoplanet',
+      env,
+      xeno: env.xenobiology,
+      latDeg: lastClimate?.observerLatDeg ?? landingSite?.latDeg ?? 32.0,
+      lonDeg: (landingSite?.lonDeg ?? 0.0) + (lastClimate?.observerLonOffsetDeg ?? 0.0),
+      seed: org.seed
+    });
+    abductedSpecimens.push(rec);
+    if (queueEvent) pendingAbductions.push(rec);
+    return rec;
+  }
+
   return Object.freeze({
     schema: ULG_PLANETARY_SURFACE_SCHEMA,
     lawAdapter: PLANETARY_SURFACE_LAW_ADAPTER,
@@ -3405,6 +3434,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     applyRemoteCraterStamp: (st) => deformMpm.applyRemoteCraterStamp(st),
     getAbductedSpecimens: () => [...abductedSpecimens],
     getOrganisms: () => surfaceOrganisms,
+    abductOrganismById,
     getResidentTerrainVertBuffer: () => terrainVertBuf,
     getResidentTerrainIndexBuffer: () => terrainIdxBuf,
     getResidentVehicleVertBuffer: () => vehicleVertBuf,

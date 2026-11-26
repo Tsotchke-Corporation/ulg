@@ -814,6 +814,7 @@ export async function mountLifeLabDemo() {
     refreshCameraForMode(modeId);
     updatePlotsAndHud();
     renderCurrentScene();
+    syncMobileContextBar();
   }
 
   function renderCurrentScene() {
@@ -1082,6 +1083,7 @@ export async function mountLifeLabDemo() {
     updatePlotsAndHud();
     renderCurrentScene();
     updatePickOverlay();
+    syncMobileContextBar?.(`${res.partLabel}: ${res.reactionText}`);
     return res;
   }
 
@@ -1183,9 +1185,75 @@ export async function mountLifeLabDemo() {
     h.setAttribute('aria-expanded', isNowOpen ? 'true' : 'false');
   }));
   document.querySelectorAll('.mode-btn').forEach((btn) => btn.addEventListener('click', () => {
-    el('life-sidebar').classList.remove('mobile-open');
+    closeMobileDrawers();
     selectMode(btn.dataset.mode);
   }));
+
+  function closeMobileDrawers() {
+    el('life-sidebar')?.classList.remove('mobile-open');
+    el('life-dock')?.classList.remove('mobile-open');
+    el('mobile-drawer-backdrop')?.classList.remove('open');
+  }
+
+  function syncMobileContextBar(toastMsg = null) {
+    const row = el('mobile-context-row');
+    const toast = el('mobile-viv-toast');
+    if (!row) return;
+    if (toast) {
+      if (toastMsg && currentLayer === 'vivarium') {
+        toast.textContent = toastMsg;
+        toast.classList.add('visible');
+      } else if (currentLayer !== 'vivarium') {
+        toast.classList.remove('visible');
+      }
+    }
+    if (currentLayer === 'vivarium') {
+      const tools = [
+        ['inspect', '🔍', 'Inspect'],
+        ['probe', '👉', 'Probe'],
+        ['heat', '🔥', 'Heat'],
+        ['cool', '❄️', 'Cool'],
+        ['stim', '⚡', 'Stim'],
+        ['sample', '💉', 'Biopsy']
+      ];
+      const biopsyHtml = pendingBiopsyAction
+        ? '<button type="button" class="mobile-ctx-btn gold" data-mctx="biopsy-jump">🔬 Tissue →</button>'
+        : '';
+      row.innerHTML = tools.map(([id, ic, lbl]) => (
+        `<button type="button" class="mobile-ctx-btn ${vivTool === id ? 'active' : ''}" data-mctx-viv="${id}" title="${lbl}">${ic} ${lbl}</button>`
+      )).join('') + biopsyHtml;
+      row.querySelectorAll('[data-mctx-viv]').forEach((b) => {
+        b.addEventListener('click', () => setVivToolUi(b.dataset.mctxViv));
+      });
+      row.querySelector('[data-mctx="biopsy-jump"]')?.addEventListener('click', () => el('btn-viv-biopsy-jump')?.click());
+    } else {
+      const primaryByLayer = {
+        membrane: { id: 'btn-mem-null', lbl: 'ε_hp=0', cls: 'coral' },
+        fold: { id: 'btn-fold-denature', lbl: '🔥 750K', cls: 'coral' },
+        evo: { id: 'btn-evo-cat', lbl: '⚠ Error Cat.', cls: 'coral' },
+        hh: { id: 'btn-hh-stim', lbl: '⚡ Stim', cls: 'gold' },
+        morph: { id: 'btn-m-null', lbl: 'v₀=0', cls: 'coral' }
+      };
+      const resetByLayer = {
+        membrane: 'btn-mem-reset',
+        fold: 'btn-fold-reset',
+        evo: 'btn-evo-reset',
+        hh: 'btn-hh-reset',
+        morph: 'btn-m-reset'
+      };
+      const pAct = primaryByLayer[currentLayer] || primaryByLayer.membrane;
+      const rId = resetByLayer[currentLayer] || 'btn-mem-reset';
+      row.innerHTML = `
+        <button type="button" class="mobile-ctx-btn" data-mctx="play">${paused ? '▶ Play' : '⏸ Pause'}</button>
+        <button type="button" class="mobile-ctx-btn ${pAct.cls}" data-mctx="primary">${pAct.lbl}</button>
+        <button type="button" class="mobile-ctx-btn" data-mctx="reset">↺ Reset</button>
+        <button type="button" class="mobile-ctx-btn" data-mctx="controls">☰ Controls</button>`;
+      row.querySelector('[data-mctx="play"]')?.addEventListener('click', () => el('btn-play')?.click());
+      row.querySelector('[data-mctx="primary"]')?.addEventListener('click', () => el(pAct.id)?.click());
+      row.querySelector('[data-mctx="reset"]')?.addEventListener('click', () => el(rId)?.click());
+      row.querySelector('[data-mctx="controls"]')?.addEventListener('click', () => el('mobile-nav-btn')?.click());
+    }
+  }
 
   // Layer 0 (Specimen Vivarium / Aquarium) controls
   const setVivToolUi = (tool) => {
@@ -1193,6 +1261,7 @@ export async function mountLifeLabDemo() {
     const labels = { inspect: '🔍 Inspect', probe: '👉 Probe', heat: '🔥 Heat', cool: '❄️ Cool', stim: '⚡ Stim', sample: '💉 Biopsy' };
     if (el('val-viv-tool')) el('val-viv-tool').textContent = labels[tool] || tool;
     document.querySelectorAll('#viv-tool-row [data-viv-tool]').forEach((b) => b.classList.toggle('active', b.dataset.vivTool === tool));
+    syncMobileContextBar();
   };
   document.querySelectorAll('#viv-tool-row [data-viv-tool]').forEach((b) => {
     b.addEventListener('click', () => setVivToolUi(b.dataset.vivTool));
@@ -1352,7 +1421,11 @@ export async function mountLifeLabDemo() {
   el('btn-m-null').addEventListener('click', () => { params.morphV0 = 0; params.morphChemo = 0; el('sl-m-v0').value = '0'; el('val-m-v0').textContent = '0.00'; el('sl-m-chemo').value = '0'; el('val-m-chemo').textContent = '0.00'; activeSession?.setV0Propel?.(0); activeSession?.setChemoGain?.(0); updatePlotsAndHud(); });
   el('btn-m-reset').addEventListener('click', () => { params.morphV0 = 1.35; params.morphChemo = 2.20; params.morphDiffRatio = 2.00; el('sl-m-v0').value = '1.35'; el('val-m-v0').textContent = '1.35'; el('sl-m-chemo').value = '2.20'; el('val-m-chemo').textContent = '2.20'; el('sl-m-ratio').value = '2.00'; el('val-m-ratio').textContent = '2.00'; selectMode(currentMode); });
 
-  el('btn-play').addEventListener('click', () => { paused = !paused; el('btn-play').textContent = paused ? '▶ Play' : '⏸ Pause'; });
+  el('btn-play').addEventListener('click', () => {
+    paused = !paused;
+    el('btn-play').textContent = paused ? '▶ Play' : '⏸ Pause';
+    syncMobileContextBar();
+  });
   el('about-btn').addEventListener('click', () => openAboutModal(false));
   el('menu-about-mode').addEventListener('click', () => { el('help-popover').classList.remove('open'); openAboutModal(false); });
   el('menu-about-lab').addEventListener('click', () => { el('help-popover').classList.remove('open'); openAboutModal(true); });
@@ -1369,10 +1442,27 @@ export async function mountLifeLabDemo() {
     if (e.key === 'Escape') {
       el('help-popover')?.classList.remove('open');
       el('about-modal')?.classList.remove('open');
+      closeMobileDrawers();
     }
   });
-  el('toggle-plots-btn').addEventListener('click', () => { el('life-shell').classList.toggle('plots-collapsed'); el('life-dock').classList.toggle('mobile-open'); handleResize(); });
-  el('mobile-nav-btn').addEventListener('click', () => el('life-sidebar').classList.toggle('mobile-open'));
+  el('toggle-plots-btn').addEventListener('click', () => {
+    if (window.innerWidth <= 1020) {
+      el('life-sidebar')?.classList.remove('mobile-open');
+      const isOpen = el('life-dock')?.classList.toggle('mobile-open');
+      el('mobile-drawer-backdrop')?.classList.toggle('open', Boolean(isOpen));
+    } else {
+      el('life-shell').classList.toggle('plots-collapsed');
+    }
+    handleResize();
+  });
+  el('mobile-nav-btn').addEventListener('click', () => {
+    el('life-dock')?.classList.remove('mobile-open');
+    const isOpen = el('life-sidebar')?.classList.toggle('mobile-open');
+    el('mobile-drawer-backdrop')?.classList.toggle('open', Boolean(isOpen));
+  });
+  el('mobile-drawer-backdrop')?.addEventListener('click', closeMobileDrawers);
+  el('mobile-sidebar-close')?.addEventListener('click', closeMobileDrawers);
+  el('mobile-dock-close')?.addEventListener('click', closeMobileDrawers);
 
   let activeXenoProfile = null;
   async function applyXenobiologyProfile(profile, { targetMode = null } = {}) {

@@ -424,6 +424,13 @@ export async function mountUlgUniversesDemo() {
   const flightTractorBtn = document.getElementById('uv-flight-tractor-btn');
   const flightGamepadStatusEl = document.getElementById('uv-flight-gamepad-status');
   const remoteSensingBox = document.getElementById('uv-remote-sensing-box');
+  const contextSpotlightEl = document.getElementById('uv-context-spotlight');
+  const topbarEl = document.getElementById('uv-topbar');
+  const mobileToolsBtn = document.getElementById('uv-mobile-tools-btn');
+  const deckPeekBar = document.getElementById('uv-deck-peek-bar');
+  const peekTitleEl = document.getElementById('uv-peek-title');
+  const peekActionBtn = document.getElementById('uv-peek-action-btn');
+  const peekToggleBtn = document.getElementById('uv-peek-toggle-btn');
   const collapseBtn = document.getElementById('uv-collapse-btn');
   const infoQuickBtn = document.getElementById('uv-info-quick-btn');
   const targetKicker = document.getElementById('uv-target-kicker');
@@ -520,6 +527,9 @@ export async function mountUlgUniversesDemo() {
   let lastL4GlobeMeta = null;
   let lastL4CamMeta = null;
   let selectedLandingSite = null;
+  let pickedSurfaceOrganism = null;
+  let lastContextSpotlight = null;
+  let lastSpotlightMarkupKey = '';
   const abductedSpecimens = [];
   const collectedMaterialSamples = [];
 
@@ -767,6 +777,7 @@ export async function mountUlgUniversesDemo() {
     physics.unloadStarSystemRegimes({ resetModes: true });
     userExplicitStellarOverride = false;
     selectedLandingSite = null;
+    pickedSurfaceOrganism = null;
     savedSurfaceCheckpoint = null;
     lastL4GlobeMeta = null;
     lastOrbitalRemoteSensing = null;
@@ -1161,13 +1172,45 @@ export async function mountUlgUniversesDemo() {
   ];
   const ALL_DRAWERS = DECK_PANES.filter((p) => p.id !== 'scan');
 
-  function setCommandDeckTab(tabId = 'scan', { autoExpand = true } = {}) {
+  function isMobileViewport() {
+    return typeof window !== 'undefined' && (window.innerWidth <= 920 || window.matchMedia?.('(max-width: 920px)').matches);
+  }
+
+  let mobileDeckState = isMobileViewport() ? 'collapsed' : 'expanded';
+
+  function setMobileDeckState(nextState = 'collapsed') {
+    const valid = nextState === 'collapsed' || nextState === 'peek' || nextState === 'expanded' ? nextState : 'collapsed';
+    mobileDeckState = valid;
+    if (!commandDeckEl) return mobileDeckState;
+    if (valid === 'collapsed') {
+      commandDeckEl.classList.add('collapsed');
+      commandDeckEl.classList.remove('mobile-peek');
+      document.body.classList.add('deck-collapsed');
+      if (deckCollapseBtn) deckCollapseBtn.textContent = isMobileViewport() ? '▲' : '❮';
+      if (peekToggleBtn) peekToggleBtn.textContent = '▲';
+    } else if (valid === 'peek') {
+      commandDeckEl.classList.remove('collapsed');
+      commandDeckEl.classList.add('mobile-peek');
+      document.body.classList.remove('deck-collapsed');
+      if (deckCollapseBtn) deckCollapseBtn.textContent = '▼';
+      if (peekToggleBtn) peekToggleBtn.textContent = '⤢';
+    } else {
+      commandDeckEl.classList.remove('collapsed');
+      commandDeckEl.classList.remove('mobile-peek');
+      document.body.classList.remove('deck-collapsed');
+      if (deckCollapseBtn) deckCollapseBtn.textContent = isMobileViewport() ? '▼' : '❯';
+      if (peekToggleBtn) peekToggleBtn.textContent = '▼';
+    }
+    return mobileDeckState;
+  }
+
+  function setCommandDeckTab(tabId = 'scan', { autoExpand = true, preferPeek = false } = {}) {
     const valid = DECK_PANES.some((p) => p.id === tabId) ? tabId : 'scan';
     activeDeckTab = valid;
-    if (autoExpand && commandDeckEl?.classList.contains('collapsed')) {
-      commandDeckEl.classList.remove('collapsed');
-      document.body.classList.remove('deck-collapsed');
-      if (deckCollapseBtn) deckCollapseBtn.textContent = '❯';
+    if (autoExpand && (commandDeckEl?.classList.contains('collapsed') || (isMobileViewport() && !preferPeek && commandDeckEl?.classList.contains('mobile-peek')))) {
+      setMobileDeckState(isMobileViewport() && preferPeek ? 'peek' : 'expanded');
+    } else if (preferPeek && isMobileViewport()) {
+      setMobileDeckState('peek');
     }
     for (const p of DECK_PANES) {
       const isOpen = p.id === valid;
@@ -1179,6 +1222,39 @@ export async function mountUlgUniversesDemo() {
     if (valid === 'em') syncEmSensorUi();
     return activeDeckTab;
   }
+
+  // Mobile-first boot: start Command Deck collapsed to a slim bottom context bar (~80% open 3D cosmos!),
+  // while desktop (>920px) keeps the full right-hand Saucer Bridge Command Deck visible.
+  if (isMobileViewport()) {
+    setMobileDeckState('collapsed');
+  }
+  mobileToolsBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = topbarEl?.classList.toggle('mobile-tools-open');
+    mobileToolsBtn.classList.toggle('active', Boolean(isOpen));
+    mobileToolsBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  });
+  peekTitleEl?.addEventListener('click', () => {
+    setCommandDeckTab('scan', { autoExpand: false });
+    setMobileDeckState(mobileDeckState === 'collapsed' ? 'peek' : (mobileDeckState === 'peek' ? 'expanded' : 'collapsed'));
+  });
+  peekToggleBtn?.addEventListener('click', () => {
+    if (mobileDeckState === 'collapsed') {
+      setCommandDeckTab(activeDeckTab || 'scan', { autoExpand: false });
+      setMobileDeckState('peek');
+    } else if (mobileDeckState === 'peek') {
+      setMobileDeckState('expanded');
+    } else {
+      setMobileDeckState('collapsed');
+    }
+  });
+  peekActionBtn?.addEventListener('click', () => {
+    if (typeof lastContextSpotlight?.primaryAction === 'function') {
+      lastContextSpotlight.primaryAction();
+    } else {
+      void initiateHyperdrive();
+    }
+  });
 
   function getOrbitEyeAndTarget() {
     const cp = Math.cos(camState.pitch);
@@ -1314,12 +1390,23 @@ export async function mountUlgUniversesDemo() {
     renderNow(performance.now());
   });
   deckCollapseBtn?.addEventListener('click', () => {
-    const collapsed = commandDeckEl?.classList.toggle('collapsed');
-    document.body.classList.toggle('deck-collapsed', Boolean(collapsed));
-    if (deckCollapseBtn) deckCollapseBtn.textContent = collapsed ? '❮' : '❯';
+    const isNowCollapsed = !commandDeckEl?.classList.contains('collapsed');
+    setMobileDeckState(isNowCollapsed ? 'collapsed' : 'expanded');
   });
-  scanTabBtn?.addEventListener('click', () => setCommandDeckTab('scan'));
-  flightTabBtn?.addEventListener('click', () => setCommandDeckTab(activeDeckTab === 'flight' ? 'scan' : 'flight'));
+  scanTabBtn?.addEventListener('click', () => {
+    if (isMobileViewport() && activeDeckTab === 'scan' && mobileDeckState !== 'collapsed') {
+      setMobileDeckState('collapsed');
+    } else {
+      setCommandDeckTab('scan');
+    }
+  });
+  flightTabBtn?.addEventListener('click', () => {
+    if (isMobileViewport() && activeDeckTab === 'flight' && mobileDeckState !== 'collapsed') {
+      setMobileDeckState('collapsed');
+    } else {
+      setCommandDeckTab(activeDeckTab === 'flight' ? 'scan' : 'flight');
+    }
+  });
   function renderCargoInventory() {
     const totalCount = abductedSpecimens.length + collectedMaterialSamples.length;
     if (cargoBtn) {
@@ -2586,6 +2673,7 @@ export async function mountUlgUniversesDemo() {
       }
     }
     pickedGpuMote = null;
+    pickedSurfaceOrganism = null;
     moteFocusLocked = false;
     camTarget = [0, 0, 0];
     currentLevel = 4;
@@ -2640,6 +2728,7 @@ export async function mountUlgUniversesDemo() {
 
   function exitSurfaceViewUi() {
     if (!physics.surfaceActive) return;
+    pickedSurfaceOrganism = null;
     physics.exitSurfaceView();
     const spec = physics.getActiveSystemCatalog()[physics.planetaryBodyIndex] || REAL_SOLAR_SYSTEM_CATALOG[3];
     currentLevel = 4;
@@ -3897,8 +3986,123 @@ export async function mountUlgUniversesDemo() {
     focusPickedMote({ zoomIn: !moteFocusLocked });
   });
 
+  function getSurfaceOrganismCurvedCenter(org, s) {
+    if (!org || !s) return null;
+    const pose = s.getCameraPose?.();
+    const focus = pose?.focusPos || [0, 0, 0];
+    const R = s.env?.hasSolidCrust ? Math.max(100, Number(s.env.tinyPlanetCurvatureRadiusM) || 2800) : 0;
+    const dx = org.pos[0] - focus[0];
+    const dz = org.pos[2] - focus[2];
+    const drop = R > 0 ? (dx * dx + dz * dz) / (2.0 * R) : 0.0;
+    const sc = Math.max(0.5, Number(org.scale) || 1.0);
+    const yOff = org.kingdom === 'flora' ? sc * 2.2 : (org.kingdom === 'fungi' ? sc * 1.15 : sc * 0.95);
+    return [org.pos[0], org.pos[1] - drop + yOff, org.pos[2]];
+  }
+
+  function selectSurfaceOrganism(org) {
+    if (!org) return null;
+    const s = physics.surfaceSession;
+    const env = s?.env;
+    const xeno = s?.xenobiology || env?.xenobiology || null;
+    const sp = org.speciesRecord || {};
+    const kingdom = org.kingdom || org.kind || sp.kingdom || 'fauna';
+    const worldName = physics.surfaceBodySpec?.name || physics.getActiveSystemCatalog()[physics.planetaryBodyIndex]?.name || 'World';
+    const latDeg = physics.surfaceClimate?.observerLatDeg ?? physics.surfaceLandingSite?.latDeg ?? 32.0;
+    const lonDeg = (physics.surfaceLandingSite?.lonDeg ?? 0.0) + (physics.surfaceClimate?.observerLonOffsetDeg ?? 0.0);
+    pickedSurfaceOrganism = {
+      id: org.id,
+      orgRef: org,
+      kingdom,
+      bodyPlan: org.bodyPlan || sp.bodyPlan || 'organism',
+      trophicGuild: org.trophicGuild || sp.trophicGuild || (kingdom === 'flora' ? 'autotroph' : 'heterotroph'),
+      speciesName: sp.speciesName || (kingdom === 'flora' ? 'Xenophyte Tree' : (kingdom === 'fungi' ? 'Myco-Organism' : 'Xeno-Fauna')),
+      morphClass: sp.morphClass || org.bodyPlan || kingdom,
+      solventFormula: xeno?.solventFormula || 'H₂O',
+      solventLabel: xeno?.solventLabel || 'Water',
+      xnaBackbone: sp.xnaBackbone || xeno?.xnaBackbone || 'RNA/DNA',
+      xnaAlphabetSize: sp.xnaAlphabetSize || xeno?.xnaAlphabetSize || 4,
+      skeleton: sp.skeleton || 'Structural Matrix',
+      metabolicPowerW: sp.metabolicPowerW ?? null,
+      redEdgeNm: sp.redEdgeNm ?? xeno?.photobiology?.redEdgeNm ?? null,
+      deltaGKjMol: sp.deltaGKjMol ?? xeno?.redox?.deltaGKjMol ?? null,
+      heightM: Number((Math.max(0.6, Number(org.scale) || 1.0) * (kingdom === 'flora' ? 4.4 : 1.7)).toFixed(1)),
+      primaryRgb: org.primaryRgb || sp.primaryRgb || [0.32, 0.82, 0.56],
+      fasta: sp.fasta || xeno?.labParams?.foldSeq || 'HPPHH+PHHPPHH-P',
+      worldName,
+      latDeg: Number(latDeg.toFixed(1)),
+      lonDeg: Number(lonDeg.toFixed(1)),
+      tempK: Math.round(physics.surfaceClimate?.surfaceTempK ?? env?.tempK ?? 288),
+      gravityMS2: Number((env?.gravityMS2 ?? 9.81).toFixed(2)),
+      profile: xeno,
+      abducted: Boolean(org.abducted),
+      abductedRecord: null
+    };
+    setCommandDeckTab('scan', { autoExpand: !isMobileViewport(), preferPeek: isMobileViewport() });
+    updateInspectorCard();
+    renderNow(performance.now());
+    return pickedSurfaceOrganism;
+  }
+
+  function pickSurfaceOrganismAt(clientX, clientY) {
+    if (!physics.surfaceActive || !physics.surfaceSession || !lastViewProj) return null;
+    const s = physics.surfaceSession;
+    const orgs = s.getOrganisms?.() || [];
+    if (!orgs.length) return null;
+    const hitRadiusPx = isMobileViewport() ? 56 : 46;
+    let best = null;
+    let bestDist = hitRadiusPx;
+    for (const org of orgs) {
+      if (!org || org.abducted) continue;
+      const wp = getSurfaceOrganismCurvedCenter(org, s);
+      if (!wp) continue;
+      const proj = projectWorldToScreen(wp, lastViewProj, lastCssW, lastCssH);
+      if (!proj.visible) continue;
+      const d = Math.hypot(proj.sx - clientX, proj.sy - clientY);
+      if (d < bestDist) {
+        bestDist = d;
+        best = org;
+      }
+    }
+    if (best) return selectSurfaceOrganism(best);
+    return null;
+  }
+
+  function abductPickedSurfaceOrganism(orgId = null) {
+    if (!physics.surfaceActive || !physics.surfaceSession) return null;
+    const targetId = orgId ?? pickedSurfaceOrganism?.id;
+    if (targetId == null) return null;
+    const rec = physics.surfaceSession.abductOrganismById?.(targetId, { queueEvent: false });
+    if (!rec) return null;
+    abductedSpecimens.push(rec);
+    if (pickedSurfaceOrganism && (pickedSurfaceOrganism.id === targetId || pickedSurfaceOrganism.orgRef?.abducted)) {
+      pickedSurfaceOrganism.abducted = true;
+      pickedSurfaceOrganism.abductedRecord = rec;
+    }
+    renderCargoInventory();
+    syncSurfaceHud();
+    updateInspectorCard();
+    renderNow(performance.now());
+    return rec;
+  }
+
+  // Multi-touch pointer tracking: 1-finger orbit/look + click-pick (space & surface aliens/trees!),
+  // 2-finger smooth pinch-to-zoom across 40-OOM space, 6-DOF UFO chase zoom, and planetary surfaces!
+  const activePointers = new Map();
   let activePointerId = null;
+  let lastPinchDist = 0;
+
   canvas.addEventListener('pointerdown', (e) => {
+    topbarEl?.classList.remove('mobile-tools-open');
+    mobileToolsBtn?.classList.remove('active');
+    mobileToolsBtn?.setAttribute('aria-expanded', 'false');
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { canvas.setPointerCapture?.(e.pointerId); } catch {}
+    if (activePointers.size === 2) {
+      const pts = [...activePointers.values()];
+      lastPinchDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      pointerMoved = true;
+      return;
+    }
     if (activePointerId !== null && activePointerId !== e.pointerId) return;
     activePointerId = e.pointerId;
     pointerDown = true;
@@ -3907,13 +4111,50 @@ export async function mountUlgUniversesDemo() {
     downY = e.clientY;
     lastX = e.clientX;
     lastY = e.clientY;
-    canvas.setPointerCapture?.(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
+    if (activePointers.has(e.pointerId)) {
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    if (activePointers.size === 2) {
+      const pts = [...activePointers.values()];
+      const nextDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      if (lastPinchDist > 8 && nextDist > 8) {
+        const ratio = Math.max(0.75, Math.min(1.35, lastPinchDist / nextDist));
+        pointerMoved = true;
+        if (physics.surfaceActive) {
+          physics.adjustSurfaceChaseDistance(ratio);
+          renderNow(performance.now());
+        } else if (ufoFlight.mode === 'ufo') {
+          ufoFlight.adjustChaseZoom(ratio);
+          syncFlightConsoleUi();
+          renderNow(performance.now());
+        } else {
+          autopilot = false;
+          autopilotBtn?.classList.remove('active');
+          if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
+          flyTargetLog10 = null;
+          const deltaLog = Math.max(-0.45, Math.min(0.45, Math.log10(ratio) * 2.6));
+          const nextSpan = Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, log10ViewSpanM + deltaLog));
+          if (currentLevel === 4 && deltaLog < 0 && nextSpan < 5.75 && !surfaceAutoEntryPending) {
+            surfaceAutoEntryPending = true;
+            void enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex }).finally(() => {
+              surfaceAutoEntryPending = false;
+            });
+          } else {
+            log10ViewSpanM = nextSpan;
+            zoomVelocityLog10PerSec = Math.abs(deltaLog) * 10.0;
+            void warmVisibleLevels(log10ViewSpanM);
+          }
+        }
+      }
+      lastPinchDist = nextDist;
+      return;
+    }
     if (pointerDown && (activePointerId === null || e.pointerId === activePointerId)) {
       const dx = e.clientX - lastX;
       const dy = e.clientY - lastY;
-      if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) pointerMoved = true;
+      if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) pointerMoved = true;
       if (physics.surfaceActive) {
         physics.addSurfaceLookDelta(-dx * 0.0055, dy * 0.0055);
       } else if (ufoFlight.mode === 'ufo') {
@@ -3937,12 +4178,35 @@ export async function mountUlgUniversesDemo() {
     }
   });
   const endCanvasPointer = (e, allowClick) => {
-    if (activePointerId !== null && e.pointerId !== activePointerId) return;
-    if (allowClick && pointerDown && !pointerMoved && !physics.surfaceActive) {
-      autopilot = false;
-      autopilotBtn?.classList.remove('active');
-      if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
-      void pickAnyEntityAt(e.clientX, e.clientY);
+    activePointers.delete(e.pointerId);
+    if (activePointers.size < 2) lastPinchDist = 0;
+    if (activePointerId !== null && e.pointerId !== activePointerId) {
+      if (activePointers.size === 1) {
+        const [remId, remPt] = activePointers.entries().next().value;
+        activePointerId = remId;
+        lastX = remPt.x;
+        lastY = remPt.y;
+      }
+      return;
+    }
+    if (allowClick && pointerDown && !pointerMoved) {
+      if (physics.surfaceActive) {
+        const orgHit = pickSurfaceOrganismAt(e.clientX, e.clientY);
+        if (!orgHit && pickedSurfaceOrganism) {
+          pickedSurfaceOrganism = null;
+          updateInspectorCard();
+          renderNow(performance.now());
+        }
+      } else {
+        autopilot = false;
+        autopilotBtn?.classList.remove('active');
+        if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
+        void pickAnyEntityAt(e.clientX, e.clientY).then((picked) => {
+          if (picked && isMobileViewport()) {
+            setCommandDeckTab('scan', { autoExpand: false, preferPeek: true });
+          }
+        });
+      }
     }
     pointerDown = false;
     activePointerId = null;
@@ -4613,9 +4877,311 @@ export async function mountUlgUniversesDemo() {
       engineTag.textContent = `${sc.engineSchema} · SS L${lvlSign} (${ssSnap.chartCount}c/${ssSnap.spanOrdersOfMagnitude.toFixed(0)} OOM) · ${activeLawGraph.active.length}/${physics.lawGraphValidation?.nodeCount || 32} laws`;
     }
     renderSampleDrilldownStrip();
+    renderContextSpotlight(target, hasMote);
     drawSpectrograph(target);
     drawScientificPlot();
   }
+
+  function renderContextSpotlight(target, hasMote) {
+    if (!contextSpotlightEl && !peekTitleEl) return;
+    let ctxType = 'generic';
+    let badge = `L${currentLevel}`;
+    let swatchRgb = null;
+    let headline = target?.name || UNIVERSES_SCALES[currentLevel]?.name || 'Cosmos';
+    let sub = target?.subtitle || '';
+    const chips = [];
+    const actions = [];
+    let primaryLabel = '⚡ Dive';
+    let primaryAction = () => { void initiateHyperdrive(); };
+
+    const cat = physics.getActiveSystemCatalog();
+    const focusedSpec = cat[currentLevel === 4 ? physics.planetaryBodyIndex : physics.focusedSolarBodyIndex] || cat[0];
+
+    if (physics.surfaceActive && pickedSurfaceOrganism) {
+      const org = pickedSurfaceOrganism;
+      const isFauna = org.kingdom === 'fauna';
+      const isFungi = org.kingdom === 'fungi';
+      ctxType = isFauna ? 'alien' : (isFungi ? 'fungi' : 'flora');
+      const icon = isFauna ? (org.bodyPlan === 'aero-gasbag' ? '🎈' : (org.bodyPlan === 'aquatic-swimmer' ? '🐟' : '🐾')) : (isFungi ? '🍄' : '🌿');
+      badge = `${icon} ${isFauna ? 'LIVING ALIEN · FAUNA' : (isFungi ? 'LIVING FUNGUS · MYCO' : 'LIVING FLORA · TREE')}`;
+      swatchRgb = org.primaryRgb;
+      headline = org.speciesName;
+      sub = `${org.morphClass} · ${org.trophicGuild} · ${org.worldName} (${org.tempK} K, g=${org.gravityMS2} m/s²)`;
+      chips.push({ text: `Solvent: ${org.solventFormula}`, cls: 'bio' });
+      chips.push({ text: `${org.xnaAlphabetSize}-base ${String(org.xnaBackbone).split(' ')[0]}`, cls: '' });
+      if (isFauna && Number.isFinite(org.metabolicPowerW)) {
+        chips.push({ text: `Kleiber ${org.metabolicPowerW.toFixed(1)} W`, cls: 'gold' });
+      } else if (!isFauna && Number.isFinite(org.redEdgeNm)) {
+        chips.push({ text: `Red-Edge ${Math.round(org.redEdgeNm)} nm`, cls: 'gold' });
+      } else if (Number.isFinite(org.deltaGKjMol)) {
+        chips.push({ text: `ΔG ${org.deltaGKjMol} kJ/mol`, cls: 'gold' });
+      }
+      chips.push({ text: `Size ~${org.heightM} m`, cls: '' });
+
+      const bioRecord = org.abductedRecord || {
+        kind: org.kingdom,
+        kingdom: org.kingdom,
+        speciesName: org.speciesName,
+        morphClass: org.morphClass,
+        bodyPlan: org.bodyPlan,
+        trophicGuild: org.trophicGuild,
+        solventFormula: org.solventFormula,
+        xnaBackbone: org.xnaBackbone,
+        xnaAlphabetSize: org.xnaAlphabetSize,
+        skeleton: org.skeleton,
+        fasta: org.fasta,
+        worldName: org.worldName,
+        latDeg: org.latDeg,
+        lonDeg: org.lonDeg,
+        tempK: org.tempK,
+        gravityMS2: org.gravityMS2,
+        primaryRgb: org.primaryRgb
+      };
+      const bioHref = buildLifeLabXenobiologyUrl(org.profile || physics.surfaceSession?.xenobiology || null, 'organism-overview', bioRecord);
+      if (org.abducted) {
+        actions.push({ id: 'open-bio', label: '🫧 Bio Aquarium ↗', href: bioHref, cls: 'bio-cta' });
+        actions.push({ id: 'open-cargo', label: '🎒 Cargo Bay', cls: '', onClick: () => setCommandDeckTab('cargo') });
+        primaryLabel = '🫧 Aquarium';
+        primaryAction = () => { window.open(bioHref, '_blank', 'noopener'); };
+      } else {
+        actions.push({ id: 'abduct-org', label: '🛸 Abduct to Cargo', cls: 'primary', onClick: () => abductPickedSurfaceOrganism(org.id) });
+        actions.push({ id: 'open-bio', label: '🫧 Bio Aquarium ↗', href: bioHref, cls: 'bio-cta' });
+        actions.push({ id: 'sample-tissue', label: '🔬 Tissue → L5', cls: '', onClick: () => { void sampleLocalSurfaceAndDiveToLattice(); } });
+        primaryLabel = '🛸 Abduct';
+        primaryAction = () => { abductPickedSurfaceOrganism(org.id); };
+      }
+    } else if (physics.surfaceActive && physics.surfaceSession) {
+      ctxType = 'planet';
+      const s = physics.surfaceSession;
+      const tel = physics.surfaceTelemetry || s.getTelemetry();
+      const env = s.env;
+      const worldName = physics.surfaceBodySpec?.name || focusedSpec?.name || 'Planetary Surface';
+      const liveOrgs = tel.livingOrganismCount ?? 0;
+      badge = `🚙 SURFACE EXPLORATION · ${s.activeVehicle.toUpperCase()}`;
+      headline = worldName;
+      sub = liveOrgs > 0
+        ? `${liveOrgs} live organisms nearby — tap any alien or tree on screen to inspect & abduct!`
+        : `${env.hasSolidCrust ? 'Solid crust' : 'Deep atmosphere'} · g=${env.gravityMS2.toFixed(2)} m/s² · T=${Math.round(tel.tempK ?? env.tempK)} K`;
+      chips.push({ text: `g=${env.gravityMS2.toFixed(2)} m/s²`, cls: '' });
+      chips.push({ text: `${Math.round(tel.tempK ?? env.tempK)} K`, cls: '' });
+      if (liveOrgs > 0) chips.push({ text: `🧬 ${liveOrgs} Organisms`, cls: 'bio' });
+      actions.push({ id: 'surf-sample', label: '🔬 Sample → L5', cls: 'primary', onClick: () => { void sampleLocalSurfaceAndDiveToLattice(); } });
+      actions.push({ id: 'surf-orbit', label: '🚀 Orbit', cls: '', onClick: () => exitSurfaceViewUi() });
+      primaryLabel = '🔬 Sample';
+      primaryAction = () => { void sampleLocalSurfaceAndDiveToLattice(); };
+    } else if (currentLevel === 2 && pickedGpuMote?.kind === 'solar-asteroid') {
+      ctxType = 'asteroid';
+      const aSpec = buildCustomBodySpecFromAsteroidMote(pickedGpuMote);
+      badge = aSpec.isComet ? '☄️ ACTIVE COMET' : (aSpec.isMetallicAsteroid ? '⛏️ FE-NI ASTEROID' : '🪨 CARBONACEOUS ASTEROID');
+      headline = aSpec.name;
+      sub = aSpec.subtitle;
+      chips.push({ text: `Ø ${Math.round(aSpec.radiusKm * 2)} km`, cls: 'gold' });
+      chips.push({ text: `g=${aSpec.surfaceGravityMS2.toFixed(3)} m/s²`, cls: '' });
+      chips.push({ text: aSpec.isMetallicAsteroid ? 'High Fe/Ni Ore' : (aSpec.isComet ? 'H₂O/CO Volatiles' : 'Silicates + Organics'), cls: 'bio' });
+      actions.push({ id: 'land-ast', label: '🚙 Land & Mine', cls: 'primary', onClick: () => { void enterSurfaceViewUi({ customBodySpec: aSpec }); } });
+      actions.push({ id: 'missile-ast', label: '🚀 Missile', cls: '', onClick: () => launchSpaceMissile() });
+      actions.push({ id: 'tractor-ast', label: '🛸 Tractor', cls: '', onClick: () => { spaceTractorOn = !spaceTractorOn; syncWeaponControlsUi(); } });
+      primaryLabel = '🚙 Mine';
+      primaryAction = () => { void enterSurfaceViewUi({ customBodySpec: aSpec }); };
+    } else if (currentLevel === 3 || (currentLevel === 2 && focusedSpec?.isStar) || (currentLevel === 1 && pickedGpuMote?.kind === 'galaxy-star')) {
+      const starSpec = currentLevel === 1 ? pickedGpuMote?.starSite : focusedSpec;
+      const exoticHint = `${physics.stellarMode || ''} ${starSpec?.stellarClass || ''} ${starSpec?.name || ''} ${target?.name || ''}`;
+      const isPulsar = /pulsar|magnetar|neutron/i.test(exoticHint);
+      const isBh = /black[\s-]?hole|kerr|smbh|quasar/i.test(exoticHint);
+      const isWd = /white[\s-]?dwarf|wd/i.test(exoticHint);
+      ctxType = (isPulsar || isBh) ? 'exotic' : 'star';
+      badge = isBh ? '🕳️ RELATIVISTIC BLACK HOLE' : (isPulsar ? '⚡ MAGNETIZED PULSAR' : (isWd ? '💎 DEGENERATE WHITE DWARF' : '☀️ STELLAR ENGINE'));
+      headline = target?.name || starSpec?.name || 'Host Star';
+      sub = target?.subtitle || (isPulsar ? 'Relativistic lighthouse beams & dipole magnetosphere' : 'Self-gravitating GPU fusion & plasma');
+      if (starSpec?.teffK) chips.push({ text: `T_eff ${Math.round(starSpec.teffK).toLocaleString()} K`, cls: 'gold' });
+      if (starSpec?.massSolar) chips.push({ text: `${Number(starSpec.massSolar).toFixed(2)} M☉`, cls: '' });
+      if (isPulsar || isBh) chips.push({ text: isBh ? 'Event Horizon + Jets' : 'Radio / γ Beams', cls: 'gold' });
+      if (currentLevel === 1) {
+        actions.push({ id: 'enter-sys', label: '⚡ Enter Star System', cls: 'primary', onClick: () => { void initiateHyperdrive(); } });
+        actions.push({ id: 'focus-star', label: '🎯 Focus', cls: '', onClick: () => focusPickedMote({ zoomIn: true }) });
+        primaryLabel = '⚡ System';
+        primaryAction = () => { void initiateHyperdrive(); };
+      } else if (currentLevel === 2) {
+        actions.push({ id: 'inspect-core', label: '⚡ Inspect Core (L3)', cls: 'primary', onClick: () => { void initiateHyperdrive(); } });
+        if (isPulsar || isBh) {
+          actions.push({ id: 'em-xray', label: '☢️ X-Ray View', cls: '', onClick: () => { const p = EM_SENSOR_PRESETS.xray; setEmSensorWindow(p.min, p.max, { active: true, preset: 'xray' }); renderNow(performance.now()); } });
+        }
+        primaryLabel = '⚡ Core';
+        primaryAction = () => { void initiateHyperdrive(); };
+      } else {
+        actions.push({ id: 'go-planet', label: '🌍 Visit Planet (L4)', cls: 'primary', onClick: () => { void initiateHyperdrive(); } });
+        actions.push({ id: 'em-uv', label: '🌈 EM Bands', cls: '', onClick: () => setCommandDeckTab('em') });
+        primaryLabel = '🌍 Planets';
+        primaryAction = () => { void initiateHyperdrive(); };
+      }
+    } else if (currentLevel === 2 || currentLevel === 4) {
+      ctxType = 'planet';
+      const isGiant = Boolean(focusedSpec && (focusedSpec.kind === 2 || focusedSpec.isGasGiant));
+      const rs = lastOrbitalRemoteSensing;
+      badge = rs?.biosignatureBadge || (isGiant ? '🌀 GAS GIANT WORLD' : '🌍 PLANETARY WORLD');
+      headline = focusedSpec?.name || target?.name || 'Planet';
+      const fluxW = lastStarIllumination?.irradianceWm2;
+      const fluxTxt = Number.isFinite(fluxW) ? (fluxW >= 10 ? `${Math.round(fluxW).toLocaleString()} W/m²` : `${fluxW.toFixed(2)} W/m²`) : null;
+      sub = selectedLandingSite && currentLevel === 4
+        ? `LZ Locked: ${selectedLandingSite.biomeLabel} (${selectedLandingSite.latDeg.toFixed(1)}°, ${selectedLandingSite.lonDeg.toFixed(1)}°) — tap Land!`
+        : (currentLevel === 4
+          ? 'Tap anywhere on the globe to pick a touchdown zone, or land now.'
+          : 'Tap Land to explore the live surface, or Orbit (L4) to scan the globe.');
+      if (fluxTxt) chips.push({ text: `☀️ ${fluxTxt}`, cls: 'gold' });
+      if (focusedSpec?.tempK) chips.push({ text: `${Math.round(focusedSpec.tempK)} K`, cls: '' });
+      if (rs?.solventFormula) chips.push({ text: `Solvent: ${rs.solventFormula}`, cls: rs.biosignatureLevel === 'strong' ? 'bio' : '' });
+      const targetBodyIdx = currentLevel === 4 ? physics.planetaryBodyIndex : physics.focusedSolarBodyIndex;
+      const landLbl = isGiant ? '🛸 Dive Clouds' : '🚙 Land on Surface';
+      actions.push({ id: 'land-world', label: landLbl, cls: 'primary', onClick: () => { void enterSurfaceViewUi({ bodyIndex: targetBodyIdx }); } });
+      if (currentLevel === 2) {
+        actions.push({ id: 'orbit-world', label: '⚡ Orbit (L4)', cls: '', onClick: () => { void initiateHyperdrive(); } });
+      } else {
+        actions.push({
+          id: 'toggle-cutaway',
+          label: physics.planetaryCutaway ? '🌐 Full Globe' : '✂ Cutaway Core',
+          cls: '',
+          onClick: () => {
+            physics.setPlanetaryCutaway(!physics.planetaryCutaway);
+            renderScaleControls();
+            updateInspectorCard();
+            renderNow(performance.now());
+          }
+        });
+      }
+      primaryLabel = isGiant ? '🛸 Clouds' : '🚙 Land';
+      primaryAction = () => { void enterSurfaceViewUi({ bodyIndex: targetBodyIdx }); };
+    } else if (currentLevel === 0 || currentLevel === 1) {
+      ctxType = 'galaxy';
+      badge = currentLevel === 0 ? '🌌 COSMIC WEB · L0' : `🌀 GALAXY · ${String(physics.galaxyPreset || 'spiral').toUpperCase()}`;
+      headline = target?.name || (currentLevel === 0 ? 'Supergalactic Web' : 'Spiral Galaxy');
+      sub = currentLevel === 0
+        ? 'Tap any halo cluster to focus or dive into a live 32,768-star galaxy.'
+        : 'Tap any star, pulsar, or SMBH core — try JWST IR or 21cm Radio in EM!';
+      if (currentLevel === 0 && physics.cosmoTelemetry) {
+        chips.push({ text: `z = ${physics.cosmoTelemetry.redshiftZ.toFixed(2)}`, cls: 'gold' });
+        chips.push({ text: `a = ${physics.cosmoTelemetry.scaleFactorA.toFixed(3)}`, cls: '' });
+      } else if (currentLevel === 1) {
+        chips.push({ text: `${(physics.galaxyEngine?.count || 0).toLocaleString()} Stars`, cls: '' });
+        chips.push({ text: physics.galaxyPreset, cls: 'gold' });
+      }
+      actions.push({
+        id: 'dive-gal',
+        label: currentLevel === 0 ? '⚡ Enter Galaxy' : '⚡ Enter System',
+        cls: 'primary',
+        onClick: () => { void initiateHyperdrive(); }
+      });
+      if (currentLevel === 1) {
+        actions.push({
+          id: 'jwst-ir',
+          label: '🔭 JWST IR',
+          cls: '',
+          onClick: () => {
+            const p = emSensorState.preset === 'jwst' ? EM_SENSOR_PRESETS.vis : EM_SENSOR_PRESETS.jwst;
+            setEmSensorWindow(p.min, p.max, { active: p.active, preset: emSensorState.preset === 'jwst' ? 'vis' : 'jwst' });
+            renderNow(performance.now());
+          }
+        });
+      } else if (hasMote) {
+        actions.push({ id: 'focus-web', label: '🎯 Focus Halo', cls: '', onClick: () => focusPickedMote({ zoomIn: true }) });
+      }
+      primaryLabel = currentLevel === 0 ? '⚡ Galaxy' : '⚡ System';
+      primaryAction = () => { void initiateHyperdrive(); };
+    } else {
+      ctxType = 'quantum';
+      badge = currentLevel === 5 ? '🧊 ATOMIC LATTICE · L5' : (currentLevel === 6 ? '⚛️ DIRAC–KS ATOM · L6' : '☢️ ATOMIC NUCLEUS · L7');
+      headline = target?.name || UNIVERSES_SCALES[currentLevel].name;
+      sub = target?.subtitle || 'Live Gate 1 first-principles WebGPU quantum & MD simulation';
+      const activeZ = currentLevel === 5 ? physics.mdElementZ : (currentLevel === 6 ? physics.quantumZ : physics.nuclearZ);
+      chips.push({ text: `Z = ${activeZ}`, cls: 'gold' });
+      if (savedSurfaceCheckpoint) {
+        actions.push({ id: 'back-surf', label: '↩ Back to Rover/UFO', cls: 'bio-cta', onClick: () => { void returnToSavedSurfaceUi(); } });
+        primaryLabel = '↩ Surface';
+        primaryAction = () => { void returnToSavedSurfaceUi(); };
+      }
+      if (currentLevel < 7) {
+        actions.push({ id: 'dive-q', label: currentLevel === 5 ? '⚛️ Atom (L6)' : '☢️ Nucleus (L7)', cls: 'primary', onClick: () => { void initiateHyperdrive(); } });
+        if (!savedSurfaceCheckpoint) {
+          primaryLabel = currentLevel === 5 ? '⚛️ Atom' : '☢️ Nucleus';
+          primaryAction = () => { void initiateHyperdrive(); };
+        }
+      } else {
+        actions.push({ id: 'open-elem-lab', label: '⚛️ Elements Lab ↗', href: `./elements-lab.html?z=${activeZ}`, cls: 'primary' });
+        if (!savedSurfaceCheckpoint) {
+          primaryLabel = '↑ Orbit';
+          primaryAction = () => returnToOrbit();
+        }
+      }
+    }
+
+    lastContextSpotlight = {
+      ctxType,
+      badge,
+      headline,
+      sub,
+      chips: chips.map((c) => c.text),
+      actionIds: actions.map((a) => a.id),
+      primaryLabel,
+      primaryAction,
+      organismId: pickedSurfaceOrganism?.id || null
+    };
+
+    if (peekTitleEl) {
+      const prefix = ctxType === 'alien' ? '🐾 ' : (ctxType === 'flora' ? '🌿 ' : (ctxType === 'fungi' ? '🍄 ' : (ctxType === 'exotic' ? '⚡ ' : '')));
+      peekTitleEl.textContent = `${prefix}${headline}`;
+    }
+    if (peekActionBtn) {
+      peekActionBtn.textContent = primaryLabel;
+    }
+
+    if (contextSpotlightEl) {
+      const nextCls = `uv-spotlight-card active ctx-${ctxType}`;
+      const swatchHtml = Array.isArray(swatchRgb)
+        ? `<span class="uv-spotlight-swatch" style="background:rgb(${Math.round((swatchRgb[0] ?? 0.3) * 255)},${Math.round((swatchRgb[1] ?? 0.8) * 255)},${Math.round((swatchRgb[2] ?? 0.5) * 255)});"></span>`
+        : '';
+      const clearBtnHtml = (physics.surfaceActive && pickedSurfaceOrganism)
+        ? '<button type="button" class="uv-btn subtle icon-only" data-spotlight-clear="1" title="Clear organism selection" style="min-height:22px;padding:2px 6px;">✕</button>'
+        : '';
+      const chipsHtml = chips.map((c) => `<span class="uv-spotlight-chip ${c.cls}">${c.text}</span>`).join('');
+      const actsHtml = actions.map((a) => (
+        a.href
+          ? `<a class="uv-btn ${a.cls}" data-spotlight-act="${a.id}" href="${a.href}" target="_blank" rel="noopener">${a.label}</a>`
+          : `<button type="button" class="uv-btn ${a.cls}" data-spotlight-act="${a.id}">${a.label}</button>`
+      )).join('');
+      const nextHtml = `
+        <div class="uv-spotlight-top">
+          <span class="uv-spotlight-badge">${swatchHtml}${badge}</span>
+          ${clearBtnHtml}
+        </div>
+        <div class="uv-spotlight-headline">${headline}</div>
+        <div class="uv-spotlight-sub">${sub}</div>
+        ${chipsHtml ? `<div class="uv-spotlight-facts">${chipsHtml}</div>` : ''}
+        ${actsHtml ? `<div class="uv-spotlight-actions">${actsHtml}</div>` : ''}`;
+      const markupKey = `${nextCls}|${nextHtml}`;
+      if (markupKey !== lastSpotlightMarkupKey) {
+        lastSpotlightMarkupKey = markupKey;
+        contextSpotlightEl.className = nextCls;
+        contextSpotlightEl.innerHTML = nextHtml;
+      }
+      contextSpotlightEl._spotlightActions = actions;
+    }
+  }
+
+  contextSpotlightEl?.addEventListener('click', (e) => {
+    const clearEl = e.target?.closest?.('[data-spotlight-clear]');
+    if (clearEl) {
+      pickedSurfaceOrganism = null;
+      updateInspectorCard();
+      renderNow(performance.now());
+      return;
+    }
+    const actEl = e.target?.closest?.('[data-spotlight-act]');
+    if (!actEl) return;
+    const actId = actEl.getAttribute('data-spotlight-act');
+    const act = (contextSpotlightEl._spotlightActions || []).find((a) => a.id === actId);
+    if (act && typeof act.onClick === 'function') {
+      act.onClick();
+    }
+  });
 
   function drawReticles(viewProj) {
     if (!reticleCtx) return;
@@ -5930,6 +6496,38 @@ export async function mountUlgUniversesDemo() {
           reticleCtx.stroke();
           reticleCtx.restore();
         }
+        // Highlight picked live Alien (fauna), Tree (flora), or Fungus directly in 3D surface space!
+        if (pickedSurfaceOrganism?.orgRef && !pickedSurfaceOrganism.orgRef.abducted) {
+          const wp = getSurfaceOrganismCurvedCenter(pickedSurfaceOrganism.orgRef, s);
+          const proj = wp ? projectWorldToScreen(wp, viewProj, lastCssW, lastCssH) : null;
+          if (proj?.visible) {
+            const r = 18;
+            const arm = 7;
+            const isFauna = pickedSurfaceOrganism.kingdom === 'fauna';
+            const strokeCol = isFauna ? 'rgba(52, 211, 153, 0.96)' : 'rgba(250, 204, 21, 0.96)';
+            reticleCtx.save();
+            reticleCtx.strokeStyle = strokeCol;
+            reticleCtx.lineWidth = 2.0;
+            for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+              reticleCtx.beginPath();
+              reticleCtx.moveTo(proj.sx + sx * r, proj.sy + sy * (r - arm));
+              reticleCtx.lineTo(proj.sx + sx * r, proj.sy + sy * r);
+              reticleCtx.lineTo(proj.sx + sx * (r - arm), proj.sy + sy * r);
+              reticleCtx.stroke();
+            }
+            const icon = isFauna ? '🐾' : (pickedSurfaceOrganism.kingdom === 'fungi' ? '🍄' : '🌿');
+            const label = `${icon} ${pickedSurfaceOrganism.speciesName}`;
+            reticleCtx.font = '700 11px monospace';
+            const tw = Math.min(220, reticleCtx.measureText(label).width + 12);
+            const lx = Math.max(8, Math.min(lastCssW - tw - 8, proj.sx + r + 8));
+            const ly = Math.max(20, Math.min(lastCssH - 12, proj.sy + 4));
+            reticleCtx.fillStyle = 'rgba(4, 12, 24, 0.82)';
+            reticleCtx.fillRect(lx - 4, ly - 12, tw, 17);
+            reticleCtx.fillStyle = isFauna ? '#a7f3d0' : '#fef08a';
+            reticleCtx.fillText(label, lx + 2, ly);
+            reticleCtx.restore();
+          }
+        }
       }
       return;
     }
@@ -7142,6 +7740,24 @@ export async function mountUlgUniversesDemo() {
         return true;
       }
       return false;
+    },
+    pickSurfaceOrganism(idOrIndex = 0) {
+      if (!physics.surfaceActive || !physics.surfaceSession) return null;
+      const alive = (physics.surfaceSession.getOrganisms?.() || []).filter((o) => !o.abducted);
+      const target = typeof idOrIndex === 'number'
+        ? alive[idOrIndex]
+        : alive.find((o) => o.id === String(idOrIndex) || o.kingdom === String(idOrIndex));
+      return target ? selectSurfaceOrganism(target) : null;
+    },
+    abductSurfaceOrganism(idOrIndex = null) {
+      const id = idOrIndex ?? pickedSurfaceOrganism?.id ?? 0;
+      return abductPickedSurfaceOrganism(id);
+    },
+    getContextSpotlight() {
+      return lastContextSpotlight ? { ...lastContextSpotlight, primaryAction: undefined } : null;
+    },
+    setMobileDeckState(state) {
+      return setMobileDeckState(state);
     },
     initiateHyperdrive,
     returnToOrbit,

@@ -471,6 +471,115 @@
       gap: 8px;
     }
 
+    /* Context-First Entity Spotlight Card (adapts dynamically to Alien, Tree, Planet, Star, Galaxy, Asteroid, Quantum!) */
+    .uv-spotlight-card {
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 9px;
+      border-radius: 10px;
+      border: 1px solid rgba(56, 189, 248, 0.42);
+      background: linear-gradient(155deg, rgba(10, 24, 46, 0.88), rgba(6, 14, 28, 0.92));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+    .uv-spotlight-card.active { display: flex; }
+    .uv-spotlight-card.ctx-alien,
+    .uv-spotlight-card.ctx-flora,
+    .uv-spotlight-card.ctx-fungi {
+      border-color: rgba(52, 211, 153, 0.62);
+      background: linear-gradient(155deg, rgba(6, 36, 32, 0.90), rgba(5, 16, 26, 0.94));
+    }
+    .uv-spotlight-card.ctx-star,
+    .uv-spotlight-card.ctx-exotic {
+      border-color: rgba(251, 191, 36, 0.56);
+      background: linear-gradient(155deg, rgba(36, 24, 8, 0.84), rgba(10, 14, 28, 0.92));
+    }
+    .uv-spotlight-card.ctx-galaxy {
+      border-color: rgba(167, 139, 250, 0.58);
+      background: linear-gradient(155deg, rgba(24, 16, 48, 0.86), rgba(8, 12, 26, 0.92));
+    }
+    .uv-spotlight-card.ctx-asteroid {
+      border-color: rgba(251, 146, 60, 0.56);
+      background: linear-gradient(155deg, rgba(34, 20, 10, 0.84), rgba(10, 14, 26, 0.92));
+    }
+    .uv-spotlight-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .uv-spotlight-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #a7f3d0;
+    }
+    .uv-spotlight-swatch {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border-radius: 3px;
+      border: 1px solid rgba(255, 255, 255, 0.55);
+      flex-shrink: 0;
+    }
+    .uv-spotlight-headline {
+      font-size: 13px;
+      font-weight: 800;
+      color: #ffffff;
+      line-height: 1.25;
+    }
+    .uv-spotlight-sub {
+      font-size: 10.5px;
+      color: #cbd5e1;
+      line-height: 1.35;
+    }
+    .uv-spotlight-facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .uv-spotlight-chip {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 5px;
+      border: 1px solid rgba(112, 168, 255, 0.28);
+      background: rgba(12, 24, 46, 0.82);
+      color: #e0f2fe;
+    }
+    .uv-spotlight-chip.bio { border-color: rgba(52, 211, 153, 0.62); background: rgba(6, 78, 59, 0.55); color: #a7f3d0; }
+    .uv-spotlight-chip.gold { border-color: rgba(251, 191, 36, 0.48); background: rgba(66, 32, 6, 0.45); color: #fde68a; }
+    .uv-spotlight-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 2px;
+    }
+    .uv-spotlight-actions .uv-btn,
+    .uv-spotlight-actions a.uv-btn {
+      flex: 1 1 auto;
+      justify-content: center;
+      text-decoration: none;
+      min-height: 30px;
+      font-size: 10.5px;
+      padding: 5px 8px;
+    }
+    .uv-spotlight-actions .uv-btn.bio-cta {
+      border-color: rgba(52, 211, 153, 0.72);
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.36), rgba(6, 182, 212, 0.28));
+      color: #ecfdf5;
+    }
+
+    /* Mobile-only topbar tools button & bottom peek context strip (hidden cleanly on desktop > 920px!) */
+    .uv-mobile-only { display: none; }
+    .uv-deck-peek-bar { display: none; }
+
     /* Orbital Remote-Sensing Biosignature & Mineral Spectroscopy Card */
     .uv-remote-box {
       display: none;
@@ -1100,18 +1209,233 @@
     }
 
     @media (max-width: 920px) {
-      :root { --deck-w: min(330px, calc(100vw - 20px)); }
-      .uv-topbar { right: 10px; }
+      :root { --deck-w: calc(100vw - 16px); }
+      .uv-mobile-only { display: inline-flex; }
+      .uv-topbar {
+        top: max(6px, env(safe-area-inset-top, 6px));
+        left: 8px;
+        right: 8px;
+        gap: 4px;
+      }
+      body.deck-collapsed .uv-topbar { right: 8px; }
+      .uv-top-row {
+        flex-wrap: nowrap;
+        gap: 5px;
+        align-items: center;
+      }
+      .uv-brand-pill {
+        padding: 4px 8px;
+        gap: 5px;
+        min-height: 32px;
+        flex-shrink: 1;
+        min-width: 0;
+      }
+      .uv-brand-title,
+      .uv-brand-pill .uv-m-hide { display: none; }
+      .uv-status-metrics { font-size: 10px; gap: 4px; }
+      .uv-mode-switch { padding: 2px; gap: 2px; flex-shrink: 0; }
+      .uv-mode-btn { padding: 4px 8px; font-size: 10.5px; min-height: 28px; }
+      #uv-mobile-tools-btn {
+        margin-left: auto;
+        min-width: 34px;
+        min-height: 32px;
+        padding: 4px 9px;
+        justify-content: center;
+        font-size: 14px;
+        line-height: 1;
+        flex-shrink: 0;
+      }
+      #uv-mobile-tools-btn.active {
+        border-color: var(--accent);
+        background: rgba(14, 116, 144, 0.55);
+        color: #ffffff;
+      }
+
+      /* Secondary desktop topbar controls fold into a crisp tap-to-open mobile popover! */
+      .uv-topbar:not(.mobile-tools-open) .uv-quick-utils,
+      .uv-topbar:not(.mobile-tools-open) #uv-gamepad-badge,
+      .uv-topbar:not(.mobile-tools-open) .uv-epoch-zoom-row {
+        display: none;
+      }
+      .uv-topbar.mobile-tools-open {
+        background: rgba(6, 12, 24, 0.94);
+        border: 1px solid var(--border-hi);
+        border-radius: 12px;
+        padding: 6px;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.78);
+      }
+      .uv-topbar.mobile-tools-open .uv-top-row { flex-wrap: wrap; }
+      .uv-topbar.mobile-tools-open .uv-quick-utils {
+        display: flex;
+        width: 100%;
+        gap: 5px;
+        margin-top: 2px;
+      }
+      .uv-topbar.mobile-tools-open .uv-quick-utils .uv-btn {
+        flex: 1 1 auto;
+        justify-content: center;
+        min-height: 32px;
+      }
+      .uv-topbar.mobile-tools-open .uv-epoch-zoom-row {
+        display: flex;
+        width: 100%;
+        gap: 5px;
+      }
+      .uv-topbar.mobile-tools-open .uv-zoom-bar {
+        width: 100%;
+        flex: 1 1 100%;
+        min-width: 0;
+      }
+
+      .uv-scale-rail {
+        width: 100%;
+        padding: 2px 4px;
+        gap: 3px;
+        -webkit-overflow-scrolling: touch;
+      }
+      .uv-rung-btn {
+        padding: 4px 8px;
+        min-height: 28px;
+        justify-content: center;
+        font-size: 10px;
+      }
+      .uv-rung-exp { display: none; }
+
+      /* Mobile 3-State Context Bottom Sheet: collapsed (~82px dock) | mobile-peek (~36dvh spotlight) | expanded (~62dvh full) */
       #uv-command-deck {
         top: auto;
-        bottom: 10px;
-        height: 46vh;
-        width: calc(100vw - 20px);
+        left: 8px;
+        right: 8px;
+        bottom: max(6px, env(safe-area-inset-bottom, 6px));
+        width: calc(100vw - 16px);
+        max-width: calc(100vw - 16px);
+        height: min(62dvh, 490px);
+        border-radius: 14px;
+        transition: height 180ms ease;
       }
-      #uv-command-deck.collapsed { height: 42px; width: calc(100vw - 20px); }
-      #uv-command-deck.collapsed .uv-deck-tabs { flex-direction: row; height: auto; }
+      #uv-command-deck.mobile-peek {
+        height: min(38dvh, 315px);
+      }
+      #uv-command-deck.collapsed {
+        height: auto;
+        width: calc(100vw - 16px);
+      }
+      .uv-deck-peek-bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 8px;
+        border-bottom: 1px solid rgba(112, 168, 255, 0.16);
+        background: rgba(5, 11, 24, 0.86);
+        flex-shrink: 0;
+        min-height: 36px;
+      }
+      .uv-peek-handle {
+        width: 24px;
+        height: 4px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.45);
+        flex-shrink: 0;
+      }
+      .uv-peek-title {
+        flex: 1;
+        min-width: 0;
+        font-size: 11.5px;
+        font-weight: 700;
+        color: #f1f5f9;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        cursor: pointer;
+      }
+      .uv-peek-action {
+        flex-shrink: 0;
+        min-height: 28px;
+        padding: 3px 9px;
+        font-size: 10.5px;
+      }
+      #uv-command-deck.collapsed .uv-deck-tabs {
+        flex-direction: row;
+        height: auto;
+        padding: 4px 5px;
+        border-bottom: none;
+        overflow-x: auto;
+        justify-content: space-between;
+      }
+      #uv-command-deck.collapsed .uv-deck-tab .uv-tab-lbl { display: inline; font-size: 9px; }
+      #uv-command-deck .uv-deck-tab {
+        min-height: 30px;
+        padding: 4px 7px;
+      }
+      #uv-command-deck.mobile-peek .uv-inspector-head,
+      #uv-command-deck.mobile-peek .uv-spec-wrap,
+      #uv-command-deck.mobile-peek .uv-plot-box,
+      #uv-command-deck.mobile-peek .uv-provenance-foot {
+        display: none;
+      }
       .uv-bottom-left { display: none; }
-      #uv-surface-hud { right: 10px; }
+
+      /* Mobile Surface HUD floats cleanly above collapsed bottom dock & hides keyboard hints */
+      #uv-surface-hud {
+        left: 8px;
+        right: 8px;
+        bottom: calc(86px + env(safe-area-inset-bottom, 0px));
+        padding: 6px 8px;
+        gap: 4px;
+      }
+      body:not(.deck-collapsed) #uv-surface-hud {
+        display: none !important;
+      }
+      .uv-surf-keys { display: none; }
+      #uv-surf-chem-bar { display: none !important; }
+      #uv-surf-weapon-bar {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        width: 100%;
+        justify-content: flex-start;
+        -webkit-overflow-scrolling: touch;
+      }
+      .uv-surf-pills {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        width: 100%;
+        justify-content: flex-start;
+        -webkit-overflow-scrolling: touch;
+      }
+      .uv-surf-pill {
+        flex-shrink: 0;
+        min-height: 34px;
+        padding: 5px 10px;
+      }
+      .uv-touch-pads {
+        right: 0;
+        bottom: calc(205px + env(safe-area-inset-bottom, 0px));
+        padding: 0 12px;
+      }
+      .uv-joy-pad { width: 92px; height: 92px; }
+      .uv-joy-knob { width: 38px; height: 38px; }
+    }
+
+    @media (max-width: 920px) and (max-height: 460px) {
+      /* Mobile Landscape (e.g. 844x390): dock Command Deck neatly on the right side instead of bottom! */
+      #uv-command-deck {
+        top: 76px;
+        left: auto;
+        right: 8px;
+        bottom: 8px;
+        width: min(320px, 46vw);
+        height: auto;
+      }
+      #uv-command-deck.mobile-peek { height: auto; width: min(290px, 42vw); }
+      #uv-command-deck.collapsed {
+        top: auto;
+        width: auto;
+        max-width: 52vw;
+      }
+      #uv-surface-hud {
+        bottom: 8px;
+        right: min(336px, 48vw);
+      }
     }
   </style>
 </head>
@@ -1120,25 +1444,27 @@
   <canvas id="uv-reticle-canvas"></canvas>
 
   <!-- Top-Left Slim Telemetry, Scale Ladder & Global Orbit ↔ 6-DOF UFO Switch -->
-  <header class="uv-topbar">
+  <header id="uv-topbar" class="uv-topbar">
     <div class="uv-top-row">
       <div class="uv-brand-pill uv-glass">
         <span class="uv-dot" id="uv-status-dot"></span>
         <span class="uv-brand-title">ULG Universes</span>
         <span class="uv-status-metrics">
           <span id="uv-scale-badge" title="Current physical length scale span">10⁺²⁵ m</span>
-          <span>·</span>
-          <span id="uv-clock-badge" title="Automatic scale-adaptive physical clock rate">150 Myr/s</span>
-          <span>·</span>
-          <span id="uv-fps-badge" title="Live WebGPU render cadence">WebGPU</span>
+          <span class="uv-m-hide">·</span>
+          <span id="uv-clock-badge" class="uv-m-hide" title="Automatic scale-adaptive physical clock rate">150 Myr/s</span>
+          <span class="uv-m-hide">·</span>
+          <span id="uv-fps-badge" class="uv-m-hide" title="Live WebGPU render cadence">WebGPU</span>
         </span>
       </div>
 
       <!-- Global Orbit Controls vs 6-DOF Quaternion UFO Flight Toggle (Works Everywhere!) -->
       <div class="uv-mode-switch uv-glass" role="group" aria-label="Global Camera & Flight Regime">
         <button id="uv-mode-orbit-btn" class="uv-mode-btn orbit-mode active" type="button" title="Classic Orbit Controls: drag to orbit target, scroll to zoom continuously across 40 orders of magnitude (Toggle: Tab)">🪐 Orbit</button>
-        <button id="uv-mode-ufo-btn" class="uv-mode-btn" type="button" title="6-DOF Quaternion UFO Free-Flight: full X/Y/Z 3D rotation, interstellar/planetary/intergalactic cruise, zoom waaaay out (0.55×–45×), + Xbox Gamepad (Toggle: Tab)">🛸 UFO 6-DOF</button>
+        <button id="uv-mode-ufo-btn" class="uv-mode-btn" type="button" title="6-DOF Quaternion UFO Free-Flight: full X/Y/Z 3D rotation, interstellar/planetary/intergalactic cruise, zoom waaaay out (0.55×–45×), + Xbox Gamepad (Toggle: Tab)">🛸 UFO</button>
       </div>
+
+      <button id="uv-mobile-tools-btn" class="uv-btn uv-mobile-only" type="button" aria-expanded="false" aria-label="More Tools: Cockpit, XR, Share, Tour, Cosmic Epoch & Zoom" title="Cockpit, XR, Share, Multiplayer, Autopilot, Cosmic Epoch & Scale Slider">⋯</button>
 
       <span id="uv-gamepad-badge" class="uv-gamepad-pill uv-glass" title="Connect any Xbox / standard gamepad to steer the UFO in full 3D (Sticks: Thrust/Look, LB/RB: Roll Z, D-Pad: Chase & Scale Zoom, RT: Warp)">🎮 No Pad</span>
 
@@ -1166,6 +1492,14 @@
 
   <!-- Unified Perspective-Aware Right-Edge Saucer Bridge & Scientific Command Deck -->
   <aside id="uv-command-deck" class="uv-glass" aria-label="Saucer Bridge Scientific Command Deck">
+    <!-- Mobile Context Peek Strip (1-line active entity summary + 1-tap primary CTA even while collapsed!) -->
+    <div id="uv-deck-peek-bar" class="uv-deck-peek-bar">
+      <span class="uv-peek-handle" aria-hidden="true"></span>
+      <span id="uv-peek-title" class="uv-peek-title">Cosmic Web · Tap any object</span>
+      <button id="uv-peek-action-btn" class="uv-btn primary uv-peek-action" type="button">⚡ Dive</button>
+      <button id="uv-peek-toggle-btn" class="uv-btn subtle icon-only" type="button" aria-label="Expand or collapse context sheet" title="Expand or collapse sheet">▲</button>
+    </div>
+
     <nav class="uv-deck-tabs" aria-label="Command Deck Modules">
       <button id="uv-scan-btn" class="uv-deck-tab active" data-deck-tab="scan" type="button" title="Scanner, Orbital Biosignature & Mineral Spectroscopy, & Live GPU Plot">📡<span class="uv-tab-lbl">Scan</span></button>
       <button id="uv-em-sensor-btn" class="uv-deck-tab" data-deck-tab="em" type="button" title="Full-Spectrum Dual-Caret EM Sensor Stack (Gamma 10⁻¹³ m → Radio 10 m)">🌈<span class="uv-tab-lbl">EM</span></button>
@@ -1193,6 +1527,9 @@
         </div>
 
         <div class="uv-inspector-body">
+          <!-- Context-First Entity Spotlight Card (dynamically leads with the most important facts & 1-tap actions for Alien, Tree, Planet, Star, Galaxy, Asteroid, Quantum!) -->
+          <div id="uv-context-spotlight" class="uv-spotlight-card" aria-label="Context-First Entity Spotlight"></div>
+
           <!-- Orbital Remote Sensing: Biosignatures, Atmospheric Gases, Minerals & Host Starlight Flux -->
           <div id="uv-remote-sensing-box" class="uv-remote-box" aria-label="Orbital Remote Sensing Spectroscopy"></div>
 

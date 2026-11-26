@@ -29,11 +29,11 @@
         font-family: Inter, system-ui, -apple-system, sans-serif;
         overflow: hidden;
       }
-      .shell { display: grid; grid-template-columns: 336px 1fr; grid-template-rows: 44px 1fr; height: 100vh; }
+      .shell { display: grid; grid-template-columns: 336px 1fr; grid-template-rows: 44px 1fr; height: 100dvh; width: 100vw; max-width: 100vw; overflow: hidden; }
       header {
         grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
         padding: 0 12px; background: #080d19; border-bottom: 1px solid var(--border); gap: 8px;
-        position: relative; z-index: 45;
+        position: relative; z-index: 45; min-width: 0; max-width: 100vw; overflow: hidden;
       }
       .header-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }
       header h1 { font-size: 12.5px; font-weight: 800; margin: 0; letter-spacing: 0.045em; color: var(--accent); white-space: nowrap; flex-shrink: 0; }
@@ -138,7 +138,7 @@
       .specimen-picker-card {
         background: linear-gradient(155deg, rgba(24, 34, 58, 0.92), rgba(14, 20, 36, 0.94));
         border: 1px solid rgba(86, 194, 255, 0.34);
-        border-radius: 9px; padding: 8px 9px; display: flex; flex-direction: column; gap: 6px;
+        border-radius: 9px; padding: 8px 9px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
       }
       .specimen-top-row { display: flex; align-items: center; gap: 8px; }
       .element-tile-mini {
@@ -163,17 +163,17 @@
       #open-pt-btn:hover { background: linear-gradient(90deg, rgba(86,194,255,0.34), rgba(124,77,255,0.36)); }
 
       /* Accordion Groups */
-      .acc-list { display: flex; flex-direction: column; gap: 5px; }
+      .acc-list { display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; }
       .acc-group {
         background: var(--card); border: 1px solid var(--border);
-        border-radius: 8px; overflow: hidden; transition: border-color 0.14s;
+        border-radius: 8px; overflow: hidden; flex-shrink: 0; transition: border-color 0.14s;
       }
       .acc-group.active-group { border-color: rgba(86, 194, 255, 0.62); }
       .acc-header {
         width: 100%; background: transparent; border: none; color: var(--text);
-        padding: 8px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+        padding: 8px 10px; min-height: 32px; font-size: 11.5px; font-weight: 700; cursor: pointer;
         display: flex; align-items: center; justify-content: space-between; gap: 6px;
-        text-align: left; letter-spacing: 0.02em;
+        text-align: left; letter-spacing: 0.02em; flex-shrink: 0;
       }
       .acc-header:hover { background: rgba(86, 194, 255, 0.08); }
       .acc-group.active-group > .acc-header { background: rgba(86, 194, 255, 0.14); color: #fff; }
@@ -212,7 +212,7 @@
 
       .card {
         background: var(--card); border: 1px solid var(--border);
-        border-radius: 8px; padding: 9px 10px; font-size: 11.5px;
+        border-radius: 8px; padding: 9px 10px; font-size: 11.5px; flex-shrink: 0;
       }
       .card h3 { margin: 0 0 6px; font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.055em; display: flex; justify-content: space-between; align-items: center; }
       .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.045); font-size: 11px; }
@@ -568,6 +568,8 @@
       @media (max-width: 767px) {
         .hdr-btn .hdr-lbl { display: none; }
         .hdr-btn { padding: 5px 8px; }
+        #gpu-hud { right: 136px; max-width: calc(100% - 144px); padding: 4px 7px; }
+        #gpu-hud-sub { display: none; }
         input[type="text"], input[type="number"], input[type="search"], select { font-size: 16px; min-height: 36px; }
         .acc-sim-controls .ctrl-group select { font-size: 13px; min-height: 30px; }
         .pt-modal { padding: 6px; }

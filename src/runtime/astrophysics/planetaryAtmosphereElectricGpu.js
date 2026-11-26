@@ -459,7 +459,7 @@ fn atmo_step_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let three_cell_w = smoothstep(0.18, 0.55, rot_scale);
   let u_target_zonal = mix(
     0.25 * raw_cos,
-    0.58 * sin(2.0 * lat) * sin(2.0 * lat) - 0.34 * pow(raw_cos, 3.0),
+    0.58 * sin(2.0 * lat) * sin(2.0 * lat) - 0.34 * (raw_cos * raw_cos * raw_cos),
     three_cell_w
   );
   let p_grad_u = -dh_dx + (u_target_zonal - adv.flow.x) * 0.22;
@@ -486,9 +486,12 @@ fn atmo_step_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
   //   - Moist updrafts in ITCZ (lat ~ 0) and baroclinic mid-latitude cyclone tracks (|lat| ~ 48 deg)
   //   - Clear subsiding subtropical high-pressure belts (|lat| ~ 26 deg) letting oceans & continents shine cleanly!
   let abs_lat = abs(lat);
-  let itcz_band = exp(-pow(abs_lat / 0.17, 2.0));
-  let storm_track = exp(-pow((abs_lat - 0.84) / 0.24, 2.0));
-  let subtrop_dry = exp(-pow((abs_lat - 0.45) / 0.19, 2.0)) * three_cell_w;
+  let itcz_x = abs_lat / 0.17;
+  let storm_x = (abs_lat - 0.84) / 0.24;
+  let subtrop_x = (abs_lat - 0.45) / 0.19;
+  let itcz_band = exp(-(itcz_x * itcz_x));
+  let storm_track = exp(-(storm_x * storm_x));
+  let subtrop_dry = exp(-(subtrop_x * subtrop_x)) * three_cell_w;
   let updraft = max(0.0, -div_v - 0.08) + max(0.0, abs(vort) - 0.45) * 0.28 + (0.28 * itcz_band + 0.22 * storm_track) * three_cell_w;
   let subsidence = max(0.0, div_v + 0.04) + 0.42 * subtrop_dry;
   let wind_spd = length(vec2<f32>(u_new, v_new));

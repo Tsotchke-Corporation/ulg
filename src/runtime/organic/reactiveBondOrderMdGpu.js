@@ -528,7 +528,8 @@ fn reduce_organic_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
       let ab = atoms[ib];
       let dist = length(aa.pos_m.xyz - ab.pos_m.xyz);
       let is_hb = (aa.vel_q.w > 0.14 && ab.vel_q.w < -0.20 && dist > 1.35 && dist < 2.75);
-      bonds[b].dyn.x = select(0.0, 0.75 * exp(-pow(dist - 1.90, 2.0) * 1.4), is_hb);
+      let hb_d = dist - 1.90;
+      bonds[b].dyn.x = select(0.0, 0.75 * exp(-(hb_d * hb_d) * 1.4), is_hb);
     } else if (bd.dyn.z > 0.5) {
       let pa = atoms[u32(round(bd.ab_ord.x))].pos_m.xyz;
       let pb = atoms[u32(round(bd.ab_ord.y))].pos_m.xyz;

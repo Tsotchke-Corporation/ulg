@@ -615,8 +615,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   let ray_dir = (exit_world - entry_world) / raw_chord;
   let clamped_exit = entry_world + ray_dir * path_m;
   let ndotv = clamp(dot(normal, view_dir), 0.0, 1.0);
-  let f0 = pow((opt.ior - 1.0) / (opt.ior + 1.0), 2.0);
-  let fresnel = clamp(f0 + (1.0 - f0) * pow(1.0 - ndotv, 5.0), 0.0, 1.0);
+  let f0_r = (opt.ior - 1.0) / (opt.ior + 1.0);
+  let f0 = f0_r * f0_r;
+  let fresnel = clamp(f0 + (1.0 - f0) * pow(max(0.0, 1.0 - ndotv), 5.0), 0.0, 1.0);
 
   let sigma_abs = -log(opt.attenuation_linear) / opt.attenuation_distance_m;
   var volume_radiance = vec3<f32>(0.0);

@@ -35,7 +35,9 @@ test('Planetary Surface View (Jump-Rocket Rover + Atmospheric Drone) live Vulkan
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist'
+      '--ignore-gpu-blocklist',
+      '--disable-dev-shm-usage',
+      '--renderer-process-limit=2'
     ]
   });
 

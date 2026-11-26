@@ -178,10 +178,13 @@ struct GalBody {
 fn ism_cooling_rate(temp_k: f32, z_met: f32) -> f32 {
   let t = max(10.0, temp_k);
   let lt = log2(t) * 0.3010299956639812;
-  let fine_struct = z_met * 2.5e-4 * exp(-params.t_fine_struct_k / t) * exp(-pow((lt - 2.6) / 0.9, 2.0));
-  let h_ly = 7.5 * exp(-params.t_h_lya_k / t) / (1.0 + pow(t / 2.2e4, 2.2));
-  let he_peak = 1.8 * exp(-pow((lt - params.log_t_he_peak) / 0.28, 2.0));
-  let met = z_met * 6.0 * exp(-pow((lt - params.log_t_met_peak) / 0.48, 2.0));
+  let fs_x = (lt - 2.6) / 0.9;
+  let he_x = (lt - params.log_t_he_peak) / 0.28;
+  let met_x = (lt - params.log_t_met_peak) / 0.48;
+  let fine_struct = z_met * 2.5e-4 * exp(-params.t_fine_struct_k / t) * exp(-(fs_x * fs_x));
+  let h_ly = 7.5 * exp(-params.t_h_lya_k / t) / (1.0 + pow(max(0.0, t / 2.2e4), 2.2));
+  let he_peak = 1.8 * exp(-(he_x * he_x));
+  let met = z_met * 6.0 * exp(-(met_x * met_x));
   let brem = 1.42e-5 * sqrt(t) * (1.2 + 0.1 * z_met);
   return fine_struct + h_ly + he_peak + met + brem;
 }

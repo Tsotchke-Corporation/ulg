@@ -37,7 +37,9 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist'
+      '--ignore-gpu-blocklist',
+      '--disable-dev-shm-usage',
+      '--renderer-process-limit=2'
     ]
   });
 

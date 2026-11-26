@@ -230,7 +230,8 @@ fn fetch_voxel(i: vec3<u32>) -> vec4<f32> {
   let s = scalar_data[idx];
   // Contrast-stretched periodic Bloch charge peaks + sharp Fermi isosurface shell (never over-exposed!)
   let mod_s = pow(clamp((s - 0.12) / 0.88, 0.0, 1.0), 2.4);
-  let iso = select(0.0, exp(-pow((s - 0.52) * 18.0, 2.0)), (u.mode_flags & 1u) != 0u);
+  let iso_d = (s - 0.52) * 18.0;
+  let iso = select(0.0, exp(-(iso_d * iso_d)), (u.mode_flags & 1u) != 0u);
   let col = mix(u.tint.rgb * (0.25 + 0.90 * mod_s), vec3<f32>(1.0, 0.84, 0.35), iso * 0.85);
   return vec4<f32>(col, clamp(mod_s * 0.24 + iso * 0.38, 0.0, 0.65));
 }
@@ -297,7 +298,7 @@ fn fs_raymarch(in: VsOut) -> @location(0) vec4<f32> {
   // Subtle bounding-box edge highlight at enter/exit planes
   let p_in = abs(ro + rd * t_enter);
   let edge_d = max(min(abs(1.0 - p_in.x), abs(1.0 - p_in.y)), min(abs(1.0 - p_in.y), abs(1.0 - p_in.z)));
-  let box_wire = smoothstep(0.022, 0.0, edge_d) * 0.16;
+  let box_wire = (1.0 - smoothstep(0.0, 0.022, edge_d)) * 0.16;
 
   let final_rgb = accum_rgb + (1.0 - accum_a) * bg + vec3<f32>(0.34, 0.76, 1.0) * box_wire;
   return vec4<f32>(clamp(final_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
@@ -449,7 +450,7 @@ fn fs_atom(in: VsOut) -> FsOut {
   let diff = max(0.16, dot(n, key_l)) + 0.18 * max(0.0, dot(n, fill_l));
   let half_v = normalize(key_l + vec3<f32>(0.0, 0.0, 1.0));
   let spec = pow(max(0.0, dot(n, half_v)), 34.0) * 0.68;
-  let rim = pow(1.0 - nz, 2.4) * (0.26 + in.glow * 0.65);
+  let rim = pow(max(0.0, 1.0 - nz), 2.4) * (0.26 + in.glow * 0.65);
   let ao = 0.84 + 0.16 * nz;
   let fog = clamp(1.0 - max(0.0, in.view_z - 3.6) * 0.10, 0.58, 1.0);
   let lit = (in.color * diff * ao + vec3<f32>(1.0) * spec + mix(vec3<f32>(0.38, 0.78, 1.0), in.color, 0.45) * rim + in.color * in.glow * 0.35) * fog;
@@ -593,8 +594,8 @@ fn fs_poly(in: VsOut) -> @location(0) vec4<f32> {
     // Density contour lines in log10(rho) + crisp slanted coexistence facet edge highlight
     let log_rho = log2(rho) * 0.3010299956639812;
     let iso_shade = 0.58 + 0.32 * clamp((log_rho + 2.0) / 6.5, 0.0, 1.0);
-    let contour = smoothstep(0.06, 0.0, abs(fract(log_rho * 1.5) - 0.5)) * 0.22;
-    let facet_edge = smoothstep(0.018, 0.0, margin) * 0.65;
+    let contour = (1.0 - smoothstep(0.0, 0.06, abs(fract(log_rho * 1.5) - 0.5))) * 0.22;
+    let facet_edge = (1.0 - smoothstep(0.0, 0.018, margin)) * 0.65;
     col = base_col * iso_shade + vec3<f32>(contour) + vec3<f32>(0.95, 0.98, 1.0) * facet_edge;
   }
 
@@ -603,10 +604,10 @@ fn fs_poly(in: VsOut) -> @location(0) vec4<f32> {
     let dx = abs(fx - u.probe_fx);
     let dy = abs(fy - u.probe_fy);
     let d_pt = sqrt(dx * dx + dy * dy);
-    let line_x = smoothstep(0.0038, 0.0, dx) * 0.34;
-    let line_y = smoothstep(0.0042, 0.0, dy) * 0.34;
-    let ring = smoothstep(0.006, 0.0, abs(d_pt - 0.022)) * 0.95;
-    let dot_c = smoothstep(0.007, 0.0, d_pt) * 0.95;
+    let line_x = (1.0 - smoothstep(0.0, 0.0038, dx)) * 0.34;
+    let line_y = (1.0 - smoothstep(0.0, 0.0042, dy)) * 0.34;
+    let ring = (1.0 - smoothstep(0.0, 0.006, abs(d_pt - 0.022))) * 0.95;
+    let dot_c = (1.0 - smoothstep(0.0, 0.007, d_pt)) * 0.95;
     col = mix(col, vec3<f32>(1.0, 0.95, 0.62), clamp(line_x + line_y + ring + dot_c, 0.0, 1.0));
   }
   return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
@@ -881,8 +882,8 @@ fn fs_wave_plane(in: WavePlaneOut) -> @location(0) vec4<f32> {
 
   let in_slab = gx >= u.grid_meta.z && gx <= u.grid_meta.w && gy >= 12.0 && gy <= ny - 13.0;
   // Crisp micro-cavity spatial ruler grid (every 8 cells = 160 nm) so wavelength compression is obvious!
-  let grid_x = smoothstep(0.06, 0.0, abs(fract(gx / 8.0) - 0.5));
-  let grid_y = smoothstep(0.06, 0.0, abs(fract(gy / 8.0) - 0.5));
+  let grid_x = 1.0 - smoothstep(0.0, 0.06, abs(fract(gx / 8.0) - 0.5));
+  let grid_y = 1.0 - smoothstep(0.0, 0.06, abs(fract(gy / 8.0) - 0.5));
   let grid_line = max(grid_x, grid_y) * 0.055;
 
   var bg = vec3<f32>(0.012, 0.019, 0.036) + vec3<f32>(0.24, 0.38, 0.58) * grid_line;
@@ -890,8 +891,10 @@ fn fs_wave_plane(in: WavePlaneOut) -> @location(0) vec4<f32> {
     bg = bg + u.slab_tint.rgb * select(0.08, 0.13, u.wave_meta.y > 0.5);
   }
   // Sharp Fresnel optical interface highlight at x = slab_x0 and x = slab_x1
-  let face0 = exp(-pow((gx - u.grid_meta.z) * 1.1, 2.0)) * select(0.0, 0.55, gy >= 12.0 && gy <= ny - 13.0);
-  let face1 = exp(-pow((gx - u.grid_meta.w) * 1.1, 2.0)) * select(0.0, 0.32, gy >= 12.0 && gy <= ny - 13.0);
+  let f0_d = (gx - u.grid_meta.z) * 1.1;
+  let f1_d = (gx - u.grid_meta.w) * 1.1;
+  let face0 = exp(-(f0_d * f0_d)) * select(0.0, 0.55, gy >= 12.0 && gy <= ny - 13.0);
+  let face1 = exp(-(f1_d * f1_d)) * select(0.0, 0.32, gy >= 12.0 && gy <= ny - 13.0);
   bg = bg + (u.slab_tint.rgb * 0.65 + vec3<f32>(0.35)) * (face0 + face1);
 
   let gain = u.probe_rgb.w;
@@ -1292,11 +1295,11 @@ fn fs_tdks_field(in: TdksVolOut) -> @location(0) vec4<f32> {
       let a_pol = abs(pol_signed);
       let crest_sheet = smoothstep(0.24, 0.62, max(0.0, pol_signed));
       let trough_sheet = smoothstep(0.24, 0.62, max(0.0, -pol_signed));
-      let crest_sharp = pow(crest_sheet, 2.0);
-      let trough_sharp = pow(trough_sheet, 2.0);
+      let crest_sharp = crest_sheet * crest_sheet;
+      let trough_sharp = trough_sheet * trough_sheet;
       // Slight outer-beam rim highlight so the 3D cylindrical wavepacket reads cleanly from any angle
       let beam_r = length(p.yz);
-      let rim_w = 0.65 + 0.55 * smoothstep(0.18, 0.72, beam_r) * smoothstep(1.35, 0.78, beam_r);
+      let rim_w = 0.65 + 0.55 * smoothstep(0.18, 0.72, beam_r) * (1.0 - smoothstep(0.78, 1.35, beam_r));
       step_rgb = step_rgb + (inc_tint_pos * crest_sharp * 1.15 + inc_tint_neg * trough_sharp * 0.72) * rim_w;
       step_d = step_d + (crest_sharp * 0.068 + trough_sharp * 0.044) * rim_w * clamp(a_pol, 0.0, 1.5);
     }
@@ -1356,10 +1359,10 @@ fn fs_tdks_field(in: TdksVolOut) -> @location(0) vec4<f32> {
         let etz = sample_grid_trilin_e_tot(pz);
         let eiz = sample_grid_trilin_e_inc(pz);
         let esz = etz.xyz - eiz.xyz;
-        let fade_z = smoothstep(1.72, 1.18, rz);
+        let fade_z = 1.0 - smoothstep(1.18, 1.72, rz);
         let ph_val = etz.y + etz.z;
-        let line_c = smoothstep(0.09, 0.0, abs(fract(ph_val * 2.2) - 0.5)) * smoothstep(0.05, 0.25, length(etz.xyz));
-        let ring = smoothstep(0.012, 0.0, abs(rz - 1.05)) * 0.14;
+        let line_c = (1.0 - smoothstep(0.0, 0.09, abs(fract(ph_val * 2.2) - 0.5))) * smoothstep(0.05, 0.25, length(etz.xyz));
+        let ring = (1.0 - smoothstep(0.0, 0.012, abs(rz - 1.05))) * 0.14;
         let cut_col = mix(vec3<f32>(0.28, 0.74, 1.0), scatt_tint, clamp(length(esz) * 2.4, 0.0, 1.0));
         acc_rgb = acc_rgb + (cut_col * (line_c * 0.28 + length(esz) * 0.42) + vec3<f32>(0.35, 0.55, 0.85) * ring) * fade_z;
         acc_a = clamp(acc_a + (line_c * 0.16 + ring) * fade_z, 0.0, 0.94);
@@ -1820,7 +1823,7 @@ fn fs_mol_atom(in: MolAtomOut) -> @location(0) vec4<f32> {
   let diff = max(0.16, dot(n, light1)) * 0.86 + max(0.0, dot(n, light2)) * 0.24;
   let half_v = normalize(light1 + vec3<f32>(0.0, 0.0, 1.0));
   let spec = pow(max(0.0, dot(n, half_v)), 34.0) * 0.78;
-  let rim = pow(1.0 - nz, 2.6) * 0.32;
+  let rim = pow(max(0.0, 1.0 - nz), 2.6) * 0.32;
   let rgb = in.color * diff + vec3<f32>(1.0) * spec + in.rim_tint * rim;
   return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
@@ -2002,7 +2005,7 @@ fn fs_rx_mol(in: RxOut) -> @location(0) vec4<f32> {
   let diff = max(0.18, dot(n, light));
   let half_v = normalize(light + vec3<f32>(0.0, 0.0, 1.0));
   let spec = pow(max(0.0, dot(n, half_v)), 26.0) * 0.72;
-  let rim = pow(1.0 - nz, 2.4) * 0.32;
+  let rim = pow(max(0.0, 1.0 - nz), 2.4) * 0.32;
   let base_rgb = in.color * diff + vec3<f32>(1.0) * spec + in.color * rim;
   let burst_rgb = vec3<f32>(1.0, 0.94, 0.62) * (0.95 + 0.45 * nz);
   let rgb = mix(base_rgb, burst_rgb, in.flash * 0.82);
@@ -2219,16 +2222,16 @@ fn fs_poly3d_mesh(in: Poly3DOut) -> @location(0) vec4<f32> {
   else if (pcode >= 3u) { base_col = vec3<f32>(0.76, 0.48, 1.00); }
 
   let lrho = log2(rho) * 0.3010299956639812;
-  let contour = smoothstep(0.055, 0.0, abs(fract(lrho * 1.5) - 0.5)) * 0.11;
+  let contour = (1.0 - smoothstep(0.0, 0.055, abs(fract(lrho * 1.5) - 0.5))) * 0.11;
   let er_edge = lookup_polytope_rel_err(T, P, in.uv_tp.x, in.uv_tp.y).y;
-  let facet_glow = select(0.0, smoothstep(0.008, 0.0, er_edge) * 0.48, u.md_beacon.w > 0.5);
+  let facet_glow = select(0.0, (1.0 - smoothstep(0.0, 0.008, er_edge)) * 0.48, u.md_beacon.w > 0.5);
   let cliff = smoothstep(0.50, 0.96, 1.0 - abs(n.y)) * 0.14;
 
   var col = base_col * diff + vec3<f32>(spec * 0.7 + contour) + vec3<f32>(0.96, 0.92, 0.72) * facet_glow + base_col * cliff;
   if (u.probe_state.z > 0.5) {
     let d_pr = length(in.uv_tp - u.probe_state.xy);
-    let ring = smoothstep(0.012, 0.0, abs(d_pr - 0.028)) * 0.95;
-    let dot_p = smoothstep(0.014, 0.0, d_pr) * 0.95;
+    let ring = (1.0 - smoothstep(0.0, 0.012, abs(d_pr - 0.028))) * 0.95;
+    let dot_p = (1.0 - smoothstep(0.0, 0.014, d_pr)) * 0.95;
     col = mix(col, vec3<f32>(1.0, 0.94, 0.45), clamp(ring + dot_p, 0.0, 1.0));
   }
   return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
@@ -2358,12 +2361,12 @@ fn fs_poly_residual(in: ResOut) -> @location(0) vec4<f32> {
     if (t < 0.35) { col = mix(c0, c1, t / 0.35); }
     else if (t < 0.72) { col = mix(c1, c2, (t - 0.35) / 0.37); }
     else { col = mix(c2, c3, (t - 0.72) / 0.28); }
-    let edge = smoothstep(0.0055, 0.0, er.y) * 0.68;
+    let edge = (1.0 - smoothstep(0.0, 0.0055, er.y)) * 0.68;
     col = mix(col, vec3<f32>(0.96, 0.98, 1.0), edge);
   }
   if (u.probe_state.z > 0.5) {
     let d_pt = length(vec2<f32>(fx - u.probe_state.x, fy - u.probe_state.y));
-    let ring = smoothstep(0.006, 0.0, abs(d_pt - 0.022)) * 0.95;
+    let ring = (1.0 - smoothstep(0.0, 0.006, abs(d_pt - 0.022))) * 0.95;
     col = mix(col, vec3<f32>(1.0, 0.95, 0.55), ring);
   }
   return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

@@ -2540,7 +2540,7 @@ export function createUlgUniversesPhysics(device, {
     planetaryAtmoSession?.setEnableTriboelectric?.(planetaryTriboelectric);
   }
 
-  async function enterSurfaceView({ bodyIndex = planetaryBodyIndex, planetaryModeOverride = null } = {}) {
+  async function enterSurfaceView({ bodyIndex = planetaryBodyIndex, planetaryModeOverride = null, restoreCheckpoint = null } = {}) {
     let idx = bodyIndex;
     let cat = getActiveSystemCatalog();
     if (typeof idx === 'string') {
@@ -2581,6 +2581,7 @@ export function createUlgUniversesPhysics(device, {
       cellSizeM: 2.35,
       particleCount: quality.id === 'low' ? 1024 : 2048,
       seed: (universeSeed ^ (idx * 7919 + 0x504face)) >>> 0,
+      initialCheckpoint: restoreCheckpoint,
       label: `ulg-universes-surface-${spec.id}`
     });
     // Reset controls cleanly on landing
@@ -2629,6 +2630,9 @@ export function createUlgUniversesPhysics(device, {
   }
   function addSurfaceLookDelta(dYaw, dPitch) {
     surfaceSession?.addLookDelta?.(dYaw, dPitch);
+  }
+  function adjustSurfaceChaseDistance(factor) {
+    return surfaceSession?.adjustChaseDistance?.(factor) ?? 1.0;
   }
   function getActiveUniversalLaws(activeLevel, log10SpanM) {
     const viewSpanM = Math.pow(10, log10SpanM);
@@ -3281,6 +3285,7 @@ export function createUlgUniversesPhysics(device, {
     setSurfaceCameraMode,
     setSurfaceControls,
     addSurfaceLookDelta,
+    adjustSurfaceChaseDistance,
     setStellarTimeAccel,
     setSolarMode,
     setKerrSpinA,

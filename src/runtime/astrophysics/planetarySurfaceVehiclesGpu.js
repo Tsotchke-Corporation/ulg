@@ -1227,6 +1227,51 @@ function pushOrientedBox(out, center, basisX, basisY, basisZ, halfX, halfY, half
   }
 }
 
+function pushFrustumCylinder(out, center, axisDir, radA, radB, radiusBot, radiusTop, halfLen, sides, rgb, emissive = 0.0, phaseRad = 0.0, capEnds = true) {
+  const emitVert = (p, n) => {
+    out.push(p[0], p[1], p[2], p[1], n[0], n[1], n[2], 4.0, rgb[0], rgb[1], rgb[2], emissive);
+  };
+  const ptAt = (axOff, r, ang) => {
+    const ca = Math.cos(ang);
+    const sa = Math.sin(ang);
+    return [
+      center[0] + axisDir[0] * axOff + (radA[0] * ca + radB[0] * sa) * r,
+      center[1] + axisDir[1] * axOff + (radA[1] * ca + radB[1] * sa) * r,
+      center[2] + axisDir[2] * axOff + (radA[2] * ca + radB[2] * sa) * r
+    ];
+  };
+  const cBot = [center[0] - axisDir[0] * halfLen, center[1] - axisDir[1] * halfLen, center[2] - axisDir[2] * halfLen];
+  const cTop = [center[0] + axisDir[0] * halfLen, center[1] + axisDir[1] * halfLen, center[2] + axisDir[2] * halfLen];
+  const nBot = [-axisDir[0], -axisDir[1], -axisDir[2]];
+  const slope = (radiusBot - radiusTop) / Math.max(1e-4, 2.0 * halfLen);
+  for (let s = 0; s < sides; s += 1) {
+    const a0 = phaseRad + (s / sides) * Math.PI * 2;
+    const a1 = phaseRad + ((s + 1) / sides) * Math.PI * 2;
+    const am = 0.5 * (a0 + a1);
+    const cm = Math.cos(am);
+    const sm = Math.sin(am);
+    const nSide = normalize3([
+      radA[0] * cm + radB[0] * sm + axisDir[0] * slope,
+      radA[1] * cm + radB[1] * sm + axisDir[1] * slope,
+      radA[2] * cm + radB[2] * sm + axisDir[2] * slope
+    ]);
+    const b0 = ptAt(-halfLen, radiusBot, a0);
+    const b1 = ptAt(-halfLen, radiusBot, a1);
+    const t0 = ptAt(halfLen, radiusTop, a0);
+    const t1 = ptAt(halfLen, radiusTop, a1);
+    emitVert(b0, nSide); emitVert(b1, nSide); emitVert(t1, nSide);
+    emitVert(b0, nSide); emitVert(t1, nSide); emitVert(t0, nSide);
+    if (capEnds) {
+      if (radiusTop > 1e-4) {
+        emitVert(cTop, axisDir); emitVert(t0, axisDir); emitVert(t1, axisDir);
+      }
+      if (radiusBot > 1e-4) {
+        emitVert(cBot, nBot); emitVert(b1, nBot); emitVert(b0, nBot);
+      }
+    }
+  }
+}
+
 function normalize3(v) {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
   return [v[0] / l, v[1] / l, v[2] / l];
@@ -1257,46 +1302,56 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo =
       base[2] + right[2] * rx + up[2] * ry + fwd[2] * rz
     ];
 
-    // Main gold-MLI thermal insulated chassis + white top avionics deck
+    // Main gold-MLI thermal insulated chassis + white top avionics deck + warm-white LED headlights!
     pushOrientedBox(out, pt(0, 0.78, 0), right, up, fwd, 0.88, 0.34, 1.28, [0.90, 0.86, 0.78], 0.0);
     pushOrientedBox(out, pt(0, 1.15, -0.05), right, up, fwd, 0.94, 0.08, 1.32, [0.94, 0.96, 0.98], 0.0);
-    // Gold-foil thermal belly pan & solar side panels
+    // Forward dual LED navigation headlights & gold bumper bar
+    pushOrientedBox(out, pt(0, 0.72, 1.30), right, up, fwd, 0.82, 0.07, 0.05, [0.34, 0.38, 0.44], 0.0);
+    pushOrientedBox(out, pt(-0.56, 0.84, 1.31), right, up, fwd, 0.14, 0.07, 0.03, [1.0, 0.95, 0.82], 1.15);
+    pushOrientedBox(out, pt(0.56, 0.84, 1.31), right, up, fwd, 0.14, 0.07, 0.03, [1.0, 0.95, 0.82], 1.15);
+    // Gold-foil thermal belly pan & trimmed solar side wing arrays
     pushOrientedBox(out, pt(0, 0.50, 0), right, up, fwd, 0.78, 0.14, 1.18, [0.88, 0.68, 0.24], 0.0);
-    pushOrientedBox(out, pt(-1.12, 1.12, -0.15), right, up, fwd, 0.36, 0.04, 0.95, [0.14, 0.26, 0.56], 0.04);
-    pushOrientedBox(out, pt(1.12, 1.12, -0.15), right, up, fwd, 0.36, 0.04, 0.95, [0.14, 0.26, 0.56], 0.04);
-    // Rear finned MMRTG plutonium power pack (warm amber glow!)
-    pushOrientedBox(out, pt(0, 0.96, -1.48), right, up, fwd, 0.34, 0.36, 0.38, [0.36, 0.38, 0.42], 0.0);
-    pushOrientedBox(out, pt(0, 1.02, -1.78), right, up, fwd, 0.22, 0.24, 0.12, [0.95, 0.44, 0.14], 0.35);
-    // Forward Mastcam-Z head & stereo laser optics (cyan-white glowing sensors!)
-    pushOrientedBox(out, pt(0.28, 1.62, 0.86), right, up, fwd, 0.09, 0.46, 0.09, [0.85, 0.88, 0.92], 0.0);
-    pushOrientedBox(out, pt(0.28, 2.08, 0.92), right, up, fwd, 0.30, 0.16, 0.22, [0.92, 0.94, 0.96], 0.0);
-    pushOrientedBox(out, pt(0.28, 2.08, 1.14), right, up, fwd, 0.14, 0.08, 0.04, [0.22, 0.88, 1.0], 0.85);
-    // Drone helipad docking deck on top-rear
+    pushOrientedBox(out, pt(-1.14, 1.12, -0.15), right, up, fwd, 0.39, 0.035, 0.98, [0.78, 0.70, 0.38], 0.0);
+    pushOrientedBox(out, pt(1.14, 1.12, -0.15), right, up, fwd, 0.39, 0.035, 0.98, [0.78, 0.70, 0.38], 0.0);
+    pushOrientedBox(out, pt(-1.14, 1.145, -0.15), right, up, fwd, 0.34, 0.025, 0.92, [0.12, 0.28, 0.62], 0.08);
+    pushOrientedBox(out, pt(1.14, 1.145, -0.15), right, up, fwd, 0.34, 0.025, 0.92, [0.12, 0.28, 0.62], 0.08);
+    // Rear cylindrical finned MMRTG plutonium power pack (warm amber glow!)
+    pushFrustumCylinder(out, pt(0, 0.96, -1.52), fwd, right, up, 0.34, 0.30, 0.34, 8, [0.36, 0.38, 0.42], 0.0, 0.0, true);
+    pushFrustumCylinder(out, pt(0, 1.00, -1.86), fwd, right, up, 0.22, 0.18, 0.08, 8, [0.95, 0.44, 0.14], 0.42, 0.0, true);
+    // Forward Mastcam-Z cylindrical neck + stereo head + twin glowing optical lenses + laser-spectrometer eye!
+    pushFrustumCylinder(out, pt(0.28, 1.62, 0.86), up, right, fwd, 0.08, 0.07, 0.46, 8, [0.85, 0.88, 0.92], 0.0, 0.0, true);
+    pushOrientedBox(out, pt(0.28, 2.08, 0.92), right, up, fwd, 0.32, 0.16, 0.22, [0.92, 0.94, 0.96], 0.0);
+    pushFrustumCylinder(out, pt(0.16, 2.08, 1.14), fwd, right, up, 0.07, 0.06, 0.04, 8, [0.22, 0.88, 1.0], 0.95, 0.0, true);
+    pushFrustumCylinder(out, pt(0.40, 2.08, 1.14), fwd, right, up, 0.07, 0.06, 0.04, 8, [0.22, 0.88, 1.0], 0.95, 0.0, true);
+    // Drone helipad docking deck on top-rear + high-gain dish antenna
     pushOrientedBox(out, pt(0, 1.24, -0.35), right, up, fwd, 0.52, 0.03, 0.52, [0.22, 0.26, 0.32], 0.0);
+    pushFrustumCylinder(out, pt(-0.56, 1.56, -0.82), up, right, fwd, 0.04, 0.30, 0.10, 10, [0.92, 0.94, 0.96], 0.0, 0.0, true);
 
-    // 4 Corner Jump-Rocket Thruster Bells (glow bright cyan-orange when firing!)
+    // 4 Corner Tapered Conical Jump-Rocket Thruster Bells (glow bright cyan-orange when firing!)
     const rGlow = rover.rocketThrottle > 0.05 ? 1.85 : 0.0;
     const rCol = rover.rocketThrottle > 0.05 ? [1.0, 0.72, 0.24] : [0.30, 0.34, 0.40];
     for (const sx of [-0.94, 0.94]) {
       for (const sz of [-1.05, 1.05]) {
-        pushOrientedBox(out, pt(sx, 0.44, sz), right, up, fwd, 0.15, 0.24, 0.15, rCol, rGlow);
+        pushFrustumCylinder(out, pt(sx, 0.42, sz), up, right, fwd, 0.18, 0.09, 0.22, 8, rCol, rGlow, 0.0, true);
       }
     }
 
-    // 6 Rocker-Bogie Wheels + Suspension Struts (spinning with rover.wheelAngle!)
+    // 6 High-LOD 10-Sided Cylindrical Titanium Rocker-Bogie Wheels + Hubs + Tread Cleats (rolling live with rover.wheelAngle!)
     const wCos = Math.cos(rover.wheelAngle);
     const wSin = Math.sin(rover.wheelAngle);
     const wUp = [up[0] * wCos + fwd[0] * wSin, up[1] * wCos + fwd[1] * wSin, up[2] * wCos + fwd[2] * wSin];
     const wFwd = [fwd[0] * wCos - up[0] * wSin, fwd[1] * wCos - up[1] * wSin, fwd[2] * wCos - up[2] * wSin];
     for (const sx of [-1.22, 1.22]) {
       // Rocker-bogie titanium linkage bar
-      pushOrientedBox(out, pt(sx * 0.90, 0.56, 0.0), right, up, fwd, 0.06, 0.07, 1.32, [0.76, 0.78, 0.82], 0.0);
+      pushOrientedBox(out, pt(sx * 0.90, 0.58, 0.0), right, up, fwd, 0.06, 0.07, 1.32, [0.76, 0.78, 0.82], 0.0);
       for (const sz of [-1.22, 0.0, 1.22]) {
-        // Vertical suspension strut
-        pushOrientedBox(out, pt(sx * 0.94, 0.36, sz), right, up, fwd, 0.05, 0.24, 0.05, [0.68, 0.70, 0.74], 0.0);
-        // Spinning wheel hub + treaded metallic-dark rim
-        pushOrientedBox(out, pt(sx, 0.34, sz), right, wUp, wFwd, 0.22, 0.34, 0.34, [0.22, 0.24, 0.28], 0.0);
-        pushOrientedBox(out, pt(sx * 1.03, 0.34, sz), right, wUp, wFwd, 0.23, 0.14, 0.14, [0.84, 0.66, 0.28], 0.0);
+        // Vertical suspension strut + axle knuckle
+        pushFrustumCylinder(out, pt(sx * 0.94, 0.40, sz), up, right, fwd, 0.055, 0.055, 0.22, 6, [0.70, 0.73, 0.78], 0.0, 0.0, false);
+        // 10-sided cylindrical titanium tire rotating around `right` axis!
+        pushFrustumCylinder(out, pt(sx, 0.34, sz), right, wUp, wFwd, 0.34, 0.34, 0.21, 10, [0.22, 0.24, 0.28], 0.0, 0.0, true);
+        // Gold-anodized wheel hubcap + rotating spoke cross-cleat so rolling spin is unmistakably visible!
+        pushFrustumCylinder(out, pt(sx * 1.03, 0.34, sz), right, wUp, wFwd, 0.16, 0.16, 0.22, 8, [0.86, 0.68, 0.28], 0.04, 0.0, true);
+        pushOrientedBox(out, pt(sx * 1.04, 0.34, sz), right, wUp, wFwd, 0.225, 0.35, 0.045, [0.42, 0.45, 0.50], 0.0);
       }
     }
   }
@@ -1318,16 +1373,17 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo =
       dBase[2] + dRight[2] * rx + dUp[2] * ry + dFwd[2] * rz
     ];
 
-    // Gold-foil avionics cube + LED beacon + 4 splayed carbon legs
-    pushOrientedBox(out, dp(0, 0.34, 0), dRight, dUp, dFwd, 0.24, 0.20, 0.24, [0.92, 0.72, 0.24], 0.06);
-    pushOrientedBox(out, dp(0, 0.34, 0.25), dRight, dUp, dFwd, 0.09, 0.07, 0.04, [0.22, 0.96, 0.72], 1.15);
-    pushOrientedBox(out, dp(0, 0.72, 0), dRight, dUp, dFwd, 0.05, 0.26, 0.05, [0.80, 0.84, 0.88], 0.0);
+    // Gold-foil octagonal avionics fuselage + glowing optical telemetry eye + carbon rotor mast
+    pushFrustumCylinder(out, dp(0, 0.34, 0), dUp, dRight, dFwd, 0.27, 0.24, 0.19, 8, [0.92, 0.72, 0.24], 0.06, 0.0, true);
+    pushFrustumCylinder(out, dp(0, 0.34, 0.25), dFwd, dRight, dUp, 0.07, 0.06, 0.04, 8, [0.22, 0.96, 0.72], 1.15, 0.0, true);
+    pushFrustumCylinder(out, dp(0, 0.72, 0), dUp, dRight, dFwd, 0.045, 0.045, 0.26, 6, [0.82, 0.86, 0.90], 0.0, 0.0, false);
     // Top photovoltaic solar cap
-    pushOrientedBox(out, dp(0, 1.02, 0), dRight, dUp, dFwd, 0.36, 0.03, 0.18, [0.16, 0.30, 0.68], 0.12);
-    // 4 landing skids
+    pushOrientedBox(out, dp(0, 1.02, 0), dRight, dUp, dFwd, 0.38, 0.03, 0.20, [0.16, 0.30, 0.68], 0.12);
+    // 4 landing struts & foot pads
     for (const sx of [-0.34, 0.34]) {
       for (const sz of [-0.34, 0.34]) {
-        pushOrientedBox(out, dp(sx, 0.12, sz), dRight, dUp, dFwd, 0.04, 0.16, 0.04, [0.28, 0.30, 0.34], 0.0);
+        pushOrientedBox(out, dp(sx, 0.12, sz), dRight, dUp, dFwd, 0.035, 0.16, 0.035, [0.28, 0.30, 0.34], 0.0);
+        pushOrientedBox(out, dp(sx, 0.02, sz), dRight, dUp, dFwd, 0.07, 0.02, 0.07, [0.56, 0.60, 0.66], 0.0);
       }
     }
     // Counter-rotating coaxial carbon rotor blades (upper + lower, spinning live at rotorAngle!)
@@ -1336,12 +1392,12 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo =
       const ca = Math.cos(a); const sa = Math.sin(a);
       const bR = [dRight[0] * ca + dFwd[0] * sa, dRight[1] * ca + dFwd[1] * sa, dRight[2] * ca + dFwd[2] * sa];
       const bF = [dFwd[0] * ca - dRight[0] * sa, dFwd[1] * ca - dRight[1] * sa, dFwd[2] * ca - dRight[2] * sa];
-      pushOrientedBox(out, dp(0, 0.84 + rIdx * 0.11, 0), bR, dUp, bF, 1.05, 0.015, 0.08, [0.24, 0.28, 0.34], 0.0);
-      pushOrientedBox(out, dp(0, 0.84 + rIdx * 0.11, 0), bF, dUp, bR, 1.05, 0.015, 0.08, [0.24, 0.28, 0.34], 0.0);
+      pushOrientedBox(out, dp(0, 0.84 + rIdx * 0.11, 0), bR, dUp, bF, 1.08, 0.015, 0.085, [0.24, 0.28, 0.34], 0.0);
+      pushOrientedBox(out, dp(0, 0.84 + rIdx * 0.11, 0), bF, dUp, bR, 1.08, 0.015, 0.085, [0.24, 0.28, 0.34], 0.0);
     }
   }
 
-  // --- 3. BUOYANT DISC-SHAPED ATMOSPHERIC RESEARCH UFO / AEROSTAT PROBE ---
+  // --- 3. SLEEK 16-SEGMENT CONTINUOUS-BEVEL BUOYANT DISC ATMOSPHERIC RESEARCH UFO ---
   if (ufo && ufo.visible) {
     const uBase = applyCurv(ufo.pos);
     const cy = Math.cos(ufo.yaw); const sy = Math.sin(ufo.yaw);
@@ -1358,49 +1414,38 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo =
       uBase[2] + uRight[2] * rx + uUp[2] * ry + uFwd[2] * rz
     ];
 
-    // 12-segmented sleek metallic flying-saucer hull (upper tapered deck, beveled dark rim, ventral dish)
-    const segs = 12;
     const rimGlowCol = ufo.vertThrust > 0.15
       ? [0.24, 0.96, 1.0]     // Ascending: electric cyan buoyancy glow
       : (ufo.vertThrust < -0.15
         ? [1.0, 0.56, 0.22]   // Diving deeper: warm amber-plasma glow
         : [0.32, 0.84, 0.98]);
-    const rimGlow = 1.15 + Math.abs(ufo.vertThrust) * 0.95;
+    const rimGlow = 1.2 + Math.abs(ufo.vertThrust) * 0.95;
 
-    for (let s = 0; s < segs; s += 1) {
-      const ang = (s / segs) * Math.PI * 2 + ufo.rimAngle * 0.35;
+    // Smooth continuous 16-sided sculpted metallic saucer frustum tiers (zero blocky bricks!)
+    const segs = 16;
+    const phase = ufo.rimAngle * 0.25;
+    // Lower beveled ventral dish -> dark outer trim flange -> brushed-titanium upper aerodynamic deck -> upper cowling
+    pushFrustumCylinder(out, upPt(0, -0.18, 0), uUp, uRight, uFwd, 0.98, 2.15, 0.14, segs, [0.46, 0.52, 0.60], 0.03, phase, true);
+    pushFrustumCylinder(out, upPt(0, 0.02, 0), uUp, uRight, uFwd, 2.38, 2.38, 0.08, segs, [0.20, 0.24, 0.32], 0.04, phase, false);
+    pushFrustumCylinder(out, upPt(0, 0.20, 0), uUp, uRight, uFwd, 2.34, 1.48, 0.12, segs, [0.86, 0.90, 0.96], 0.05, phase, true);
+    pushFrustumCylinder(out, upPt(0, 0.38, 0), uUp, uRight, uFwd, 1.46, 1.12, 0.08, segs, [0.74, 0.80, 0.88], 0.05, phase, true);
+
+    // 12 Glowing rotating ion/plasma rim thruster pods evenly spaced along the equatorial flange
+    for (let s = 0; s < 12; s += 1) {
+      const ang = (s / 12) * Math.PI * 2 + ufo.rimAngle * 0.45;
       const ca = Math.cos(ang); const sa = Math.sin(ang);
       const radDir = [uRight[0] * ca + uFwd[0] * sa, uRight[1] * ca + uFwd[1] * sa, uRight[2] * ca + uFwd[2] * sa];
       const tanDir = [uFwd[0] * ca - uRight[0] * sa, uFwd[1] * ca - uRight[1] * sa, uFwd[2] * ca - uRight[2] * sa];
-
-      // Main brushed-titanium saucer wedge
-      const cMain = upPt(ca * 1.15, 0.10, sa * 1.15);
-      pushOrientedBox(out, cMain, radDir, uUp, tanDir, 1.12, 0.16, 0.62, [0.84, 0.88, 0.94], 0.04);
-      // Tapered upper fairing
-      const cTop = upPt(ca * 0.85, 0.32, sa * 0.85);
-      pushOrientedBox(out, cTop, radDir, uUp, tanDir, 0.72, 0.14, 0.48, [0.74, 0.79, 0.86], 0.04);
-      // Dark outer aerodynamic bumper rim
-      const cRim = upPt(ca * 2.28, 0.04, sa * 2.28);
-      pushOrientedBox(out, cRim, radDir, uUp, tanDir, 0.18, 0.09, 0.62, [0.22, 0.26, 0.34], 0.02);
-      // Glowing plasma/ion rim-thruster node
-      const cNode = upPt(ca * 2.38, 0.05, sa * 2.38);
-      pushOrientedBox(out, cNode, radDir, uUp, tanDir, 0.10, 0.06, 0.22, rimGlowCol, rimGlow);
+      pushOrientedBox(out, upPt(ca * 2.42, 0.02, sa * 2.42), radDir, uUp, tanDir, 0.09, 0.055, 0.22, rimGlowCol, rimGlow);
     }
 
-    // Panoramic glowing cyan observation cockpit dome on top (two stepped octagons)
-    for (let k = 0; k < 4; k += 1) {
-      const a = (k / 4) * Math.PI + ufo.rimAngle * 0.1;
-      const ca = Math.cos(a); const sa = Math.sin(a);
-      const dR = [uRight[0] * ca + uFwd[0] * sa, uRight[1] * ca + uFwd[1] * sa, uRight[2] * ca + uFwd[2] * sa];
-      const dF = [uFwd[0] * ca - uRight[0] * sa, uFwd[1] * ca - uRight[1] * sa, uFwd[2] * ca - uRight[2] * sa];
-      pushOrientedBox(out, upPt(0, 0.58, 0), dR, uUp, dF, 0.92, 0.20, 0.92, [0.36, 0.82, 1.0], 0.45);
-      pushOrientedBox(out, upPt(0, 0.80, 0), dR, uUp, dF, 0.54, 0.12, 0.54, [0.58, 0.92, 1.0], 0.62);
-    }
+    // Smooth 16-sided panoramic cyan glass cockpit dome (3 tapered dome rings)
+    pushFrustumCylinder(out, upPt(0, 0.56, 0), uUp, uRight, uFwd, 1.06, 0.84, 0.13, segs, [0.34, 0.82, 1.0], 0.48, phase, false);
+    pushFrustumCylinder(out, upPt(0, 0.78, 0), uUp, uRight, uFwd, 0.84, 0.44, 0.10, segs, [0.54, 0.92, 1.0], 0.64, phase, true);
 
     // Ventral glowing buoyancy/grav-field core ring + downward atmospheric chemistry laser-spectrometer nozzle!
-    pushOrientedBox(out, upPt(0, -0.14, 0), uRight, uUp, uFwd, 1.05, 0.10, 1.05, [0.30, 0.36, 0.44], 0.02);
-    pushOrientedBox(out, upPt(0, -0.26, 0), uRight, uUp, uFwd, 0.58, 0.07, 0.58, rimGlowCol, 1.55);
-    pushOrientedBox(out, upPt(0, -0.44, 0), uRight, uUp, uFwd, 0.12, 0.18, 0.12, [0.96, 0.82, 0.30], 0.95);
+    pushFrustumCylinder(out, upPt(0, -0.34, 0), uUp, uRight, uFwd, 0.64, 0.82, 0.06, 12, rimGlowCol, 1.55, phase, true);
+    pushFrustumCylinder(out, upPt(0, -0.50, 0), uUp, uRight, uFwd, 0.09, 0.16, 0.14, 8, [0.96, 0.82, 0.30], 0.95, 0.0, true);
   }
 
   return new Float32Array(out);
@@ -1415,6 +1460,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   cellSizeM = 2.2,
   particleCount = 2048,
   seed = 20261125,
+  initialCheckpoint = null,
   label = 'ulg-planetary-surface'
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
@@ -1477,8 +1523,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telReadBuf = device.createBuffer({ label: `${label}-tel-rd`, size: 16, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
 
-  // Vehicle dynamic solid mesh buffer (up to 8,192 vertices = 393 KB — fits Rover + Drone + 12-faceted Disc UFO!)
-  const MAX_VEHICLE_VERTS = 8192;
+  // Vehicle dynamic solid mesh buffer (up to 16,384 vertices = 786 KB — fits high-LOD Rover + Drone + 16-seg UFO!)
+  const MAX_VEHICLE_VERTS = 16384;
   const vehicleVertBuf = device.createBuffer({ label: `${label}-veh-verts`, size: MAX_VEHICLE_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
 
   device.queue.writeBuffer(terrainIdxBuf, 0, indices);
@@ -1558,6 +1604,53 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   let cameraMode = 'chase'; // 'chase' | 'first-person'
   let lookYawOffset = -0.34; // Hero 3/4 rear-quarter angle showing all 6 rocker-bogie wheels, drone deck, & rocket plumes!
   let lookPitch = 0.18;
+  let chaseDistScale = 1.0;
+
+  // Restore saved surface exploration pose cleanly when returning from sampled L5/L6/L7 views!
+  if (initialCheckpoint && typeof initialCheckpoint === 'object') {
+    if (Array.isArray(initialCheckpoint.roverPos) && initialCheckpoint.roverPos.length === 3 && env.hasSolidCrust) {
+      const rx = Number(initialCheckpoint.roverPos[0]) || 0;
+      const rz = Number(initialCheckpoint.roverPos[2]) || 0;
+      const ryaw = Number(initialCheckpoint.roverYaw) || rover.yaw;
+      const sup = resolveRoverMultiWheelSupport(rx, rz, ryaw, cellSizeM, env);
+      rover.pos = [rx, Math.max(sup.supportY, Number(initialCheckpoint.roverPos[1]) || sup.supportY), rz];
+      rover.yaw = ryaw;
+      rover.up = sup.normal;
+      rover.onGround = initialCheckpoint.roverOnGround !== false;
+    }
+    if (Array.isArray(initialCheckpoint.dronePos) && initialCheckpoint.dronePos.length === 3) {
+      drone.pos = [...initialCheckpoint.dronePos];
+      drone.docked = Boolean(initialCheckpoint.droneDocked);
+      if (Number.isFinite(Number(initialCheckpoint.droneYaw))) drone.yaw = Number(initialCheckpoint.droneYaw);
+    }
+    if (Array.isArray(initialCheckpoint.ufoPos) && initialCheckpoint.ufoPos.length === 3) {
+      ufo.pos = [...initialCheckpoint.ufoPos];
+      if (Number.isFinite(Number(initialCheckpoint.ufoYaw))) ufo.yaw = Number(initialCheckpoint.ufoYaw);
+      if (Number.isFinite(Number(initialCheckpoint.ufoAltitudeKm)) && cfdSession) {
+        const prof = cfdSession.profile;
+        ufo.altitudeKm = Math.max(prof.minAltKm, Math.min(prof.maxAltKm, Number(initialCheckpoint.ufoAltitudeKm)));
+      }
+    }
+    if (initialCheckpoint.activeVehicle === 'ufo' && cfdSession) {
+      activeVehicle = 'ufo';
+      ufo.visible = true;
+      if (!env.hasSolidCrust) drone.visible = false;
+    } else if (initialCheckpoint.activeVehicle === 'drone') {
+      activeVehicle = 'drone';
+      drone.visible = true;
+      ufo.visible = false;
+    } else if (initialCheckpoint.activeVehicle === 'rover' && env.hasSolidCrust) {
+      activeVehicle = 'rover';
+      ufo.visible = false;
+      drone.visible = true;
+    }
+    if (initialCheckpoint.cameraMode === 'first-person' || initialCheckpoint.cameraMode === 'chase') {
+      cameraMode = initialCheckpoint.cameraMode;
+    }
+    if (Number.isFinite(Number(initialCheckpoint.lookYawOffset))) lookYawOffset = Number(initialCheckpoint.lookYawOffset);
+    if (Number.isFinite(Number(initialCheckpoint.lookPitch))) lookPitch = Math.max(-0.85, Math.min(1.15, Number(initialCheckpoint.lookPitch)));
+    if (Number.isFinite(Number(initialCheckpoint.chaseDistScale))) chaseDistScale = Math.max(0.55, Math.min(2.4, Number(initialCheckpoint.chaseDistScale)));
+  }
   let vehicleVertCount = 0;
   let stepIndex = 0;
   let simTimeS = 0;
@@ -1659,6 +1752,33 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   function addLookDelta(dYaw, dPitch) {
     lookYawOffset += Number(dYaw) || 0;
     lookPitch = Math.max(-0.85, Math.min(1.15, lookPitch + (Number(dPitch) || 0)));
+  }
+
+  function adjustChaseDistance(factor = 1.0) {
+    const f = Number(factor);
+    if (Number.isFinite(f) && f > 0.1) {
+      chaseDistScale = Math.max(0.55, Math.min(2.4, chaseDistScale * f));
+    }
+    return chaseDistScale;
+  }
+
+  function getCheckpoint() {
+    return Object.freeze({
+      activeVehicle,
+      cameraMode,
+      roverPos: [...rover.pos],
+      roverYaw: rover.yaw,
+      roverOnGround: rover.onGround,
+      dronePos: [...drone.pos],
+      droneDocked: drone.docked,
+      droneYaw: drone.yaw,
+      ufoPos: [...ufo.pos],
+      ufoYaw: ufo.yaw,
+      ufoAltitudeKm: ufo.altitudeKm,
+      lookYawOffset,
+      lookPitch,
+      chaseDistScale
+    });
   }
 
   function integrateVehicles(dt, controls = {}) {
@@ -2001,7 +2121,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       return { eye, target, up: [0, 1, 0], focusPos: vehPos };
     }
     // Dynamic 3rd-person chase camera showing articulated Rover / Drone / Buoyant UFO + 3D clouds!
-    const dist = isUfo ? 11.8 : (isDrone ? 8.5 : 10.5);
+    const baseDist = isUfo ? 11.8 : (isDrone ? 8.5 : 10.5);
+    const dist = baseDist * chaseDistScale;
     const eyeX = vehPos[0] - sy * cp * dist;
     const eyeZ = vehPos[2] - cy * cp * dist;
     let eyeY = vehPos[1] + (isUfo ? 2.4 : 2.6) + sp * dist;
@@ -2206,6 +2327,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     getActiveSkyEnv,
     getLocalSample,
     getCameraPose,
+    getCheckpoint,
+    adjustChaseDistance,
     setActiveVehicle,
     setUfoAltitudeKm,
     setCameraMode,

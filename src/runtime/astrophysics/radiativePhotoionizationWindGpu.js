@@ -267,8 +267,8 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
   //   - Intermediate ionized shell -> crimson-rose H-alpha 656.3 nm
   //   - Outer ionization front / dense shielded molecular skin -> amber-gold [S II] 672 nm
   let o3 = select(
-    x_hii * smoothstep(5.4, 0.9, r) * (0.95 + 0.55 * params.uv_flux),
-    x_hii * smoothstep(4.2, 1.2, r) * 1.45,
+    x_hii * (1.0 - smoothstep(0.9, 5.4, r)) * (0.95 + 0.55 * params.uv_flux),
+    x_hii * (1.0 - smoothstep(1.2, 4.2, r)) * 1.45,
     reg == 1u || reg == 2u
   );
   let ha = x_hii * smoothstep(0.6, 4.8, r) * (0.72 + 0.45 * params.uv_flux);

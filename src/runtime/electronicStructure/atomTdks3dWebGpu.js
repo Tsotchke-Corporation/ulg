@@ -279,7 +279,7 @@ fn eval_psi_at(p: vec3<f32>) -> vec3<f32> {
     az = select(sin(mf * phi), cos(mf * phi), cb.m_signed > 0);
   }
 
-  let env = smoothstep(1.05, 0.86, r_norm);
+  let env = 1.0 - smoothstep(0.86, 1.05, r_norm);
   let psi0 = r_s.y * p_s.y * az * env;
   let psi1 = r_s.z * p_s.z * az * env;
   return vec3<f32>(psi0, psi1, r_norm);

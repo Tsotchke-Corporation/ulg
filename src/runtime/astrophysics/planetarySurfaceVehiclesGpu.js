@@ -1688,7 +1688,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
 
   let activeVehicle = startAsRover ? 'rover' : 'ufo';
   let cameraMode = 'chase'; // 'chase' | 'first-person' (3D Emerald Glass Cockpit!)
-  let lookYawOffset = -0.32;
+  let lookYawOffset = startAsRover ? -0.32 : 0.0;
   let lookPitch = 0.22;
   let chaseDistScale = 1.0;
 
@@ -1842,6 +1842,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       activeVehicle = 'ufo';
       ufo.visible = true;
       tractorAutoTimerS = 0;
+      ufo.yaw += lookYawOffset;
+      lookYawOffset = 0;
       if (env.hasSolidCrust) {
         const refP = rover.deployed ? rover.pos : ufo.pos;
         const gh = deformMpm.evaluateGroundHeight(refP[0], refP[2]);
@@ -1973,7 +1975,14 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   }
 
   function addLookDelta(dYaw, dPitch) {
-    lookYawOffset += Number(dYaw) || 0;
+    const dy = Number(dYaw) || 0;
+    if (activeVehicle === 'ufo') {
+      // Keep the 60-ft Explorer UFO continuously rotated with the pilot's view direction!
+      ufo.yaw += dy;
+      lookYawOffset = 0;
+    } else {
+      lookYawOffset += dy;
+    }
     lookPitch = Math.max(-0.85, Math.min(1.15, lookPitch + (Number(dPitch) || 0)));
   }
 
@@ -2013,7 +2022,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     const turbo = Boolean(controls.turbo || controls.run);
     const yawIn = (controls.yawLeft ? 1 : 0) - (controls.yawRight ? 1 : 0);
 
-    if (Math.abs(yawIn) > 0.01) lookYawOffset += yawIn * 1.8 * dt;
+    if (Math.abs(yawIn) > 0.01 && activeVehicle !== 'ufo') lookYawOffset += yawIn * 1.8 * dt;
 
     // Live wind vector: couple directly to live 3D WebGPU Navier-Stokes CFD velocity at craft when atmosphere is active!
     const cfdWind = lastCfdTelemetry?.craftWindMS;
@@ -2209,11 +2218,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       drone.rotorAngle = (drone.rotorAngle + rpmSpeed * dt) % (Math.PI * 2);
 
       // Desired forward/right flight axes aligned with camera/drone heading
+      // Right-handed Y-up screen right = cross(fwd, up) = (-cos(h), 0, +sin(h)) = (-fz, 0, +fx)!
       const heading = drone.yaw + (isCtrl ? lookYawOffset : 0);
       const fx = Math.sin(heading);
       const fz = Math.cos(heading);
-      const rx = fz;
-      const rz = -fx;
+      const rx = -fz;
+      const rz = fx;
 
       // Tilt drone nose/bank proportionally to horizontal aerodynamic thrust command
       const maxTilt = turbo ? 0.36 : 0.24;
@@ -2272,23 +2282,31 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       const fwdCmd = isCtrl ? Math.max(-1, Math.min(1, fwdIn)) : 0;
       const strafeCmd = isCtrl ? Math.max(-1, Math.min(1, turnIn)) : 0;
       const upCmd = isCtrl ? ((jumpHeld ? 1 : 0) - (downHeld ? 1 : 0)) : 0;
-      if (isCtrl && Math.abs(yawIn) > 0.01) {
-        ufo.yaw += yawIn * 1.6 * dt;
+      if (isCtrl) {
+        if (Math.abs(yawIn) > 0.01) {
+          ufo.yaw += yawIn * 1.8 * dt;
+        }
+        // Keep UFO smoothly aligned with the active view heading (no decoupled orbit drift!)
+        if (Math.abs(lookYawOffset) > 1e-4) {
+          ufo.yaw += lookYawOffset;
+          lookYawOffset = 0;
+        }
       }
       ufo.vertThrust += (upCmd - ufo.vertThrust) * Math.min(1, dt * 8.0);
       ufo.rimAngle = (ufo.rimAngle + (2.4 + Math.abs(ufo.vertThrust) * 4.5 + Math.hypot(fwdCmd, strafeCmd) * 3.0) * dt) % (Math.PI * 2);
 
-      const heading = ufo.yaw + (isCtrl ? lookYawOffset : 0);
+      // Right-handed Y-up screen right = cross(fwd, up) = (-cos(h), 0, +sin(h)) = (-fz, 0, +fx)!
+      const heading = ufo.yaw;
       const fx = Math.sin(heading);
       const fz = Math.cos(heading);
-      const rx = fz;
-      const rz = -fx;
+      const rx = -fz;
+      const rz = fx;
 
       // Live 3D GPU Navier-Stokes CFD velocity sampled directly at the UFO's 3D location (0 in vacuum!)
       const cfdW = (cfdSession && lastCfdTelemetry?.craftWindMS) ? lastCfdTelemetry.craftWindMS : [0, 0, 0];
       const maxBank = turbo ? 0.30 : 0.19;
       ufo.pitch += (fwdCmd * maxBank - ufo.pitch) * Math.min(1, dt * 6.5);
-      ufo.roll += (-strafeCmd * maxBank + Math.max(-0.14, Math.min(0.14, cfdW[0] * 0.006)) - ufo.roll) * Math.min(1, dt * 6.5);
+      ufo.roll += (strafeCmd * maxBank + Math.max(-0.14, Math.min(0.14, -cfdW[0] * 0.006)) - ufo.roll) * Math.min(1, dt * 6.5);
 
       const horizThrust = turbo ? 72.0 : 42.0;
       const vertThrustAccel = turbo ? 42.0 : 24.0;

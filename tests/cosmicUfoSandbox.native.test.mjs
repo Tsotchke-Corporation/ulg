@@ -81,6 +81,31 @@ test('Cosmic UFO Perspective, 60ft Emerald-Dome Saucer, Yellow Tractor Beam, Rim
     assert.equal(marsUfo0.surfaceTelemetry?.mpmDispatches, 0, 'GPU MLS-MPM must execute 0 dispatches while idle!');
     const fIdle = await saveSnap(page, 'ufo-02-mars-60ft-hover-boulders');
 
+    // 2B. Verify UFO Left/Right Strafe Matches Screen Right/Left AND UFO Rotates With View!
+    const ctrlCheck = await page.evaluate(async () => {
+      const stA = window.__ulgUniversesDemo.getState();
+      const yaw0 = stA.surfaceTelemetry.ufoYaw ?? 0;
+      window.__ulgUniversesDemo.addSurfaceLookDelta(-0.45, 0);
+      await window.__ulgUniversesDemo.stepOnce();
+      const stYaw = window.__ulgUniversesDemo.getState();
+      const yaw1 = stYaw.surfaceTelemetry.ufoYaw ?? 0;
+      const p0 = [...stYaw.surfaceTelemetry.ufoPos];
+      // Screen right in Y-up right-handed coords is cross(fwd, up) = (-cos(yaw), 0, sin(yaw))
+      const rx = -Math.cos(yaw1);
+      const rz = Math.sin(yaw1);
+      window.__ulgUniversesDemo.setSurfaceControls({ right: true });
+      for (let i = 0; i < 8; i += 1) await window.__ulgUniversesDemo.stepOnce();
+      window.__ulgUniversesDemo.setSurfaceControls({ right: false });
+      const p1 = window.__ulgUniversesDemo.getState().surfaceTelemetry.ufoPos;
+      const dotRight = (p1[0] - p0[0]) * rx + (p1[2] - p0[2]) * rz;
+      // Restore original orientation for consistent weapon shots
+      window.__ulgUniversesDemo.addSurfaceLookDelta(0.45, 0);
+      await window.__ulgUniversesDemo.stepOnce();
+      return { yawDelta: yaw1 - yaw0, dotRight };
+    });
+    assert.ok(Math.abs(ctrlCheck.yawDelta + 0.45) < 0.05, `UFO yaw must rotate directly with camera view look delta (got ${ctrlCheck.yawDelta})`);
+    assert.ok(ctrlCheck.dotRight > 0.25, `Pressing Right (D) must move UFO strictly screen-right (dot=${ctrlCheck.dotRight})`);
+
     // 3. Activate Yellow Conical Tractor Beam & Beam Down Rover!
     await page.evaluate(async () => {
       window.__ulgUniversesDemo.setTractorBeam(true);

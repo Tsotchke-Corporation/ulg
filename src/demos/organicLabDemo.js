@@ -21,10 +21,55 @@ import {
 import { resolveActiveUniversalLaws } from '../runtime/universalLawGraph.js';
 import { GPU_PICK_LAYOUT, createGpuEntityPickerWebGpu } from '../runtime/gpuMath/gpuEntityPickerWebGpu.js';
 import { createTargetOrbitControls } from '../runtime/shared/targetOrbitControls.js';
+import { requestCompatibleWebGpuDevice } from '../runtime/shared/webgpuCompat.js';
 import { createChemBioWebGpuRenderer } from './chemBioWebGpuRenderer.js';
 import { ORGANIC_LAB_ABOUT_ULG, ORGANIC_MODE_DOCS } from './organicLabDocs.js';
 
 const SPATIAL_MODES = new Set(['frank-chiral', 'belousov-zhabotinsky', 'prebiotic-raf']);
+const REP_MODE_LABELS = ['Ball & Stick', 'CPK vdW', 'Licorice'];
+
+function computeDistanceA(a, b) {
+  return Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+}
+
+function computeAngleDeg(a, b, c) {
+  const u = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const v = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
+  const lu = Math.hypot(u[0], u[1], u[2]) || 1e-6;
+  const lv = Math.hypot(v[0], v[1], v[2]) || 1e-6;
+  const cosT = Math.max(-1, Math.min(1, (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (lu * lv)));
+  return (Math.acos(cosT) * 180) / Math.PI;
+}
+
+function computeDihedralDeg(p0, p1, p2, p3) {
+  const b1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+  const b2 = [p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]];
+  const b3 = [p3[0] - p2[0], p3[1] - p2[1], p3[2] - p2[2]];
+  const cross = (x, y) => [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+  const dot = (x, y) => x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+  const n1 = cross(b1, b2);
+  const n2 = cross(b2, b3);
+  const b2Len = Math.hypot(b2[0], b2[1], b2[2]) || 1e-6;
+  const b2Hat = [b2[0] / b2Len, b2[1] / b2Len, b2[2] / b2Len];
+  const m1 = cross(n1, b2Hat);
+  const x = dot(n1, n2);
+  const y = dot(m1, n2);
+  return (Math.atan2(y, x) * 180) / Math.PI;
+}
+
+function triggerTextDownload(filename, text, mime = 'text/plain;charset=utf-8') {
+  try {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch {}
+}
 
 function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = null, hZero = false, labelX = '', labelY = '' }) {
   if (!canvas) return;
@@ -161,21 +206,15 @@ function drawMoLevelPlot(canvas, piRes, selectedMo) {
 }
 
 export async function mountOrganicLabDemo() {
-  if (!navigator.gpu) throw new Error('WebGPU is not available in this browser.');
-  let adapter = null;
-  for (let i = 0; i < 6 && !adapter; i += 1) {
-    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!adapter) throw new Error('No WebGPU GPUAdapter available.');
-  const device = await adapter.requestDevice();
+  const { device } = await requestCompatibleWebGpuDevice({ label: 'ulg-organic-lab' });
   const gpuErrors = [];
   device.addEventListener?.('uncapturederror', (ev) => {
     gpuErrors.push(String(ev?.error?.message || ev?.error || 'uncaptured-webgpu-error').slice(0, 240));
   });
 
   const canvas = document.getElementById('org-canvas');
+  const overlayCanvas = document.getElementById('org-overlay');
+  const overlayCtx = overlayCanvas?.getContext('2d') || null;
   const renderer = createChemBioWebGpuRenderer(device, canvas, { bgStyle: 0 });
   const gpuPicker = createGpuEntityPickerWebGpu(device);
   const plot1 = document.getElementById('plot1');
@@ -199,6 +238,11 @@ export async function mountOrganicLabDemo() {
   let selectedMoIdx = 0;
   let showPiMo = false;
   let espMode = false;
+  let repMode = 0; // 0=Ball&Stick, 1=CPK vdW, 2=Licorice
+  let measureMode = false;
+  let measureAtoms = []; // [{ index, sym, pos:[x,y,z] }]
+  let labelMode = 'off'; // 'off' | 'sym' | 'qeq'
+  let labelHostSnapshot = null; // Float32Array (N*16) refreshed only when labels active
   let reactProgress = 0.0;
   let bearingTorque = 0.45;
   let autoCycleReaction = true;
@@ -472,8 +516,11 @@ export async function mountOrganicLabDemo() {
     if (mdSession) { mdSession.dispose(); mdSession = null; }
     if (rdSession) { rdSession.dispose(); rdSession = null; }
     pickedEntity = null;
+    measureAtoms = [];
+    labelHostSnapshot = null;
     el('pick-card')?.classList.remove('open');
     if (el('pick-reticle')) el('pick-reticle').style.display = 'none';
+    updateMeasureBanner();
     eeHistory = [];
     purityHistory = [];
 
@@ -546,6 +593,7 @@ export async function mountOrganicLabDemo() {
         piCloudCount,
         showPiMo: showPiMo && piCloudCount > 0,
         espBlend: espMode ? 0.92 : 0.0,
+        style: repMode,
         sphereScale: 1.0,
         piPointSize: 0.17,
         timeSec
@@ -560,6 +608,7 @@ export async function mountOrganicLabDemo() {
         timeSec
       });
     }
+    drawStageOverlay();
   }
 
   async function stepSimulationOnce({ forceRead = false, useSpeed = true } = {}) {
@@ -588,7 +637,9 @@ export async function mountOrganicLabDemo() {
         }
         const effDt = useSpeed ? Math.max(0.0025, Math.min(0.012, 0.012 * Math.min(1.0, spd * 1.45))) : 0.012;
         const effSubsteps = useSpeed ? Math.max(1, Math.round(spd * 2.6)) : 3;
-        await mdSession.step({ dt: effDt, substeps: effSubsteps, readTelemetry: doRead });
+        const needPos = labelMode !== 'off' && doRead;
+        await mdSession.step({ dt: effDt, substeps: effSubsteps, readTelemetry: doRead, readPositions: needPos });
+        if (needPos) labelHostSnapshot = mdSession.getLatestAtomsHost();
         if (doRead && (currentMode === 'sn2-walden' || currentMode === 'diels-alder' || currentGraph?.rotorMeta?.kind === 'molecular-bearing')) {
           refreshAcidBaseAndPlots();
         }
@@ -638,6 +689,11 @@ export async function mountOrganicLabDemo() {
   const handleResize = () => {
     const rect = canvas.parentElement.getBoundingClientRect();
     renderer.resize(rect.width, rect.height);
+    if (overlayCanvas) {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      overlayCanvas.width = Math.max(1, Math.round(rect.width * dpr));
+      overlayCanvas.height = Math.max(1, Math.round(rect.height * dpr));
+    }
     renderCurrentScene();
   };
   window.addEventListener('resize', handleResize);
@@ -645,19 +701,164 @@ export async function mountOrganicLabDemo() {
 
   let followPickedAtom = false;
 
+  function computeActiveGeometryMeasurement() {
+    if (measureAtoms.length < 2) return null;
+    const p = measureAtoms.map((m) => m.pos);
+    const ids = measureAtoms.map((m) => `${m.sym}${m.index}`).join('–');
+    if (measureAtoms.length === 2) {
+      const distA = computeDistanceA(p[0], p[1]);
+      return { kind: 'distance', atomIndices: measureAtoms.map((m) => m.index), label: ids, distanceA: Number(distA.toFixed(3)), text: `d(${ids}) = ${distA.toFixed(3)} Å` };
+    }
+    if (measureAtoms.length === 3) {
+      const d01 = computeDistanceA(p[0], p[1]);
+      const d12 = computeDistanceA(p[1], p[2]);
+      const ang = computeAngleDeg(p[0], p[1], p[2]);
+      return { kind: 'angle', atomIndices: measureAtoms.map((m) => m.index), label: ids, angleDeg: Number(ang.toFixed(2)), distA01: Number(d01.toFixed(3)), distA12: Number(d12.toFixed(3)), text: `∠(${ids}) = ${ang.toFixed(1)}° (${d01.toFixed(2)} / ${d12.toFixed(2)} Å)` };
+    }
+    const dih = computeDihedralDeg(p[0], p[1], p[2], p[3]);
+    return { kind: 'dihedral', atomIndices: measureAtoms.map((m) => m.index), label: ids, dihedralDeg: Number(dih.toFixed(2)), text: `φ(${ids}) = ${dih >= 0 ? '+' : ''}${dih.toFixed(1)}°` };
+  }
+
+  function updateMeasureBanner() {
+    const banner = el('measure-banner');
+    if (!banner) return;
+    const show = (measureMode || measureAtoms.length > 0) && !SPATIAL_MODES.has(currentMode);
+    banner.classList.toggle('open', show);
+    if (!show) return;
+    const atomsTxt = el('measure-atoms-txt');
+    const valTxt = el('measure-val-txt');
+    if (atomsTxt) {
+      atomsTxt.textContent = measureAtoms.length === 0
+        ? 'Click 2 atoms (dist), 3 (angle), or 4 (torsion)'
+        : `Selected (${measureAtoms.length}/4): ${measureAtoms.map((m, i) => `[${i + 1}] ${m.sym}#${m.index}`).join(' · ')}`;
+    }
+    const geom = computeActiveGeometryMeasurement();
+    if (valTxt) valTxt.textContent = geom ? geom.text : '';
+  }
+
+  function drawStageOverlay() {
+    if (!overlayCtx || !overlayCanvas) return;
+    const w = overlayCanvas.width;
+    const h = overlayCanvas.height;
+    overlayCtx.clearRect(0, 0, w, h);
+    if (SPATIAL_MODES.has(currentMode) || !currentGraph) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = w / Math.max(1, rect.width);
+    const scaleY = h / Math.max(1, rect.height);
+
+    // 1. 3D Projected Atom Element / QEq Partial-Charge Labels
+    if (labelMode !== 'off' && currentGraph.atoms?.length) {
+      const snap = labelHostSnapshot;
+      const n = currentGraph.atomCount;
+      overlayCtx.save();
+      overlayCtx.font = `700 ${Math.round(10 * scaleX)}px ui-monospace, monospace`;
+      overlayCtx.textAlign = 'center';
+      overlayCtx.textBaseline = 'middle';
+      for (let i = 0; i < n; i += 1) {
+        const a = currentGraph.atoms[i];
+        // For huge supramolecular systems (e.g. 134-atom Sulflower), skip H labels to keep view crisp
+        if (n > 40 && a.Z === 1) continue;
+        const pos = snap && snap.length >= (i + 1) * 16
+          ? [snap[i * 16 + 0], snap[i * 16 + 1], snap[i * 16 + 2]]
+          : a.pos;
+        const proj = renderer.projectWorld(pos, rect.width, rect.height);
+        if (!proj.visible) continue;
+        const sx = proj.sx * scaleX;
+        const sy = proj.sy * scaleY - 12 * scaleY;
+        const qVal = snap && snap.length >= (i + 1) * 16 ? snap[i * 16 + 7] : (currentQeq?.charges?.[i] || 0);
+        const txt = labelMode === 'qeq' ? `${qVal >= 0 ? '+' : ''}${qVal.toFixed(2)}` : `${a.sym}${i}`;
+        overlayCtx.fillStyle = 'rgba(5, 10, 22, 0.72)';
+        const tw = overlayCtx.measureText(txt).width + 6 * scaleX;
+        overlayCtx.fillRect(sx - tw * 0.5, sy - 6 * scaleY, tw, 12 * scaleY);
+        overlayCtx.fillStyle = labelMode === 'qeq'
+          ? (qVal < -0.05 ? '#fca5a5' : (qVal > 0.05 ? '#93c5fd' : '#e2e8f0'))
+          : '#e0f2fe';
+        overlayCtx.fillText(txt, sx, sy);
+      }
+      overlayCtx.restore();
+    }
+
+    // 2. Live Interactive Geometry Measurement Caliper Overlay (Distance / Angle / Torsion Dihedral)
+    if (measureAtoms.length > 0) {
+      overlayCtx.save();
+      const projected = measureAtoms.map((m) => {
+        const p = renderer.projectWorld(m.pos, rect.width, rect.height);
+        return { ...p, sx: p.sx * scaleX, sy: p.sy * scaleY, m };
+      });
+      if (projected.length >= 2) {
+        overlayCtx.strokeStyle = '#34d399';
+        overlayCtx.lineWidth = 2.2 * scaleX;
+        overlayCtx.setLineDash([6 * scaleX, 4 * scaleX]);
+        overlayCtx.beginPath();
+        for (let i = 0; i < projected.length; i += 1) {
+          if (!projected[i].visible) continue;
+          if (i === 0) overlayCtx.moveTo(projected[i].sx, projected[i].sy);
+          else overlayCtx.lineTo(projected[i].sx, projected[i].sy);
+        }
+        overlayCtx.stroke();
+        overlayCtx.setLineDash([]);
+      }
+      for (let i = 0; i < projected.length; i += 1) {
+        const pt = projected[i];
+        if (!pt.visible) continue;
+        overlayCtx.beginPath();
+        overlayCtx.arc(pt.sx, pt.sy, 11 * scaleX, 0, Math.PI * 2);
+        overlayCtx.strokeStyle = '#34d399';
+        overlayCtx.lineWidth = 2.0 * scaleX;
+        overlayCtx.stroke();
+        overlayCtx.fillStyle = '#050914';
+        overlayCtx.beginPath();
+        overlayCtx.arc(pt.sx + 10 * scaleX, pt.sy - 10 * scaleY, 7.5 * scaleX, 0, Math.PI * 2);
+        overlayCtx.fill();
+        overlayCtx.fillStyle = '#34d399';
+        overlayCtx.font = `800 ${Math.round(9.5 * scaleX)}px ui-monospace, monospace`;
+        overlayCtx.textAlign = 'center';
+        overlayCtx.textBaseline = 'middle';
+        overlayCtx.fillText(String(i + 1), pt.sx + 10 * scaleX, pt.sy - 10 * scaleY);
+      }
+      const geom = computeActiveGeometryMeasurement();
+      if (geom && projected[0].visible && projected[projected.length - 1].visible) {
+        const midX = projected.reduce((s, p) => s + p.sx, 0) / projected.length;
+        const midY = projected.reduce((s, p) => s + p.sy, 0) / projected.length - 18 * scaleY;
+        overlayCtx.font = `800 ${Math.round(11 * scaleX)}px ui-monospace, monospace`;
+        const tw = overlayCtx.measureText(geom.text).width + 14 * scaleX;
+        overlayCtx.fillStyle = 'rgba(6, 16, 28, 0.90)';
+        overlayCtx.strokeStyle = '#34d399';
+        overlayCtx.lineWidth = 1.4 * scaleX;
+        overlayCtx.fillRect(midX - tw * 0.5, midY - 9 * scaleY, tw, 18 * scaleY);
+        overlayCtx.strokeRect(midX - tw * 0.5, midY - 9 * scaleY, tw, 18 * scaleY);
+        overlayCtx.fillStyle = '#fef08a';
+        overlayCtx.textAlign = 'center';
+        overlayCtx.textBaseline = 'middle';
+        overlayCtx.fillText(geom.text, midX, midY);
+      }
+      overlayCtx.restore();
+    }
+  }
+
   async function refreshTrackedPickedAtom() {
-    if (!pickedEntity || pickedEntity.kind !== 'atom' || !mdSession || !currentGraph) return;
-    const raw = await gpuPicker.readSingleEntity(mdSession.getResidentAtomsBuffer(), pickedEntity.index, 16);
-    if (!raw || !pickedEntity || pickedEntity.kind !== 'atom') return;
-    const x = raw[0]; const y = raw[1]; const z = raw[2];
-    const q = raw[7];
-    const spd = Math.hypot(raw[4], raw[5], raw[6]);
-    const a = currentGraph.atoms[pickedEntity.index];
-    const chiral = currentGraph.chiralCenters.find((c) => c.atomIndex === pickedEntity.index);
-    pickedEntity.pos = [x, y, z];
-    pickedEntity.details = `q=${q >= 0 ? '+' : ''}${q.toFixed(3)} e · |v|=${spd.toFixed(2)} · r=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})${chiral ? ` · Stereocenter (${chiral.configuration})` : ''}`;
-    if (followPickedAtom && orbitControls) {
-      orbitControls.setPose({ target: [x, y, z] }, { immediate: false });
+    if (!mdSession || !currentGraph) return;
+    const atomBuf = mdSession.getResidentAtomsBuffer();
+    if (pickedEntity && pickedEntity.kind === 'atom') {
+      const raw = await gpuPicker.readSingleEntity(atomBuf, pickedEntity.index, 16);
+      if (raw && pickedEntity && pickedEntity.kind === 'atom') {
+        const x = raw[0]; const y = raw[1]; const z = raw[2];
+        const q = raw[7];
+        const spd = Math.hypot(raw[4], raw[5], raw[6]);
+        const chiral = currentGraph.chiralCenters.find((c) => c.atomIndex === pickedEntity.index);
+        pickedEntity.pos = [x, y, z];
+        pickedEntity.details = `q=${q >= 0 ? '+' : ''}${q.toFixed(3)} e · |v|=${spd.toFixed(2)} · r=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})${chiral ? ` · Stereocenter (${chiral.configuration})` : ''}`;
+        if (followPickedAtom && orbitControls) {
+          orbitControls.setPose({ target: [x, y, z] }, { immediate: false });
+        }
+      }
+    }
+    if (measureAtoms.length > 0) {
+      for (let i = 0; i < measureAtoms.length; i += 1) {
+        const rawM = await gpuPicker.readSingleEntity(atomBuf, measureAtoms[i].index, 16);
+        if (rawM) measureAtoms[i].pos = [rawM[0], rawM[1], rawM[2]];
+      }
+      updateMeasureBanner();
     }
   }
 
@@ -716,6 +917,14 @@ export async function mountOrganicLabDemo() {
         title: `Atom #${hit.index} · ${a?.sym || 'X'} (Z=${Math.round(hit.vec3[3])}) · ${a?.hybridization || 'sp³'}`,
         details: `q=${q >= 0 ? '+' : ''}${q.toFixed(3)} e · |v|=${spd.toFixed(2)} · r=(${hit.vec0[0].toFixed(2)}, ${hit.vec0[1].toFixed(2)}, ${hit.vec0[2].toFixed(2)})${chiral ? ` · Stereocenter (${chiral.configuration})` : ''}`
       };
+      if (measureMode) {
+        if (!measureAtoms.some((m) => m.index === hit.index)) {
+          if (measureAtoms.length >= 4) measureAtoms = [];
+          measureAtoms.push({ index: hit.index, sym: a?.sym || 'X', pos: [hit.vec0[0], hit.vec0[1], hit.vec0[2]] });
+        }
+        updateMeasureBanner();
+        drawStageOverlay();
+      }
       updatePickOverlay();
       return pickedEntity;
     }
@@ -802,6 +1011,104 @@ export async function mountOrganicLabDemo() {
   el('chk-auto-xi').addEventListener('change', (e) => { autoCycleReaction = e.target.checked; });
   el('chk-pi').addEventListener('change', (e) => { showPiMo = e.target.checked; renderCurrentScene(); });
   el('chk-esp').addEventListener('change', (e) => { espMode = e.target.checked; renderCurrentScene(); });
+
+  function applyRepresentationMode(mode) {
+    repMode = Math.max(0, Math.min(2, Math.trunc(Number(mode) || 0)));
+    if (el('val-rep')) el('val-rep').textContent = REP_MODE_LABELS[repMode];
+    document.querySelectorAll('#rep-mode-row [data-rep]').forEach((b) => {
+      b.classList.toggle('active', Number(b.dataset.rep) === repMode);
+    });
+    renderCurrentScene();
+  }
+  document.querySelectorAll('#rep-mode-row [data-rep]').forEach((b) => {
+    b.addEventListener('click', () => applyRepresentationMode(Number(b.dataset.rep)));
+  });
+
+  function setMeasureModeActive(next) {
+    measureMode = Boolean(next);
+    el('btn-measure')?.classList.toggle('active', measureMode);
+    updateMeasureBanner();
+    drawStageOverlay();
+  }
+  el('btn-measure')?.addEventListener('click', () => setMeasureModeActive(!measureMode));
+  el('btn-measure-clear')?.addEventListener('click', () => {
+    measureAtoms = [];
+    measureMode = false;
+    el('btn-measure')?.classList.remove('active');
+    updateMeasureBanner();
+    drawStageOverlay();
+  });
+
+  async function applyLabelMode(nextMode) {
+    labelMode = nextMode === 'sym' || nextMode === 'qeq' ? nextMode : 'off';
+    const lblText = labelMode === 'off' ? '🏷 Labels: Off' : (labelMode === 'sym' ? '🏷 Labels: Sym' : '🏷 Labels: QEq q');
+    if (el('btn-labels')) {
+      el('btn-labels').textContent = lblText;
+      el('btn-labels').classList.toggle('active', labelMode !== 'off');
+    }
+    if (labelMode !== 'off' && mdSession) {
+      await mdSession.step({ dt: 0.002, substeps: 1, readTelemetry: false, readPositions: true });
+      labelHostSnapshot = mdSession.getLatestAtomsHost();
+    }
+    renderCurrentScene();
+    return labelMode;
+  }
+  el('btn-labels')?.addEventListener('click', () => {
+    const next = labelMode === 'off' ? 'sym' : (labelMode === 'sym' ? 'qeq' : 'off');
+    void applyLabelMode(next);
+  });
+
+  async function buildLiveXyzString() {
+    if (!mdSession || !currentGraph) return null;
+    while (busy) await new Promise((r) => setTimeout(r, 8));
+    await mdSession.step({ dt: 0.002, substeps: 1, readTelemetry: true, readPositions: true });
+    const arr = mdSession.getLatestAtomsHost();
+    const n = currentGraph.atomCount;
+    const lines = [
+      String(n),
+      `ULG Organic Lab | ${currentMode} (${currentGraph.formula || ''}) | step=${mdSession.stepIndex} | T=${Math.round(temperatureK)}K | er=${dielectricEr.toFixed(1)}`
+    ];
+    for (let i = 0; i < n; i += 1) {
+      const sym = currentGraph.atoms[i]?.sym || 'X';
+      const x = arr[i * 16 + 0];
+      const y = arr[i * 16 + 1];
+      const z = arr[i * 16 + 2];
+      lines.push(`${sym.padEnd(2, ' ')}  ${x.toFixed(6).padStart(11, ' ')}  ${y.toFixed(6).padStart(11, ' ')}  ${z.toFixed(6).padStart(11, ' ')}`);
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  function buildLiveJsonReport() {
+    return JSON.stringify({
+      schema: 'ulg.organic-lab.export.v1',
+      mode: currentMode,
+      formula: currentGraph?.formula || null,
+      stepIndex: mdSession ? mdSession.stepIndex : (rdSession ? rdSession.stepIndex : 0),
+      conditions: { temperatureK, dielectricEr, pH, simSpeed, repMode: REP_MODE_LABELS[repMode] },
+      piOrbitals: currentPiRes ? {
+        piAtomCount: currentPiRes.piAtomCount,
+        totalPiElectrons: currentPiRes.totalPiElectrons,
+        homoLumoGapEv: currentPiRes.homoLumoGapEv,
+        resonanceEnergyEv: currentPiRes.resonanceEnergyEv,
+        isAromatic4nPlus2: currentPiRes.isAromatic4nPlus2,
+        uvVisLambdaMaxNm: currentPiRes.uvVisLambdaMaxNm,
+        eigenvaluesEv: currentPiRes.eigenvaluesEv
+      } : null,
+      qeq: currentQeq,
+      acidBase: currentAcidBase,
+      geometryMeasurement: computeActiveGeometryMeasurement(),
+      telemetry: mdSession ? mdSession.getTelemetry() : (rdSession ? rdSession.getTelemetry() : null),
+      scientificValidation: false
+    }, null, 2);
+  }
+
+  el('btn-export-xyz')?.addEventListener('click', async () => {
+    const xyz = await buildLiveXyzString();
+    if (xyz) triggerTextDownload(`ulg-${currentMode}.xyz`, xyz, 'chemical/x-xyz;charset=utf-8');
+  });
+  el('btn-export-json')?.addEventListener('click', () => {
+    triggerTextDownload(`ulg-${currentMode}-report.json`, buildLiveJsonReport(), 'application/json;charset=utf-8');
+  });
   el('btn-mo-prev').addEventListener('click', async () => {
     if (!currentPiRes?.piAtomCount) return;
     selectedMoIdx = (selectedMoIdx - 1 + currentPiRes.piAtomCount) % currentPiRes.piAtomCount;
@@ -884,6 +1191,11 @@ export async function mountOrganicLabDemo() {
         dielectricEr,
         pH,
         espMode,
+        repMode,
+        repModeLabel: REP_MODE_LABELS[repMode],
+        measureMode,
+        geometryMeasurement: computeActiveGeometryMeasurement(),
+        labelMode,
         showPiMo,
         selectedMoIdx,
         reactProgress,
@@ -917,6 +1229,28 @@ export async function mountOrganicLabDemo() {
     setDielectricEr(er) { dielectricEr = er; el('sl-er').value = String(er); el('val-er').textContent = er.toFixed(1); mdSession?.setDielectricEr(er); refreshAcidBaseAndPlots(); updateHudAndProvenance(); },
     setPh(v) { pH = v; el('sl-ph').value = String(v); el('val-ph').textContent = v.toFixed(1); refreshAcidBaseAndPlots(); updateHudAndProvenance(); },
     setEspMode(v) { espMode = Boolean(v); el('chk-esp').checked = espMode; renderCurrentScene(); },
+    setRepresentation(m) { applyRepresentationMode(m); return api.getState(); },
+    setMeasureMode(on) { setMeasureModeActive(on); return api.getState(); },
+    async setMeasureAtoms(indices = []) {
+      measureAtoms = [];
+      if (mdSession && currentGraph) {
+        const atomBuf = mdSession.getResidentAtomsBuffer();
+        for (const idx of indices.slice(0, 4)) {
+          if (idx >= 0 && idx < currentGraph.atomCount) {
+            const raw = await gpuPicker.readSingleEntity(atomBuf, idx, 16);
+            const pos = raw ? [raw[0], raw[1], raw[2]] : [...currentGraph.atoms[idx].pos];
+            measureAtoms.push({ index: idx, sym: currentGraph.atoms[idx].sym, pos });
+          }
+        }
+      }
+      updateMeasureBanner();
+      drawStageOverlay();
+      return computeActiveGeometryMeasurement();
+    },
+    getGeometryMeasurement: () => computeActiveGeometryMeasurement(),
+    setLabelMode(m) { return applyLabelMode(m); },
+    exportXyz: () => buildLiveXyzString(),
+    exportJson: () => buildLiveJsonReport(),
     setShowPiMo(v) { showPiMo = Boolean(v); el('chk-pi').checked = showPiMo; renderCurrentScene(); },
     async mirrorMolecule() { if (currentGraph) await selectMode(currentMode, mirrorOrganicMolecularGraph(currentGraph)); return api.getState(); },
     setBearingTorque(tau) {

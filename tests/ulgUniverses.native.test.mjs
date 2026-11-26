@@ -31,7 +31,9 @@ test('ULG Universes native Vulkan proof: all 8 WebGPU scales (40 OOM), real lock
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist'
+      '--ignore-gpu-blocklist',
+      '--disable-dev-shm-usage',
+      '--renderer-process-limit=2'
     ]
   });
 

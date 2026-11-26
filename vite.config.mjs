@@ -623,6 +623,20 @@ export default defineConfig({
   },
   server: {
     https: resolveLocalHttpsConfig(),
+    watch: {
+      // Prevent chokidar from watching generated builds, GitHub Pages output,
+      // ICC SQLite stores, or test/plan archives (avoids multi-GB RSS & thread bloat).
+      ignored: [
+        '**/docs/**',
+        '**/dist/**',
+        '**/.icc/**',
+        '**/.cache/**',
+        '**/plan/**',
+        '**/tests/**',
+        '**/coverage/**',
+        '**/scratch/**'
+      ]
+    },
     // Keep this narrow rather than setting `allowedHosts: true`: the exact
     // tailnet name is enough for VPN HMR while preserving Vite's DNS-rebind
     // protection for arbitrary Host headers.

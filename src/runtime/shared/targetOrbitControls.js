@@ -12,6 +12,8 @@
 //   - Clean click/tap discrimination (`onClick`) for GPU entity picking without drag misfires.
 //   - Double-click or `reset()` smoothly returns to the anchored default target & framing.
 
+import { normalizeWheelDeltaY } from './webgpuCompat.js';
+
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
@@ -224,6 +226,7 @@ export function createTargetOrbitControls(domElement, {
     );
     const clickType = downInfo?.pointerType || e.pointerType;
     pointers.delete(e.pointerId);
+    try { domElement.releasePointerCapture?.(e.pointerId); } catch {}
 
     if (pointers.size === 1) {
       const rem = [...pointers.values()][0];
@@ -253,9 +256,27 @@ export function createTargetOrbitControls(domElement, {
   const onWheel = (e) => {
     if (disposed || !enableZoom || shouldIgnorePointer?.(e)) return;
     e.preventDefault();
-    const norm = clamp(e.deltaY / 120, -2.5, 2.5);
+    const dy = normalizeWheelDeltaY(e);
+    const norm = clamp(dy / 120, -2.5, 2.5);
     const factor = Math.pow(1 + zoomSpeed, norm);
     dollyByFactor(factor);
+  };
+
+  // Safari macOS native trackpad pinch gestures fire non-standard `gesturestart`/`gesturechange`
+  let lastGestureScale = 1.0;
+  const onGestureStart = (e) => {
+    if (disposed || !enableZoom || shouldIgnorePointer?.(e)) return;
+    e.preventDefault();
+    lastGestureScale = Number(e.scale) || 1.0;
+  };
+  const onGestureChange = (e) => {
+    if (disposed || !enableZoom || shouldIgnorePointer?.(e)) return;
+    e.preventDefault();
+    const nextScale = Number(e.scale) || 1.0;
+    if (nextScale > 0.05 && lastGestureScale > 0.05) {
+      dollyByFactor(lastGestureScale / nextScale);
+    }
+    lastGestureScale = nextScale;
   };
 
   const onDblClick = (e) => {
@@ -269,6 +290,8 @@ export function createTargetOrbitControls(domElement, {
   domElement.addEventListener('pointerup', onPointerUpOrCancel);
   domElement.addEventListener('pointercancel', onPointerUpOrCancel);
   domElement.addEventListener('wheel', onWheel, { passive: false });
+  domElement.addEventListener('gesturestart', onGestureStart, { passive: false });
+  domElement.addEventListener('gesturechange', onGestureChange, { passive: false });
   domElement.addEventListener('dblclick', onDblClick);
 
   function update(dtSec = 1 / 60) {
@@ -342,6 +365,8 @@ export function createTargetOrbitControls(domElement, {
     domElement.removeEventListener('pointerup', onPointerUpOrCancel);
     domElement.removeEventListener('pointercancel', onPointerUpOrCancel);
     domElement.removeEventListener('wheel', onWheel);
+    domElement.removeEventListener('gesturestart', onGestureStart);
+    domElement.removeEventListener('gesturechange', onGestureChange);
     domElement.removeEventListener('dblclick', onDblClick);
   }
 

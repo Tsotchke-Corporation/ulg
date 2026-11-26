@@ -35,7 +35,9 @@ test('ULG Biophysics & Emergent Life Lab (life-lab.html) live Vulkan physics, nu
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist'
+      '--ignore-gpu-blocklist',
+      '--disable-dev-shm-usage',
+      '--renderer-process-limit=2'
     ]
   });
 

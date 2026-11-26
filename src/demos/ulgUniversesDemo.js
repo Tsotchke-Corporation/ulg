@@ -8,6 +8,10 @@
 
 import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
+  normalizeWheelDeltaY,
+  requestCompatibleWebGpuDevice
+} from '../runtime/shared/webgpuCompat.js';
+import {
   GPU_PICK_LAYOUT,
   createGpuEntityPickerWebGpu
 } from '../runtime/gpuMath/gpuEntityPickerWebGpu.js';
@@ -126,6 +130,7 @@ function wavelengthNmToRgb(nm) {
 
 function clamp01(x) { return Math.max(0, Math.min(1, x)); }
 function smoothstep(e0, e1, x) {
+  if (e0 > e1) return 1 - smoothstep(e1, e0, x);
   const t = clamp01((x - e0) / Math.max(1e-6, e1 - e0));
   return t * t * (3 - 2 * t);
 }
@@ -258,15 +263,20 @@ function buildSolarOsculatingOrbitLines(solarEngine, focusPosAu, scaleAuToWorld,
  * Determine the primary active scale level (0..7) from the continuous `log10ViewSpanM`
  * and current focus target (`focusedSolarBodyIndex` = 0 -> Sun => L3; planet => L4!).
  */
-export function resolvePrimaryLevelFromSpan(log10SpanM, { focusedSolarBodyIndex = 3, galaxyBranch = 'solar-system' } = {}) {
+export function resolvePrimaryLevelFromSpan(log10SpanM, {
+  focusedSolarBodyIndex = 3,
+  focusedBodyIsStar = null,
+  galaxyBranch = 'solar-system'
+} = {}) {
+  const isStar = focusedBodyIsStar != null ? Boolean(focusedBodyIsStar) : focusedSolarBodyIndex === 0;
   if (log10SpanM >= 22.3) return 0; // Cosmic Web
   if (log10SpanM >= 16.2) return 1; // Spiral Galaxy
   if (log10SpanM >= 8.75) {
-    if (galaxyBranch !== 'smbh-core' && focusedSolarBodyIndex === 0 && log10SpanM <= 9.8) return 3; // Stellar Core!
+    if (galaxyBranch !== 'smbh-core' && isStar && log10SpanM <= 9.8) return 3; // Stellar Core!
     return 2; // Real-Scale Solar System (or SMBH Core)
   }
   if (log10SpanM >= -5.6) {
-    if (focusedSolarBodyIndex === 0 && log10SpanM >= 7.2) return 3;
+    if (isStar && log10SpanM >= 7.2) return 3;
     return 4; // Planetary World & Interior
   }
   if (log10SpanM >= -9.1) return 5; // Crystal/Fluid MD
@@ -286,14 +296,7 @@ function mapLog10ScaleToInitialSpan(log10Val) {
 }
 
 export async function mountUlgUniversesDemo() {
-  if (!navigator.gpu) throw new Error('navigator.gpu is unavailable in this browser.');
-  let adapter = null;
-  for (let i = 0; i < 6 && !adapter; i += 1) {
-    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!adapter) throw new Error('No WebGPU adapter available on this device.');
-  const device = await adapter.requestDevice();
+  const { device } = await requestCompatibleWebGpuDevice({ label: 'ulg-universes-demo' });
   const gpuErrorBucket = [];
   device.addEventListener('uncapturederror', (e) => {
     gpuErrorBucket.push(String(e?.error?.message ?? e));
@@ -407,10 +410,16 @@ export async function mountUlgUniversesDemo() {
   });
 
   // App State
+  const isFocusedSolarBodyStar = () => {
+    const cat = physics.getActiveSystemCatalog();
+    return Boolean(cat[physics.focusedSolarBodyIndex]?.isStar) || physics.focusedSolarBodyIndex === 0;
+  };
   let currentLevel = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
     focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
+    focusedBodyIsStar: isFocusedSolarBodyStar(),
     galaxyBranch: physics.galaxyBranch
   });
+  let savedSurfaceCheckpoint = null; // Preserves Rover/Drone/UFO world + pose when sampling down to L5/L6/L7!
   let selectedTargetId = null;
   let hoveredTargetId = null;
   let pickedGpuMote = null;     // Live GPU-picked individual mote (star, asteroid, plasma parcel, atom, nucleon!)
@@ -597,8 +606,10 @@ export async function mountUlgUniversesDemo() {
 
   // ---- Background Pre-Warming of Active, Adjacent & Parent-Perspective Continuous Zoom Regimes ----
   async function warmVisibleLevels(spanLog10) {
+    const isStar = isFocusedSolarBodyStar();
     const lvl = resolvePrimaryLevelFromSpan(spanLog10, {
       focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
+      focusedBodyIsStar: isStar,
       galaxyBranch: physics.galaxyBranch
     });
     const toWarm = new Set([lvl]);
@@ -611,8 +622,8 @@ export async function mountUlgUniversesDemo() {
     if (spanLog10 >= 20.5) toWarm.add(0);
     if (spanLog10 >= 14.8 && spanLog10 <= 23.5) toWarm.add(1);
     if (spanLog10 >= 6.5 && spanLog10 <= 18.2) toWarm.add(2);
-    if (spanLog10 >= 6.8 && spanLog10 <= 10.8 && physics.focusedSolarBodyIndex === 0) toWarm.add(3);
-    if (spanLog10 >= -6.2 && spanLog10 <= 9.2 && physics.focusedSolarBodyIndex > 0) toWarm.add(4);
+    if (spanLog10 >= 6.8 && spanLog10 <= 10.8 && isStar) toWarm.add(3);
+    if (spanLog10 >= -6.2 && spanLog10 <= 9.2 && !isStar) toWarm.add(4);
     if (spanLog10 >= -10.0 && spanLog10 <= -4.5) toWarm.add(5);
     if (spanLog10 >= -13.5 && spanLog10 <= -8.4) toWarm.add(6);
     if (spanLog10 <= -11.5) toWarm.add(7);
@@ -1150,7 +1161,16 @@ export async function mountUlgUniversesDemo() {
     if (surfaceQuickBtn) {
       surfaceQuickBtn.style.display = (currentLevel === 4 && !physics.surfaceActive) ? 'inline-flex' : 'none';
     }
-    if (returnBtn) returnBtn.disabled = currentLevel === 0 && !physics.surfaceActive;
+    if (returnBtn) {
+      returnBtn.disabled = currentLevel === 0 && !physics.surfaceActive;
+      if (currentLevel === 5 && savedSurfaceCheckpoint && !physics.surfaceActive) {
+        returnBtn.textContent = `↑ ${savedSurfaceCheckpoint.vehicleLabel}`;
+        returnBtn.title = `Return directly back to your parked ${savedSurfaceCheckpoint.vehicleLabel} on ${savedSurfaceCheckpoint.worldName}`;
+      } else {
+        returnBtn.textContent = '↑ Orbit';
+        returnBtn.title = 'Return one scale level outward';
+      }
+    }
     if (orbitUpBtn) orbitUpBtn.disabled = currentLevel === 0 && !physics.surfaceActive;
     if (scaleRail) {
       for (const b of scaleRail.querySelectorAll('[data-level]')) {
@@ -1179,6 +1199,15 @@ export async function mountUlgUniversesDemo() {
     const worldName = physics.planetaryMode === 'magma-ocean'
       ? 'Hadean Magma Ocean'
       : (physics.planetaryMode === 'cryo-plumes' ? 'Cryovolcanic Moon' : (spec?.name || 'World'));
+    const veh = sess.activeVehicle;
+    const vehicleLabel = veh === 'ufo' ? '🛸 UFO' : (veh === 'drone' ? '🚁 Drone' : '🚙 Rover');
+    savedSurfaceCheckpoint = {
+      bodyIndex: physics.planetaryBodyIndex,
+      planetaryMode: physics.planetaryMode,
+      worldName,
+      vehicleLabel,
+      checkpoint: sess.getCheckpoint ? sess.getCheckpoint() : null
+    };
     const sample = {
       ...sess.getLocalSample(),
       worldName
@@ -1197,6 +1226,16 @@ export async function mountUlgUniversesDemo() {
     updateInspectorCard();
     renderNow(performance.now());
     return sample;
+  }
+
+  async function returnToSavedSurface() {
+    if (!savedSurfaceCheckpoint) return null;
+    const cp = savedSurfaceCheckpoint;
+    return enterSurfaceViewUi({
+      bodyIndex: cp.bodyIndex,
+      planetaryModeOverride: cp.planetaryMode,
+      restoreCheckpoint: cp.checkpoint
+    });
   }
 
   async function inspectSampledCompound(compound) {
@@ -1326,6 +1365,11 @@ export async function mountUlgUniversesDemo() {
       exitSurfaceViewUi();
       return;
     }
+    // Returning upward from a sampled L5 Lattice restores your exact parked Rover / Drone / UFO on the planet!
+    if (currentLevel === 5 && savedSurfaceCheckpoint) {
+      await returnToSavedSurface();
+      return;
+    }
     if (currentLevel <= 0) return;
     flyToLog10Span(UNIVERSES_SCALES[currentLevel - 1].log10SpanM);
   }
@@ -1450,7 +1494,7 @@ export async function mountUlgUniversesDemo() {
     }
   }
 
-  async function enterSurfaceViewUi({ bodyIndex = null, planetaryModeOverride = null } = {}) {
+  async function enterSurfaceViewUi({ bodyIndex = null, planetaryModeOverride = null, restoreCheckpoint = null } = {}) {
     autopilot = false;
     autopilotBtn?.classList.remove('active');
     if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
@@ -1480,7 +1524,7 @@ export async function mountUlgUniversesDemo() {
     camTarget = [0, 0, 0];
     currentLevel = 4;
     log10ViewSpanM = 2.0; // ~100 m surface horizon scale!
-    await physics.enterSurfaceView({ bodyIndex: idx, planetaryModeOverride });
+    await physics.enterSurfaceView({ bodyIndex: idx, planetaryModeOverride, restoreCheckpoint });
     selectDefaultTarget();
     syncScaleChrome();
     syncSurfaceHud();
@@ -2475,19 +2519,25 @@ export async function mountUlgUniversesDemo() {
     }
   });
 
-  // TRUE CONTINUOUS 40-ORDER-OF-MAGNITUDE MOUSE-WHEEL ZOOM!
+  // TRUE CONTINUOUS 40-ORDER-OF-MAGNITUDE MOUSE-WHEEL & MACOS TRACKPAD PINCH ZOOM!
   // Zooming inward past an L4 planet's orbital horizon lands/dives onto its surface/atmosphere FIRST
   // so you can drive/fly and sample the exact local terrain or cloud deck beneath you before diving to L5!
   let surfaceAutoEntryPending = false;
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    if (physics.surfaceActive) return;
+    const dy = normalizeWheelDeltaY(e);
+    if (physics.surfaceActive) {
+      const factor = Math.pow(1.08, Math.max(-2.5, Math.min(2.5, dy / 120)));
+      physics.adjustSurfaceChaseDistance(factor);
+      renderNow(performance.now());
+      return;
+    }
     autopilot = false;
     autopilotBtn?.classList.remove('active');
     if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
     flyTargetLog10 = null;
-    // Scroll up (deltaY < 0) zooms IN (smaller log10SpanM); scroll down zooms OUT
-    const deltaLog = Math.max(-0.55, Math.min(0.55, e.deltaY * 0.0024));
+    // Scroll up (dy < 0) zooms IN (smaller log10SpanM); scroll down zooms OUT
+    const deltaLog = Math.max(-0.55, Math.min(0.55, dy * 0.0024));
     const nextSpan = Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, log10ViewSpanM + deltaLog));
     if (currentLevel === 4 && deltaLog < 0 && nextSpan < 5.75 && !surfaceAutoEntryPending) {
       surfaceAutoEntryPending = true;
@@ -2499,6 +2549,30 @@ export async function mountUlgUniversesDemo() {
     log10ViewSpanM = nextSpan;
     zoomVelocityLog10PerSec = Math.abs(deltaLog) * 10.0;
     void warmVisibleLevels(log10ViewSpanM);
+  }, { passive: false });
+
+  // Safari macOS native trackpad pinch gestures (`gesturestart`/`gesturechange`)
+  let lastUvGestureScale = 1.0;
+  canvas.addEventListener('gesturestart', (e) => {
+    e.preventDefault();
+    lastUvGestureScale = Number(e.scale) || 1.0;
+  }, { passive: false });
+  canvas.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+    const nextScale = Number(e.scale) || 1.0;
+    if (nextScale > 0.05 && lastUvGestureScale > 0.05) {
+      const ratio = lastUvGestureScale / nextScale;
+      if (physics.surfaceActive) {
+        physics.adjustSurfaceChaseDistance(ratio);
+        renderNow(performance.now());
+      } else {
+        flyTargetLog10 = null;
+        const deltaLog = Math.max(-0.45, Math.min(0.45, Math.log10(ratio) * 2.2));
+        log10ViewSpanM = Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, log10ViewSpanM + deltaLog));
+        void warmVisibleLevels(log10ViewSpanM);
+      }
+    }
+    lastUvGestureScale = nextScale;
   }, { passive: false });
 
   // ---- 2D Emission Spectrograph & Live Scientific Plots ----
@@ -2739,7 +2813,7 @@ export async function mountUlgUniversesDemo() {
       lastSampleStripSig = '';
       return;
     }
-    const sig = `${sm.id}:${currentLevel}:${physics.mdElementZ}:${physics.quantumMode}:${physics.quantumMoleculeKey}:${physics.quantumZ}:${physics.nuclearZ}`;
+    const sig = `${sm.id}:${currentLevel}:${physics.mdElementZ}:${physics.quantumMode}:${physics.quantumMoleculeKey}:${physics.quantumZ}:${physics.nuclearZ}:${savedSurfaceCheckpoint ? savedSurfaceCheckpoint.vehicleLabel : 'none'}`;
     if (sig === lastSampleStripSig) return;
     lastSampleStripSig = sig;
     const compBtns = (sm.compounds || []).slice(0, 4).map((c, idx) => {
@@ -2753,10 +2827,13 @@ export async function mountUlgUniversesDemo() {
         || (currentLevel === 7 && physics.nuclearZ === el.Z);
       return `<button class="uv-chip ${isAct ? 'active' : ''}" data-sample-el="${el.Z}" type="button" title="Examine ${el.name} (Z=${el.Z}) at this scale">${el.sym}(${el.Z})</button>`;
     }).join('');
+    const backBtnHtml = savedSurfaceCheckpoint
+      ? `<button class="uv-chip active" id="uv-back-to-surface-btn" data-return-surface="1" type="button" style="border-color:rgba(52,211,153,0.75);background:rgba(16,185,129,0.28);color:#ecfdf5;" title="Return directly to your parked ${savedSurfaceCheckpoint.vehicleLabel} on ${savedSurfaceCheckpoint.worldName}">↩ Back to ${savedSurfaceCheckpoint.vehicleLabel}</button>`
+      : '';
     sampleStripEl.innerHTML = `
       <div class="uv-sample-head">
         <span>🔬 ${sm.worldName} · ${sm.shortLabel}</span>
-        <span style="color:var(--muted);">${sm.locationTag}</span>
+        ${backBtnHtml || `<span style="color:var(--muted);">${sm.locationTag}</span>`}
       </div>
       <div class="uv-chip-row"><span class="uv-chip-lbl">Compounds:</span>${compBtns}</div>
       <div class="uv-chip-row"><span class="uv-chip-lbl">Elements:</span>${elBtns}</div>
@@ -2767,6 +2844,9 @@ export async function mountUlgUniversesDemo() {
         <button class="uv-chip ${currentLevel === 6 && physics.quantumMode === 'atom' ? 'active' : ''}" data-sample-step="6a" type="button">L6 Element</button>
         <button class="uv-chip ${currentLevel === 7 ? 'active' : ''}" data-sample-step="7" type="button">L7 Nucleus</button>
       </div>`;
+    sampleStripEl.querySelector('[data-return-surface]')?.addEventListener('click', () => {
+      void returnToSavedSurface();
+    });
     for (const b of sampleStripEl.querySelectorAll('[data-sample-comp]')) {
       b.addEventListener('click', () => {
         const comp = sm.compounds?.[Number(b.dataset.sampleComp)];
@@ -3524,7 +3604,7 @@ export async function mountUlgUniversesDemo() {
     }
 
     // 4. L3: MHD Nebular Collapse & Bipolar Jets OR Stellar Core Fusion Plasma (`self-gravitating-hydro@1`)
-    const wStarCore = (physics.focusedSolarBodyIndex === 0 && physics.galaxyBranch !== 'smbh-core')
+    const wStarCore = (isFocusedSolarBodyStar() && physics.galaxyBranch !== 'smbh-core')
       ? bandWeight(span, 7.0, 7.8, 9.7, 10.4)
       : 0;
     if (wStarCore > 0.01) {
@@ -3966,6 +4046,7 @@ export async function mountUlgUniversesDemo() {
     // Update primary level cleanly as `log10ViewSpanM` crosses scale thresholds
     const nextLvl = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
       focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
+      focusedBodyIsStar: isFocusedSolarBodyStar(),
       galaxyBranch: physics.galaxyBranch
     });
     if (nextLvl !== currentLevel) {
@@ -4144,6 +4225,8 @@ export async function mountUlgUniversesDemo() {
         surfaceDroneMaxAeroLiftN: physics.surfaceSession?.env?.maxAeroLiftN ?? null,
         surfaceTelemetry: physics.surfaceTelemetry ?? null,
         surfaceLocalSample: physics.surfaceSession?.getLocalSample?.() ?? null,
+        hasSavedSurfaceCheckpoint: Boolean(savedSurfaceCheckpoint),
+        savedSurfaceWorld: savedSurfaceCheckpoint?.worldName ?? null,
         activeSampledMaterial: physics.activeSampledMaterial ?? null,
         scaleTimeDilation: physics.computeScaleAdaptiveTimeDilation(log10ViewSpanM, {
           surfaceActive: physics.surfaceActive,
@@ -4177,6 +4260,7 @@ export async function mountUlgUniversesDemo() {
       log10ViewSpanM = mapLog10ScaleToInitialSpan(val);
       currentLevel = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
         focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
+        focusedBodyIsStar: isFocusedSolarBodyStar(),
         galaxyBranch: physics.galaxyBranch
       });
       if (currentLevel !== prevL) {
@@ -4440,6 +4524,10 @@ export async function mountUlgUniversesDemo() {
     async sampleSurfaceAndDiveToLattice() {
       const sample = await sampleLocalSurfaceAndDiveToLattice();
       return { sample, state: this.getState() };
+    },
+    async returnToSavedSurface() {
+      await returnToSavedSurface();
+      return this.getState();
     },
     async inspectSampledCompound(compoundIndex = 0) {
       const comp = typeof compoundIndex === 'object'

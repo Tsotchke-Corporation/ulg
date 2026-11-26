@@ -35,6 +35,7 @@ import {
   evaluateBundleDensityEos
 } from '../runtime/material/polytopeAtlasBuilder.js';
 import { getSharedPolytopeAtlasPersistentCache } from '../runtime/material/polytopeAtlasPersistentCache.js';
+import { requestCompatibleWebGpuDevice } from '../runtime/shared/webgpuCompat.js';
 import {
   climbingImageNEBWebGpu,
   registerMolecularRhfSimulationModule,
@@ -5564,36 +5565,23 @@ async function boot() {
     }
   });
 
-  let adapter = null;
   if (!navigator.gpu) {
     statusBadge.textContent = 'WebGPU unavailable (fail-closed)';
     showWebGpuFallback(
       'WebGPU Not Supported in This Browser',
-      'ULG Material Physics Lab runs live Dirac–KS, TD-KS, 2D Maxwell–FDTD, MD, and Polytope compute shaders on WebGPU. Use Chrome 121+ on Android/Desktop or Safari 26+ on iOS/macOS over HTTPS.'
-    );
-    return;
-  }
-  for (let attempt = 0; attempt < 8 && !adapter; attempt += 1) {
-    try {
-      adapter = await navigator.gpu.requestAdapter(attempt < 4 ? { powerPreference: 'high-performance' } : undefined);
-    } catch {
-      adapter = null;
-    }
-    if (!adapter) await new Promise((r) => setTimeout(r, 200));
-  }
-  if (!adapter) {
-    statusBadge.textContent = 'WebGPU adapter unavailable';
-    showWebGpuFallback(
-      'WebGPU GPU Adapter Unavailable',
-      'Your browser exposes navigator.gpu, but no compatible WebGPU hardware adapter was returned. Ensure hardware acceleration / WebGPU is enabled in browser settings and retry.'
+      'ULG Material Physics Lab runs live Dirac–KS, TD-KS, 2D Maxwell–FDTD, MD, and Polytope compute shaders on WebGPU. Use Chrome 121+ on Android/Desktop or Safari 18+/26+ on iOS/macOS over HTTPS.'
     );
     return;
   }
   try {
-    gpuDevice = await adapter.requestDevice();
+    const acquired = await requestCompatibleWebGpuDevice({ label: 'ulg-elements-lab', retries: 8, retryDelayMs: 200 });
+    gpuDevice = acquired.device;
   } catch (err) {
-    statusBadge.textContent = 'WebGPU device error';
-    showWebGpuFallback('WebGPU Device Initialization Failed', err?.message || String(err));
+    statusBadge.textContent = 'WebGPU adapter/device unavailable';
+    showWebGpuFallback(
+      'WebGPU Initialization Failed',
+      err?.message || 'Ensure hardware acceleration / WebGPU is enabled in browser settings and retry.'
+    );
     return;
   }
   hideWebGpuFallback();

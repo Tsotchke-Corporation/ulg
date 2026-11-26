@@ -668,9 +668,12 @@ fn cfd3d_advect_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
   theta = clamp(theta, -4.5, 4.5);
 
   // Multi-deck Clausius-Clapeyron cloud condensation density along vertical strata (deck0=upper, deck1=mid, deck2=lower)
-  let d0 = exp(-pow((y_norm - p.deck0_col.w) / 0.14, 2.0));
-  let d1 = exp(-pow((y_norm - p.deck1_col.w) / 0.16, 2.0));
-  let d2 = exp(-pow((y_norm - p.deck2_col.w) / 0.17, 2.0));
+  let d0_x = (y_norm - p.deck0_col.w) / 0.14;
+  let d1_x = (y_norm - p.deck1_col.w) / 0.16;
+  let d2_x = (y_norm - p.deck2_col.w) / 0.17;
+  let d0 = exp(-(d0_x * d0_x));
+  let d1 = exp(-(d1_x * d1_x));
+  let d2 = exp(-(d2_x * d2_x));
   let deck_env = max(d0, max(d1, d2));
   let updraft_cond = max(0.0, v * 0.16 + theta * 0.12);
   let target_q = clamp(deck_env * (0.28 + 0.72 * p.phys1.w) + updraft_cond * 0.45, 0.0, 1.25);

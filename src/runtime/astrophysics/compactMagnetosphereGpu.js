@@ -309,7 +309,7 @@ fn step_mag_bfield_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   var b_next = b0.xyz + (curl_emf + eta_eff * lap_b - grad_psi) * dt_b;
   // Gentle inner relaxation toward rotating crust boundary in transition shell (r in [1.35..1.85])
   if (r < 1.85) {
-    let w_bc = smoothstep(1.85, 1.35, r);
+    let w_bc = 1.0 - smoothstep(1.35, 1.85, r);
     let b_ref = dipole_core_b(pos, m_moment, 0.72) + cross(m_axis, pos) * (params.twist_phi * 0.45 * params.b_norm / (0.65 + r * r));
     b_next = mix(b_next, b_ref, w_bc * 0.42);
   }

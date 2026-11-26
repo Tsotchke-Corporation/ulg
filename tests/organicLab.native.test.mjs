@@ -34,7 +34,9 @@ test('ULG Organic Chemistry Lab (organic-lab.html) live Vulkan physics, null lim
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist'
+      '--ignore-gpu-blocklist',
+      '--disable-dev-shm-usage',
+      '--renderer-process-limit=2'
     ]
   });
 

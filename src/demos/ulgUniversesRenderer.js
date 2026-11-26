@@ -8,6 +8,8 @@
 // + relativistic Doppler accretion disks / planetary rings + 3D lines + 3D nuclear volume
 // + fullscreen Schwarzschild lensing, Hyperdrive streaks, ACES tone-mapping, and Retro CRT).
 
+import { configureCompatibleWebGpuCanvas } from '../runtime/shared/webgpuCompat.js';
+
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,
   VERTEX: 0x0020,
@@ -88,10 +90,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let log_span = cam.cam_fwd.w;
   // Subtle Milky Way galactic band visible ONLY when no live parent GPU galaxy skybox is active!
   let live_parent_sky = clamp(cam.extra0.y, 0.0, 1.0);
-  let gal_vis = smoothstep(23.0, 17.0, log_span) * smoothstep(-4.0, 4.0, log_span) * (1.0 - 0.88 * live_parent_sky);
-  let gal_band = exp(-pow(dir.y * 2.8 + dir.x * 0.72, 2.0) * 4.5);
+  let gal_vis = (1.0 - smoothstep(17.0, 23.0, log_span)) * smoothstep(-4.0, 4.0, log_span) * (1.0 - 0.88 * live_parent_sky);
+  let gal_axis = dir.y * 2.8 + dir.x * 0.72;
+  let gal_band = exp(-(gal_axis * gal_axis) * 4.5);
   let dust = 0.5 + 0.5 * sin(dir.x * 4.5 + dir.z * 3.2) * cos(dir.y * 3.9 - dir.x * 2.8);
-  let base_void = mix(vec3<f32>(0.005, 0.009, 0.020), vec3<f32>(0.004, 0.007, 0.015), smoothstep(0.0, -8.0, log_span));
+  let base_void = mix(vec3<f32>(0.005, 0.009, 0.020), vec3<f32>(0.004, 0.007, 0.015), 1.0 - smoothstep(-8.0, 0.0, log_span));
   var col = base_void + vec3<f32>(0.028, 0.036, 0.068) * gal_band * dust * (0.25 + 0.75 * gal_vis);
 
   let star_vis = (smoothstep(-6.0, 6.0, log_span) * 0.85 + 0.15) * (1.0 - 0.65 * live_parent_sky);
@@ -233,15 +236,28 @@ fn surf_hash(p: vec2<f32>) -> f32 {
   return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
-fn surf_noise(p: vec2<f32>) -> f32 {
+// Smooth C2 quintic value noise with exact analytical (val, d/dx, d/dy) — zero grid-cell faceting!
+fn surf_noise_d(p: vec2<f32>) -> vec3<f32> {
   let i = floor(p);
   let f = fract(p);
-  let u = f * f * (3.0 - 2.0 * f);
-  return mix(
-    mix(surf_hash(i), surf_hash(i + vec2<f32>(1.0, 0.0)), u.x),
-    mix(surf_hash(i + vec2<f32>(0.0, 1.0)), surf_hash(i + vec2<f32>(1.0, 1.0)), u.x),
-    u.y
-  );
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  let a = surf_hash(i);
+  let b = surf_hash(i + vec2<f32>(1.0, 0.0));
+  let c = surf_hash(i + vec2<f32>(0.0, 1.0));
+  let d = surf_hash(i + vec2<f32>(1.0, 1.0));
+  let k0 = a;
+  let k1 = b - a;
+  let k2 = c - a;
+  let k3 = a - b - c + d;
+  let val = k0 + k1 * u.x + k2 * u.y + k3 * u.x * u.y;
+  let dx = (k1 + k3 * u.y) * du.x;
+  let dy = (k2 + k3 * u.x) * du.y;
+  return vec3<f32>(val, dx, dy);
+}
+
+fn surf_noise(p: vec2<f32>) -> f32 {
+  return surf_noise_d(p).x;
 }
 
 @fragment
@@ -251,7 +267,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let sun_dir = normalize(cam.extra1.xyz);
   let sky_hor = cam.extra2.rgb;
 
-  let n = normalize(in.norm);
+  var n = normalize(in.norm);
   let view_v = cam.cam_pos.xyz - in.world_pos;
   let dist = length(view_v);
   let v = view_v / max(1e-4, dist);
@@ -259,19 +275,37 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
   let tag = in.surf_info.x;
   let emissive = in.surf_info.y;
+  let raw_h = in.surf_info.z;
 
-  // Fine procedural micro-regolith grain on natural terrain (crisp smooth metal/foil on vehicles!)
+  // Rotated tri-scale analytical C2 micro-normal relief + stratigraphic cliff banding on natural terrain!
   var base_col = in.albedo;
-  if (tag < 3.5 && tag != 2.0) {
-    let g1 = surf_noise(in.world_pos.xz * 0.72);
-    let g2 = surf_noise(in.world_pos.xz * 2.85 + vec2<f32>(11.3, -7.1));
-    let grain = 0.86 + 0.20 * g1 + 0.12 * g2;
-    base_col = base_col * grain;
+  if (tag < 3.5 && (tag < 1.5 || tag > 2.5)) {
+    let p_xz = in.world_pos.xz;
+    let rot1 = vec2<f32>(p_xz.x * 0.80 - p_xz.y * 0.60, p_xz.x * 0.60 + p_xz.y * 0.80);
+    let rot2 = vec2<f32>(p_xz.x * 0.36 + p_xz.y * 0.93, -p_xz.x * 0.93 + p_xz.y * 0.36);
+    let n1 = surf_noise_d(p_xz * 0.32);
+    let n2 = surf_noise_d(rot1 * 1.15 + vec2<f32>(11.3, -7.1));
+    let n3 = surf_noise_d(rot2 * 3.40 - vec2<f32>(5.7, 13.4));
+    // Transform rotated analytical gradients back into world XZ frame
+    let d2_x = n2.y * 0.80 + n2.z * 0.60;
+    let d2_z = -n2.y * 0.60 + n2.z * 0.80;
+    let d3_x = n3.y * 0.36 - n3.z * 0.93;
+    let d3_z = n3.y * 0.93 + n3.z * 0.36;
+    let bump_fade = 1.0 - smoothstep(14.0, 78.0, dist);
+    let bump_s = select(0.14, 0.08, tag > 0.5 && tag < 1.5) * bump_fade;
+    let gx = n1.y * 0.55 + d2_x * 0.32 + d3_x * 0.13;
+    let gz = n1.z * 0.55 + d2_z * 0.32 + d3_z * 0.13;
+    n = normalize(n - vec3<f32>(gx * bump_s, 0.0, gz * bump_s));
+    let grain = 0.87 + 0.14 * n1.x + 0.09 * n2.x + 0.05 * n3.x;
+    // Geological sedimentary / basaltic strata bands on steeper canyon/crater walls
+    let slope_w = smoothstep(0.12, 0.44, 1.0 - n.y);
+    let strata = 0.91 + 0.14 * sin(raw_h * 3.2 + n1.x * 2.4);
+    base_col = base_col * grain * mix(1.0, strata, slope_w * 0.72);
   }
 
   let ndl = max(0.0, dot(n, sun_dir));
   let ndv = max(0.0, dot(n, v));
-  let fresnel = pow(1.0 - ndv, 3.8);
+  let fresnel = pow(max(0.0, 1.0 - ndv), 3.8);
 
   // Hemispheric sky-bounce ambient (deep crisp shadows in vacuum; soft atmospheric scatter in dense air!)
   let hemi_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
@@ -282,7 +316,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   var lit = base_col * (amb_sky * amb_gain + sun_tint * (ndl * 1.18));
 
   if (tag > 1.5 && tag < 2.5) {
-    // Liquid ocean surface: non-orthogonal rotated multi-octave waves + crisp Fresnel sky reflection & sun specular glint!
+    // Liquid ocean surface: non-orthogonal rotated multi-octave waves + turquoise shallow glint + Fresnel sky reflection!
     let t = cam.cam_pos.w;
     let p_w = in.world_pos.xz;
     let ph1 = dot(p_w, vec2<f32>(0.86, 0.51)) * 0.72 + t * 1.9;
@@ -294,15 +328,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let nw = normalize(n + vec3<f32>(wx, 0.0, wz));
     let hw = normalize(sun_dir + v);
     let w_spec = pow(max(0.0, dot(nw, hw)), 84.0) * 1.35;
-    let w_fres = pow(1.0 - max(0.0, dot(nw, v)), 3.2);
-    lit = mix(lit, sky_hor * 0.95 + vec3<f32>(0.08, 0.16, 0.28), w_fres * 0.70) + sun_tint * w_spec;
+    let w_fres = pow(max(0.0, 1.0 - max(0.0, dot(nw, v))), 3.2);
+    let foam_n = surf_noise(p_w * 1.35 + vec2<f32>(t * 0.4, t * 0.25));
+    let foam = smoothstep(0.68, 0.92, foam_n + sin(ph1) * 0.14) * 0.16;
+    lit = mix(lit, sky_hor * 0.95 + vec3<f32>(0.08, 0.18, 0.30), w_fres * 0.70) + sun_tint * w_spec + vec3<f32>(0.85, 0.94, 0.98) * foam * ndl;
   } else if (tag > 3.5) {
-    // Metallic Rover & Drone hardware: crisp Blinn-Phong specular + rim edge highlight!
-    let m_spec = pow(max(0.0, dot(n, half_v)), 42.0) * 0.65;
-    lit = lit + sun_tint * m_spec + (sky_hor * 0.35 + vec3<f32>(0.12, 0.16, 0.22)) * fresnel * 0.45;
+    // Metallic Rover, Drone, & UFO hardware: crisp Blinn-Phong specular + rim edge highlight!
+    let m_spec = pow(max(0.0, dot(n, half_v)), 48.0) * 0.72;
+    lit = lit + sun_tint * m_spec + (sky_hor * 0.38 + vec3<f32>(0.14, 0.18, 0.24)) * fresnel * 0.48;
   } else {
     // Subtle mineral sheen on ice/basalt slopes
-    let r_spec = pow(max(0.0, dot(n, half_v)), 18.0) * select(0.08, 0.26, tag > 0.5 && tag < 1.5);
+    let r_spec = pow(max(0.0, dot(n, half_v)), 20.0) * select(0.08, 0.28, tag > 0.5 && tag < 1.5);
     lit = lit + sun_tint * r_spec;
   }
 
@@ -852,9 +888,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let tip_x = max(0.0, 1.0 - in.uv.x * in.uv.x);
     w = core_y * tip_x * 1.15;
   } else if (in.shape > 0.5) {
-    // Soft broad volumetric 3D cloud billow (zero bright pinpoint snowflake dots!)
-    let soft = max(0.0, 1.0 - r2);
-    w = soft * soft * 0.72;
+    // Sculpted volumetric 3D cloud billow: warm sunlit tops + cooler shaded underside + organic lobe edge!
+    let lobe = 0.88 + 0.12 * sin(in.uv.x * 5.2 + in.uv.y * 3.1) * cos(in.uv.y * 4.7 - in.uv.x * 2.4);
+    let soft = max(0.0, 1.0 - r2 * lobe);
+    w = soft * soft * 0.76;
+    let top_sun = clamp(in.uv.y * 0.45 + 0.62, 0.38, 1.14);
+    let cloud_tint = mix(vec3<f32>(0.72, 0.78, 0.88), vec3<f32>(1.06, 1.02, 0.96), clamp(in.uv.y * 0.5 + 0.5, 0.0, 1.0));
+    return vec4<f32>(in.color.rgb * cloud_tint * top_sun * w * in.color.a, in.color.a * w);
   } else {
     let core = exp(-6.2 * r2);
     let halo = exp(-2.2 * r2) * 0.28;
@@ -932,7 +972,7 @@ fn vs_main(
   // Compute approximate apparent radius in screen height fraction:
   let app_frac = radius / max(1e-5, dist * cam.cam_up.w);
   let min_glint_frac = select(0.0062, 0.013, kind == 0u);
-  let pinpoint_w = smoothstep(min_glint_frac * 2.2, min_glint_frac * 0.55, app_frac);
+  let pinpoint_w = 1.0 - smoothstep(min_glint_frac * 0.55, min_glint_frac * 2.2, app_frac);
   let min_world_half = dist * cam.cam_up.w * min_glint_frac;
 
   let base_inflate = radius * select(1.48, 1.24, dist > radius * 2.6);
@@ -1118,11 +1158,15 @@ fn fs_main(in: VsOut) -> FsOut {
 
   let view_dir = -rd;
   let ndv = max(0.0, dot(n_hit, view_dir));
-  let ndl = max(0.0, dot(n_hit, light_dir));
-  let soft_term = smoothstep(-0.08, 0.14, dot(n_hit, light_dir));
+  let raw_ndl = dot(n_hit, light_dir);
+  let ndl = max(0.0, raw_ndl);
+  let soft_term = smoothstep(-0.08, 0.14, raw_ndl);
+  // Warm golden-crimson Rayleigh/Mie sunset glow right along the day-night terminator on atmospheric worlds!
+  let term_d = (raw_ndl - 0.04) / 0.16;
+  let term_sunset = exp(-(term_d * term_d)) * in.color1.w;
   let half_v = normalize(light_dir + view_dir);
   let spec = pow(max(0.0, dot(n_hit, half_v)), 44.0);
-  let fresnel = pow(1.0 - ndv, 3.6);
+  let fresnel = pow(max(0.0, 1.0 - ndv), 3.6);
   let seed_v = vec3<f32>(in.params.w * 2.13, in.params.w * 1.47, in.params.w * 3.19);
 
   var col = vec3<f32>(0.8);
@@ -1159,12 +1203,21 @@ fn fs_main(in: VsOut) -> FsOut {
     let shade = 0.52 + 0.48 * max(0.25, dot(n_hit, normalize(vec3<f32>(0.55, 0.72, 0.45))));
     col = shell_col * shade;
   } else if (kind == 2u) {
-    // Banded Gas / Dense-Cloud World with live GPU zonal jets, lightning superbolts, & polar aurorae!
+    // Banded Gas / Dense-Cloud World with Kelvin-Helmholtz zonal eddies, anticyclonic storm ovals, lightning, & polar aurorae!
     let turb = fbm5(n_hit * 5.2 + seed_v);
-    let lat = n_hit.y * 16.0 + (turb - 0.5) * 3.0;
+    let kh_shear = fbm5(vec3<f32>(n_hit.x * 7.5 + turb * 0.9, n_hit.y * 28.0, n_hit.z * 7.5 - turb * 0.9) + seed_v);
+    let lat = n_hit.y * 16.5 + (turb - 0.5) * 3.2 + (kh_shear - 0.5) * 0.75;
     let band = 0.5 + 0.5 * sin(lat) * cos(lat * 0.45 + turb * 1.6);
     let fine_jet = fbm5(vec3<f32>(n_hit.x * 4.5, n_hit.y * 22.0, n_hit.z * 4.5) + seed_v);
-    var base = mix(in.color1.rgb * 0.82, in.color0.rgb * 1.08, clamp(0.18 + 0.58 * band + 0.26 * fine_jet, 0.0, 1.0));
+    var base = mix(in.color1.rgb * 0.78, in.color0.rgb * 1.10, clamp(0.16 + 0.56 * band + 0.28 * fine_jet, 0.0, 1.0));
+    // Subtle polar cool atmospheric darkening + anticyclonic storm oval vortex
+    let polar_haze = smoothstep(0.68, 0.96, abs(n_hit.y));
+    base = mix(base, in.color1.rgb * 0.68 + vec3<f32>(0.08, 0.12, 0.20), polar_haze * 0.45);
+    let spot_lon = atan2(n_hit.z, n_hit.x) - fract(in.params.w * 0.37) * 6.283 + 3.1415;
+    let spot_d = length(vec2<f32>(sin(spot_lon * 0.5) * 1.35, (n_hit.y + 0.34) * 3.4));
+    let spot_w = (1.0 - smoothstep(0.14, 0.34, spot_d)) * smoothstep(0.35, 0.75, in.color0.r);
+    let spot_swirl = 0.72 + 0.28 * sin(spot_d * 24.0 + turb * 5.0);
+    base = mix(base, mix(in.color0.rgb, vec3<f32>(0.92, 0.42, 0.22), 0.58) * spot_swirl, spot_w * 0.78);
     var em_fx = vec3<f32>(0.0);
     if (cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z))) {
       let av = sample_live_atmo_vis(n_hit, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
@@ -1178,21 +1231,25 @@ fn fs_main(in: VsOut) -> FsOut {
       em_fx = em_fx + mix(vec3<f32>(0.24, 0.78, 1.0), vec3<f32>(0.62, 0.36, 1.0), clamp(abs(n_hit.y), 0.0, 1.0)) * aur * (0.38 + 0.82 * (1.0 - ndl));
     }
     let atm = vec3<f32>(0.58, 0.76, 1.0) * fresnel * in.color1.w;
-    col = base * (0.04 + 0.98 * ndl) * soft_term + base * 0.03 + atm * (0.15 + 0.85 * ndl) + em_fx;
+    let sunset = vec3<f32>(0.95, 0.44, 0.16) * term_sunset * 0.14;
+    col = base * (0.04 + 0.98 * ndl) * soft_term + base * 0.03 + sunset + atm * (0.15 + 0.85 * ndl) + em_fx;
   } else if (kind == 1u || kind == 4u) {
-    // Photorealistic Terrestrial / Ocean / Mars / Mercury world with 5-octave FBM continents, relief, polar caps, & clouds
+    // Photorealistic Terrestrial / Ocean / Mars / Mercury world with 5-octave FBM continents, analytical micro-normal relief, bathymetry, polar caps, & sunset terminator!
     let elev = fbm5(n_hit * 3.4 + seed_v);
     let detail = fbm5(n_hit * 14.0 + seed_v * 1.7);
     let has_ocean = in.color1.b > in.color1.r + 0.14;
     var surf = in.color0.rgb;
     var water_spec = 0.0;
+    var bump_strength = 0.0;
 
     if (has_ocean) {
       let sea_lvl = 0.51;
       if (elev < sea_lvl) {
         let depth_f = clamp((sea_lvl - elev) / 0.26, 0.0, 1.0);
-        surf = mix(vec3<f32>(0.08, 0.42, 0.68), in.color1.rgb * 0.72, depth_f);
-        water_spec = spec * 0.68;
+        // Turquoise shallow continental shelf transitioning smoothly into deep sapphire abyss!
+        let shelf = mix(vec3<f32>(0.10, 0.62, 0.76), vec3<f32>(0.06, 0.36, 0.64), smoothstep(0.0, 0.22, depth_f));
+        surf = mix(shelf, in.color1.rgb * 0.68, smoothstep(0.16, 0.95, depth_f));
+        water_spec = spec * 0.74;
       } else {
         let h_land = clamp((elev - sea_lvl) / 0.32, 0.0, 1.0);
         let desert = vec3<f32>(0.68, 0.58, 0.38);
@@ -1201,22 +1258,40 @@ fn fs_main(in: VsOut) -> FsOut {
         surf = mix(in.color0.rgb * (0.75 + 0.45 * detail), desert, arid * 0.55);
         surf = mix(surf, mtn, smoothstep(0.42, 0.85, h_land));
         surf = mix(surf, vec3<f32>(0.92, 0.95, 0.98), smoothstep(0.76, 0.95, h_land));
+        bump_strength = 0.32 + 0.58 * h_land;
       }
       // Polar ice caps
       let polar = smoothstep(0.76, 0.90, abs(n_hit.y) + (detail - 0.5) * 0.14);
       surf = mix(surf, vec3<f32>(0.90, 0.94, 0.98), polar);
+      bump_strength = bump_strength * (1.0 - polar * 0.75);
     } else {
-      // Rocky / Mars / Mercury world with craters & dust basins
+      // Rocky / Mars / Mercury world with craters, highlands & dust basins
       let crater = smoothstep(0.32, 0.68, detail);
       surf = mix(in.color1.rgb, in.color0.rgb, clamp(elev * 1.15 - 0.1 + 0.25 * crater, 0.0, 1.0));
       let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + (detail - 0.5) * 0.08);
       surf = mix(surf, vec3<f32>(0.88, 0.90, 0.94), polar * select(0.0, 0.85, in.color1.w > 0.12));
+      bump_strength = 0.58;
+    }
+
+    // Analytical tangent-space FBM topographic relief normal for crisp sunlit mountain/crater shading!
+    var ndl_relief = ndl;
+    if (bump_strength > 0.01) {
+      let up_ref = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
+      let t1 = normalize(cross(up_ref, n_hit));
+      let t2 = cross(n_hit, t1);
+      let eps_b = 0.014;
+      let e1 = fbm5(normalize(n_hit + t1 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t1 * eps_b) * 14.0 + seed_v * 1.7);
+      let e2 = fbm5(normalize(n_hit + t2 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t2 * eps_b) * 14.0 + seed_v * 1.7);
+      let e0 = elev + 0.24 * detail;
+      let n_relief = normalize(n_hit + (t1 * (e0 - e1) + t2 * (e0 - e2)) * (bump_strength * 5.2));
+      ndl_relief = max(0.0, dot(n_relief, light_dir));
     }
 
     // Live zero-copy GPU baroclinic clouds, billowing dust storms, Paschen lightning, & polar aurorae!
     let live_atmo = cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z));
     var em_lightning = vec3<f32>(0.0);
     var em_aurora = vec3<f32>(0.0);
+    var cloud_cover = 0.0;
     if (live_atmo) {
       let av = sample_live_atmo_vis(n_hit, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
       // Advect fine wispy 3D FBM cloud micro-structure onto the live GPU baroclinic cloud field
@@ -1227,6 +1302,7 @@ fn fs_main(in: VsOut) -> FsOut {
       let cloud_wisp = clamp(wisp1 * 0.68 + wisp2 * 0.42, 0.0, 1.0);
       let cloud_raw = av.x * (0.55 + 0.85 * cloud_wisp);
       let cloud_d = smoothstep(0.18, 0.72, cloud_raw) * 0.88;
+      cloud_cover = cloud_d;
       // Subtle 3D cloud drop-shadow cast onto ocean & continents directly away from host-star light_dir!
       let n_sh = normalize(n_hit + light_dir * 0.018);
       let av_sh = sample_live_atmo_vis(n_sh, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
@@ -1249,17 +1325,27 @@ fn fs_main(in: VsOut) -> FsOut {
     } else if (in.color1.w > 0.45) {
       let c_raw = fbm5(n_hit * 4.8 + vec3<f32>(cam.cam_pos.w * 0.012, 2.4, -1.9) + seed_v);
       let cloud = smoothstep(0.52, 0.74, c_raw) * 0.78;
+      cloud_cover = cloud;
       surf = mix(surf, vec3<f32>(0.95, 0.97, 1.0), cloud);
       water_spec = water_spec * (1.0 - cloud);
     }
 
-    let rayleigh = mix(vec3<f32>(0.76, 0.52, 0.34), vec3<f32>(0.32, 0.68, 1.0), select(0.25, 1.0, has_ocean));
-    let atm = rayleigh * fresnel * in.color1.w * 0.95;
-    col = surf * (0.03 + 0.98 * ndl) * soft_term + surf * 0.03 + vec3<f32>(1.0, 0.96, 0.88) * water_spec * ndl + atm * (0.14 + 0.86 * ndl) + em_lightning + em_aurora;
+    let ndl_eff = mix(ndl_relief, ndl, cloud_cover * 0.85);
+    let rayleigh = mix(vec3<f32>(0.78, 0.50, 0.30), vec3<f32>(0.30, 0.68, 1.0), select(0.25, 1.0, has_ocean));
+    let atm = rayleigh * fresnel * in.color1.w * 0.98;
+    let sunset = mix(vec3<f32>(0.98, 0.44, 0.14), vec3<f32>(1.0, 0.52, 0.18), select(0.0, 1.0, has_ocean)) * term_sunset * (0.16 + 0.24 * cloud_cover + 0.25 * fresnel);
+    col = surf * (0.03 + 0.98 * ndl_eff) * soft_term + surf * 0.03 + sunset + vec3<f32>(1.0, 0.96, 0.88) * water_spec * ndl + atm * (0.14 + 0.86 * ndl) + em_lightning + em_aurora;
   } else if (kind == 3u) {
-    // Cratered Moon / Icy World / Ice Giant (live GPU clouds/lightning/aurora if atmosphere active!)
+    // Cratered Moon / Icy World / Ice Giant with analytical crater-rim micro-relief!
     let n1 = fbm5(n_hit * 6.0 + seed_v);
     let n2 = fbm5(n_hit * 18.0 - seed_v);
+    let up_r3 = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
+    let t1_3 = normalize(cross(up_r3, n_hit));
+    let t2_3 = cross(n_hit, t1_3);
+    let c_x = fbm5(normalize(n_hit + t1_3 * 0.012) * 18.0 - seed_v);
+    let c_y = fbm5(normalize(n_hit + t2_3 * 0.012) * 18.0 - seed_v);
+    let n_crater = normalize(n_hit + (t1_3 * (n2 - c_x) + t2_3 * (n2 - c_y)) * 2.4);
+    let ndl_c = max(0.0, dot(n_crater, light_dir));
     var base = mix(in.color1.rgb, in.color0.rgb, clamp(0.2 + 0.7 * n1 + 0.25 * n2, 0.0, 1.0));
     var em_ice = vec3<f32>(0.0);
     if (cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z))) {
@@ -1270,12 +1356,12 @@ fn fs_main(in: VsOut) -> FsOut {
       em_ice = em_ice + vec3<f32>(0.24, 0.96, 0.72) * clamp(av.w, 0.0, 1.4) * (0.42 + 0.85 * (1.0 - ndl));
     }
     let atm = vec3<f32>(0.42, 0.76, 1.0) * fresnel * in.color1.w;
-    col = base * (0.04 + 0.96 * ndl) * soft_term + base * 0.03 + vec3<f32>(1.0) * spec * 0.16 * ndl + atm * (0.15 + 0.85 * ndl) + em_ice;
+    col = base * (0.04 + 0.96 * ndl_c) * soft_term + base * 0.03 + vec3<f32>(1.0) * spec * 0.16 * ndl + atm * (0.15 + 0.85 * ndl) + em_ice;
   } else if (kind == 5u) {
     // Event horizon shadow OR glowing atomic nucleus pin
     let is_black_hole = dot(in.color0.rgb, in.color0.rgb) < 0.001;
     if (is_black_hole) {
-      let photon_rim = pow(1.0 - ndv, 4.8);
+      let photon_rim = pow(max(0.0, 1.0 - ndv), 4.8);
       col = vec3<f32>(1.0, 0.88, 0.64) * photon_rim * 1.4;
     } else {
       let base = mix(in.color0.rgb, in.color1.rgb, 0.25 + 0.45 * fresnel);
@@ -1394,7 +1480,7 @@ fn fs_main(in: VsOut) -> FsOut {
   let ndl = max(0.0, dot(n, light));
   let ndl2 = max(0.0, dot(n, light2));
   let spec = pow(max(0.0, dot(n, normalize(light + view))), 52.0);
-  let rim = pow(1.0 - max(0.0, dot(n, view)), 3.0);
+  let rim = pow(max(0.0, 1.0 - max(0.0, dot(n, view))), 3.0);
   let col = in.tint * (0.20 + 0.78 * ndl + 0.18 * ndl2) + vec3<f32>(1.0, 0.98, 0.94) * spec * 0.68 + in.tint * rim * 0.24;
   let clip = cam.view_proj * vec4<f32>(in.center + p_hit, 1.0);
   var out: FsOut;
@@ -1485,8 +1571,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   } else {
     // Saturn Cassini-division ring system
     let u = clamp((r - in.r_in) / max(1e-4, in.r_out - in.r_in), 0.0, 1.0);
-    let cassini = 1.0 - 0.88 * exp(-pow((u - 0.60) * 32.0, 2.0));
-    let encke = 1.0 - 0.60 * exp(-pow((u - 0.88) * 55.0, 2.0));
+    let c_x = (u - 0.60) * 32.0;
+    let e_x = (u - 0.88) * 55.0;
+    let cassini = 1.0 - 0.88 * exp(-(c_x * c_x));
+    let encke = 1.0 - 0.60 * exp(-(e_x * e_x));
     let ringlets = 0.72 + 0.28 * sin(u * 76.0) * cos(u * 27.0);
     let fade = smoothstep(0.0, 0.08, u) * (1.0 - smoothstep(0.92, 1.0, u));
     let alpha = clamp(fade * cassini * encke * ringlets * 0.74, 0.0, 0.86);
@@ -1615,7 +1703,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Translucent Woods-Saxon potential aura + bright neutron-skin edge + emerald TDSE tunneling shell
     let edge_shell = dens * (1.0 - dens) * 4.0;
     let skin_col = mix(vec3<f32>(1.0, 0.45, 0.16), vec3<f32>(0.18, 0.84, 1.0), clamp((rho_n - rho_p) * 4.8 + 0.45, 0.0, 1.0));
-    let tdse_ring = exp(-pow((rr - tdse_crest_r) * 20.0, 2.0)) * (0.25 + 0.85 * clamp(tdse_tun * 5.0, 0.0, 1.0));
+    let tdse_x = (rr - tdse_crest_r) * 20.0;
+    let tdse_ring = exp(-(tdse_x * tdse_x)) * (0.25 + 0.85 * clamp(tdse_tun * 5.0, 0.0, 1.0));
     let shell_col = vec3<f32>(0.24, 1.0, 0.72);
 
     let sigma = (edge_shell * 0.55 + tdse_ring * 0.65) * dt;
@@ -1698,7 +1787,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let deflect = (u.bh_strength / max(r2 + rs * rs * 0.75, 0.0005)) * falloff;
     let dir_uv = vec2<f32>(d_aspect.x / aspect, d_aspect.y) / max(r, 1e-4);
     uv = clamp(uv - dir_uv * min(0.095, deflect * 0.11), vec2<f32>(0.001), vec2<f32>(0.999));
-    let ring = exp(-pow((r - rs * 1.16) / max(0.005, rs * 0.22), 2.0)) * 0.48;
+    let ring_x = (r - rs * 1.16) / max(0.005, rs * 0.22);
+    let ring = exp(-(ring_x * ring_x)) * 0.48;
     photon_glow = vec3<f32>(1.0, 0.86, 0.64) * ring;
   }
 
@@ -1742,26 +1832,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 export function createUlgUniversesRenderer(device, canvas) {
   const ctx = canvas.getContext('webgpu');
   if (!ctx) throw new Error('WebGPU canvas context unavailable');
-  const presentFormat = navigator.gpu.getPreferredCanvasFormat();
-
-  function configureSwapchain() {
-    const configs = [
-      { device, format: presentFormat, alphaMode: 'opaque', usage: 0x10 | 0x01 },
-      { device, format: presentFormat, alphaMode: 'opaque' },
-      { device, format: presentFormat, alphaMode: 'premultiplied' }
-    ];
-    let lastErr = null;
-    for (const cfg of configs) {
-      try {
-        ctx.configure(cfg);
-        return;
-      } catch (err) {
-        lastErr = err;
-      }
-    }
-    if (lastErr) throw lastErr;
-  }
-  configureSwapchain();
+  const { format: presentFormat } = configureCompatibleWebGpuCanvas(ctx, device, { preferCopySrc: true });
 
   const sceneFormat = 'rgba16float';
   const depthFormat = 'depth24plus';
@@ -2091,7 +2162,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     if (sceneTex && width === nw && height === nh) return;
     width = nw;
     height = nh;
-    configureSwapchain();
+    configureCompatibleWebGpuCanvas(ctx, device, { preferCopySrc: true });
     sceneTex?.destroy();
     depthTex?.destroy();
     sceneTex = device.createTexture({

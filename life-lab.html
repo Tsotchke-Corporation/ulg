@@ -138,14 +138,14 @@
       .pick-card-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 800; color: #facc15; }
       .pick-card-meta { font-family: ui-monospace, monospace; font-size: 10px; color: #e2e8f0; line-height: 1.4; }
       .hud-top-left {
-        position: absolute; top: 10px; left: 10px; max-width: 400px; pointer-events: none;
+        position: absolute; top: 10px; left: 10px; max-width: 400px; pointer-events: none; z-index: 16;
         background: rgba(6, 14, 22, 0.82); border: 1px solid rgba(52, 211, 153, 0.30);
         border-radius: 8px; padding: 7px 10px; backdrop-filter: blur(8px);
       }
       .hud-title { font-size: 12px; font-weight: 800; color: #fff; margin: 0 0 2px; }
       .hud-sub { font-size: 10.5px; color: var(--muted); line-height: 1.35; margin: 0; }
       .hud-bottom {
-        position: absolute; bottom: 10px; left: 10px; right: 10px;
+        position: absolute; bottom: 10px; left: 10px; right: 10px; z-index: 16;
         display: flex; align-items: center; justify-content: space-between; gap: 8px; pointer-events: none;
       }
       .hud-badge-bar { display: flex; gap: 6px; flex-wrap: wrap; pointer-events: auto; }
@@ -354,6 +354,12 @@
           <h3><span>Biopolymer Folding Controls</span><span>Node #21</span></h3>
           <div class="ctrl-row">
             <div class="ctrl-head"><span>Monomer Sequence (H / P / + / −)</span><b id="val-fold-len">36-mer</b></div>
+            <div class="btn-row" id="fold-preset-row" style="margin-bottom:3px;">
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-fold-seq="HPPHH+PHHPPHH-PHPPPHHPPHH+PHHPPHH-PP" type="button">α-Helix</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-fold-seq="HPHPHPHPPPPP+PHPHPHPH-PPPPPH" type="button">β-Hairpin</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-fold-seq="HH++PHHPHH--PHH++PHHPHH--PHH" type="button">Salt-Bridge</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-fold-seq="PP+PP-PP+PP-PP+PP-PP+PP-PP+P" type="button" title="Intrinsically Disordered Protein (polar/charged coil)">IDP Coil</button>
+            </div>
             <input id="inp-seq" class="seq-input" type="text" value="HPPHH+PHHPPHH-PHPPPHHPPHH+PHHPPHH-PP" />
             <button class="sm-btn" id="btn-apply-seq" type="button" style="margin-top:4px;">Apply Custom Sequence</button>
           </div>
@@ -445,8 +451,11 @@
         </div>
 
         <div class="card">
+          <h3><span>Session &amp; Data Export (COPASI/VMD)</span><span>Live</span></h3>
           <div class="btn-row">
             <button id="btn-play" class="sm-btn" type="button">⏸ Pause</button>
+            <button id="btn-export-csv" class="sm-btn" type="button" title="Download recorded live trajectory metrics as .CSV">⬇ .CSV</button>
+            <button id="btn-export-xyz" class="sm-btn" type="button" title="Download live 3D coarse-grained coordinates as .XYZ">⬇ .XYZ</button>
           </div>
         </div>
       </aside>
@@ -487,7 +496,13 @@
           <canvas id="plot2" class="plot-canvas" width="296" height="118"></canvas>
         </div>
         <div class="plot-card">
-          <div class="plot-head"><span id="p3-title">Thermodynamic Curve</span><span id="p3-sub">live</span></div>
+          <div class="plot-head" style="gap:6px;">
+            <span id="p3-title" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Thermodynamic Curve</span>
+            <span style="display:flex;align-items:center;gap:5px;flex:0 0 auto;white-space:nowrap;">
+              <button id="btn-p3-alt" class="sm-btn" style="display:none;flex:0 0 auto;min-width:0;padding:2px 6px;font-size:9px;white-space:nowrap;" type="button">🗺 Map</button>
+              <span id="p3-sub" style="white-space:nowrap;">live</span>
+            </span>
+          </div>
           <canvas id="plot3" class="plot-canvas" width="296" height="118"></canvas>
         </div>
         <div class="card">

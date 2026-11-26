@@ -127,7 +127,7 @@ fn srgb_encode(c: f32) -> f32 {
   if (x <= 0.0031308) {
     return 12.92 * x;
   }
-  return 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+  return 1.055 * pow(max(0.0, x), 1.0 / 2.4) - 0.055;
 }
 
 fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {

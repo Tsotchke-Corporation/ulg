@@ -26,8 +26,133 @@ import {
 import { resolveActiveUniversalLaws } from '../runtime/universalLawGraph.js';
 import { GPU_PICK_LAYOUT, createGpuEntityPickerWebGpu } from '../runtime/gpuMath/gpuEntityPickerWebGpu.js';
 import { createTargetOrbitControls } from '../runtime/shared/targetOrbitControls.js';
+import { requestCompatibleWebGpuDevice } from '../runtime/shared/webgpuCompat.js';
 import { createChemBioWebGpuRenderer } from './chemBioWebGpuRenderer.js';
 import { LIFE_LAB_ABOUT_ULG, LIFE_MODE_DOCS } from './lifeLabDocs.js';
+
+function triggerLifeDownload(filename, text, mime = 'text/plain;charset=utf-8') {
+  try {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch {}
+}
+
+function drawContactMapPlot(canvas, coordsF32, nRes, seqStr = '') {
+  if (!canvas) return { contactCount: 0, longRangeContacts: 0, nRes: 0 };
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#040910';
+  ctx.fillRect(0, 0, w, h);
+  if (!coordsF32 || nRes < 2) {
+    ctx.fillStyle = '#8cb2ab';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText('Sampling live GPU residue contacts…', 24, h * 0.5);
+    return { contactCount: 0, longRangeContacts: 0, nRes: 0 };
+  }
+  const sz = Math.min(w - 92, h - 14);
+  const ox = 16;
+  const oy = Math.floor((h - sz) * 0.5);
+  const cell = sz / nRes;
+  let contactCount = 0;
+  let longRangeContacts = 0;
+  const cutoffA = 3.8;
+  for (let i = 0; i < nRes; i += 1) {
+    const xi = coordsF32[i * 12 + 0];
+    const yi = coordsF32[i * 12 + 1];
+    const zi = coordsF32[i * 12 + 2];
+    for (let j = i; j < nRes; j += 1) {
+      const dx = xi - coordsF32[j * 12 + 0];
+      const dy = yi - coordsF32[j * 12 + 1];
+      const dz = zi - coordsF32[j * 12 + 2];
+      const d = Math.hypot(dx, dy, dz);
+      const sep = j - i;
+      if (sep === 0) {
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.35)';
+      } else if (d < cutoffA) {
+        if (sep >= 3) {
+          contactCount += 1;
+          if (sep >= 6) longRangeContacts += 1;
+        }
+        const t = Math.max(0, Math.min(1, 1 - d / cutoffA));
+        ctx.fillStyle = sep >= 6
+          ? `rgba(250, 204, 21, ${(0.45 + 0.55 * t).toFixed(2)})` // Long-range tertiary contact (gold!)
+          : (sep >= 3 ? `rgba(52, 211, 153, ${(0.40 + 0.58 * t).toFixed(2)})` : `rgba(86, 194, 255, ${(0.25 + 0.45 * t).toFixed(2)})`);
+      } else if (d < cutoffA * 1.55) {
+        ctx.fillStyle = 'rgba(30, 58, 92, 0.28)';
+      } else {
+        continue;
+      }
+      ctx.fillRect(ox + j * cell, oy + i * cell, Math.max(1.2, cell), Math.max(1.2, cell));
+      if (i !== j) ctx.fillRect(ox + i * cell, oy + j * cell, Math.max(1.2, cell), Math.max(1.2, cell));
+    }
+  }
+  ctx.strokeStyle = 'rgba(52, 211, 153, 0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(ox, oy, sz, sz);
+  // Right-side contact-map legend
+  const lx = ox + sz + 10;
+  ctx.font = 'bold 9.5px ui-monospace, monospace';
+  ctx.fillStyle = '#34d399';
+  ctx.fillText(`N=${nRes} (${seqStr.length || nRes}m)`, lx, oy + 12);
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.fillStyle = '#facc15';
+  ctx.fillText(`■ |i-j|≥6: ${longRangeContacts}`, lx, oy + 32);
+  ctx.fillStyle = '#34d399';
+  ctx.fillText(`■ Local: ${Math.max(0, contactCount - longRangeContacts)}`, lx, oy + 48);
+  ctx.fillStyle = '#8cb2ab';
+  ctx.fillText(`r < ${cutoffA.toFixed(1)} Å`, lx, oy + 66);
+  ctx.fillText('Live GPU Map', lx, oy + 82);
+  return { contactCount, longRangeContacts, nRes };
+}
+
+function drawPhasePortraitPlot(canvas, traceMv = []) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#040910';
+  ctx.fillRect(0, 0, w, h);
+  const padL = 34; const padR = 10; const padT = 10; const padB = 20;
+  const pw = w - padL - padR; const ph = h - padT - padB;
+  const mapX = (v) => padL + ((v + 85) / 135) * pw;
+  const mapY = (dv) => padT + ph - ((dv + 45) / 90) * ph;
+  ctx.strokeStyle = 'rgba(52,211,153,0.16)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(padL, padT, pw, ph);
+  ctx.beginPath(); ctx.moveTo(padL, mapY(0)); ctx.lineTo(w - padR, mapY(0)); ctx.stroke();
+  if (traceMv.length >= 3) {
+    ctx.strokeStyle = '#56c2ff';
+    ctx.lineWidth = 1.9;
+    ctx.beginPath();
+    for (let i = 1; i < traceMv.length; i += 1) {
+      const v = traceMv[i];
+      const dv = Math.max(-44, Math.min(44, (traceMv[i] - traceMv[i - 1]) * 3.0));
+      const px = Math.max(padL, Math.min(w - padR, mapX(v)));
+      const py = Math.max(padT, Math.min(padT + ph, mapY(dv)));
+      if (i === 1) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    const lastV = traceMv[traceMv.length - 1];
+    const lastDv = Math.max(-44, Math.min(44, (lastV - traceMv[traceMv.length - 2]) * 3.0));
+    ctx.fillStyle = '#facc15';
+    ctx.beginPath(); ctx.arc(mapX(lastV), mapY(lastDv), 3.2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = '#8cb2ab';
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.fillText('+dV', 4, padT + 8);
+  ctx.fillText('-dV', 4, padT + ph);
+  ctx.fillText('HH Phase Portrait: V_m vs dV_m/dt', padL + 16, h - 5);
+}
 
 function layerForMode(modeId) {
   if (modeId === 'lipid-soup' || modeId === 'protocell-vesicle' || modeId === 'lipid-bilayer') return 'membrane';
@@ -94,15 +219,7 @@ function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = n
 }
 
 export async function mountLifeLabDemo() {
-  if (!navigator.gpu) throw new Error('WebGPU is not available in this browser.');
-  let adapter = null;
-  for (let i = 0; i < 6 && !adapter; i += 1) {
-    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!adapter) throw new Error('No WebGPU GPUAdapter available.');
-  const device = await adapter.requestDevice();
+  const { device } = await requestCompatibleWebGpuDevice({ label: 'ulg-life-lab' });
   const gpuErrors = [];
   device.addEventListener?.('uncapturederror', (ev) => {
     gpuErrors.push(String(ev?.error?.message || ev?.error || 'uncaptured-webgpu-error').slice(0, 240));
@@ -152,8 +269,46 @@ export async function mountLifeLabDemo() {
   let histA = [];
   let histB = [];
   let histC = [];
+  let csvRows = []; // Recorded live scientist time-series trajectory rows!
+  let foldShowContactMap = true;
+  let hhShowPhasePortrait = false;
+  let lastFoldCoordsF32 = null;
+  let lastContactMapStats = { contactCount: 0, longRangeContacts: 0, nRes: 0 };
+  let readbackStagingBuf = null;
+  let readbackStagingBytes = 0;
+  let readbackBusy = false;
   const startTimeMs = performance.now();
   let orbitControls = null;
+
+  async function readResidentFloats(srcBuf, floatCount) {
+    if (!srcBuf || floatCount <= 0 || disposed || readbackBusy) return null;
+    const byteLen = Math.ceil((floatCount * 4) / 4) * 4;
+    readbackBusy = true;
+    try {
+      if (!readbackStagingBuf || readbackStagingBytes < byteLen) {
+        if (readbackStagingBuf) try { readbackStagingBuf.destroy(); } catch {}
+        readbackStagingBytes = Math.max(byteLen, 4096);
+        readbackStagingBuf = device.createBuffer({
+          label: 'ulg-life-export-readback',
+          size: readbackStagingBytes,
+          usage: 0x0001 | 0x0008 // MAP_READ | COPY_DST
+        });
+      }
+      if (readbackStagingBuf.mapState !== 'unmapped') return null;
+      const enc = device.createCommandEncoder({ label: 'ulg-life-readback' });
+      enc.copyBufferToBuffer(srcBuf, 0, readbackStagingBuf, 0, byteLen);
+      device.queue.submit([enc.finish()]);
+      await readbackStagingBuf.mapAsync(0x0001);
+      if (disposed) return null;
+      const copy = new Float32Array(readbackStagingBuf.getMappedRange(0, byteLen)).slice();
+      try { readbackStagingBuf.unmap(); } catch {}
+      return copy;
+    } catch {
+      return null;
+    } finally {
+      readbackBusy = false;
+    }
+  }
 
   function applySimSpeed(next) {
     simSpeed = Math.max(0.05, Math.min(2.0, Math.round((Number(next) || 0.30) * 20) / 20));
@@ -229,6 +384,8 @@ export async function mountLifeLabDemo() {
         series: [{ pts: histB.map((v, i) => [i, v]), color: '#56c2ff', width: 2.0 }],
         hZero: true, labelX: 'Orientation Order'
       });
+      const p3AltBtn = el('btn-p3-alt');
+      if (p3AltBtn) p3AltBtn.style.display = 'none';
       el('p3-title').textContent = 'Self-Assembly vs ε_hp';
       el('p3-sub').textContent = `ε_hp=${params.memEpsHp.toFixed(2)}`;
       drawLinePlot(plot3, {
@@ -261,19 +418,30 @@ export async function mountLifeLabDemo() {
         series: [{ pts: histB.map((v, i) => [i, Math.log10(Math.max(1, v))]), color: '#facc15', width: 2.1 }],
         labelX: 'Eyring Preorganization'
       });
-      el('p3-title').textContent = 'Thermal Denaturation Curve';
-      el('p3-sub').textContent = `T=${Math.round(params.foldTempK)} K`;
-      drawLinePlot(plot3, {
-        xMin: 100, xMax: 850, yMin: 0, yMax: 1.05,
-        series: [{
-          pts: Array.from({ length: 31 }, (_, i) => {
-            const tk = 100 + i * 25;
-            return [tk, 1 / (1 + Math.exp((tk - 470) / 55))];
-          }),
-          color: '#fb7185', width: 2.0
-        }],
-        vMarker: params.foldTempK, labelX: 'Temperature T (K)'
-      });
+      const p3AltBtn = el('btn-p3-alt');
+      if (p3AltBtn) {
+        p3AltBtn.style.display = 'inline-flex';
+        p3AltBtn.textContent = foldShowContactMap ? '📈 Melt' : '🗺 Map';
+      }
+      if (foldShowContactMap) {
+        el('p3-title').textContent = '2D Contact Map';
+        lastContactMapStats = drawContactMapPlot(plot3, lastFoldCoordsF32, activeSession.residueCount, params.foldSeq);
+        el('p3-sub').textContent = `${lastContactMapStats.contactCount} hits`;
+      } else {
+        el('p3-title').textContent = 'Thermal Melt Curve';
+        el('p3-sub').textContent = `T=${Math.round(params.foldTempK)} K`;
+        drawLinePlot(plot3, {
+          xMin: 100, xMax: 850, yMin: 0, yMax: 1.05,
+          series: [{
+            pts: Array.from({ length: 31 }, (_, i) => {
+              const tk = 100 + i * 25;
+              return [tk, 1 / (1 + Math.exp((tk - 470) / 55))];
+            }),
+            color: '#fb7185', width: 2.0
+          }],
+          vMarker: params.foldTempK, labelX: 'Temperature T (K)'
+        });
+      }
     } else if (currentLayer === 'evo') {
       const melt = evaluateDuplexMeltingCurve({ lengthL: 16, strongPairFraction: params.evoStrongFrac });
       el('st-m1-lbl').textContent = 'Identity';
@@ -303,6 +471,8 @@ export async function mountLifeLabDemo() {
         series: [{ pts: idHist.map((v, i) => [i, v]), color: '#34d399', width: 2.1 }],
         labelX: 'Generations'
       });
+      const p3AltBtn = el('btn-p3-alt');
+      if (p3AltBtn) p3AltBtn.style.display = 'none';
       el('p3-title').textContent = 'Eigen Error Threshold μ_crit';
       el('p3-sub').textContent = `μ=${params.evoMu.toFixed(3)}`;
       drawLinePlot(plot3, {
@@ -356,20 +526,31 @@ export async function mountLifeLabDemo() {
         }],
         vMarker: params.hhGNa, hZero: true, labelX: 'g_Na (mS/cm²)'
       });
-      el('p3-title').textContent = 'Mitchell Chemiosmotic ATP Flux';
-      el('p3-sub').textContent = `J=${chem.atpSynthesisFlux.toFixed(1)}`;
-      drawLinePlot(plot3, {
-        xMin: 0, xMax: 320, yMin: 0, yMax: 120,
-        series: [{
-          pts: Array.from({ length: 33 }, (_, i) => {
-            const pmf = i * 10;
-            const c = evaluateChemiosmoticBioenergetics({ deltaPsiMv: pmf, deltaPh: 0, uncouplerLeak: 0 });
-            return [pmf, c.atpSynthesisFlux];
-          }),
-          color: '#34d399', width: 2.1
-        }],
-        vMarker: chem.protonMotiveForceMv, labelX: 'Proton-Motive Force Δp (mV)'
-      });
+      const p3AltBtn = el('btn-p3-alt');
+      if (p3AltBtn) {
+        p3AltBtn.style.display = 'inline-flex';
+        p3AltBtn.textContent = hhShowPhasePortrait ? '⚡ ATP' : '🔄 Phase';
+      }
+      if (hhShowPhasePortrait) {
+        el('p3-title').textContent = 'HH Phase Portrait';
+        el('p3-sub').textContent = `${t.probeVoltageMv.toFixed(1)} mV`;
+        drawPhasePortraitPlot(plot3, vt);
+      } else {
+        el('p3-title').textContent = 'Mitchell ATP Flux';
+        el('p3-sub').textContent = `J=${chem.atpSynthesisFlux.toFixed(1)}`;
+        drawLinePlot(plot3, {
+          xMin: 0, xMax: 320, yMin: 0, yMax: 120,
+          series: [{
+            pts: Array.from({ length: 33 }, (_, i) => {
+              const pmf = i * 10;
+              const c = evaluateChemiosmoticBioenergetics({ deltaPsiMv: pmf, deltaPh: 0, uncouplerLeak: 0 });
+              return [pmf, c.atpSynthesisFlux];
+            }),
+            color: '#34d399', width: 2.1
+          }],
+          vMarker: chem.protonMotiveForceMv, labelX: 'Proton-Motive Force Δp (mV)'
+        });
+      }
     } else {
       el('st-m1-lbl').textContent = 'Turing σ_v';
       el('st-m1-val').textContent = t.turingPatternStd.toFixed(3);
@@ -395,6 +576,8 @@ export async function mountLifeLabDemo() {
         series: [{ pts: histB.map((v, i) => [i, v]), color: '#facc15', width: 2.1 }],
         labelX: 'Enrichment (<v>_ag / <v>)'
       });
+      const p3AltBtn = el('btn-p3-alt');
+      if (p3AltBtn) p3AltBtn.style.display = 'none';
       el('p3-title').textContent = 'Active Gain Response';
       el('p3-sub').textContent = `gain=${params.morphChemo.toFixed(1)}`;
       drawLinePlot(plot3, {
@@ -412,7 +595,7 @@ export async function mountLifeLabDemo() {
     pickedEntity = null;
     el('pick-card')?.classList.remove('open');
     if (el('pick-reticle')) el('pick-reticle').style.display = 'none';
-    histA = []; histB = []; histC = [];
+    histA = []; histB = []; histC = []; csvRows = []; lastFoldCoordsF32 = null;
 
     document.querySelectorAll('.mode-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.mode === modeId));
     for (const id of ['ctrl-membrane', 'ctrl-fold', 'ctrl-evo', 'ctrl-hh', 'ctrl-morph']) {
@@ -445,6 +628,7 @@ export async function mountLifeLabDemo() {
         epsHBond: params.foldEpsHb
       });
       await activeSession.step({ dt: 0.014, substeps: 14, readTelemetry: true });
+      lastFoldCoordsF32 = await readResidentFloats(activeSession.getResidentResiduesBuffer(), activeSession.residueCount * 12);
     } else if (currentLayer === 'evo') {
       activeSession = createTemplateReplicationSessionWebGpu(device, {
         populationCount: 1024,
@@ -557,21 +741,40 @@ export async function mountLifeLabDemo() {
       const dtScale = useSpeed ? Math.max(0.2, Math.min(1.0, spd * 1.4)) : 1.0;
       if (currentLayer === 'membrane') {
         tel = await activeSession.step({ dt: 0.015 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(4 * spd)) : 4, readTelemetry: doRead });
-        if (doRead) { histA.push(tel.meanTailCoordination); histB.push(tel.radialHeadOrder); }
+        if (doRead) {
+          histA.push(tel.meanTailCoordination); histB.push(tel.radialHeadOrder);
+          csvRows.push([tel.stepIndex, tel.meanTailCoordination.toFixed(4), tel.radialHeadOrder.toFixed(4), tel.meanRadius.toFixed(4)]);
+        }
       } else if (currentLayer === 'fold') {
         tel = await activeSession.step({ dt: 0.014 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(5 * spd)) : 5, readTelemetry: doRead });
-        if (doRead) { histA.push(tel.radiusOfGyrationA); histB.push(tel.catalyticRateBoost); }
+        if (doRead) {
+          histA.push(tel.radiusOfGyrationA); histB.push(tel.catalyticRateBoost);
+          csvRows.push([tel.stepIndex, tel.radiusOfGyrationA.toFixed(4), tel.catalyticRateBoost.toFixed(4), tel.hydrophobicContacts]);
+          if (foldShowContactMap) {
+            lastFoldCoordsF32 = await readResidentFloats(activeSession.getResidentResiduesBuffer(), activeSession.residueCount * 12);
+          }
+        }
       } else if (currentLayer === 'evo') {
         tel = await activeSession.step({ substeps: useSpeed ? Math.max(1, Math.round(2 * spd)) : 2, readTelemetry: doRead });
-        if (doRead) { histA.push(tel.meanSequenceIdentity); histB.push(tel.quasispeciesFraction); }
+        if (doRead) {
+          histA.push(tel.meanSequenceIdentity); histB.push(tel.quasispeciesFraction);
+          csvRows.push([tel.stepIndex, tel.meanSequenceIdentity.toFixed(4), tel.quasispeciesFraction.toFixed(4), params.evoMu.toFixed(4)]);
+        }
       } else if (currentLayer === 'hh') {
         tel = await activeSession.step({ dt: 0.025 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(10 * spd)) : 10, readTelemetry: doRead });
+        if (doRead) {
+          csvRows.push([tel.stepIndex, tel.probeVoltageMv.toFixed(3), tel.maxVoltageMv.toFixed(3), params.hhGNa.toFixed(1)]);
+        }
       } else {
         tel = await activeSession.step({ substeps: useSpeed ? Math.max(1, Math.round(10 * spd)) : 10, readTelemetry: doRead });
-        if (doRead) { histA.push(tel.turingPatternStd); histB.push(tel.chemotacticEnrichment); }
+        if (doRead) {
+          histA.push(tel.turingPatternStd); histB.push(tel.chemotacticEnrichment);
+          csvRows.push([tel.stepIndex, tel.turingPatternStd.toFixed(5), tel.chemotacticEnrichment.toFixed(4), tel.meanAgentSpeed.toFixed(4)]);
+        }
       }
       if (histA.length > 96) histA.shift();
       if (histB.length > 96) histB.shift();
+      if (csvRows.length > 2000) csvRows.shift();
       if (doRead) updatePlotsAndHud();
       await refreshTrackedPickedEntity();
       renderCurrentScene();
@@ -763,8 +966,73 @@ export async function mountLifeLabDemo() {
   el('btn-mem-null').addEventListener('click', () => { params.memEpsHp = 0.0; el('sl-mem-eps').value = '0'; el('val-mem-eps').textContent = '0.00'; activeSession?.setHydrophobicCoupling?.(0.0); updatePlotsAndHud(); });
   el('btn-mem-reset').addEventListener('click', () => { params.memEpsHp = 1.85; params.memTempK = 300; el('sl-mem-eps').value = '1.85'; el('val-mem-eps').textContent = '1.85'; el('sl-mem-temp').value = '300'; el('val-mem-temp').textContent = '300 K'; selectMode(currentMode); });
 
-  // Layer 2 controls
+  // Layer 2 controls + 1-click FASTA Motif Presets
   el('btn-apply-seq').addEventListener('click', () => selectMode(currentMode, el('inp-seq').value.trim().toUpperCase()));
+  document.querySelectorAll('#fold-preset-row [data-fold-seq]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const seq = b.dataset.foldSeq;
+      if (seq) {
+        el('inp-seq').value = seq;
+        void selectMode(currentMode, seq);
+      }
+    });
+  });
+  el('btn-p3-alt')?.addEventListener('click', async () => {
+    if (currentLayer === 'fold') {
+      foldShowContactMap = !foldShowContactMap;
+      if (foldShowContactMap && activeSession) {
+        lastFoldCoordsF32 = await readResidentFloats(activeSession.getResidentResiduesBuffer(), activeSession.residueCount * 12);
+      }
+    } else if (currentLayer === 'hh') {
+      hhShowPhasePortrait = !hhShowPhasePortrait;
+    }
+    updatePlotsAndHud();
+  });
+
+  function buildLifeCsvString() {
+    const headerMap = {
+      membrane: 'step,mean_tail_coordination,radial_head_order,mean_radius',
+      fold: 'step,radius_of_gyration_A,catalytic_rate_boost,hydrophobic_contacts',
+      evo: 'step,mean_sequence_identity,quasispecies_fraction,mutation_rate_mu',
+      hh: 'step,probe_voltage_mV,max_voltage_mV,g_Na_mS_cm2',
+      morph: 'step,turing_pattern_std,chemotactic_enrichment,mean_agent_speed'
+    };
+    const header = headerMap[currentLayer] || 'step,m1,m2,m3';
+    const rows = csvRows.length > 0 ? csvRows.map((r) => r.join(',')) : [`${activeSession?.stepIndex || 0},0,0,0`];
+    return `${header}\n${rows.join('\n')}\n`;
+  }
+
+  async function buildLifeXyzString() {
+    const info = getActivePickBufferInfo();
+    if (!info || !info.buffer) return null;
+    while (busy) await new Promise((r) => setTimeout(r, 8));
+    const arr = await readResidentFloats(info.buffer, info.count * info.strideFloats);
+    if (!arr) return null;
+    const lines = [
+      String(info.count),
+      `ULG Life Lab | ${currentMode} (${currentLayer}) | step=${activeSession?.stepIndex || 0}`
+    ];
+    for (let i = 0; i < info.count; i += 1) {
+      let sym = 'C';
+      if (currentLayer === 'membrane') sym = (i % 3 === 0) ? 'P' : 'C';
+      else if (currentLayer === 'fold') {
+        const ch = params.foldSeq[i] || 'P';
+        sym = ch === 'H' ? 'C' : (ch === '+' ? 'N' : (ch === '-' ? 'O' : 'S'));
+      } else if (currentLayer === 'evo') sym = 'N';
+      else if (currentLayer === 'morph') sym = 'O';
+      const o = i * info.strideFloats;
+      lines.push(`${sym.padEnd(2, ' ')}  ${arr[o].toFixed(6).padStart(11, ' ')}  ${arr[o + 1].toFixed(6).padStart(11, ' ')}  ${arr[o + 2].toFixed(6).padStart(11, ' ')}`);
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  el('btn-export-csv')?.addEventListener('click', () => {
+    triggerLifeDownload(`ulg-life-${currentMode}-trajectory.csv`, buildLifeCsvString(), 'text/csv;charset=utf-8');
+  });
+  el('btn-export-xyz')?.addEventListener('click', async () => {
+    const xyz = await buildLifeXyzString();
+    if (xyz) triggerLifeDownload(`ulg-life-${currentMode}.xyz`, xyz, 'chemical/x-xyz;charset=utf-8');
+  });
   el('sl-fold-temp').addEventListener('input', (e) => { params.foldTempK = Number(e.target.value); el('val-fold-temp').textContent = `${Math.round(params.foldTempK)} K`; activeSession?.setTemperatureK?.(params.foldTempK); updatePlotsAndHud(); });
   el('sl-fold-eps').addEventListener('input', (e) => { params.foldEpsHp = Number(e.target.value); el('val-fold-eps').textContent = params.foldEpsHp.toFixed(2); activeSession?.setHydrophobicCoupling?.(params.foldEpsHp); });
   el('sl-fold-hb').addEventListener('input', (e) => { params.foldEpsHb = Number(e.target.value); el('val-fold-hb').textContent = params.foldEpsHb.toFixed(2); activeSession?.setHBondStrength?.(params.foldEpsHb); });
@@ -831,6 +1099,10 @@ export async function mountLifeLabDemo() {
         simSpeed,
         camera: orbitControls ? orbitControls.state : { ...renderer.camera },
         params: { ...params },
+        foldShowContactMap,
+        hhShowPhasePortrait,
+        contactMapStats: { ...lastContactMapStats },
+        csvRowCount: csvRows.length,
         telemetry: activeSession?.getTelemetry?.() || null,
         gpuErrorCount: gpuErrors.length,
         gpuErrors: [...gpuErrors],
@@ -865,6 +1137,18 @@ export async function mountLifeLabDemo() {
       updatePlotsAndHud();
     },
     triggerStimulus() { activeSession?.triggerStimulus?.(); },
+    exportCsv: () => buildLifeCsvString(),
+    exportXyz: () => buildLifeXyzString(),
+    getContactMapStats: () => ({ ...lastContactMapStats }),
+    async setPlot3AltMode({ foldContactMap, hhPhasePortrait } = {}) {
+      if (typeof foldContactMap === 'boolean') foldShowContactMap = foldContactMap;
+      if (typeof hhPhasePortrait === 'boolean') hhShowPhasePortrait = hhPhasePortrait;
+      if (currentLayer === 'fold' && foldShowContactMap && activeSession) {
+        lastFoldCoordsF32 = await readResidentFloats(activeSession.getResidentResiduesBuffer(), activeSession.residueCount * 12);
+      }
+      updatePlotsAndHud();
+      return api.getState();
+    },
     setSimSpeed(s) { applySimSpeed(s); },
     resetCamera() { orbitControls?.reset({ immediate: true }); renderCurrentScene(); updatePickOverlay(); },
     setPaused(p) { paused = Boolean(p); el('btn-play').textContent = paused ? '▶ Play' : '⏸ Pause'; },
@@ -911,6 +1195,7 @@ export async function mountLifeLabDemo() {
       orbitControls?.dispose();
       activeSession?.dispose();
       gpuPicker.dispose();
+      if (readbackStagingBuf) try { readbackStagingBuf.destroy(); } catch {}
       renderer.dispose();
     }
   };

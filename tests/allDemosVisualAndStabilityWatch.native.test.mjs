@@ -32,7 +32,9 @@ test('ALL 5 ULG Flagship Pages & Every Scale: Live Vulkan Stability, Zero-Jiggle
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist'
+      '--ignore-gpu-blocklist',
+      '--disable-dev-shm-usage',
+      '--renderer-process-limit=2'
     ]
   });
 

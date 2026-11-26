@@ -11,6 +11,8 @@
 //   6. 128x128 Spatial Field Renderer (Frank Chiral, BZ Spirals, Prebiotic RAF, Hodgkin-Huxley Voltage,
 //      AND 3D displaced Turing Morphogenesis landscape with overlaid 3D chemotactic agents!)
 
+import { configureCompatibleWebGpuCanvas } from '../runtime/shared/webgpuCompat.js';
+
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,
   UNIFORM: 0x0040,
@@ -148,7 +150,11 @@ fn vs_org_atom(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   );
   let qv = quad[vid];
   let a = atoms[iid];
-  let rad = clamp(a.frc_r.w * 0.56 + 0.08, 0.22, 0.62) * u.field_info.w;
+  let rep_mode = u32(round(u.cam_pos_mode.w)); // 0=Ball&Stick, 1=Space-Fill CPK (Bondi vdW), 2=Licorice
+  let base_rad = clamp(a.frc_r.w * 0.56 + 0.08, 0.22, 0.62);
+  let vdw_rad = clamp(a.frc_r.w * 1.48 + 0.42, 0.92, 1.95);
+  let lic_rad = 0.175;
+  let rad = select(select(base_rad, vdw_rad, rep_mode == 1u), lic_rad, rep_mode == 2u) * u.field_info.w;
   let to_cam = normalize(u.cam_pos_mode.xyz - a.pos_m.xyz);
   let wpos = a.pos_m.xyz + to_cam * (rad * 0.72) + (u.cam_right_esp.xyz * qv.x + u.cam_up_time.xyz * qv.y) * rad;
   var out: VsOut;
@@ -172,7 +178,7 @@ fn fs_org_atom(in: VsOut) -> @location(0) vec4<f32> {
   let diff2 = max(dot(n_view, l2), 0.0) * 0.35;
   let h1 = normalize(l1 + vec3<f32>(0.0, 0.0, 1.0));
   let spec = pow(max(dot(n_view, h1), 0.0), 42.0) * 0.85;
-  let fres = pow(1.0 - nz, 3.0) * 0.42;
+  let fres = pow(max(0.0, 1.0 - nz), 3.0) * 0.42;
   let rim_tint = select(vec3<f32>(0.38, 0.76, 1.0), vec3<f32>(1.0, 0.45, 0.32), in.charge < -0.18);
   let col = in.color * (0.24 + 0.92 * diff1 + diff2) + vec3<f32>(spec) + rim_tint * fres;
   return vec4<f32>(col, 1.0);
@@ -219,7 +225,8 @@ fn vs_org_bond(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   let live_ord = b.dyn.x;
   let is_hb = b.dyn.w;
   var out: VsOut;
-  if (live_ord < 0.04) {
+  let rep_mode = u32(round(u.cam_pos_mode.w));
+  if (live_ord < 0.04 || (rep_mode == 1u && is_hb < 0.5)) {
     out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
     out.along_across = vec2<f32>(0.0);
     out.color = vec3<f32>(0.0);
@@ -237,8 +244,9 @@ fn vs_org_bond(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   var side = cross(axis, view_dir);
   if (length(side) < 1e-4) { side = u.cam_right_esp.xyz; } else { side = normalize(side); }
 
+  let cov_thick = select(0.085 + 0.065 * clamp(live_ord, 0.2, 2.5), 0.165, rep_mode == 2u);
   let base_thick = select(
-    0.085 + 0.065 * clamp(live_ord, 0.2, 2.5),
+    cov_thick,
     select(0.055, 0.045 + 0.055 * clamp(live_ord, 0.0, 1.0), is_hb > 1.5),
     is_hb > 0.5
   );
@@ -379,7 +387,7 @@ fn fs_bio_bead(in: VsOut) -> @location(0) vec4<f32> {
   let diff = max(dot(n_view, l1), 0.0) * 0.92 + max(dot(n_view, l2), 0.0) * 0.30;
   let h1 = normalize(l1 + vec3<f32>(0.0, 0.0, 1.0));
   let spec = pow(max(dot(n_view, h1), 0.0), 34.0) * 0.65;
-  let fres = pow(1.0 - nz, 2.8) * 0.38;
+  let fres = pow(max(0.0, 1.0 - nz), 2.8) * 0.38;
   let col = in.color * (0.26 + diff) + vec3<f32>(spec) + in.color * fres * 0.85;
   return vec4<f32>(col, 1.0);
 }
@@ -646,15 +654,14 @@ fn aces_film(x: vec3<f32>) -> vec3<f32> {
 fn fs_tone(in: VsOut) -> @location(0) vec4<f32> {
   let hdr = textureSample(hdr_tex, hdr_samp, in.uv).rgb;
   let mapped = aces_film(hdr * 1.12);
-  let srgb = pow(mapped, vec3<f32>(1.0 / 2.2));
+  let srgb = pow(max(mapped, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
   return vec4<f32>(srgb, 1.0);
 }
 `;
 
 export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}) {
   const ctx = canvas.getContext('webgpu');
-  const format = navigator.gpu.getPreferredCanvasFormat();
-  ctx.configure({ device, format, alphaMode: 'opaque' });
+  const { format } = configureCompatibleWebGpuCanvas(ctx, device, { preferCopySrc: true });
 
   const uniformBuf = device.createBuffer({
     label: 'ulg-chembio-render-uniforms',

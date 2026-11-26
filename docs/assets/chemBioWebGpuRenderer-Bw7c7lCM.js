@@ -159,16 +159,21 @@ fn vs_org_bond(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   var side = cross(axis, view_dir);
   if (length(side) < 1e-4) { side = u.cam_right_esp.xyz; } else { side = normalize(side); }
 
-  let base_thick = select(0.085 + 0.065 * clamp(live_ord, 0.2, 2.5), 0.055, is_hb > 0.5);
+  let base_thick = select(
+    0.085 + 0.065 * clamp(live_ord, 0.2, 2.5),
+    select(0.055, 0.045 + 0.055 * clamp(live_ord, 0.0, 1.0), is_hb > 1.5),
+    is_hb > 0.5
+  );
   let wpos = mid + side * (qv.y * base_thick * u.field_info.w);
   let ca = atoms[ia].vis_z.rgb;
   let cb = atoms[ib].vis_z.rgb;
   let cov_col = mix(mix(ca, cb, smoothstep(0.38, 0.62, qv.x)), vec3<f32>(0.76, 0.86, 0.98), 0.35);
   let pi_glow = select(vec3<f32>(0.0), vec3<f32>(0.18, 0.42, 0.55), live_ord > 1.32 && is_hb < 0.5);
+  let nonbond_col = select(vec3<f32>(0.18, 0.96, 1.0), vec3<f32>(1.0, 0.72, 0.18) * (0.55 + 0.85 * clamp(live_ord, 0.0, 1.0)), is_hb > 1.5);
 
   out.pos = u.view_proj * vec4<f32>(wpos, 1.0);
   out.along_across = qv;
-  out.color = select(cov_col + pi_glow, vec3<f32>(0.18, 0.96, 1.0), is_hb > 0.5);
+  out.color = select(cov_col + pi_glow, nonbond_col, is_hb > 0.5);
   out.bond_info = vec2<f32>(live_ord, is_hb);
   return out;
 }
@@ -177,6 +182,13 @@ fn vs_org_bond(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
 fn fs_org_bond(in: VsOut) -> @location(0) vec4<f32> {
   let across = in.along_across.y;
   let cy = sqrt(max(0.0, 1.0 - across * across));
+  if (in.bond_info.y > 1.5) {
+    // Live GPU van der Waals / steric bearing-race force bridge (dashed warm gold pulses!)
+    let dash = sin(in.along_across.x * 28.0 - u.cam_up_time.w * 5.0);
+    if (dash < -0.15) { discard; }
+    let pulse = clamp(in.bond_info.x, 0.0, 1.0);
+    return vec4<f32>(in.color * (0.65 + 0.85 * cy), 0.72 * pulse);
+  }
   if (in.bond_info.y > 0.5) {
     // Dashed glowing cyan H-bond beam
     let dash = sin(in.along_across.x * 36.0 - u.cam_up_time.w * 4.0);

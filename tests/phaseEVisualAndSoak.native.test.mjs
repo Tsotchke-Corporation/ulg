@@ -222,6 +222,85 @@ test('Phase E Native Vulkan Visual & Functional Verification (E1–E5)', {
 
     const finalState = await page.evaluate(() => window.__ulgUniversesDemo.getState());
     assert.equal(finalState.gpuErrorCount, 0, `Final GPU errors: ${JSON.stringify(finalState.gpuErrors)}`);
+
+    // 6. Star-system clean unloading: Black Hole / X-Ray Binary + Deployed Probes + Planet Surface MUST fully unload on exit to L1 & switch to Sol!
+    const unloadCheck = await page.evaluate(async () => {
+      const d = window.__ulgUniversesDemo;
+      d.setFlightMode('orbit');
+      await d.selectCausalStarSite({ posGal: [4.2, 0.05, -2.1], popTag: 0.72, starIndex: 888, forceExoticStage: 'stellar-black-hole' });
+      await d.setLevel(3, { instant: true });
+      await d.setSolarMode('xray-binary');
+      d.deployVonNeumannProbe();
+      await d.stepOnce();
+      const insideBhSys = d.getState();
+
+      // Leave star system back to L1 Galaxy!
+      await d.setLevel(1, { instant: true });
+      await d.stepOnce();
+      const afterLeaveL1 = d.getState();
+
+      // Enter Sol Reference L2 — neither the BH nor the previous system's probes may bleed over!
+      await d.setUseSolReference(true);
+      await d.setLevel(2, { instant: true });
+      await d.stepOnce();
+      const inSolL2 = d.getState();
+      return { insideBhSys, afterLeaveL1, inSolL2 };
+    });
+    assert.equal(unloadCheck.insideBhSys.hasActiveBlackHoleSession, true, 'Black hole / XRB system must have active BH session inside system');
+    assert.ok(unloadCheck.insideBhSys.visibleProbesInScene >= 1, 'Deployed probe must be visible inside its home star system');
+    assert.equal(unloadCheck.afterLeaveL1.hasActiveBlackHoleSession, false, 'Leaving star system to L1 Galaxy MUST dispose BH/XRB sessions');
+    assert.equal(unloadCheck.afterLeaveL1.solarMode, 'nbody', 'Leaving star system MUST reset solarMode to nbody');
+    assert.equal(unloadCheck.afterLeaveL1.stellarMode, 'fusion', 'Leaving star system MUST reset stellarMode');
+    assert.equal(unloadCheck.afterLeaveL1.visibleProbesInScene, 0, 'Leaving star system to L1 Galaxy MUST hide probes');
+    assert.equal(unloadCheck.inSolL2.hasActiveBlackHoleSession, false, 'Switching to Sol MUST NOT retain previous system BH session');
+    assert.equal(unloadCheck.inSolL2.visibleProbesInScene, 0, 'Switching to Sol MUST NOT show probes deployed in another star system');
+    await page.screenshot({ path: path.join(OUT_DIR, 'e10_clean_sol_after_bh_unload.png') });
+
+    // 7. Bio Lab & Organic Chem Lab Accordion Menu integrity (ZERO flexbox-squished pancake bars!)
+    const bioPage = await context.newPage();
+    bioPage.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[bio] ${m.text()}`); });
+    bioPage.on('pageerror', (e) => pageErrors.push(`[bio] ${String(e)}`));
+    await bioPage.goto(`${BASE_URL}/life-lab.html?xeno=1&world=Eridani-679+b&tempK=330&solvent=H2SO4&species=Caelibulla+caerulea&plan=aero-gasbag&kingdom=fauna`, { waitUntil: 'domcontentloaded' });
+    await bioPage.waitForFunction(() => Boolean(window.__ulgLifeLab?.getState?.()?.ready), null, { timeout: 45000 });
+    await bioPage.waitForTimeout(450);
+    const bioAcc = await bioPage.evaluate(() => {
+      const grps = [...document.querySelectorAll('#life-sidebar .acc-group')];
+      return grps.map((g) => ({
+        group: g.dataset.group,
+        open: g.classList.contains('open'),
+        active: g.classList.contains('active-group'),
+        height: Math.round(g.getBoundingClientRect().height),
+        headerHeight: Math.round(g.querySelector('.acc-header')?.getBoundingClientRect().height || 0)
+      }));
+    });
+    assert.equal(bioAcc.length, 6, 'Bio Lab must have 6 accordion groups');
+    assert.ok(bioAcc.every((g) => g.height >= 28 && g.headerHeight >= 26), `ZERO Bio Lab accordion groups may squish below 28px! Got: ${JSON.stringify(bioAcc)}`);
+    assert.equal(bioAcc.find((g) => g.group === 'vivarium')?.open, true, 'Abducted Bio-Aquarium accordion group must auto-open');
+    await bioPage.screenshot({ path: path.join(OUT_DIR, 'e11_bio_lab_accordion_clean.png') });
+    await bioPage.close();
+
+    const orgPage = await context.newPage();
+    orgPage.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[org] ${m.text()}`); });
+    orgPage.on('pageerror', (e) => pageErrors.push(`[org] ${String(e)}`));
+    await orgPage.goto(`${BASE_URL}/organic-lab.html`, { waitUntil: 'domcontentloaded' });
+    await orgPage.waitForFunction(() => Boolean(window.__ulgOrganicLab?.getState?.()?.ready), null, { timeout: 45000 });
+    await orgPage.waitForTimeout(450);
+    const orgAcc = await orgPage.evaluate(() => {
+      const grps = [...document.querySelectorAll('#org-sidebar .acc-group')];
+      return grps.map((g) => ({
+        group: g.dataset.group,
+        open: g.classList.contains('open'),
+        active: g.classList.contains('active-group'),
+        height: Math.round(g.getBoundingClientRect().height),
+        headerHeight: Math.round(g.querySelector('.acc-header')?.getBoundingClientRect().height || 0)
+      }));
+    });
+    assert.equal(orgAcc.length, 5, 'Organic Chem Lab must have 5 accordion groups');
+    assert.ok(orgAcc.every((g) => g.height >= 28 && g.headerHeight >= 26), `ZERO Organic Lab accordion groups may squish below 28px! Got: ${JSON.stringify(orgAcc)}`);
+    assert.equal(orgAcc.find((g) => g.group === 'nanotech')?.open, true, 'Active Nanotech accordion group must start open');
+    await orgPage.screenshot({ path: path.join(OUT_DIR, 'e12_organic_lab_accordion_clean.png') });
+    await orgPage.close();
+
     assert.equal(consoleErrors.length, 0, `Console errors: ${consoleErrors.join('; ')}`);
     assert.equal(pageErrors.length, 0, `Page errors: ${pageErrors.join('; ')}`);
   } finally {

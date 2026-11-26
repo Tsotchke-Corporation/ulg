@@ -1494,7 +1494,37 @@ export function createUlgUniversesPhysics(device, {
     return resolved;
   }
 
+  function unloadStarSystemRegimes({ resetModes = true } = {}) {
+    // Always cleanly tear down surface session (and invalidate any in-flight enterSurfaceView!)
+    exitSurfaceView();
+    const disposeSession = (sess) => {
+      if (sess && typeof sess.dispose === 'function') {
+        try { sess.dispose(); } catch {}
+      }
+    };
+    disposeSession(kerrJetSession); kerrJetSession = null; kerrJetTelemetry = null;
+    disposeSession(relBinarySession); relBinarySession = null; relBinaryTelemetry = null; relBinaryMode = null;
+    disposeSession(radWindL2Session); radWindL2Session = null; radWindL2Telemetry = null; radWindL2Mode = null;
+    disposeSession(tidalRocheSession); tidalRocheSession = null; tidalRocheTelemetry = null; tidalRocheMode = null;
+    disposeSession(protoplanetarySession); protoplanetarySession = null; protoplanetaryTelemetry = null;
+    disposeSession(nebulaMhdSession); nebulaMhdSession = null; nebulaMhdTelemetry = null; nebulaMhdStreamlines = null;
+    disposeSession(radWindL3Session); radWindL3Session = null; radWindL3Telemetry = null; radWindL3Mode = null;
+    disposeSession(magnetosphereSession); magnetosphereSession = null; magnetosphereTelemetry = null; magnetosphereMode = null; magnetosphereFieldLines = null;
+    disposeSession(cryoPlumeSession); cryoPlumeSession = null; cryoPlumeTelemetry = null;
+    disposeSession(smbhEngine); smbhEngine = null; smbhBodies = null;
+    planetaryResult = null;
+    planetaryAtmoState = null;
+    if (resetModes) {
+      galaxyBranch = 'solar-system';
+      solarMode = 'nbody';
+      planetaryMode = 'standard';
+      planetaryCutaway = false;
+      stellarMode = 'fusion';
+    }
+  }
+
   async function selectCausalStarSite({ posGal, popTag = 0.5, starIndex = 0, forceMultiplicity = null, forceExoticStage = null, seedOverride = null } = {}) {
+    unloadStarSystemRegimes({ resetModes: true });
     activeStarSite = {
       posGal: Array.isArray(posGal) ? [...posGal] : [...activeStarSite.posGal],
       popTag: Number.isFinite(Number(popTag)) ? Number(popTag) : 0.5,
@@ -1531,6 +1561,7 @@ export function createUlgUniversesPhysics(device, {
   }
 
   async function setUseSolReference(enabled) {
+    unloadStarSystemRegimes({ resetModes: true });
     useSolReference = Boolean(enabled);
     await initSolarSystem({ solReference: useSolReference });
     return getActiveSystemCatalog();
@@ -2895,6 +2926,8 @@ export function createUlgUniversesPhysics(device, {
     }, 1200);
   }
 
+  let surfaceEnterToken = 0;
+
   async function enterSurfaceView({
     bodyIndex = planetaryBodyIndex,
     customBodySpec = null,
@@ -2904,7 +2937,9 @@ export function createUlgUniversesPhysics(device, {
     initialVehicle = 'ufo',
     onCraterStamp = null
   } = {}) {
+    const myEnterToken = ++surfaceEnterToken;
     await flushSurfaceCraters();
+    if (myEnterToken !== surfaceEnterToken) return null;
     let spec = null;
     let idx = bodyIndex;
     let surfAtmoState = planetaryAtmoState;
@@ -2990,6 +3025,10 @@ export function createUlgUniversesPhysics(device, {
     // Warm terrain mesh + articulated Rover & Drone geometry immediately before swap!
     surfaceTelemetry = await nextSurf.step({ dt: 0.016, controls: surfaceControls, readTelemetry: false });
     surfaceTelemetry = await nextSurf.step({ dt: 0.016, controls: surfaceControls, readTelemetry: true });
+    if (myEnterToken !== surfaceEnterToken) {
+      try { nextSurf.dispose(); } catch {}
+      return null;
+    }
     const prev = surfaceSession;
     surfaceSession = nextSurf;
     surfaceActive = true;
@@ -2998,6 +3037,7 @@ export function createUlgUniversesPhysics(device, {
   }
 
   function exitSurfaceView() {
+    surfaceEnterToken += 1;
     void flushSurfaceCraters();
     surfaceActive = false;
     customSurfaceBodySpec = null;
@@ -3804,6 +3844,7 @@ export function createUlgUniversesPhysics(device, {
     setPlanetaryMode,
     enterSurfaceView,
     exitSurfaceView,
+    unloadStarSystemRegimes,
     flushSurfaceCraters,
     applyRemoteCraterStamp: (st) => surfaceSession?.applyRemoteCraterStamp?.(st) ?? false,
     triggerCatastrophicShatter,

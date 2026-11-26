@@ -536,6 +536,14 @@ export async function mountOrganicLabDemo() {
       document.querySelectorAll('.mode-btn').forEach((btn) => {
         btn.classList.toggle('active', btn.dataset.mode === modeId);
       });
+      const activeBtnEl = document.querySelector(`.mode-btn[data-mode="${modeId}"]`);
+      const activeGrpEl = activeBtnEl?.closest('.acc-group') || null;
+      document.querySelectorAll('.acc-group').forEach((grp) => {
+        const isAct = grp === activeGrpEl;
+        grp.classList.toggle('active-group', isAct);
+        grp.classList.toggle('open', isAct);
+        grp.querySelector('.acc-header')?.setAttribute('aria-expanded', isAct ? 'true' : 'false');
+      });
       el('mol-controls-card').style.display = isSpatial ? 'none' : 'flex';
       el('rd-controls-card').style.display = isSpatial ? 'flex' : 'none';
       el('reaction-ctrl-box').style.display = (modeId === 'sn2-walden' || modeId === 'diels-alder') ? 'flex' : 'none';
@@ -983,7 +991,12 @@ export async function mountOrganicLabDemo() {
   applySimSpeed(simSpeed);
 
   document.querySelectorAll('.acc-header').forEach((hdr) => {
-    hdr.addEventListener('click', () => hdr.parentElement.classList.toggle('open'));
+    hdr.addEventListener('click', () => {
+      const grp = hdr.closest('.acc-group');
+      if (!grp) return;
+      const isNowOpen = grp.classList.toggle('open');
+      hdr.setAttribute('aria-expanded', isNowOpen ? 'true' : 'false');
+    });
   });
   document.querySelectorAll('.mode-btn').forEach((btn) => {
     btn.addEventListener('click', () => {

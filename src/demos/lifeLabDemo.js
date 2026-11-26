@@ -701,6 +701,14 @@ export async function mountLifeLabDemo() {
     histA = []; histB = []; histC = []; csvRows = []; lastFoldCoordsF32 = null;
 
     document.querySelectorAll('.mode-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.mode === modeId));
+    const activeBtnEl = document.querySelector(`.mode-btn[data-mode="${modeId}"]`);
+    const activeGrpEl = activeBtnEl?.closest('.acc-group') || null;
+    document.querySelectorAll('.acc-group').forEach((grp) => {
+      const isAct = grp === activeGrpEl;
+      grp.classList.toggle('active-group', isAct);
+      grp.classList.toggle('open', isAct);
+      grp.querySelector('.acc-header')?.setAttribute('aria-expanded', isAct ? 'true' : 'false');
+    });
     for (const id of ['ctrl-vivarium', 'ctrl-membrane', 'ctrl-fold', 'ctrl-evo', 'ctrl-hh', 'ctrl-morph']) {
       if (el(id)) el(id).style.display = id === `ctrl-${currentLayer}` ? 'flex' : 'none';
     }
@@ -1168,7 +1176,12 @@ export async function mountLifeLabDemo() {
   });
   applySimSpeed(simSpeed);
 
-  document.querySelectorAll('.acc-header').forEach((h) => h.addEventListener('click', () => h.parentElement.classList.toggle('open')));
+  document.querySelectorAll('.acc-header').forEach((h) => h.addEventListener('click', () => {
+    const grp = h.closest('.acc-group');
+    if (!grp) return;
+    const isNowOpen = grp.classList.toggle('open');
+    h.setAttribute('aria-expanded', isNowOpen ? 'true' : 'false');
+  }));
   document.querySelectorAll('.mode-btn').forEach((btn) => btn.addEventListener('click', () => {
     el('life-sidebar').classList.remove('mobile-open');
     selectMode(btn.dataset.mode);

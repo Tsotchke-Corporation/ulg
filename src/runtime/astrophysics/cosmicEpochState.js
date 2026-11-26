@@ -160,15 +160,25 @@ export function evaluateStellarEvolutionaryState({
     });
   }
 
-  // Main-sequence lifetime tau_MS ≈ 10 Gyr * M^(-2.5) (saturating near ~3 Myr for massive O/WR stars)
-  const tauMsGyr = Math.max(0.003, 10.0 * Math.pow(m0, -2.5));
+  // Smooth C^inf convective-to-Kramers-to-Thomson ZAMS luminosity + Eddington cap
+  const wRad = 1.0 / (1.0 + Math.exp(-(m0 - 0.43) / 0.07));
+  const lConv = 0.21 * Math.pow(m0, 2.3);
+  const kramersNorm = Math.pow(1.0 + Math.pow(1.0 / 3.2, 2), 0.55);
+  const lRadRaw = 0.72 * Math.pow(m0, 4.5) * kramersNorm / Math.pow(1.0 + Math.pow(m0 / 3.2, 2), 0.55);
+  const lZamsUnCapped = ((1.0 - wRad) * lConv + wRad * lRadRaw) * Math.pow(Math.max(0.01, zMet), -0.12 * wRad);
+  const lEddCap = 1.6e4 * m0;
+  const lZams = (lZamsUnCapped * lEddCap) / (lZamsUnCapped + lEddCap);
+  // Core-He mean molecular weight mu^4 MS brightening (enhanced for CNO convective cores M > 1.35 M_sun)
+  const wCno = 1.0 / (1.0 + Math.exp(-(m0 - 1.35) / 0.25));
+  const msBrightSpan = 0.18 + 0.78 * wRad + 0.35 * wCno;
+  const lMidMs = lZams * (1.0 + 0.45 * msBrightSpan);
+  // Fuel-conserving main-sequence lifetime tau_MS ~ 9.6 Gyr * (M / L_mid) * f_core
+  const fCoreFuel = 0.94 + 0.34 * wCno;
+  const tauMsGyr = Math.max(0.003, 9.6 * (m0 / Math.max(1e-5, lMidMs)) * fCoreFuel);
   const tauPreMsGyr = Math.max(0.0002, 0.04 * Math.pow(m0, -1.8));
   const tauGiantGyr = Math.max(0.0008, tauMsGyr * (m0 > 8 ? 0.12 : 0.18));
 
-  // Main-sequence scaling relations
-  const lumMs = m0 < 0.43
-    ? 0.23 * Math.pow(m0, 2.3)
-    : (m0 < 2.0 ? Math.pow(m0, 4.0) : (m0 < 20 ? 1.4 * Math.pow(m0, 3.5) : 3.2e4 * m0 * 0.45));
+  const lumMs = lMidMs;
   const radMs = m0 < 1.0 ? Math.pow(m0, 0.8) : Math.pow(m0, 0.58);
   const tEffMs = 5778 * Math.pow(lumMs / (radMs * radMs), 0.25);
 
@@ -195,7 +205,7 @@ export function evaluateStellarEvolutionaryState({
   // Stage 2: Main Sequence (O/B/A/F/G/K/M)
   if (age < tauMsGyr) {
     const f = (age - tauPreMsGyr) / Math.max(1e-6, tauMsGyr - tauPreMsGyr);
-    const lum = lumMs * (0.72 + 0.65 * f);
+    const lum = lZams * (1.0 + msBrightSpan * Math.pow(Math.max(0, f), 1.15));
     const rad = radMs * (0.90 + 0.32 * f);
     const tEff = 5778 * Math.pow(lum / (rad * rad), 0.25);
     const eddRatio = (lum / m0) / 3.2e4;

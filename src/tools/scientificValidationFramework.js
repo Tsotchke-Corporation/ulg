@@ -27,6 +27,12 @@ import {
 } from '../runtime/organic/organicMolecularGraphGpu.js';
 import { evaluateAcidBaseEquilibrium } from '../runtime/organic/acidBaseCatalysisGpu.js';
 import { evaluateChemiosmoticBioenergetics } from '../runtime/biology/membraneBioenergeticsGpu.js';
+import { evaluateDuplexMeltingCurve } from '../runtime/biology/templateReplicationGpu.js';
+import { evaluateBundleDensityEos } from '../runtime/material/polytopeAtlasBuilder.js';
+import {
+  G7_ADVISORY_PLANETARY_REFERENCES,
+  solvePlanetaryInteriorFromBundles
+} from '../runtime/astrophysics/planetaryStructureGpu.js';
 import { REAL_SOLAR_SYSTEM_CATALOG } from '../runtime/astrophysics/solarSystemNBodyGpu.js';
 import { deriveSurfaceEnvironmentState } from '../runtime/astrophysics/planetarySurfaceVehiclesGpu.js';
 import {
@@ -434,7 +440,27 @@ export async function runCrossScaleScientificValidation({
     );
   }
 
-  // --- DOMAIN 4: COMPOUND THERMODYNAMICS, DIELECTRIC & OPTICS (Gate 2 GPU Atlas vs NIST WebBook / IAPWS-95) ---
+  // Relativistic Optical Dispersion Audit (Au yellow-gold shift vs Ag neutral silver from Gate 1 GPU optics)
+  const auEl = elBySym.get('Au');
+  const agEl = elBySym.get('Ag');
+  if (Array.isArray(auEl?.electromagnetic?.opticalSrgb) && Array.isArray(agEl?.electromagnetic?.opticalSrgb)) {
+    const auWarmth = auEl.electromagnetic.opticalSrgb[0] - auEl.electromagnetic.opticalSrgb[2];
+    const agWarmth = Math.abs(agEl.electromagnetic.opticalSrgb[0] - agEl.electromagnetic.opticalSrgb[2]);
+    domainBuckets.bulkSolidsAndPhase.push(
+      makeQualitativeComparison({
+        domain: 'bulkSolidsAndPhase', subject: 'Au', observable: 'relativisticGoldShift',
+        simulated: String(auWarmth > 0.06), reference: 'true',
+        source: 'Johnson-Christy-1972', physicsTag: 'compound-optics-gap'
+      }),
+      makeQualitativeComparison({
+        domain: 'bulkSolidsAndPhase', subject: 'Ag', observable: 'neutralSilverReflectance',
+        simulated: String(agWarmth < 0.08), reference: 'true',
+        source: 'Johnson-Christy-1972', physicsTag: 'compound-optics-gap'
+      })
+    );
+  }
+
+  // --- DOMAIN 4: COMPOUND THERMODYNAMICS, DIELECTRIC, OPTICS & IAPWS-95 CONTINUUM EOS ---
   for (const ref of NIST_COMPOUND_BENCHMARKS) {
     const cmp = cmpByKey.get(ref.key);
     if (!cmp) continue;
@@ -478,6 +504,31 @@ export async function runCrossScaleScientificValidation({
     }
   }
 
+  // Live Continuum IAPWS-95 Water EOS Benchmarks (300 K/1 atm, 100 MPa deep ocean, 500 K/1 atm steam)
+  const h2oCmp = cmpByKey.get('H2O');
+  if (h2oCmp) {
+    const rho300 = evaluateBundleDensityEos(h2oCmp, 'liquid', 300, 101325);
+    const rho100Mpa = evaluateBundleDensityEos(h2oCmp, 'liquid', 300, 1e8);
+    const rhoSteam500 = evaluateBundleDensityEos(h2oCmp, 'gas', 500, 101325);
+    domainBuckets.compoundChemistry.push(
+      makeComparison({
+        domain: 'compoundChemistry', subject: 'H2O(300K,1atm)', observable: 'rho_IAPWS95', unit: 'kg/m^3',
+        simulated: rho300, reference: 996.5, relTol: 0.20,
+        source: 'IAPWS-95', physicsTag: 'compound-hbond-packing'
+      }),
+      makeComparison({
+        domain: 'compoundChemistry', subject: 'H2O(300K,100MPa)', observable: 'rho_IAPWS95', unit: 'kg/m^3',
+        simulated: rho100Mpa, reference: 1038.0, relTol: 0.20,
+        source: 'IAPWS-95', physicsTag: 'compound-hbond-packing'
+      }),
+      makeComparison({
+        domain: 'compoundChemistry', subject: 'H2O(500K,1atm)', observable: 'rho_steam', unit: 'kg/m^3',
+        simulated: rhoSteam500, reference: 0.440, relTol: 0.10,
+        source: 'IAPWS-95', physicsTag: 'compound-hbond-packing'
+      })
+    );
+  }
+
   // --- DOMAIN 5: ORGANIC CHEMISTRY & BIOPHYSICS (Live Solvers vs NIST WebBook / Mitchell Bioenergetics) ---
   const benzeneGraph = buildOrganicMolecularGraph(ORGANIC_MOLECULE_INITIAL_CONDITIONS['benzene'].build());
   const benzPi = solvePiMolecularOrbitalsAnalytic(benzeneGraph);
@@ -514,13 +565,53 @@ export async function runCrossScaleScientificValidation({
   // Live Mitchell chemiosmotic proton-motive force at physiological mitochondrial state (Delta_psi=150mV, Delta_pH=1.0, T=310K)
   // Exact physical value: 150 + 61.51 = 211.5 mV
   const mitoBio = evaluateChemiosmoticBioenergetics({ deltaPsiMv: 150.0, deltaPh: 1.0, temperatureK: 310.0, uncouplerLeak: 0.0 });
-  domainBuckets.organicAndBio.push(makeComparison({
-    domain: 'organicAndBio', subject: 'Mitochondria', observable: 'PMF_Delta_p', unit: 'mV',
-    simulated: mitoBio.protonMotiveForceMv, reference: 211.51, relTol: 0.02,
-    source: 'Mitchell-1961', physicsTag: 'bio-chemiosmotic'
-  }));
+  const dnaAt = evaluateDuplexMeltingCurve({ lengthL: 16, strongPairFraction: 0.25, saltMolar: 0.15 });
+  const dnaGc = evaluateDuplexMeltingCurve({ lengthL: 16, strongPairFraction: 0.75, saltMolar: 0.15 });
+  domainBuckets.organicAndBio.push(
+    makeComparison({
+      domain: 'organicAndBio', subject: 'Mitochondria', observable: 'PMF_Delta_p', unit: 'mV',
+      simulated: mitoBio.protonMotiveForceMv, reference: 211.51, relTol: 0.02,
+      source: 'Mitchell-1961', physicsTag: 'bio-chemiosmotic'
+    }),
+    makeComparison({
+      domain: 'organicAndBio', subject: 'DNA-16mer(75%GC-25%GC)', observable: 'Delta_Tm', unit: 'K',
+      simulated: dnaGc.meltingTempK - dnaAt.meltingTempK, reference: 20.0, relTol: 0.35,
+      source: 'SantaLucia-1998', physicsTag: 'bio-chemiosmotic'
+    }),
+    makeComparison({
+      domain: 'organicAndBio', subject: 'Eigen(L=16,s=6)', observable: 'mu_crit', unit: '1/site',
+      simulated: dnaGc.eigenErrorThresholdMu, reference: Math.log(6) / 16, relTol: 0.02,
+      source: 'Eigen-1971', physicsTag: 'bio-chemiosmotic'
+    })
+  );
 
-  // --- DOMAIN 6: PLANETARY SURFACES & STRATIFIED ATMOSPHERES (Live Solvers vs NASA Fact Sheets) ---
+  // --- DOMAIN 6: PLANETARY SURFACES, PREM INTERIORS & STRATIFIED ATMOSPHERES ---
+  const feBundle = elBySym.get('Fe');
+  const al2o3Bundle = cmpByKey.get('O3Al2');
+  if (feBundle && al2o3Bundle) {
+    const earthInt = solvePlanetaryInteriorFromBundles({
+      centralPressurePa: 364e9,
+      surfacePressurePa: 1e5,
+      radialStepM: 35000,
+      layers: [
+        { name: 'iron-core', bundle: feBundle, phase: 'solid', tempK: 5200, massFractionTarget: 0.325 },
+        { name: 'silicate-mantle', bundle: al2o3Bundle, phase: 'solid', tempK: 2600, massFractionTarget: 0.675 }
+      ]
+    });
+    const prem = G7_ADVISORY_PLANETARY_REFERENCES.earth;
+    domainBuckets.planetaryAtmospheres.push(
+      makeComparison({
+        domain: 'planetaryAtmospheres', subject: 'Earth-PREM', observable: 'R_planet', unit: 'm',
+        simulated: earthInt.radiusM, reference: prem.radiusM, relTol: 0.25,
+        source: 'PREM-1981', physicsTag: 'planetary-atmosphere'
+      }),
+      makeComparison({
+        domain: 'planetaryAtmospheres', subject: 'Earth-PREM', observable: 'I/(MR^2)', unit: '1',
+        simulated: earthInt.moiFactor, reference: prem.moiFactor, relTol: 0.15,
+        source: 'PREM-1981', physicsTag: 'planetary-atmosphere'
+      })
+    );
+  }
   for (const ref of NASA_PLANETARY_BENCHMARKS) {
     const spec = REAL_SOLAR_SYSTEM_CATALOG.find((b) => b.id === ref.id);
     if (!spec) continue;

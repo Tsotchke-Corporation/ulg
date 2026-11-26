@@ -27,10 +27,11 @@ const GPU_BUFFER_USAGE = Object.freeze({
 });
 
 // Universal nuclear microscopic-macroscopic constants (not per-element fits)
-const A_VOL_MEV = 15.75;
+const A_VOL_MEV = 15.80;
 const A_SURF_MEV = 17.80;
 const A_COUL_MEV = 0.711;
-const A_SYM_MEV = 23.70;
+const A_SYM_MEV = 22.70;
+const A_WIGNER_MEV = 37.0;
 const A_PAIR_MEV = 11.18;
 const MAGIC_NUMBERS = Object.freeze([2, 8, 20, 28, 50, 82, 126, 184]);
 const M_PROTON_MEV = 938.27208816;
@@ -81,16 +82,16 @@ export function shellCorrectionMeV(Z, N) {
     const dz = Z - m;
     const dn = N - m;
     // Strutinsky magic-closure binding enhancement (MeV)
-    const width = 1.6 + 0.03 * m;
-    corr += 3.8 * Math.exp(-(dz * dz) / (2 * width * width));
-    corr += 3.8 * Math.exp(-(dn * dn) / (2 * width * width));
+    const width = 1.15 + 0.022 * m;
+    corr += 2.4 * Math.exp(-(dz * dz) / (2 * width * width));
+    corr += 2.4 * Math.exp(-(dn * dn) / (2 * width * width));
   }
   return corr;
 }
 
 /**
- * Total nuclear binding energy B(Z, A) in MeV (Weizsäcker LDM + Strutinsky
- * magic-shell + pairing corrections). Conserves nucleon count A = Z + N.
+ * Total nuclear binding energy B(Z, A) in MeV (Weizsäcker LDM + Myers-Swiatecki
+ * Wigner congruence + Strutinsky magic-shell + pairing corrections). Conserves A = Z + N.
  */
 export function nuclearBindingEnergyMeV(Z, A) {
   const z = Math.trunc(Z);
@@ -106,25 +107,27 @@ export function nuclearBindingEnergyMeV(Z, A) {
   const surf = -A_SURF_MEV * a23;
   const coul = -A_COUL_MEV * (z * (z - 1)) / a13;
   const sym = -A_SYM_MEV * ((n - z) * (n - z)) / a;
+  const wigner = -A_WIGNER_MEV * Math.abs(n - z) / a;
   let pair = 0;
   if (z % 2 === 0 && n % 2 === 0) pair = A_PAIR_MEV / Math.sqrt(a);
   else if (z % 2 === 1 && n % 2 === 1) pair = -A_PAIR_MEV / Math.sqrt(a);
   const shell = shellCorrectionMeV(z, n);
-  return Math.max(0, vol + surf + coul + sym + pair + shell);
+  return Math.max(0, vol + surf + coul + sym + wigner + pair + shell);
 }
 
 /**
  * Finite 2-parameter Fermi nuclear RMS charge radius in femtometers (fm)
- * and Bohr radii (a_0) for Stage P1.2 finite-nucleus relativistic atomic DFT.
+ * with A-body center-of-mass recoil (1 - 1/A) and finite proton charge radius
+ * convolution (r_p = 0.8414 fm) for Stage P1.2 relativistic atomic DFT.
  */
 export function nuclearChargeRadiusFm(A) {
   const a = Math.max(1, Math.trunc(A));
   if (a === 1) return 0.8414; // proton charge radius (fm)
   const a13 = Math.cbrt(a);
-  // Half-density radius R_0 ~ 1.23 A^(1/3) - 0.60 A^(-1/3), RMS = sqrt(3/5 R_0^2 + 7/5 (pi a)^2)
-  const rHalf = Math.max(0.9, 1.23 * a13 - 0.60 / a13);
-  const diffuseness = 0.523;
-  return Math.sqrt(0.6 * rHalf * rHalf + 1.4 * Math.PI * Math.PI * diffuseness * diffuseness);
+  const c = Math.max(0, 1.128 * a13 - 0.89 / a13);
+  const aDiff = 0.523 * (1 - Math.exp(-c / 1.15));
+  const r2Point = (0.6 * c * c + 1.4 * Math.PI * Math.PI * aDiff * aDiff) * (1 - 1 / a);
+  return Math.sqrt(r2Point + 0.8414 * 0.8414);
 }
 
 /**
@@ -227,15 +230,20 @@ export function mostStableMassNumberForZ(Z) {
   let bestA = Math.round(2 * z + 0.015 * z ** (5 / 3));
   let bestScore = -Infinity;
   for (let a = aMin; a <= aMax; a += 1) {
-    const ba = nuclearBindingEnergyMeV(z, a) / a;
-    // Slight beta-stability preference: favor nuclides where both Q_beta- <= 0 and Q_EC <= 0
+    const bSelf = nuclearBindingEnergyMeV(z, a);
+    // Reject nucleon drip-line unbound isotopes
+    if (a > 2 && (bSelf - nuclearBindingEnergyMeV(z, a - 1) <= 0 || bSelf - nuclearBindingEnergyMeV(z - 1, a - 1) <= 0)) {
+      continue;
+    }
+    const ba = bSelf / a;
+    // Isobaric beta-stability valley: both Q_beta- <= 0 and Q_EC <= 0
     const bPlus = nuclearBindingEnergyMeV(z + 1, a);
     const bMinus = nuclearBindingEnergyMeV(z - 1, a);
-    const bSelf = nuclearBindingEnergyMeV(z, a);
-    const qBetaM = bPlus - bSelf + (M_NEUTRON_MEV - M_PROTON_MEV - M_ELECTRON_MEV);
-    const qEC = bMinus - bSelf - (M_NEUTRON_MEV - M_PROTON_MEV + M_ELECTRON_MEV);
-    const betaStableBonus = (qBetaM <= 0 && qEC <= 0) ? 0.35 : 0;
-    const score = ba + betaStableBonus;
+    const dmNpE = M_NEUTRON_MEV - M_PROTON_MEV - M_ELECTRON_MEV;
+    const qBetaM = bPlus - bSelf + dmNpE;
+    const qEC = bMinus - bSelf - dmNpE;
+    const betaStableBonus = (qBetaM <= 0 && qEC <= 0) ? 50.0 : 0.0;
+    const score = betaStableBonus - Math.max(qBetaM, qEC) + 0.15 * ba;
     if (score > bestScore) {
       bestScore = score;
       bestA = a;
@@ -428,11 +436,11 @@ fn shell_corr(z_f: f32, n_f: f32) -> f32 {
   var acc = 0.0;
   for (var i = 0u; i < 8u; i = i + 1u) {
     let m = mag[i];
-    let w = 1.6 + 0.03 * m;
+    let w = 1.15 + 0.022 * m;
     let inv2w2 = 0.5 / (w * w);
     let dz = z_f - m;
     let dn = n_f - m;
-    acc = acc + 3.8 * exp(-dz * dz * inv2w2) + 3.8 * exp(-dn * dn * inv2w2);
+    acc = acc + 2.4 * exp(-dz * dz * inv2w2) + 2.4 * exp(-dn * dn * inv2w2);
   }
   return acc;
 }
@@ -453,8 +461,8 @@ fn binding_mev(z_i: i32, a_i: i32) -> f32 {
   } else if ((z_i & 1) == 1 && (n_i & 1) == 1) {
     pair = -11.18 / sqrt(a);
   }
-  let b = 15.75 * a - 17.80 * a23 - 0.711 * z * (z - 1.0) / a13
-    - 23.70 * (n - z) * (n - z) / a + pair + shell_corr(z, n);
+  let b = 15.80 * a - 17.80 * a23 - 0.711 * z * (z - 1.0) / a13
+    - 22.70 * (n - z) * (n - z) / a - 37.0 * abs(n - z) / a + pair + shell_corr(z, n);
   return max(0.0, b);
 }
 
@@ -533,7 +541,7 @@ export async function solveNuclearStructureWebGpu(device, Z, A = null, {
   }
   const closure = deriveNuclearClosure(Z, A);
   const a13 = Math.cbrt(closure.A);
-  const rHalfFm = Math.max(0.9, 1.23 * a13 - 0.60 / a13);
+  const rHalfFm = Math.max(0.85, 1.128 * a13 - 0.89 / a13);
   const boxHalfFm = Math.max(4.5, rHalfFm * 1.9);
   const chartCount = maxZ * maxN;
   const volCount = volDim * volDim * volDim;
@@ -794,7 +802,7 @@ export function buildFissionDeformationVolumeWebGpu(device, nuclear, {
   const z = Math.max(1, Math.trunc(Number(nuclear?.Z) || 92));
   const a = Math.max(z, Math.trunc(Number(nuclear?.A) || 235));
   const a13 = Math.cbrt(a);
-  const rHalfFm = Math.max(0.9, 1.23 * a13 - 0.60 / a13);
+  const rHalfFm = Math.max(0.85, 1.128 * a13 - 0.89 / a13);
   const boxHalfFm = Math.max(6.5, rHalfFm * 2.55);
   const totalVoxels = dim * dim * dim;
   const byteSize = totalVoxels * 16;

@@ -220,7 +220,7 @@
         .hdr-btn.mobile-only { display: inline-flex; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/organicLab-eNql2sPr.js"></script>
+    <script type="module" crossorigin src="./assets/organicLab-U6ljLoLY.js"></script>
   </head>
   <body>
     <div id="org-shell" class="shell">
@@ -229,8 +229,8 @@
           <button id="mobile-nav-btn" class="hdr-btn mobile-only" type="button">☰ Lab</button>
           <h1>ULG · ORGANIC CHEMISTRY LAB</h1>
           <div id="active-pill" class="specimen-pill">
-            <span id="pill-name">Benzene (C₆H₆)</span>
-            <span id="pill-tag" class="pill-tag">4n+2 Aromatic</span>
+            <span id="pill-name">Sulflower Molecular Bearing (C₁₆S₈ @ Calix[11]furan)</span>
+            <span id="pill-tag" class="pill-tag">8:11 Superlubric</span>
           </div>
         </div>
         <div class="header-actions">
@@ -271,10 +271,33 @@
       </div>
 
       <aside id="org-sidebar" class="sidebar">
-        <div class="acc-group open active-group" data-group="aromatic">
+        <div class="card" id="speed-controls-card">
+          <h3><span>Sim Speed &amp; Orbit</span><b id="val-sim-speed">0.25×</b></h3>
+          <div class="ctrl-row">
+            <input id="sl-sim-speed" type="range" min="0.05" max="2.0" step="0.05" value="0.25" />
+          </div>
+          <div class="btn-row" id="speed-preset-row">
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;" data-speed="0.1" type="button">0.1×</button>
+            <button class="sm-btn active" style="min-width:0;padding:3px 5px;" data-speed="0.25" type="button">0.25×</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;" data-speed="0.5" type="button">0.5×</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;" data-speed="1" type="button">1×</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;" data-speed="2" type="button">2×</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 6px;" id="btn-step-once" type="button" title="Single physics step">⏭ +1</button>
+          </div>
+          <div style="font-size:9.5px;color:var(--muted);">Drag: orbit target · Right/Shift+Drag: pan · Wheel: zoom · Dbl-click: reset</div>
+        </div>
+
+        <div class="acc-group open active-group" data-group="nanotech">
+          <button class="acc-header" type="button"><span>0. Supramolecular Nanotech</span><span class="acc-chev">▸</span></button>
+          <div class="acc-body">
+            <button class="mode-btn active" data-mode="sulflower-bearing" type="button"><span>Sulflower Bearing</span><small>C₁₆S₈@Calix[11]</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group open" data-group="aromatic">
           <button class="acc-header" type="button"><span>1. Conjugation &amp; π-Aromaticity</span><span class="acc-chev">▸</span></button>
           <div class="acc-body">
-            <button class="mode-btn active" data-mode="benzene" type="button"><span>Benzene</span><small>C₆H₆ · 6π</small></button>
+            <button class="mode-btn" data-mode="benzene" type="button"><span>Benzene</span><small>C₆H₆ · 6π</small></button>
             <button class="mode-btn" data-mode="cyclobutadiene" type="button"><span>Cyclobutadiene</span><small>C₄H₄ · 4π</small></button>
             <button class="mode-btn" data-mode="naphthalene" type="button"><span>Naphthalene</span><small>C₁₀H₈ · 10π</small></button>
             <button class="mode-btn" data-mode="butadiene" type="button"><span>1,3-Butadiene</span><small>C₄H₆ · 4π</small></button>
@@ -327,6 +350,10 @@
             <div class="ctrl-head"><span>Solution pH</span><b id="val-ph">7.0</b></div>
             <input id="sl-ph" type="range" min="0" max="14" step="0.2" value="7.0" />
           </div>
+          <div id="bearing-ctrl-box" class="ctrl-row" style="display:flex;">
+            <div class="ctrl-head"><span>Bearing Drive Torque τ</span><b id="val-torque">0.45</b></div>
+            <input id="sl-torque" type="range" min="0" max="1.5" step="0.05" value="0.45" />
+          </div>
           <div id="reaction-ctrl-box" class="ctrl-row" style="display:none;">
             <div class="ctrl-head"><span>Reaction Drive ξ</span><b id="val-xi">0.00</b></div>
             <input id="sl-xi" type="range" min="0" max="1" step="0.01" value="0" />
@@ -371,7 +398,7 @@
         <canvas id="org-canvas"></canvas>
         <div id="pick-reticle" class="pick-reticle"></div>
         <div class="hud-top-left">
-          <div id="hud-title" class="hud-title">Benzene (C₆H₆)</div>
+          <div id="hud-title" class="hud-title">Sulflower Molecular Bearing (C₁₆S₈ @ Calix[11]furan)</div>
           <p id="hud-sub" class="hud-sub">Click any atom/cell to inspect live WebGPU state · Drag to orbit · Scroll to zoom</p>
         </div>
         <div class="hud-bottom">

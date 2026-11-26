@@ -864,7 +864,7 @@
       .uv-touch-pads.active:not(.force-visible) { display: none; }
     }
   </style>
-  <script type="module" crossorigin src="./assets/universes-Qcz2dqS0.js"></script>
+  <script type="module" crossorigin src="./assets/universes-Ce-FLI-8.js"></script>
 </head>
 <body>
   <canvas id="uv-canvas"></canvas>
@@ -1096,17 +1096,20 @@
     <div id="uv-joy-move" class="uv-joy-pad"><div class="uv-joy-knob" id="uv-joy-move-knob"></div><span class="uv-joy-label">DRIVE / FLY</span></div>
     <div id="uv-joy-look" class="uv-joy-pad"><div class="uv-joy-knob" id="uv-joy-look-knob"></div><span class="uv-joy-label">LOOK</span></div>
   </div>
-  <section id="uv-surface-hud" class="uv-glass" aria-label="Planetary Surface Vehicle Controls">
+  <section id="uv-surface-hud" class="uv-glass" aria-label="Planetary Surface & Atmospheric Explorer Controls">
     <div class="uv-surf-telemetry" id="uv-surf-telemetry">
       <span><strong>ROVER</strong> · g=3.72 m/s² · ρ=0.016 kg/m³ · Alt 0.0 m · Fuel 100%</span>
     </div>
+    <div class="uv-surf-telemetry" id="uv-surf-chem-bar" style="display:none;gap:6px;font-size:10.5px;border-top:1px solid rgba(120,175,255,0.16);padding-top:5px;">
+    </div>
     <div class="uv-surf-pills">
-      <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to fire Rover Jump Rockets (or ascend in Drone)">🔥 ROCKET JUMP</button>
-      <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to deploy / switch between 6-Wheel Rover and Coaxial Atmospheric Drone">🚁 DEPLOY DRONE (F)</button>
-      <button id="uv-surf-cam-btn" class="uv-surf-pill" type="button" title="Press V to toggle 3rd-Person Chase and 1st-Person Mast/Cockpit Camera">📷 3RD CAM (V)</button>
+      <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to fire Rover Jump Rockets (or ascend in Drone / UFO)">🔥 ROCKET JUMP</button>
+      <button id="uv-surf-descend-btn" class="uv-surf-pill" style="display:none;" type="button" title="Hold Ctrl/C or press to dive deeper into atmospheric pressure strata">⬇ DIVE DEEPER (C)</button>
+      <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to switch between Rover, Atmospheric Drone, and 3D CFD Buoyant UFO">🚁 DEPLOY DRONE (F)</button>
+      <button id="uv-surf-cam-btn" class="uv-surf-pill" type="button" title="Press V to toggle 3rd-Person Chase and 1st-Person Cockpit Camera">📷 3RD CAM (V)</button>
       <button id="uv-surf-orbit-btn" class="uv-surf-pill" type="button" title="Press Esc to launch back to Orbital Planetary View">🚀 ORBIT (Esc)</button>
     </div>
-    <div class="uv-surf-keys" id="uv-surf-keys">WASD: Drive/Fly · Space: Jump Rockets / Ascend · Ctrl/C: Brake/Descend · Shift: Boost · Drag/QE: Look · F: Drone · V: Cam · Esc: Orbit</div>
+    <div class="uv-surf-keys" id="uv-surf-keys">WASD: Drive/Fly · Space: Jump/Ascend · Ctrl/C: Brake/Dive · Shift: Boost · Drag/QE: Look · F: Rover/Drone/UFO · V: Cam · Esc: Orbit</div>
   </section>
 
   <!-- Hyperdrive Transition Overlay -->

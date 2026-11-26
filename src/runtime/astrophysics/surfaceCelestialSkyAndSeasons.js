@@ -10,6 +10,7 @@
 //     axial obliquity, orbital declination, stellar flux, and active solvent T_melt!
 
 import { AU_METERS } from './solarSystemNBodyGpu.js';
+import { appendStarVisuals } from './starlightAndExoticOptics.js';
 
 function norm3(v) {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
@@ -399,6 +400,7 @@ export function buildLiveSurfaceCelestialSky({
   const skyBodies = [];
   const spheres = [];
   const disks = [];
+  const lineChunks = [];
   const bodyRadiusM = Math.max(1.0e4, Number(env.radiusM) || (Number(focusSpec.radiusKm) || 6371) * 1000.0);
   const isGasGiantEnv = env.hasSolidCrust === false || bodyRadiusM >= 1.6e7;
   const craftAltM = Math.max(10.0, Number(posForNav[1]) || 20.0);
@@ -461,18 +463,33 @@ export function buildLiveSurfaceCelestialSky({
     const attenC0 = skyTrans < 0.99 ? [baseC0[0] * skyTrans, baseC0[1] * skyTrans, baseC0[2] * skyTrans] : baseC0;
     const attenC1 = skyTrans < 0.99 ? [baseC1[0] * skyTrans, baseC1[1] * skyTrans, baseC1[2] * skyTrans] : baseC1;
 
-    spheres.push({
-      pos,
-      radius: worldRadiusM,
-      color0: attenC0,
-      color1: attenC1,
-      kind: isStar ? 0 : (sp.kind ?? 1),
-      atm: isStar ? 0.0 : (sp.atm ?? 0.2),
-      tempK: Number(sp.tempK) || (isStar ? 5778 : 220),
-      civTechK: Number(sp.civTechK) || 0,
-      dysonCoverage: isStar ? dysonCoverage : 0,
-      seed: i * 2.17 + 1.3
-    });
+    if (isStar) {
+      appendStarVisuals({
+        spec: { ...sp, color0: attenC0, color1: attenC1 },
+        pos,
+        radius: worldRadiusM,
+        timeSec: surfaceSimSec * 0.05,
+        dysonCoverage,
+        seed: i * 2.17 + 1.3,
+        spheres,
+        disks,
+        lineChunks,
+        alphaMul: skyTrans
+      });
+    } else {
+      spheres.push({
+        pos,
+        radius: worldRadiusM,
+        color0: attenC0,
+        color1: attenC1,
+        kind: sp.kind ?? 1,
+        atm: sp.atm ?? 0.2,
+        tempK: Number(sp.tempK) || 220,
+        civTechK: Number(sp.civTechK) || 0,
+        dysonCoverage: 0,
+        seed: i * 2.17 + 1.3
+      });
+    }
 
     // If this sky body is a ringed parent planet (e.g. viewing Saturn's rings from Titan's methane shores!)
     if (sp.ringed && worldRadiusM > 1000 && skyTrans > 0.14) {
@@ -555,7 +572,9 @@ export function buildLiveSurfaceCelestialSky({
   return {
     spheres,
     disks,
+    lines: lineChunks.length ? new Float32Array(lineChunks) : null,
     lightDir: primarySunDir,
+    primaryStarDistAu: toStar0DistAu,
     primarySunElevDeg: sunElevDeg,
     gasGiantSkyTransmittance: Number(gasGiantSkyTransmittance.toFixed(3)),
     climate: {

@@ -34,6 +34,7 @@ struct CameraUniforms {
   extra2: vec4<f32>,     // mode-specific floats
   em_sensor: vec4<f32>,  // x = log10LambdaMin [-13..+1], y = log10LambdaMax, z = sensorActive (0|1), w = gain
   em_aux: vec4<f32>,     // x = ambientTempK, y = sunFluxOrEclipse, z = skyOptDepth, w = flags (bit0=skipSurfaceFog, bit1=reversedLogDepth)
+  star_light: vec4<f32>, // rgb = linear host-star light spectrum, w = perceptual inverse-square irradiance gain [0.14..1.85]
 };
 
 // Unified Reversed Logarithmic Depth Buffer [0.1 m .. 10^14 m (~668 AU)]!
@@ -279,6 +280,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let sun_dir = normalize(cam.extra1.xyz);
   let sky_hor_day = cam.extra2.rgb;
   let eclipse_f = clamp(cam.em_aux.y, 0.04, 1.0);
+  let star_rgb = cam.star_light.rgb;
+  let star_flux = clamp(cam.star_light.w, 0.14, 1.85);
+  let sky_star_gain = clamp(0.24 + 0.76 * star_flux, 0.22, 1.45);
+  let sky_star_tint = mix(vec3<f32>(1.0), star_rgb, 0.68);
 
   // Physical Chapman airmass day -> golden/crimson sunset twilight -> deep starlit night cycle!
   let sun_elev = sun_dir.y;
@@ -287,8 +292,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let sunset_w = exp(-(twi_d * twi_d)) * opt_depth * eclipse_f;
   let night_zen = vec3<f32>(0.004, 0.008, 0.022);
   let night_hor = vec3<f32>(0.014, 0.022, 0.044);
-  let sky_zen = mix(night_zen, sky_zen_day, day_f) + vec3<f32>(0.18, 0.10, 0.24) * sunset_w * 0.45;
-  let sky_hor = mix(night_hor, sky_hor_day, day_f) + vec3<f32>(0.96, 0.40, 0.14) * sunset_w * 0.82;
+  let sky_zen = mix(night_zen, sky_zen_day * sky_star_tint * sky_star_gain, day_f) + vec3<f32>(0.18, 0.10, 0.24) * sky_star_tint * sunset_w * 0.45 * sky_star_gain;
+  let sky_hor = mix(night_hor, sky_hor_day * sky_star_tint * sky_star_gain, day_f) + vec3<f32>(0.96, 0.40, 0.14) * sky_star_tint * sunset_w * 0.82 * sky_star_gain;
 
   // Smooth elevation gradient from horizon haze band to deep zenith sky!
   let elev = clamp(dir.y, -0.35, 1.0);
@@ -298,7 +303,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   // Directional crimson-gold horizon sunset glow centered toward the setting/rising sun azimuth
   let hor_cos = max(0.0, dot(normalize(vec3<f32>(dir.x, 0.0, dir.z) + vec3<f32>(1e-5, 0.0, 0.0)), normalize(vec3<f32>(sun_dir.x, 0.0, sun_dir.z) + vec3<f32>(1e-5, 0.0, 0.0))));
   let sunset_band = exp(-abs(dir.y) * 5.2) * pow(hor_cos, 3.0) * sunset_w;
-  col = col + vec3<f32>(1.15, 0.44, 0.12) * sunset_band * 0.85;
+  col = col + vec3<f32>(1.15, 0.44, 0.12) * sky_star_tint * sunset_band * 0.85 * sky_star_gain;
 
   // Subtle below-horizon horizon-haze fill so curved TinyPlanet terrain melts seamlessly into the horizon!
   if (dir.y < 0.0) {
@@ -310,8 +315,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let sun_above = smoothstep(-0.04, 0.02, sun_elev);
   let cos_sun = dot(dir, sun_dir);
   let sun_halo = (pow(max(0.0, cos_sun), 10.0) * (0.24 + 0.48 * opt_depth)
-    + pow(max(0.0, cos_sun), 64.0) * (0.50 + 0.60 * opt_depth)) * sun_above * eclipse_f;
-  let sun_col = mix(vec3<f32>(1.0, 0.96, 0.88), vec3<f32>(1.0, 0.58, 0.24), clamp(sunset_w + opt_depth * 0.35, 0.0, 1.0));
+    + pow(max(0.0, cos_sun), 64.0) * (0.50 + 0.60 * opt_depth)) * sun_above * eclipse_f * sky_star_gain;
+  let sun_col = mix(star_rgb, vec3<f32>(1.0, 0.58, 0.24) * sky_star_tint, clamp(sunset_w + opt_depth * 0.35, 0.0, 1.0));
   col = col + sun_col * sun_halo;
 
   // Crisp stars & Milky Way shine brightly in airless vacuum AND on atmospheric night sides / during solar eclipses!
@@ -455,8 +460,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let sunset_w = select(exp(-(twi_d * twi_d)) * opt_depth * eclipse_f, 0.0, skip_fog);
 
   // Hemispheric sky-bounce ambient (genuinely dark starlit night on planet/comet dark side!)
+  let star_rgb = cam.star_light.rgb;
+  let star_flux = clamp(cam.star_light.w, 0.14, 1.85);
+  let surf_star_l = select(star_rgb * star_flux, mix(vec3<f32>(1.0), star_rgb, 0.45) * clamp(0.45 + 0.55 * star_flux, 0.45, 1.35), skip_fog);
+  let sky_gain = select(clamp(0.26 + 0.74 * star_flux, 0.22, 1.40), 1.0, skip_fog);
   let hemi_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-  let amb_sky_day = mix(sky_hor * 0.42 + vec3<f32>(0.04, 0.05, 0.07), sky_zen * 0.55 + vec3<f32>(0.05, 0.06, 0.09), hemi_up);
+  let amb_sky_day = mix(sky_hor * 0.42 + vec3<f32>(0.04, 0.05, 0.07), sky_zen * 0.55 + vec3<f32>(0.05, 0.06, 0.09), hemi_up) * mix(vec3<f32>(1.0), star_rgb, 0.55) * sky_gain;
   let amb_sky_night = mix(vec3<f32>(0.007, 0.010, 0.018), vec3<f32>(0.020, 0.030, 0.054), opt_depth);
   let amb_sky = select(mix(amb_sky_night, amb_sky_day, sun_day), vec3<f32>(0.24, 0.28, 0.34), skip_fog);
   let amb_gain = select(mix(0.20, 0.55, opt_depth * sun_day + 0.15), 0.42, skip_fog);
@@ -464,7 +473,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     mix(vec3<f32>(1.05, 1.02, 0.96), vec3<f32>(1.12, 0.95, 0.78), opt_depth * 0.35),
     vec3<f32>(1.25, 0.56, 0.24),
     sunset_w * 0.68
-  );
+  ) * surf_star_l;
 
   // Subtle emerald-cyan UFO ventral landing pool on pitch-black night sides so terrain stays navigable in true darkness!
   let night_pool = select(exp(-dist * dist / (110.0 * 110.0)) * (1.0 - sun_day) * 0.24, 0.0, skip_fog || tag > 3.5);
@@ -644,9 +653,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     emiss = in.col_emiss.w * (0.35 + 0.95 * (1.0 - sun_day));
   }
 
-  let amb_day = mix(sky_hor * 0.36 + vec3<f32>(0.05), sky_zen * 0.48 + vec3<f32>(0.06), clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+  let star_rgb_f = cam.star_light.rgb;
+  let star_flux_f = clamp(cam.star_light.w, 0.14, 1.85);
+  let amb_day = mix(sky_hor * 0.36 + vec3<f32>(0.05), sky_zen * 0.48 + vec3<f32>(0.06), clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * mix(vec3<f32>(1.0), star_rgb_f, 0.55) * clamp(0.26 + 0.74 * star_flux_f, 0.22, 1.40);
   let amb = mix(vec3<f32>(0.025, 0.036, 0.062), amb_day, sun_day);
-  let sun_tint = mix(vec3<f32>(1.06, 1.02, 0.94), vec3<f32>(1.24, 0.56, 0.24), sunset_w * 0.65);
+  let sun_tint = mix(vec3<f32>(1.06, 1.02, 0.94), vec3<f32>(1.24, 0.56, 0.24), sunset_w * 0.65) * star_rgb_f * star_flux_f;
   var col = base_col * (amb * 0.52 + sun_tint * (ndl * 1.15 * sun_day)) + base_col * emiss;
 
   let dist = length(cam.cam_pos.xyz - in.world_pos);
@@ -1844,7 +1855,11 @@ fn fs_main(in: VsOut) -> FsOut {
   let raw_ndl = dot(n_hit, light_dir);
   let ndl = max(0.0, raw_ndl);
   let soft_term = smoothstep(-0.08, 0.14, raw_ndl);
-  // Warm golden-crimson Rayleigh/Mie sunset glow right along the day-night terminator on atmospheric worlds!
+  // Real host-star spectral color & inverse-square irradiance attenuation (cam.star_light)!
+  let star_rgb = cam.star_light.rgb;
+  let star_flux = clamp(cam.star_light.w, 0.14, 1.85);
+  let star_dir_l = star_rgb * star_flux;
+  // Warm Rayleigh/Mie sunset glow along the day-night terminator tinted by host star spectrum
   let term_d = (raw_ndl - 0.04) / 0.16;
   let term_sunset = exp(-(term_d * term_d)) * in.color1.w;
   let half_v = normalize(light_dir + view_dir);
@@ -1982,8 +1997,8 @@ fn fs_main(in: VsOut) -> FsOut {
       em_uv = polar_haze * 0.45 * (0.3 + 0.7 * ndl) + band * 0.36 * ndl;
     }
     let atm = vec3<f32>(0.58, 0.76, 1.0) * fresnel * in.color1.w;
-    let sunset = vec3<f32>(0.95, 0.44, 0.16) * term_sunset * 0.14;
-    col = base * (0.04 + 0.98 * ndl) * soft_term + base * 0.03 + sunset + atm * (0.15 + 0.85 * ndl) + em_fx;
+    let sunset = vec3<f32>(0.95, 0.44, 0.16) * term_sunset * 0.14 * star_dir_l;
+    col = base * (vec3<f32>(0.03) + star_dir_l * (0.04 + 0.98 * ndl) * soft_term) + sunset + atm * (vec3<f32>(0.03) + star_dir_l * (0.14 + 0.86 * ndl)) + em_fx;
   } else if (kind == 1u || kind == 4u) {
     // Photorealistic Terrestrial / Ocean / Mars / Mercury world with 5-octave FBM continents, analytical micro-normal relief, bathymetry, polar caps, night-side city lights & live CFD clouds!
     let elev = fbm5(n_hit * 3.4 + seed_v);
@@ -2121,8 +2136,8 @@ fn fs_main(in: VsOut) -> FsOut {
     let ndl_eff = mix(ndl_relief, ndl, cloud_cover * 0.85);
     let rayleigh = mix(vec3<f32>(0.78, 0.50, 0.30), vec3<f32>(0.30, 0.68, 1.0), select(0.25, 1.0, has_ocean));
     let atm = rayleigh * fresnel * in.color1.w * 0.98;
-    let sunset = mix(vec3<f32>(0.98, 0.44, 0.14), vec3<f32>(1.0, 0.52, 0.18), select(0.0, 1.0, has_ocean)) * term_sunset * (0.16 + 0.24 * cloud_cover + 0.25 * fresnel);
-    col = surf * (0.03 + 0.98 * ndl_eff) * soft_term + surf * 0.03 + sunset + vec3<f32>(1.0, 0.96, 0.88) * water_spec * ndl + atm * (0.14 + 0.86 * ndl) + em_lightning + em_aurora + em_cities;
+    let sunset = mix(vec3<f32>(0.98, 0.44, 0.14), vec3<f32>(1.0, 0.52, 0.18), select(0.0, 1.0, has_ocean)) * term_sunset * (0.16 + 0.24 * cloud_cover + 0.25 * fresnel) * star_dir_l;
+    col = surf * (vec3<f32>(0.028) + star_dir_l * (0.03 + 0.98 * ndl_eff) * soft_term) + sunset + star_dir_l * water_spec * ndl + atm * (vec3<f32>(0.03) + star_dir_l * (0.14 + 0.86 * ndl)) + em_lightning + em_aurora + em_cities;
   } else if (kind == 3u) {
     // Cratered Moon / Icy World / Atmospheric Ice Giant (Uranus & Neptune):
     // Gate rocky crater relief strictly on airless moons (atm < 0.28) so Ice Giants have silky atmospheric methane bands!
@@ -2174,7 +2189,7 @@ fn fs_main(in: VsOut) -> FsOut {
       em_rad = bolt * 1.1 + aur3 * 0.6;
     }
     let atm = vec3<f32>(0.42, 0.76, 1.0) * fresnel * in.color1.w;
-    col = base * (0.04 + 0.96 * ndl_c) * soft_term + base * 0.03 + vec3<f32>(1.0) * spec * 0.16 * ndl + atm * (0.15 + 0.85 * ndl) + em_ice;
+    col = base * (vec3<f32>(0.03) + star_dir_l * (0.04 + 0.96 * ndl_c) * soft_term) + star_dir_l * spec * 0.16 * ndl + atm * (vec3<f32>(0.03) + star_dir_l * (0.15 + 0.85 * ndl)) + em_ice;
   } else if (kind == 5u) {
     // Event horizon shadow OR glowing atomic nucleus pin
     let is_black_hole = dot(in.color0.rgb, in.color0.rgb) < 0.001;
@@ -2194,7 +2209,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let basalt = mix(vec3<f32>(0.10, 0.08, 0.09), vec3<f32>(0.24, 0.16, 0.14), cracks);
     let lava = mix(vec3<f32>(0.96, 0.22, 0.04), vec3<f32>(1.0, 0.86, 0.32), smoothstep(0.45, 0.95, rift));
     let atm = vec3<f32>(1.0, 0.48, 0.18) * fresnel * in.color1.w * 0.9;
-    col = basalt * (0.08 + 0.85 * ndl) * soft_term + lava * rift * 1.65 + atm * (0.35 + 0.65 * ndl);
+    col = basalt * (vec3<f32>(0.04) + star_dir_l * (0.06 + 0.85 * ndl) * soft_term) + lava * rift * 1.65 + atm * (vec3<f32>(0.08) + star_dir_l * (0.30 + 0.65 * ndl));
     em_temp_k = mix(850.0, 2200.0, rift);
   } else {
     // Kind 6: Quantized L7 Nuclear Protons (warm ruby-amber) & Neutrons (cool sapphire-silver)
@@ -2425,7 +2440,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let opp_surge = 1.0 + 0.28 * pow(max(0.0, dot(view_r, ldir)), 8.0);
     let phase_gain = clamp(0.68 + 0.34 * hg_phase * opp_surge, 0.55, 1.55);
     let alpha = clamp(fade * cassini * encke * ringlets * 0.76, 0.0, 0.88);
-    var ring_c = in.color_kind.rgb * (0.85 + 0.25 * ringlets) * ring_shadow * phase_gain;
+    let ring_star_l = cam.star_light.rgb * clamp(cam.star_light.w, 0.16, 1.85);
+    var ring_c = in.color_kind.rgb * (0.85 + 0.25 * ringlets) * ring_shadow * phase_gain * ring_star_l;
     ring_c = em_sensor_map_rgb(ring_c, 85.0, 0.0, 0.0, 0.08, 0.0);
     return vec4<f32>(ring_c * alpha, alpha);
   }
@@ -2757,17 +2773,17 @@ export function createUlgUniversesRenderer(device, canvas) {
   let bloomTexB = null;
   let bloomViewB = null;
 
-  // Dedicated 208-byte CameraUniforms buffers (incl. EM Sensor + Space-Mesh buffer fixing UFO fog!)
-  const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 208, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  // Dedicated 224-byte CameraUniforms buffers (incl. EM Sensor, Host Starlight Spectrum & Space-Mesh buffer!)
+  const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const MAX_CLOUD_SLOTS = 4;
   const cloudCamBufs = Array.from({ length: MAX_CLOUD_SLOTS }, (_, idx) => device.createBuffer({
     label: `uv-cam-cloud-${idx}`,
-    size: 208,
+    size: 224,
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   }));
-  const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 208, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const floraCamBuf = device.createBuffer({ label: 'uv-cam-flora', size: 208, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const spaceMeshCamBuf = device.createBuffer({ label: 'uv-cam-space-mesh', size: 208, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const floraCamBuf = device.createBuffer({ label: 'uv-cam-flora', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const spaceMeshCamBuf = device.createBuffer({ label: 'uv-cam-space-mesh', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const postUniformBuf = device.createBuffer({ label: 'uv-post-uniform', size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bloomExtractUniformBuf = device.createBuffer({ label: 'uv-bloom-extract-u', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bloomBlurUniformBuf = device.createBuffer({ label: 'uv-bloom-blur-u', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
@@ -3261,13 +3277,13 @@ export function createUlgUniversesRenderer(device, canvas) {
     device.queue.writeBuffer(nuclearVolBuf, 0, volumeData);
   }
 
-  const camData = new Float32Array(52);
+  const camData = new Float32Array(56);
   const postData = new Float32Array(16);
   const sphereStaging = new Float32Array(MAX_SPHERES * 20);
   const diskStaging = new Float32Array(MAX_DISKS * 12);
   const lineStaging = new Float32Array(MAX_LINE_VERTS * 7);
 
-  function writeCam(targetBuf, camera, extra0, extra1, extra2, emSensorVec = null, emAuxVec = null) {
+  function writeCam(targetBuf, camera, extra0, extra1, extra2, emSensorVec = null, emAuxVec = null, starLightVec = null) {
     camData.set(camera.viewProj, 0);
     camData.set([camera.pos[0], camera.pos[1], camera.pos[2], camera.timeSec || 0], 16);
     camData.set([camera.right[0], camera.right[1], camera.right[2], camera.aspect], 20);
@@ -3278,6 +3294,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     camData.set(extra2 || [0, 0, 0, 0], 40);
     camData.set(emSensorVec || [-6.42, -6.12, 0.0, 1.0], 44);
     camData.set(emAuxVec || [288.0, 1.0, 0.0, 0.0], 48);
+    camData.set(starLightVec || [1.0, 0.97, 0.92, 1.0], 52);
     device.queue.writeBuffer(targetBuf, 0, camData);
   }
 
@@ -3289,6 +3306,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     surfaceScene = null,  // Optional live GPU Planetary Surface Terrain + Boulders + Flora + Rover/Drone/UFO + Translucent FX!
     cosmicMeshes = null,  // Optional `{ opaque: Float32Array, fx: Float32Array }` for 3D UFO/Remote UFOs/Probes in space!
     lightDir = [0.6, 0.75, 0.55],
+    starLight = [1.0, 0.97, 0.92, 1.0], // Physical linear host-star RGB + perceptual inverse-square irradiance gain!
     mdCloud = null,
     disks = null,
     lines = null,
@@ -3388,6 +3406,9 @@ export function createUlgUniversesRenderer(device, canvas) {
     const activeClouds = (particleClouds || []).filter((c) => c && c.buffer && c.count > 0).slice(0, MAX_CLOUD_SLOTS);
     const hasLiveParentBackdrop = activeClouds.some((c) => c.isBackdrop);
     const hasAtmo = Boolean(atmoEm && atmoEm.buffer && atmoEm.width > 0 && atmoEm.height > 0);
+    const starLightVec = (Array.isArray(starLight) && starLight.length >= 4)
+      ? [Number(starLight[0]) || 1.0, Number(starLight[1]) || 0.97, Number(starLight[2]) || 0.92, Number(starLight[3]) || 1.0]
+      : [1.0, 0.97, 0.92, 1.0];
     writeCam(
       camBuf,
       camera,
@@ -3395,7 +3416,8 @@ export function createUlgUniversesRenderer(device, canvas) {
       [lightDir[0], lightDir[1], lightDir[2], 0],
       hasAtmo ? [atmoEm.width, atmoEm.height, atmoEm.sphereIndex ?? 0, 1.0] : [1, 1, -1, 0.0],
       emSensorVec,
-      baseEmAux
+      baseEmAux,
+      starLightVec
     );
     // Dedicated clean space-mesh camera uniform (sky_hor=0, opt_depth=0, isMagma=0, flags=1 skipping aerial fog!)
     // Fixes UFO metallic/neon-yellow fog bleed when hovering in space at L0..L4!
@@ -3406,7 +3428,8 @@ export function createUlgUniversesRenderer(device, canvas) {
       [lightDir[0], lightDir[1], lightDir[2], 0.0],
       [0.0, 0.0, 0.0, 0.0],
       emSensorVec,
-      [320.0, 1.0, 0.0, 1.0]
+      [320.0, 1.0, 0.0, 1.0],
+      starLightVec
     );
 
     for (let slot = 0; slot < activeClouds.length; slot += 1) {
@@ -3419,7 +3442,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         c.extra1 || [...(c.colorPos || [0, 0, 0]), 0],
         c.extra2 || [...(c.colorNeg || [0, 0, 0]), 0],
         emSensorVec,
-        baseEmAux
+        baseEmAux,
+        starLightVec
       );
     }
 
@@ -3434,7 +3458,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         [ld[0], ld[1], ld[2], curvInv2R],
         [env.skyHorizonRgb[0], env.skyHorizonRgb[1], env.skyHorizonRgb[2], env.isMagmaOcean ? 1.0 : 0.0],
         emSensorVec,
-        baseEmAux
+        baseEmAux,
+        starLightVec
       );
       const fp = surfaceScene.focusPos || camera.pos;
       writeCam(
@@ -3444,7 +3469,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         [ld[0], ld[1], ld[2], curvInv2R],
         [env.skyHorizonRgb[0], env.skyHorizonRgb[1], env.skyHorizonRgb[2], fp[0] || 0],
         emSensorVec,
-        [baseEmAux[0], baseEmAux[1], fp[2] || 0, baseEmAux[3]]
+        [baseEmAux[0], baseEmAux[1], fp[2] || 0, baseEmAux[3]],
+        starLightVec
       );
     } else if (mdCloud && mdCloud.positionsBuffer && mdCloud.velocitiesBuffer && mdCloud.count > 0) {
       writeCam(
@@ -3454,7 +3480,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         [mdCloud.baseRgb[0], mdCloud.baseRgb[1], mdCloud.baseRgb[2], mdCloud.radius],
         [mdCloud.alphaFade ?? 1.0, 0, 0, mdCloud.idealCoord || 12],
         emSensorVec,
-        baseEmAux
+        baseEmAux,
+        starLightVec
       );
     } else if (nuclearVol && nuclearVol.dim > 0) {
       writeCam(
@@ -3464,7 +3491,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         [nuclearVol.alphaMul ?? 1.0, 0, 0, 0],
         [0, 0, 0, 0],
         emSensorVec,
-        baseEmAux
+        baseEmAux,
+        starLightVec
       );
     }
 

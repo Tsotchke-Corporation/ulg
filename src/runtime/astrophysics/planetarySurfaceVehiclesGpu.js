@@ -2368,7 +2368,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   function adjustChaseDistance(factor = 1.0) {
     const f = Number(factor);
     if (Number.isFinite(f) && f > 0.1) {
-      chaseDistScale = Math.max(0.55, Math.min(2.4, chaseDistScale * f));
+      // Allow zooming waaaay out from close-up (0.45x) to panoramic orbital overlook (18.0x)!
+      chaseDistScale = Math.max(0.45, Math.min(18.0, chaseDistScale * f));
     }
     return chaseDistScale;
   }

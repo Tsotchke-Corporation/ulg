@@ -40,6 +40,7 @@ import {
   deriveStarSystemFromGalacticLocation,
   synthesizeNebularPlanetarySystem
 } from '../runtime/astrophysics/causalNebularSystemGenerator.js';
+import { resolveStellarRegimeForStarSpec } from '../runtime/astrophysics/starlightAndExoticOptics.js';
 import {
   createCosmologicalBaryonRadiationSessionWebGpu
 } from '../runtime/astrophysics/cosmologicalBaryonRadiationGpu.js';
@@ -1415,7 +1416,8 @@ export function createUlgUniversesPhysics(device, {
     seedOverride = null,
     starSite = null,
     solReference = null,
-    forceMultiplicity = null
+    forceMultiplicity = null,
+    forceExoticStage = null
   } = {}) {
     if (solarEngine) {
       solarEngine.dispose();
@@ -1426,7 +1428,8 @@ export function createUlgUniversesPhysics(device, {
       activeStarSite = {
         posGal: starSite.posGal || activeStarSite.posGal,
         popTag: starSite.popTag ?? activeStarSite.popTag,
-        starIndex: starSite.starIndex ?? activeStarSite.starIndex
+        starIndex: starSite.starIndex ?? activeStarSite.starIndex,
+        forceExoticStage: forceExoticStage ?? starSite.forceExoticStage ?? null
       };
       useSolReference = false;
     }
@@ -1439,7 +1442,8 @@ export function createUlgUniversesPhysics(device, {
         popTag: activeStarSite.popTag,
         starIndex: activeStarSite.starIndex,
         seed: activeSeed,
-        forceMultiplicity
+        forceMultiplicity,
+        forceExoticStage: forceExoticStage ?? activeStarSite.forceExoticStage ?? null
       });
       activeCausalSystem = synthesizeNebularPlanetarySystem(starSys, { seedOverride: activeSeed });
     }
@@ -1465,24 +1469,48 @@ export function createUlgUniversesPhysics(device, {
     }
   }
 
-  async function selectCausalStarSite({ posGal, popTag = 0.5, starIndex = 0, forceMultiplicity = null, seedOverride = null } = {}) {
+  async function syncStellarRegimeForStar(starSpec = null, { recommendedL3Regime = null, initializeNow = false } = {}) {
+    const cat = getActiveSystemCatalog();
+    const spec = starSpec
+      || (cat[focusedSolarBodyIndex]?.isStar ? cat[focusedSolarBodyIndex] : cat[0])
+      || null;
+    const rec = recommendedL3Regime ?? (spec?.starIndex === 0 || spec === cat[0] ? activeCausalSystem?.recommendedL3Regime : null);
+    const resolved = resolveStellarRegimeForStarSpec(spec, rec);
+    const modeChanged = resolved.stellarMode !== stellarMode;
+    const presetChanged = resolved.stellarMode === 'fusion' && resolved.stellarPreset !== stellarPreset;
+    stellarMode = resolved.stellarMode;
+    if (resolved.stellarMode === 'fusion') {
+      stellarPreset = resolved.stellarPreset;
+    }
+    if (initializeNow) {
+      if (stellarMode === 'fusion') {
+        if (!stellarEngine || presetChanged || modeChanged) {
+          await initStellarCore({ preset: stellarPreset });
+        }
+      } else {
+        await setStellarMode(stellarMode);
+      }
+    }
+    return resolved;
+  }
+
+  async function selectCausalStarSite({ posGal, popTag = 0.5, starIndex = 0, forceMultiplicity = null, forceExoticStage = null, seedOverride = null } = {}) {
     activeStarSite = {
       posGal: Array.isArray(posGal) ? [...posGal] : [...activeStarSite.posGal],
       popTag: Number.isFinite(Number(popTag)) ? Number(popTag) : 0.5,
-      starIndex: Math.trunc(Number(starIndex) || 0)
+      starIndex: Math.trunc(Number(starIndex) || 0),
+      forceExoticStage: forceExoticStage || null
     };
     galaxyFocusPos = [...activeStarSite.posGal];
     useSolReference = false;
-    await initSolarSystem({ starSite: activeStarSite, forceMultiplicity, seedOverride });
-    // Cascade primary host star properties down into L3 stellar preset!
-    const star0 = activeCausalSystem?.starSystem?.stars?.[0];
+    await initSolarSystem({ starSite: activeStarSite, forceMultiplicity, forceExoticStage, seedOverride });
+    // Cascade primary host star properties cleanly down into L3 stellar regime (preserving Pulsar/Magnetar/BH/WD/Supergiant!)
+    const star0 = activeCausalSystem?.catalog?.[0] || activeCausalSystem?.starSystem?.stars?.[0];
     if (star0) {
-      if (star0.stage === 'white-dwarf') stellarMode = 'white-dwarf-tov';
-      else if (star0.stage === 'neutron-star') stellarMode = 'pulsar';
-      else {
-        stellarMode = 'fusion';
-        stellarPreset = star0.initialMassSolar >= 10.0 ? 'massive-supernova' : (star0.stage === 'protostar-yso' ? 'binary-nursery' : 'main-sequence-star');
-      }
+      await syncStellarRegimeForStar(star0, {
+        recommendedL3Regime: activeCausalSystem?.recommendedL3Regime,
+        initializeNow: false
+      });
     }
     return activeCausalSystem;
   }
@@ -2292,6 +2320,12 @@ export function createUlgUniversesPhysics(device, {
             substeps: 2,
             readTelemetry: true
           });
+        } else if (stellarMode === 'black-hole' && kerrJetSession) {
+          kerrJetTelemetry = await kerrJetSession.step({
+            dt: 0.028 * Math.max(0.12, Math.min(2.5, effScale)),
+            substeps: 2,
+            readTelemetry: true
+          });
         } else if ((stellarMode === 'pulsar' || stellarMode === 'magnetar') && magnetosphereSession) {
           const readMagB = (magnetosphereSession.stepIndex % 4) === 0;
           magnetosphereTelemetry = await magnetosphereSession.step({
@@ -2550,7 +2584,14 @@ export function createUlgUniversesPhysics(device, {
     if (level === 0 && cosmoSession) return;
     if (level === 1 && galaxyEngine) return;
     if (level === 2 && (galaxyBranch === 'smbh-core' ? smbhEngine : solarEngine)) return;
-    if (level === 3 && stellarEngine) return;
+    if (level === 3) {
+      if (stellarMode === 'fusion' && stellarEngine) return;
+      if ((stellarMode === 'pulsar' || stellarMode === 'magnetar') && magnetosphereSession && magnetosphereMode === stellarMode) return;
+      if (stellarMode === 'black-hole' && kerrJetSession) return;
+      if (stellarMode === 'white-dwarf-tov' && tovCurve) return;
+      if (stellarMode === 'nebular-mhd' && nebulaMhdSession) return;
+      if (['h2-pillars', 'planetary-nebula', 'snr-pwn', 'reflection-nebula', 'wr-bubble'].includes(stellarMode) && radWindL3Session && radWindL3Mode === stellarMode) return;
+    }
     if (level === 4 && planetaryResult) return;
     if (level === 5 && mdSession) return;
     if (level === 6 && orbitalCloud) return;
@@ -2564,8 +2605,10 @@ export function createUlgUniversesPhysics(device, {
       else if (level === 2) {
         if (galaxyBranch === 'smbh-core') await initSmbhCore();
         else await initSolarSystem(opts);
-      } else if (level === 3) await initStellarCore(opts);
-      else if (level === 4) await initPlanetaryInterior(opts);
+      } else if (level === 3) {
+        if (stellarMode !== 'fusion') await setStellarMode(stellarMode);
+        else await initStellarCore(opts);
+      } else if (level === 4) await initPlanetaryInterior(opts);
       else if (level === 5) await initMolecularDynamics(opts);
       else if (level === 6) await initQuantumAtom(opts);
       else if (level === 7) await initAtomicNucleus(opts);
@@ -2709,7 +2752,7 @@ export function createUlgUniversesPhysics(device, {
   async function setStellarMode(mode) {
     const valid = [
       'fusion', 'nebular-mhd', 'h2-pillars', 'planetary-nebula', 'snr-pwn',
-      'reflection-nebula', 'wr-bubble', 'pulsar', 'magnetar', 'white-dwarf-tov'
+      'reflection-nebula', 'wr-bubble', 'pulsar', 'magnetar', 'white-dwarf-tov', 'black-hole'
     ];
     stellarMode = valid.includes(mode) ? mode : 'fusion';
     if (stellarMode === 'nebular-mhd') {
@@ -2720,6 +2763,8 @@ export function createUlgUniversesPhysics(device, {
       if (!magnetosphereSession || magnetosphereMode !== stellarMode) await initCompactMagnetosphere(stellarMode);
     } else if (stellarMode === 'white-dwarf-tov') {
       if (!tovCurve) await initWhiteDwarfTovCurve();
+    } else if (stellarMode === 'black-hole') {
+      if (!kerrJetSession) await initKerrQuasarJet({ spinA: 0.94 });
     } else if (!stellarEngine) {
       await initStellarCore();
     }
@@ -3610,6 +3655,7 @@ export function createUlgUniversesPhysics(device, {
     getActiveSystemCatalog,
     getDefaultPlanetIndex,
     selectCausalStarSite,
+    syncStellarRegimeForStar,
     sampleNewGalacticSector,
     setUseSolReference,
     deriveGalaxyEnvironmentFromCosmicContext,

@@ -74,6 +74,10 @@ import {
   createPlanetarySurfaceSessionWebGpu
 } from '../runtime/astrophysics/planetarySurfaceVehiclesGpu.js';
 import {
+  buildCraterTileKey,
+  createSurfaceCraterTileStore
+} from '../runtime/astrophysics/surfaceCraterTileStore.js';
+import {
   deriveGate1IsmCoolingAnchorsWebGpu,
   evaluateIsmRadiativeCoolingErgCm3PerS
 } from '../runtime/astrophysics/galacticIsmCoolingGpu.js';
@@ -863,13 +867,20 @@ export function createUlgUniversesPhysics(device, {
   let cryoPlumeSession = null;
   let cryoPlumeTelemetry = null;
 
-  // Planetary Surface View (TinyPlanetControls + 6-Wheel Jump-Rocket Mars Rover + Atmospheric Drone!)
+  // Planetary Surface View (TinyPlanetControls + 6-Wheel Jump-Rocket Mars Rover + Atmospheric Drone + OPFS Crater Persistence!)
+  const craterTileStore = createSurfaceCraterTileStore();
   let surfaceActive = false;
   let surfaceSession = null;
   let surfaceTelemetry = null;
   let surfaceTimeWarp = 1.0;
   let surfaceSimSec = 0.0;
   let surfaceClimate = null;
+  let surfaceCraterTileKey = null;
+  let surfaceCraterDirty = false;
+  let surfaceCraterFlushTimer = null;
+  let customSurfaceBodySpec = null;
+  const shatteredBodyIds = new Set();
+  let shatterOriginBodyName = null;
   let surfaceControls = {
     forward: false,
     backward: false,
@@ -1480,11 +1491,40 @@ export function createUlgUniversesPhysics(device, {
       seed: (universeSeed ^ (mode.length * 4099)) >>> 0,
       label: `ulg-universes-tidal-${mode}`
     });
-    const warm = mode === 'roche-rings' ? 12 : 6;
+    const warm = mode === 'roche-rings' ? 12 : (mode === 'catastrophic-shatter' ? 4 : 6);
     for (let w = 0; w < warm; w += 1) {
       tidalRocheTelemetry = await next.step({ dt: 0.028, substeps: 3, readTelemetry: w === warm - 1 });
     }
     tidalRocheSession = next;
+  }
+
+  async function triggerCatastrophicShatter(bodySpec = null, { excessRatio = 1.6 } = {}) {
+    const prev = tidalRocheSession;
+    tidalRocheSession = null;
+    if (prev) prev.dispose();
+    const bid = bodySpec?.id || getActiveSystemCatalog()[focusedSolarBodyIndex]?.id || 'asteroid';
+    shatteredBodyIds.add(bid);
+    shatterOriginBodyName = bodySpec?.name || getActiveSystemCatalog()[focusedSolarBodyIndex]?.name || 'Target Body';
+    solarMode = 'catastrophic-shatter';
+    tidalRocheMode = 'catastrophic-shatter';
+    const next = createTidalRocheDisruptionSessionWebGpu(device, {
+      mode: 'catastrophic-shatter',
+      orbitRadiusSim: 2.2,
+      rHostSim: 1.0,
+      rRocheSim: 2.2,
+      gmHost: 6.0,
+      cohesionStrength: 0.25,
+      tidalHeatDrive: Math.max(1.2, Math.min(3.0, 1.55 * excessRatio)),
+      shepherdGm: 0.0,
+      particleCount: quality.id === 'low' ? 3072 : 5120,
+      seed: (universeSeed ^ (bid.length * 8191 + 0x54a77e)) >>> 0,
+      label: `ulg-universes-shatter-${bid}`
+    });
+    for (let w = 0; w < 4; w += 1) {
+      tidalRocheTelemetry = await next.step({ dt: 0.026, substeps: 3, readTelemetry: w === 3 });
+    }
+    tidalRocheSession = next;
+    return tidalRocheTelemetry;
   }
 
   // ---- L3 Wave-2 Photoionized Nebulae: H II Pillars, Planetary Nebula, SNR / Crab PWN ----
@@ -2013,7 +2053,7 @@ export function createUlgUniversesPhysics(device, {
             substeps: 2,
             readTelemetry: true
           });
-        } else if ((solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant') && tidalRocheSession) {
+        } else if ((solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant' || solarMode === 'catastrophic-shatter') && tidalRocheSession) {
           tidalRocheTelemetry = await tidalRocheSession.step({
             dt: 0.024 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
@@ -2425,7 +2465,7 @@ export function createUlgUniversesPhysics(device, {
 
   async function setSolarMode(mode) {
     const valid = [
-      'nbody', 'formation', 'roche-rings', 'giant-impact', 'red-giant',
+      'nbody', 'formation', 'roche-rings', 'giant-impact', 'red-giant', 'catastrophic-shatter',
       'comet-tails', 'hot-jupiter', 'quasar-jet', 'xray-binary', 'bns-kilonova', 'type-ia', 'bbh-merger'
     ];
     solarMode = valid.includes(mode) ? mode : 'nbody';
@@ -2437,7 +2477,7 @@ export function createUlgUniversesPhysics(device, {
       if (!relBinarySession || relBinaryMode !== solarMode) await initRelativisticBinary(solarMode);
     } else if (solarMode === 'comet-tails' || solarMode === 'hot-jupiter') {
       if (!radWindL2Session || radWindL2Mode !== solarMode) await initRadiativeWindL2(solarMode);
-    } else if (solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant') {
+    } else if (solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant' || solarMode === 'catastrophic-shatter') {
       if (!tidalRocheSession || tidalRocheMode !== solarMode) await initTidalRocheL2(solarMode);
     } else if (!solarEngine) {
       await initSolarSystem();
@@ -2558,54 +2598,111 @@ export function createUlgUniversesPhysics(device, {
     planetaryAtmoSession?.setEnableTriboelectric?.(planetaryTriboelectric);
   }
 
+  async function flushSurfaceCraters() {
+    if (surfaceCraterFlushTimer) {
+      clearTimeout(surfaceCraterFlushTimer);
+      surfaceCraterFlushTimer = null;
+    }
+    if (!surfaceSession || !surfaceCraterTileKey || !surfaceCraterDirty) return false;
+    const stamps = surfaceSession.getCraterStamps?.() || [];
+    surfaceCraterDirty = false;
+    try {
+      await craterTileStore.saveTile(surfaceCraterTileKey, stamps);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function scheduleCraterFlush() {
+    if (surfaceCraterFlushTimer) return;
+    surfaceCraterFlushTimer = setTimeout(() => {
+      surfaceCraterFlushTimer = null;
+      void flushSurfaceCraters();
+    }, 1200);
+  }
+
   async function enterSurfaceView({
     bodyIndex = planetaryBodyIndex,
+    customBodySpec = null,
     planetaryModeOverride = null,
     restoreCheckpoint = null,
-    initialVehicle = 'ufo'
+    initialVehicle = 'ufo',
+    onCraterStamp = null
   } = {}) {
+    await flushSurfaceCraters();
+    let spec = null;
     let idx = bodyIndex;
-    let cat = getActiveSystemCatalog();
-    if (typeof idx === 'string') {
-      const foundActive = cat.findIndex((b) => b.id === idx);
-      if (foundActive >= 0 && !cat[foundActive].isStar) {
-        idx = foundActive;
-      } else {
-        const foundSol = REAL_SOLAR_SYSTEM_CATALOG.findIndex((b) => b.id === idx);
-        if (foundSol > 0) {
-          useSolReference = true;
-          await initSolarSystem({ solReference: true });
-          cat = getActiveSystemCatalog();
-          idx = foundSol;
+    let surfAtmoState = planetaryAtmoState;
+    if (customBodySpec && typeof customBodySpec === 'object') {
+      spec = { isMinorBody: true, ...customBodySpec };
+      customSurfaceBodySpec = spec;
+      surfAtmoState = { surfacePressurePa: spec.surfacePressurePa || 0, volatileMassFrac: spec.isComet ? 0.55 : 0.02, particulateMassFrac: 0.0 };
+    } else {
+      customSurfaceBodySpec = null;
+      let cat = getActiveSystemCatalog();
+      if (typeof idx === 'string') {
+        const foundActive = cat.findIndex((b) => b.id === idx);
+        if (foundActive >= 0 && !cat[foundActive].isStar) {
+          idx = foundActive;
         } else {
-          idx = planetaryBodyIndex;
+          const foundSol = REAL_SOLAR_SYSTEM_CATALOG.findIndex((b) => b.id === idx);
+          if (foundSol > 0) {
+            useSolReference = true;
+            await initSolarSystem({ solReference: true });
+            cat = getActiveSystemCatalog();
+            idx = foundSol;
+          } else {
+            idx = planetaryBodyIndex;
+          }
         }
       }
+      idx = Math.max(0, Math.min(cat.length - 1, Math.trunc(Number(idx) ?? planetaryBodyIndex)));
+      if (cat[idx]?.isStar || idx === 0) {
+        const alt = getDefaultPlanetIndex(cat);
+        if (alt > 0) idx = alt;
+      }
+      focusedSolarBodyIndex = idx;
+      if (planetaryModeOverride) {
+        planetaryMode = planetaryModeOverride;
+      }
+      if (!planetaryResult || planetaryBodyIndex !== idx) {
+        await initPlanetaryInterior({ bodyIndex: idx });
+      }
+      spec = cat[idx] || REAL_SOLAR_SYSTEM_CATALOG[3];
+      surfAtmoState = planetaryAtmoState;
     }
-    idx = Math.max(0, Math.min(cat.length - 1, Math.trunc(Number(idx) ?? planetaryBodyIndex)));
-    if (cat[idx]?.isStar || idx === 0) {
-      const alt = getDefaultPlanetIndex(cat);
-      if (alt > 0) idx = alt;
-    }
-    focusedSolarBodyIndex = idx;
-    if (planetaryModeOverride) {
-      planetaryMode = planetaryModeOverride;
-    }
-    if (!planetaryResult || planetaryBodyIndex !== idx) {
-      await initPlanetaryInterior({ bodyIndex: idx });
-    }
-    const spec = cat[idx] || REAL_SOLAR_SYSTEM_CATALOG[3];
+
+    // Load OPFS / IndexedDB persisted sparse crater stamps for 1-submit GPU replay!
+    const tileKey = buildCraterTileKey({
+      universeSeed,
+      systemId: useSolReference ? 'sol' : (activeCausalSystem?.systemName || cosmicEpoch?.id || 'proc'),
+      bodyId: spec.id || `body-${idx}`
+    });
+    const persisted = await craterTileStore.loadTile(tileKey);
+    const initialCraterStamps = Array.isArray(persisted)
+      ? persisted
+      : (Array.isArray(persisted?.stamps) ? persisted.stamps : []);
+    surfaceCraterTileKey = tileKey;
+    surfaceCraterDirty = false;
+
     const nextSurf = createPlanetarySurfaceSessionWebGpu(device, {
       bodySpec: spec,
       planetaryResult,
-      planetaryAtmoState,
-      planetaryMode,
+      planetaryAtmoState: surfAtmoState,
+      planetaryMode: customSurfaceBodySpec ? 'standard' : planetaryMode,
       gridN: quality.id === 'low' ? 81 : 129,
       cellSizeM: 9.5,
       particleCount: quality.id === 'low' ? 1024 : 2048,
-      seed: (universeSeed ^ (idx * 7919 + 0x504face)) >>> 0,
+      seed: (universeSeed ^ ((Number(idx) || 13) * 7919 + (spec.id?.length || 5) * 997 + 0x504face)) >>> 0,
       initialVehicle,
       initialCheckpoint: restoreCheckpoint,
+      initialCraterStamps,
+      onCraterStamp: (st) => {
+        surfaceCraterDirty = true;
+        scheduleCraterFlush();
+        if (typeof onCraterStamp === 'function') onCraterStamp(st, tileKey);
+      },
       label: `ulg-universes-surface-${spec.id}`
     });
     // Reset controls cleanly on landing
@@ -2625,7 +2722,9 @@ export function createUlgUniversesPhysics(device, {
   }
 
   function exitSurfaceView() {
+    void flushSurfaceCraters();
     surfaceActive = false;
+    customSurfaceBodySpec = null;
     surfaceControls = {
       forward: false, backward: false, left: false, right: false,
       jump: false, down: false, turbo: false, yawLeft: false, yawRight: false,
@@ -2891,6 +2990,12 @@ export function createUlgUniversesPhysics(device, {
             subtitle: 'Bloated Convective RGB Envelope · Aerodynamic Common-Envelope Drag on Inner Worlds',
             tempK: 3400,
             composition: 'Convective H/He Envelope · Vaporizing Inner Rocky Orbits'
+          },
+          'catastrophic-shatter': {
+            name: `Catastrophic Shatter — ${shatterOriginBodyName || 'Disrupted Body'}`,
+            subtitle: `Binding Energy Exceeded (E > 0.85 U_bind) · Incandescent Molten-Core & Crustal Debris Field`,
+            tempK: 3800,
+            composition: 'Vaporized Fe-Ni Core Plasma · Ballistic Silicate & Volatile Fragments'
           }
         };
         const m = metaMap[solarMode] || metaMap['quasar-jet'];
@@ -3241,6 +3346,8 @@ export function createUlgUniversesPhysics(device, {
     get surfaceActive() { return surfaceActive; },
     get surfaceSession() { return surfaceSession; },
     get surfaceTelemetry() { return surfaceTelemetry; },
+    get surfaceBodySpec() { return customSurfaceBodySpec || getActiveSystemCatalog()[planetaryBodyIndex] || null; },
+    get surfaceCraterTileKey() { return surfaceCraterTileKey; },
     get surfaceControls() { return surfaceControls; },
     get surfaceTimeWarp() { return surfaceTimeWarp; },
     get surfaceSimSec() { return surfaceSimSec; },
@@ -3307,6 +3414,11 @@ export function createUlgUniversesPhysics(device, {
     setPlanetaryMode,
     enterSurfaceView,
     exitSurfaceView,
+    flushSurfaceCraters,
+    applyRemoteCraterStamp: (st) => surfaceSession?.applyRemoteCraterStamp?.(st) ?? false,
+    triggerCatastrophicShatter,
+    getShatteredBodyIds: () => [...shatteredBodyIds],
+    craterTileStore,
     setSurfaceVehicle,
     setSurfaceUfoAltitudeKm,
     setSurfaceCameraMode,

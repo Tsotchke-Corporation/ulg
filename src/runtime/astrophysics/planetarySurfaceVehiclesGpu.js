@@ -41,6 +41,8 @@ import {
   appendIconicUfoGeometry,
   appendMissileGeometry,
   appendVonNeumannProbeGeometry,
+  computeAntimatterMassRateKgS,
+  computeBodyBindingEnergyJ,
   computeUfoRimEmitPoint,
   evaluateAntimatterAnnihilation,
   evaluateEmWavelengthInfo,
@@ -128,10 +130,10 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
 } = {}) {
   const G = 6.67430e-11;
   const M_SUN = 1.98847e30;
-  const massKg = Math.max(1e18, (Number(bodySpec.massSolar) || 3.00349e-6) * M_SUN);
-  const radiusM = Math.max(1e5, (Number(bodySpec.radiusKm) || 6371) * 1000);
+  const massKg = Math.max(1e9, (Number(bodySpec.massSolar) || 3.00349e-6) * M_SUN);
+  const radiusM = Math.max(100, (Number(bodySpec.radiusKm) || 6371) * 1000);
   const computedG = (G * massKg) / (radiusM * radiusM);
-  const gravityMS2 = Math.max(0.15, Math.min(35.0, Number(bodySpec.surfaceGravityMS2) || computedG));
+  const gravityMS2 = Math.max(0.002, Math.min(35.0, Number(bodySpec.surfaceGravityMS2) || computedG));
 
   const atmo = planetaryAtmoState || deriveFluidElectrodynamicsState(bodySpec, planetaryResult);
   // Physical Fulton/Rogers rocky-to-gaseous envelope cliff (R > 16,000 km => deep fluid/gas giant, no solid landing crust!)
@@ -254,12 +256,25 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     ? Math.min(18.0, (2.2 + 9.5 * dustTint + 3.5 * skyOpticalDepth) * (isEyeball ? 1.4 : 1.0))
     : 0.0;
 
+  const isMinorBody = Boolean(bodySpec.isMinorBody) || radiusM < 600e3;
+  const isComet = Boolean(bodySpec.isComet);
+  const isMetallicAsteroid = Boolean(bodySpec.isMetallicAsteroid);
+  // Real micro-gravity for minor bodies clamped gently to >= 0.14 m/s^2 so Rover/boulders stay crisp & playable!
+  const effectiveGravityMS2 = isMinorBody ? Math.max(0.14, Math.min(2.2, gravityMS2)) : gravityMS2;
+  const tinyPlanetCurvatureRadiusM = isMinorBody
+    ? Math.max(460.0, Math.min(1450.0, 460.0 + (radiusM / 500e3) * 990.0))
+    : 2800.0;
+
   return Object.freeze({
     schema: ULG_PLANETARY_SURFACE_SCHEMA,
-    gravityMS2,
+    gravityMS2: effectiveGravityMS2,
+    rawGravityMS2: gravityMS2,
     radiusM,
     massKg,
     hasSolidCrust,
+    isMinorBody,
+    isComet,
+    isMetallicAsteroid,
     isMagmaOcean,
     isCryoMoon,
     isRogue,
@@ -279,8 +294,8 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     skyZenithRgb: Object.freeze(skyZenithRgb),
     skyHorizonRgb: Object.freeze(skyHorizonRgb),
     dustTint,
-    craterStrength,
-    terrainAmpM,
+    craterStrength: isMinorBody ? Math.max(0.75, craterStrength) : craterStrength,
+    terrainAmpM: isMinorBody ? Math.max(26.0, Math.min(54.0, terrainAmpM * 0.62)) : terrainAmpM,
     baseWindMS,
     droneMassKg,
     maxAeroLiftN,
@@ -291,7 +306,7 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     color1: Object.freeze([c1[0], c1[1], c1[2]]),
     crustPrimaryRgb: Object.freeze([c0[0], c0[1], c0[2]]),
     crustSecondaryRgb: Object.freeze([c1[0], c1[1], c1[2]]),
-    tinyPlanetCurvatureRadiusM: 2800.0,
+    tinyPlanetCurvatureRadiusM,
     seed: (seed >>> 0) || 1,
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
     scientificValidation: false
@@ -1343,8 +1358,24 @@ fn step_surface_plume_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
         live = 0.0;
       }
     } else {
-      // Role 2: Drone rotor downwash dust ring OR subtle blowing atmospheric dust motes (0 in vacuum!)
-      if (params.rho_atm > 1e-4 && (params.drone_throttle > 0.05 || abs(params.wind_x) + abs(params.wind_z) > 0.5)) {
+      // Role 2: Active Comet Sublimation Outgassing Jets (mode_flags bit4 = 16u!) OR Drone downwash / atmospheric dust!
+      let is_comet_vent = (params.mode_flags & 16u) != 0u;
+      if (is_comet_vent) {
+        // Active solar-driven H2O/CO sublimation geysers erupting vertically from fissured comet vents into vacuum coma!
+        let vent_id = i % 6u;
+        let v_ang = f32(vent_id) * 1.0471975 + params.seed_f;
+        let v_rad = 26.0 + f32(vent_id) * 18.0;
+        let vx_base = params.col0_pad.w + cos(v_ang) * v_rad + (r_rand - 0.5) * 6.0;
+        let vz_base = params.col1_pad.w + sin(v_ang) * v_rad + (cos(ang) - 0.5) * 6.0;
+        let vy_base = eval_height(vx_base, vz_base);
+        pos = vec3<f32>(vx_base, vy_base + 0.4, vz_base);
+        let jet_spd = 18.0 + r_rand * 26.0;
+        vel = vec3<f32>(cos(ang) * (2.5 + r_rand * 4.5), jet_spd, sin(ang) * (2.5 + r_rand * 4.5));
+        p.col_life = vec4<f32>(0.68, 0.90, 1.0, 2.2 + 1.8 * r_rand);
+        p.meta0 = vec4<f32>(0.55 + 0.65 * r_rand, 0.85, seed, 1.0);
+        age = r_rand * 0.35;
+        live = 1.0;
+      } else if (params.rho_atm > 1e-4 && (params.drone_throttle > 0.05 || abs(params.wind_x) + abs(params.wind_z) > 0.5)) {
         let is_downwash = params.drone_throttle > 0.05 && (i & 3u) != 0u;
         if (is_downwash) {
           let rad = 0.35 + r_rand * 1.1;
@@ -1710,6 +1741,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   seed = 20261125,
   initialVehicle = 'ufo',
   initialCheckpoint = null,
+  initialCraterStamps = [],
+  onCraterStamp = null,
   label = 'ulg-planetary-surface'
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
@@ -1770,7 +1803,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-planetary-surface-${entryPoint}.v4-clipmap-living`,
+    cacheKey: `ulg-planetary-surface-${entryPoint}.v5-comet-jets`,
     label: `${label}-${entryPoint}`,
     code: planetarySurfaceWgsl,
     entryPoint,
@@ -1793,10 +1826,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   const vehicleVertBuf = device.createBuffer({ label: `${label}-veh-verts`, size: MAX_VEHICLE_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
   const fxVertBuf = device.createBuffer({ label: `${label}-fx-verts`, size: MAX_FX_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
 
-  // Active-Zone Hybrid GPU MLS-MPM Deformable Terrain + 64 Rigid-Body Boulders!
+  // Active-Zone Hybrid GPU MLS-MPM Deformable Terrain + 64 GPU SE(3) DLM Rigid-Body Boulders + Persistent Crater Replay!
   const deformMpm = createSurfaceDeformationAndBouldersGpu(device, {
     env,
     baseHeightFn: (x, z) => evaluatePlanetaryTerrainHeight(x, z, env),
+    initialCraterStamps,
+    onCraterStamp,
     seed,
     label: `${label}-mpm`
   });
@@ -1911,12 +1946,16 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   let tractorAutoTimerS = 0.0;
   let weaponMode = 'laser';        // 'laser' | 'missile' | 'antimatter'
   let laserLog10WavelengthM = -6.27; // Default 532 nm emerald visible laser (tunable 10^-13 Gamma -> 10^+1 Radio!)
-  let laserPowerW = 2.5e8;         // 250 MW default (tunable 1 kW -> 100 TW!)
+  let laserPowerW = 2.5e8;         // 250 MW default (dynamically lifts to 10^26 W with Kardashev tier!)
+  let maxWeaponPowerW = 1e12;
   let weaponFiring = false;
   let weaponAimWorldPos = null;
   let laserSpotTempK = env.tempK;
   let lastWeaponReaction = null;
   let antimatterFlash = 0;
+  const bodyBindingEnergyJ = computeBodyBindingEnergyJ(bodySpec);
+  let deliveredWeaponEnergyJ = 0;
+  let shatterTriggered = false;
   let externalRemoteUfos = [];
   let externalProbes = [];
   let externalShieldFlash = 0;
@@ -2076,11 +2115,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     return tractorManualOn;
   }
 
-  function setWeaponConfig({ mode, log10WavelengthM, powerW } = {}) {
+  function setWeaponConfig({ mode, log10WavelengthM, powerW, maxPowerW } = {}) {
     if (mode === 'laser' || mode === 'missile' || mode === 'antimatter') weaponMode = mode;
+    if (Number.isFinite(Number(maxPowerW))) maxWeaponPowerW = Math.max(1e12, Math.min(1e26, Number(maxPowerW)));
     if (Number.isFinite(Number(log10WavelengthM))) laserLog10WavelengthM = Math.max(-13.0, Math.min(1.0, Number(log10WavelengthM)));
-    if (Number.isFinite(Number(powerW))) laserPowerW = Math.max(1e3, Math.min(1e14, Number(powerW)));
-    return { mode: weaponMode, log10WavelengthM: laserLog10WavelengthM, powerW: laserPowerW };
+    if (Number.isFinite(Number(powerW))) laserPowerW = Math.max(1e3, Math.min(maxWeaponPowerW, Number(powerW)));
+    return { mode: weaponMode, log10WavelengthM: laserLog10WavelengthM, powerW: laserPowerW, maxPowerW: maxWeaponPowerW };
   }
 
   function computeDefaultForwardAimPoint() {
@@ -2621,7 +2661,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     const modeFlags = (env.hasSolidCrust ? 1 : 0)
       | (env.isMagmaOcean ? 2 : 0)
       | (env.isCryoMoon ? 4 : 0)
-      | (env.hasLiquidOcean ? 8 : 0);
+      | (env.hasLiquidOcean ? 8 : 0)
+      | (env.isComet ? 16 : 0);
     const seedF = ((env.seed % 997) * 0.13) + 1.7;
     const curvInv2R = env.hasSolidCrust ? (1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM)) : 0.0;
 
@@ -2718,6 +2759,10 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       }
       if (hitPos) {
         m.alive = false;
+        deliveredWeaponEnergyJ += 4.0e12;
+        if (deliveredWeaponEnergyJ >= 0.85 * bodyBindingEnergyJ) {
+          shatterTriggered = true;
+        }
         if (env.hasLiquidOcean && evaluatePlanetaryCrustElevation(hitPos[0], hitPos[2], env) <= env.seaLevelM + 1.0) {
           oceanWaveGpu.queueSplashImpulse(hitPos[0], hitPos[2], -1.8, 22.0);
         }
@@ -2734,13 +2779,14 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           ejectaRgb: [1.0, 0.56, 0.16],
           ejectaRole: 0.0
         });
-        pendingHarvest.silicates += harv.silicates + 10;
-        pendingHarvest.metals += harv.metals + 6;
-        pendingHarvest.volatiles += harv.volatiles + 4;
+        const oreMul = env.isMetallicAsteroid ? 4.0 : (env.isComet ? 2.5 : 1.0);
+        pendingHarvest.silicates += (harv.silicates + 10) * oreMul;
+        pendingHarvest.metals += (harv.metals + 6) * oreMul;
+        pendingHarvest.volatiles += (harv.volatiles + (env.isComet ? 16 : 4)) * oreMul;
         pendingHarvest.exotics += harv.exotics;
         lastWeaponReaction = {
           weapon: 'missile',
-          phaseState: 'Shock Detonation',
+          phaseState: shatterTriggered ? 'BINDING ENERGY EXCEEDED' : 'Shock Detonation',
           reactionOutcome: `Thermobaric impact crater (R=14.5 m · GPU MLS-MPM ejecta + boulder shockwave)`
         };
       }
@@ -2765,12 +2811,17 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       });
 
       if (weaponMode === 'antimatter') {
-        const am = evaluateAntimatterAnnihilation({ massRateKgS: 3e-7, dt: dtSafe });
+        const amRate = computeAntimatterMassRateKgS(Math.max(1e10, laserPowerW));
+        const am = evaluateAntimatterAnnihilation({ massRateKgS: amRate, dt: dtSafe });
+        deliveredWeaponEnergyJ += am.coupledEnergyJ;
+        if (deliveredWeaponEnergyJ >= 0.85 * bodyBindingEnergyJ) {
+          shatterTriggered = true;
+        }
         antimatterFlash = 0.16;
         activeBeam = { targetPos, rgb: [0.84, 0.36, 1.0], isAntimatter: true, thicknessMul: 1.4 };
         lastWeaponReaction = {
           weapon: 'antimatter',
-          phaseState: 'Annihilation Plasma',
+          phaseState: shatterTriggered ? 'BINDING ENERGY EXCEEDED' : 'Annihilation Plasma',
           tempK: am.plasmaTempK,
           reactionOutcome: am.reactionOutcome
         };
@@ -2782,7 +2833,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
             kind: 3,
             pos: targetPos,
             radiusM: am.craterRadiusM * 0.62,
-            depthM: Math.min(4.8, am.craterDepthM * 0.25),
+            depthM: Math.min(8.5, am.craterDepthM * 0.32),
             tempK: 6500,
             melt: 0.95,
             char: 1.0,
@@ -2791,19 +2842,26 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
             ejectaRgb: [0.88, 0.44, 1.0],
             ejectaRole: 0.0
           });
-          pendingHarvest.silicates += harv.silicates + 5;
-          pendingHarvest.metals += harv.metals + 4;
+          const oreMul = env.isMetallicAsteroid ? 4.0 : (env.isComet ? 2.5 : 1.0);
+          pendingHarvest.silicates += (harv.silicates + 5) * oreMul;
+          pendingHarvest.metals += (harv.metals + 4) * oreMul;
+          pendingHarvest.volatiles += (env.isComet ? 12 : 2) * oreMul;
           pendingHarvest.exotics += harv.exotics + 2.5;
         }
       } else {
         const res = evaluateLaserMaterialInteraction({
           log10WavelengthM: laserLog10WavelengthM,
           powerW: laserPowerW,
+          maxPowerW: maxWeaponPowerW,
           spotRadiusM: 1.6,
           sample: tgtSample,
           currentTempK: laserSpotTempK,
           dt: dtSafe
         });
+        deliveredWeaponEnergyJ += Math.max(0, laserPowerW * res.absorptance * dtSafe);
+        if (deliveredWeaponEnergyJ >= 0.85 * bodyBindingEnergyJ) {
+          shatterTriggered = true;
+        }
         laserSpotTempK = res.nextTempK;
         activeBeam = {
           targetPos,
@@ -3006,7 +3064,16 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       aliveBoulderCount: deformMpm.aliveBoulderCount,
       bouldersCaptured: boulderRes.capturedCount,
       totalCratersCarved: deformMpm.totalCratersCarved,
+      craterReplayCount: deformMpm.craterReplayCount,
+      boulderSkinGpuActive: Boolean(deformMpm.boulderSkinGpuActive),
       totalBouldersShattered: deformMpm.totalBouldersShattered,
+      deliveredWeaponEnergyJ,
+      bodyBindingEnergyJ,
+      shatterFraction: Math.min(1.0, deliveredWeaponEnergyJ / Math.max(1.0, 0.85 * bodyBindingEnergyJ)),
+      shatterTriggered,
+      isMinorBody: Boolean(env.isMinorBody),
+      isComet: Boolean(env.isComet),
+      isMetallicAsteroid: Boolean(env.isMetallicAsteroid),
       mpmActive: deformMpm.mpmActive,
       mpmDispatches: deformMpm.totalMpmDispatches,
       cfdActive: runCfd,
@@ -3048,7 +3115,9 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   return Object.freeze({
     schema: ULG_PLANETARY_SURFACE_SCHEMA,
     lawAdapter: PLANETARY_SURFACE_LAW_ADAPTER,
+    get bodySpec() { return bodySpec; },
     get env() { return env; },
+    get isMinorBody() { return Boolean(env.isMinorBody); },
     get xenobiology() { return env.xenobiology; },
     get activeVehicle() { return activeVehicle; },
     get cameraMode() { return cameraMode; },
@@ -3064,6 +3133,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     get cfdMoteCount() { return cfdSession ? cfdSession.moteCount : 0; },
     get cfdProfile() { return cfdSession ? cfdSession.profile : null; },
     get stepIndex() { return stepIndex; },
+    getCraterStamps: () => deformMpm.getCraterStamps(),
+    applyRemoteCraterStamp: (st) => deformMpm.applyRemoteCraterStamp(st),
     getResidentTerrainVertBuffer: () => terrainVertBuf,
     getResidentTerrainIndexBuffer: () => terrainIdxBuf,
     getResidentVehicleVertBuffer: () => vehicleVertBuf,

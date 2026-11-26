@@ -171,13 +171,49 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     composition: 'H₂O/CH₄/NH₃ Mantle · H₂ 80% · He 19%'
   },
   {
-    id: 'halley', name: '1P/Halley Comet', subtitle: 'Eccentric Periodic Comet · e = 0.967',
+    id: 'halley', name: '1P/Halley Comet', subtitle: 'Active Outgassing Periodic Comet · e = 0.967',
     parent: 0, kind: 3, massSolar: 1.1e-16, radiusKm: 5.5,
     aAu: 17.834, e: 0.9671, incDeg: 162.26, omDeg: 58.42, wDeg: 111.33, m0Deg: 38.4,
-    axialObliquityDeg: 30.0, spinAxisLonDeg: 140.0, rotationPeriodHr: 52.8, tidallyLocked: false, isComet: true,
-    color0: [0.74, 0.90, 1.0], color1: [0.42, 0.68, 0.92], atm: 0.2, tempK: 170,
+    axialObliquityDeg: 30.0, spinAxisLonDeg: 140.0, rotationPeriodHr: 52.8, tidallyLocked: false, isComet: true, isMinorBody: true,
+    color0: [0.74, 0.90, 1.0], color1: [0.42, 0.68, 0.92], atm: 0.2, surfacePressurePa: 0, volatileMassFrac: 0.72, tempK: 170,
     centralP: 1e5, coreZ: 8, mantleZ: 6, surfZ: 14,
     composition: 'H₂O 80% · CO 10% · CO₂/CH₄/Silicate Dust'
+  },
+  {
+    id: 'ceres', name: '1 Ceres', subtitle: 'Main-Belt Cryo-Silicate Dwarf Planet · 2.767 AU',
+    parent: 0, kind: 3, massSolar: 4.72e-10, radiusKm: 469.7,
+    aAu: 2.7675, e: 0.0758, incDeg: 10.59, omDeg: 80.33, wDeg: 73.60, m0Deg: 95.9,
+    axialObliquityDeg: 4.0, spinAxisLonDeg: 291.0, rotationPeriodHr: 9.074, tidallyLocked: false, isMinorBody: true,
+    color0: [0.56, 0.55, 0.54], color1: [0.34, 0.36, 0.40], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.25, tempK: 168,
+    centralP: 1.2e8, coreZ: 14, mantleZ: 8, surfZ: 14,
+    composition: 'Hydrated Phyllosilicates · H₂O Ice Mantle · Na₂CO₃ Evaporites'
+  },
+  {
+    id: 'vesta', name: '4 Vesta', subtitle: 'Differentiated Basaltic Asteroid · 2.362 AU',
+    parent: 0, kind: 1, massSolar: 1.30e-10, radiusKm: 262.7,
+    aAu: 2.3615, e: 0.0887, incDeg: 7.14, omDeg: 103.85, wDeg: 151.20, m0Deg: 205.5,
+    axialObliquityDeg: 29.0, spinAxisLonDeg: 309.0, rotationPeriodHr: 5.342, tidallyLocked: false, isMinorBody: true,
+    color0: [0.64, 0.60, 0.56], color1: [0.40, 0.36, 0.32], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.01, tempK: 185,
+    centralP: 4.5e7, coreZ: 26, mantleZ: 14, surfZ: 14,
+    composition: 'Fe-Ni Core · Eucrite/Diogenite Basalt Crust'
+  },
+  {
+    id: 'psyche', name: '16 Psyche', subtitle: 'Metallic Fe-Ni Asteroid Core · 2.923 AU',
+    parent: 0, kind: 1, massSolar: 1.15e-11, radiusKm: 111.0,
+    aAu: 2.923, e: 0.134, incDeg: 3.10, omDeg: 150.2, wDeg: 228.0, m0Deg: 312.0,
+    axialObliquityDeg: 95.0, spinAxisLonDeg: 34.0, rotationPeriodHr: 4.196, tidallyLocked: false, isMinorBody: true, isMetallicAsteroid: true,
+    color0: [0.70, 0.68, 0.66], color1: [0.42, 0.44, 0.48], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.0, tempK: 162,
+    centralP: 1.8e7, coreZ: 26, mantleZ: 28, surfZ: 26,
+    composition: 'Fe 82% · Ni 10% · Orthopyroxene Silicate 8%'
+  },
+  {
+    id: 'bennu', name: '101955 Bennu', subtitle: 'Near-Earth Carbonaceous Rubble-Pile Asteroid · 1.126 AU',
+    parent: 0, kind: 1, massSolar: 3.69e-20, radiusKm: 0.245,
+    aAu: 1.1264, e: 0.2037, incDeg: 6.035, omDeg: 2.06, wDeg: 66.22, m0Deg: 101.7,
+    axialObliquityDeg: 177.6, spinAxisLonDeg: 85.0, rotationPeriodHr: 4.296, tidallyLocked: false, isMinorBody: true,
+    color0: [0.30, 0.28, 0.27], color1: [0.16, 0.15, 0.15], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.12, tempK: 268,
+    centralP: 8.0, coreZ: 6, mantleZ: 14, surfZ: 6,
+    composition: 'C-Type Chondrite · Magnetite · Hydrated Clay & Organics'
   }
 ]);
 

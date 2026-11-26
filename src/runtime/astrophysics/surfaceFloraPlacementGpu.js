@@ -417,8 +417,18 @@ export function createSurfaceFloraPlacementGpu(device, {
     force = false
   } = {}) {
     if (disposed) return false;
-    const bioActive = Boolean(xeno && xeno.biosphereViability >= 0.18 && env.hasSolidCrust && !env.isMagmaOcean);
-    const civActive = Boolean(xeno && xeno.civTechK >= 0.35 && env.hasSolidCrust && !env.isMagmaOcean);
+    const allowSurfaceFlora = Boolean(
+      env?.hasSolidCrust
+      && !env?.isMagmaOcean
+      && !env?.isMinorBody
+      && !env?.isComet
+      && !env?.isCryoMoon
+      && (Number(env?.pressurePa) || 0) >= 500
+      && xeno?.solvent !== 'H2O-subsurface'
+      && xeno?.solvent !== 'none'
+    );
+    const bioActive = allowSurfaceFlora && Boolean(xeno && xeno.biosphereViability >= 0.18);
+    const civActive = allowSurfaceFlora && Boolean(xeno && xeno.civTechK >= 0.35);
     if (!bioActive && !civActive) {
       activeCount = 0;
       return false;

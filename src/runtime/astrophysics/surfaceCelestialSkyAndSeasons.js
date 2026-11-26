@@ -86,7 +86,7 @@ export function buildSurfaceTangentBasis({
     -eqA[2] * sLam + eqB[2] * cLam
   ]);
   const south = norm3(cross3(east, up));
-  return { pole, east, up, south, observerLatRad: phi };
+  return { pole, eqA, eqB, east, up, south, observerLatRad: phi };
 }
 
 /**
@@ -175,10 +175,10 @@ export function buildLiveSurfaceCelestialSky({
     tidallyLocked: Boolean(focusSpec.tidallyLocked),
     toPrimaryStarUnit: toStar0Unit
   });
-  const sEast0 = dot3(toStar0Unit, baseBasis0.east);
-  const sUp0 = dot3(toStar0Unit, baseBasis0.up);
-  const sSouth0 = dot3(toStar0Unit, baseBasis0.south);
-  const baseMeridOffset = focusSpec.tidallyLocked ? 0.35 : (Math.atan2(sEast0, Math.hypot(sUp0, sSouth0) + 1e-4) - 0.52);
+  const sEqA = dot3(toStar0Unit, baseBasis0.eqA);
+  const sEqB = dot3(toStar0Unit, baseBasis0.eqB);
+  // Exact subsolar longitude minus ~30 deg -> crisp 10:00 AM sunlit morning on EVERY orbital quadrant!
+  const baseMeridOffset = focusSpec.tidallyLocked ? 0.35 : (Math.atan2(sEqB, sEqA) - 0.52);
   const spinAngleRad = focusSpec.tidallyLocked
     ? baseMeridOffset
     : (baseMeridOffset + omegaSpin * surfaceSimSec);

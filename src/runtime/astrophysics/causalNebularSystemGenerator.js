@@ -916,9 +916,81 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     }
   }
 
+  // Synthesize visitable, landable, mineable named Minor Bodies (Metallic Asteroid + Active Outgassing Comet) for EVERY star system!
+  const astAu = Number(Math.max(rMinStableAu * 1.35, Math.min(rMaxStableAu * 0.9, rSnowLineAu * 0.92)).toFixed(4));
+  const lHostSol = Math.max(0.01, stars.reduce((acc, s) => acc + (Number(s.luminositySolar) || 0), 0) || 1.0);
+  const astTeq = Math.max(45, Math.round(278 * Math.pow(lHostSol, 0.25) / Math.sqrt(Math.max(0.1, astAu))));
+  catalog.push({
+    id: 'belt-asteroid-1',
+    name: `${sys.systemName} Belt Asteroid α`,
+    planetClass: 'metallic-asteroid',
+    subtitle: `Mineable Fe-Ni / Silicate Main-Belt Asteroid · ${astAu.toFixed(2)} AU`,
+    parent: planetParentIdx,
+    kind: 1,
+    massSolar: (2e-12 + rand() * 3e-11),
+    radiusKm: Math.round(45 + rand() * 145),
+    aAu: astAu,
+    e: Number((0.06 + rand() * 0.14).toFixed(4)),
+    incDeg: Number((3.0 + rand() * 9.0).toFixed(2)),
+    omDeg: Number((rand() * 360).toFixed(1)),
+    wDeg: Number((rand() * 360).toFixed(1)),
+    m0Deg: Number((rand() * 360).toFixed(1)),
+    axialObliquityDeg: Number((rand() * 140).toFixed(1)),
+    spinAxisLonDeg: Number((rand() * 360).toFixed(1)),
+    rotationPeriodHr: Number((3.8 + rand() * 9.5).toFixed(2)),
+    tidallyLocked: false,
+    isMinorBody: true,
+    isMetallicAsteroid: true,
+    civTechK: 0,
+    hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+    color0: [0.64, 0.62, 0.58],
+    color1: [0.36, 0.38, 0.42],
+    atm: 0.0,
+    surfacePressurePa: 0,
+    volatileMassFrac: 0.04,
+    tempK: astTeq,
+    centralP: 1.4e7,
+    coreZ: 26, mantleZ: 28, surfZ: 26,
+    composition: 'Fe-Ni Metallic Ore · Olivine/Pyroxene Chondrite'
+  });
+  const comAu = Number(Math.max(rSnowLineAu * 1.4, Math.min(18.0, rSnowLineAu * 2.8)).toFixed(4));
+  catalog.push({
+    id: 'periodic-comet-1',
+    name: `${sys.systemName} Comet 1P`,
+    planetClass: 'periodic-comet',
+    subtitle: `Active Outgassing Volatile Comet · e = 0.84`,
+    parent: planetParentIdx,
+    kind: 3,
+    massSolar: 8.5e-17,
+    radiusKm: Number((4.5 + rand() * 9.0).toFixed(1)),
+    aAu: comAu,
+    e: Number((0.76 + rand() * 0.16).toFixed(4)),
+    incDeg: Number((18.0 + rand() * 115.0).toFixed(2)),
+    omDeg: Number((rand() * 360).toFixed(1)),
+    wDeg: Number((rand() * 360).toFixed(1)),
+    m0Deg: Number((12 + rand() * 26).toFixed(1)),
+    axialObliquityDeg: 28.0,
+    spinAxisLonDeg: 110.0,
+    rotationPeriodHr: Number((14.0 + rand() * 36.0).toFixed(1)),
+    tidallyLocked: false,
+    isMinorBody: true,
+    isComet: true,
+    civTechK: 0,
+    hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+    color0: [0.74, 0.90, 1.0],
+    color1: [0.38, 0.62, 0.88],
+    atm: 0.18,
+    surfacePressurePa: 0,
+    volatileMassFrac: 0.76,
+    tempK: 175,
+    centralP: 1e5,
+    coreZ: 8, mantleZ: 6, surfZ: 8,
+    composition: 'H₂O Ice 75% · CO/CO₂/CH₄ Volatiles · Silicate Dust'
+  });
+
   // Pick a compelling default focus body (Earth-like if present, else first rocky/ocean planet, else first planet, else primary star!)
   const earthLikeIdx = catalog.findIndex((b) => b.planetClass === 'earth-like');
-  const firstPlanetIdx = catalog.findIndex((b) => !b.isStar);
+  const firstPlanetIdx = catalog.findIndex((b) => !b.isStar && !b.isMinorBody);
   const defaultFocusIndex = earthLikeIdx >= 0 ? earthLikeIdx : (firstPlanetIdx >= 0 ? firstPlanetIdx : 0);
 
   return Object.freeze({

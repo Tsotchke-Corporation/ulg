@@ -918,6 +918,46 @@ export async function mountOrganicLabDemo() {
       }
       return Math.hypot(cx / Math.max(1e-4, mTot), cy / Math.max(1e-4, mTot), cz / Math.max(1e-4, mTot));
     },
+    async readBearingIntegrity() {
+      if (!mdSession || !currentGraph || currentGraph.rotorMeta?.kind !== 'molecular-bearing') return null;
+      await mdSession.step({ dt: 0.012, substeps: 1, readTelemetry: true, readPositions: true });
+      const arr = mdSession.getLatestAtomsHost();
+      const n = mdSession.atomCount;
+      const rotorCount = currentGraph.rotorMeta.rotorCount || 24;
+      let minSR = 999; let maxSR = 0; let maxSOContact = 0; let minSODist = 999; let maxOFlex = 0;
+      const sCoords = [];
+      const oCoords = [];
+      for (let i = 0; i < n; i += 1) {
+        const x = arr[i * 16 + 0]; const y = arr[i * 16 + 1]; const z = arr[i * 16 + 2];
+        const Z = Math.round(arr[i * 16 + 15]);
+        if (i < rotorCount && Z === 16) {
+          const r = Math.hypot(x, y, z);
+          if (r < minSR) minSR = r;
+          if (r > maxSR) maxSR = r;
+          sCoords.push([x, y, z]);
+        } else if (i >= rotorCount && Z === 8) {
+          const init = currentGraph.atoms[i].pos;
+          const flex = Math.hypot(x - init[0], y - init[1], z - init[2]);
+          if (flex > maxOFlex) maxOFlex = flex;
+          oCoords.push([x, y, z]);
+        }
+      }
+      for (const s of sCoords) {
+        for (const o of oCoords) {
+          const d = Math.hypot(s[0] - o[0], s[1] - o[1], s[2] - o[2]);
+          if (d < minSODist) minSODist = d;
+          if (d < 3.55) maxSOContact += 1;
+        }
+      }
+      return {
+        minSRadiusA: Number(minSR.toFixed(3)),
+        maxSRadiusA: Number(maxSR.toFixed(3)),
+        minSODistA: Number(minSODist.toFixed(3)),
+        activeSOContacts: maxSOContact,
+        maxStatorOFlexA: Number(maxOFlex.toFixed(4)),
+        activeBondCount: mdSession.getTelemetry()?.activeBondCount || 0
+      };
+    },
     setReactionProgress(xi, auto = false) {
       autoCycleReaction = Boolean(auto);
       el('chk-auto-xi').checked = autoCycleReaction;

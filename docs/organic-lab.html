@@ -121,6 +121,20 @@
       .stage-wrap { position: relative; width: 100%; height: 100%; overflow: hidden; background: #040710; }
       #org-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
       #org-canvas:active { cursor: grabbing; }
+      .stage-overlay {
+        position: absolute; inset: 0; width: 100%; height: 100%;
+        pointer-events: none; z-index: 6; display: block;
+      }
+      .measure-banner {
+        display: none; position: absolute; top: 10px; right: 10px; z-index: 18;
+        background: rgba(8, 14, 28, 0.90); border: 1px solid rgba(52, 211, 153, 0.58);
+        border-radius: 8px; padding: 6px 10px; font-family: ui-monospace, monospace;
+        font-size: 10.5px; color: #d1fae5; backdrop-filter: blur(8px);
+        max-width: 310px; flex-direction: column; gap: 3px; pointer-events: auto;
+      }
+      .measure-banner.open { display: flex; }
+      .measure-banner-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 800; color: #34d399; }
+      .measure-banner-val { color: #fef08a; font-size: 11.5px; font-weight: 700; }
       .pick-reticle {
         position: absolute; pointer-events: none; width: 28px; height: 28px; margin: -14px 0 0 -14px;
         border: 2px solid #facc15; border-radius: 999px; box-shadow: 0 0 12px rgba(250, 204, 21, 0.85);
@@ -135,14 +149,14 @@
       .pick-card-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 800; color: #facc15; }
       .pick-card-meta { font-family: ui-monospace, monospace; font-size: 10px; color: #e2e8f0; line-height: 1.4; }
       .hud-top-left {
-        position: absolute; top: 10px; left: 10px; max-width: 380px; pointer-events: none;
+        position: absolute; top: 10px; left: 10px; max-width: 380px; pointer-events: none; z-index: 16;
         background: rgba(8, 13, 26, 0.80); border: 1px solid rgba(124, 164, 240, 0.28);
         border-radius: 8px; padding: 7px 10px; backdrop-filter: blur(8px);
       }
       .hud-title { font-size: 12px; font-weight: 800; color: #fff; margin: 0 0 2px; }
       .hud-sub { font-size: 10.5px; color: var(--muted); line-height: 1.35; margin: 0; }
       .hud-bottom {
-        position: absolute; bottom: 10px; left: 10px; right: 10px;
+        position: absolute; bottom: 10px; left: 10px; right: 10px; z-index: 16;
         display: flex; align-items: center; justify-content: space-between; gap: 8px; pointer-events: none;
       }
       .hud-badge-bar {
@@ -220,7 +234,7 @@
         .hdr-btn.mobile-only { display: inline-flex; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/organicLab-neNJ4POh.js"></script>
+    <script type="module" crossorigin src="./assets/organicLab-ZZ_EoZX9.js"></script>
   </head>
   <body>
     <div id="org-shell" class="shell">
@@ -368,6 +382,22 @@
           </div>
           <label class="chk-row"><span>Show 3D π-MO Wavefunction Lobes</span><input id="chk-pi" type="checkbox" checked /></label>
           <label class="chk-row"><span>ESP Partial-Charge Coloring (QEq)</span><input id="chk-esp" type="checkbox" /></label>
+          <div class="ctrl-row" style="margin-top:2px;">
+            <div class="ctrl-head"><span>Representation (PyMOL/VMD)</span><b id="val-rep">Ball &amp; Stick</b></div>
+            <div class="btn-row" id="rep-mode-row">
+              <button class="sm-btn active" style="min-width:0;padding:4px 5px;" data-rep="0" type="button">Ball &amp; Stick</button>
+              <button class="sm-btn" style="min-width:0;padding:4px 5px;" data-rep="1" type="button" title="Bondi van der Waals space-filling CPK spheres">CPK vdW</button>
+              <button class="sm-btn" style="min-width:0;padding:4px 5px;" data-rep="2" type="button" title="Uniform-radius licorice stick framework">Licorice</button>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button id="btn-measure" class="sm-btn" type="button" title="Click 2 atoms for distance (Å), 3 for angle (°), 4 for dihedral torsion (°)">📏 Measure</button>
+            <button id="btn-labels" class="sm-btn" type="button" title="Toggle 3D projected Element / QEq partial-charge atom labels">🏷 Labels: Off</button>
+          </div>
+          <div class="btn-row">
+            <button id="btn-export-xyz" class="sm-btn" type="button" title="Export live GPU Cartesian coordinates (.xyz for Avogadro/PyMOL/ORCA)">⬇ .XYZ</button>
+            <button id="btn-export-json" class="sm-btn" type="button" title="Export live quantum π-MO, QEq, titration &amp; geometry report (.json)">⬇ .JSON</button>
+          </div>
           <div class="btn-row">
             <button id="btn-mirror" class="sm-btn mirror" type="button" title="Apply exact (x,y,z) -> (-x,y,z) spatial reflection">🪞 Mirror R↔S</button>
           </div>
@@ -396,7 +426,16 @@
 
       <main class="stage-wrap">
         <canvas id="org-canvas"></canvas>
+        <canvas id="org-overlay" class="stage-overlay"></canvas>
         <div id="pick-reticle" class="pick-reticle"></div>
+        <div id="measure-banner" class="measure-banner">
+          <div class="measure-banner-head">
+            <span>📏 Live Geometry Caliper</span>
+            <button id="btn-measure-clear" class="sm-btn" style="flex:0;min-width:24px;padding:1px 5px;" type="button" title="Clear measurement atoms">✕</button>
+          </div>
+          <div id="measure-atoms-txt" style="color:#94a3b8;font-size:10px;">Click 2 atoms (dist), 3 (angle), or 4 (torsion)</div>
+          <div id="measure-val-txt" class="measure-banner-val"></div>
+        </div>
         <div class="hud-top-left">
           <div id="hud-title" class="hud-title">Sulflower Molecular Bearing (C₁₆S₈ @ Calix[11]furan)</div>
           <p id="hud-sub" class="hud-sub">Click any atom/cell to inspect live WebGPU state · Drag to orbit · Scroll to zoom</p>

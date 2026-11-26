@@ -45,6 +45,23 @@ import {
   evaluateEisensteinHuBaoTransfer,
   evaluateStellarEvolutionaryState
 } from '../runtime/astrophysics/cosmicEpochState.js';
+import { evaluateKerrSpacetimeMetrics } from '../runtime/astrophysics/relativisticCompactObjectGpu.js';
+import { evaluateRocheAndTidalHeating } from '../runtime/astrophysics/tidalRocheDisruptionGpu.js';
+import { evaluateHolmanWiegertLimits } from '../runtime/astrophysics/causalNebularSystemGenerator.js';
+import {
+  classifySolventBains2024,
+  deriveRedoxAndBiosignatures,
+  solvePhotobiologySpectrum,
+  synthesizeWorldEcosystem
+} from '../runtime/biology/xenobiologyEcologyEngine.js';
+import {
+  UNIVERSAL_LAW_GRAPH_NODES,
+  resolveActiveUniversalLaws,
+  validateUniversalLawGraphContracts
+} from '../runtime/universalLawGraph.js';
+import {
+  createDynamicSchroederScaleAtlasRuntime
+} from '../runtime/sph/schroederSpatialScaleAtlasRuntime.js';
 
 export const ULG_SCIENTIFIC_VALIDATION_SCHEMA = 'ulg.science.validation.v1';
 
@@ -262,6 +279,18 @@ const TRIAGE_CATALOG = Object.freeze({
   'astro-cosmo': {
     title: 'Lambda-CDM Cosmology & Stellar Evolutionary Scaling (`cosmicEpochState.js`)',
     recommendation: 'Extend mass-luminosity / main-sequence radius scaling across low-mass M-dwarf convective interiors and high-mass radiative stars.'
+  },
+  'relativistic-tidal-astro': {
+    title: 'Relativistic Kerr Metrics, Roche Limits & Circumbinary Dynamics',
+    recommendation: 'Verify Bardeen-Press-Teukolsky Kerr ISCO, Peale-Cassen-Reynolds tidal heating, and Holman-Wiegert binary stability.'
+  },
+  'xenobiology-ecology': {
+    title: 'Astrobiology Solvents, Multi-Photon Photobiology, Redox & Allometry (`xenobiologyEcologyEngine.js`)',
+    recommendation: 'Audit Bains-Petkowski-Seager solvent boundaries, Kiang/Takizawa red-edge photobiology, and Kleiber/Euler allometry scaling.'
+  },
+  'law-graph-schroeder-ss': {
+    title: 'Universal Law Graph Contracts & 40-OOM Schroeder Simulation (SS) Scale Atlas',
+    recommendation: 'Verify zero-debt CANONICAL_SS_EPOCH Law Adapter descriptors and double-float conservation across 40-OOM chart migrations.'
   }
 });
 
@@ -346,7 +375,10 @@ export async function runCrossScaleScientificValidation({
     compoundChemistry: [],
     organicAndBio: [],
     planetaryAtmospheres: [],
-    stellarAndCosmology: []
+    stellarAndCosmology: [],
+    relativisticRadiativeTidal: [],
+    xenobiologyAstrobiology: [],
+    lawGraphAndSchroederSs: []
   };
 
   // --- DOMAIN 1: NUCLEAR STRUCTURE (Live `nuclearStructureGpu.js` vs AME2020) ---
@@ -700,6 +732,176 @@ export async function runCrossScaleScientificValidation({
     })
   );
 
+  // --- DOMAIN 8: RELATIVISTIC, RADIATIVE & TIDAL ASTROPHYSICS (Kerr/BZ, Roche, Holman-Wiegert) ---
+  const kerrSchw = evaluateKerrSpacetimeMetrics({ massSolar: 1e8, spinA: 0.0, accretionRateEddington: 0.3, magneticFluxNorm: 1.0 });
+  const kerrMax = evaluateKerrSpacetimeMetrics({ massSolar: 1e8, spinA: 0.998, accretionRateEddington: 0.3, magneticFluxNorm: 1.0 });
+  const kerrRetro = evaluateKerrSpacetimeMetrics({ massSolar: 1e8, spinA: -0.998, accretionRateEddington: 0.3, magneticFluxNorm: 1.0 });
+  const saturnRoche = evaluateRocheAndTidalHeating({
+    hostMassKg: 5.683e26,
+    hostRadiusM: 5.823e7,
+    bodyMassKg: 1.08e20,
+    bodyRadiusM: 2.52e5,
+    orbitalRadiusM: 2.38e8,
+    eccentricity: 0.0047,
+    loveK2OverQ: 0.0025
+  });
+  const hwEq = evaluateHolmanWiegertLimits(1.0, 0.0, 0.5);
+  domainBuckets.relativisticRadiativeTidal.push(
+    makeComparison({
+      domain: 'relativisticRadiativeTidal', subject: 'Schwarzschild(a*=0)', observable: 'r_ISCO', unit: 'r_g',
+      simulated: kerrSchw.rIscoRg, reference: 6.0, relTol: 0.005,
+      source: 'Bardeen-Press-Teukolsky-1972', physicsTag: 'relativistic-tidal-astro'
+    }),
+    makeComparison({
+      domain: 'relativisticRadiativeTidal', subject: 'Kerr-Prograde(a*=0.998)', observable: 'r_ISCO', unit: 'r_g',
+      simulated: kerrMax.rIscoRg, reference: 1.237, relTol: 0.02,
+      source: 'Thorne-1974', physicsTag: 'relativistic-tidal-astro'
+    }),
+    makeComparison({
+      domain: 'relativisticRadiativeTidal', subject: 'Kerr-Retrograde(a*=-0.998)', observable: 'r_ISCO', unit: 'r_g',
+      simulated: kerrRetro.rIscoRg, reference: 8.994, relTol: 0.02,
+      source: 'Bardeen-Press-Teukolsky-1972', physicsTag: 'relativistic-tidal-astro'
+    }),
+    makeComparison({
+      domain: 'relativisticRadiativeTidal', subject: 'Kerr-BZ(a*=0)', observable: 'P_BZ', unit: 'W',
+      simulated: kerrSchw.jetPowerW, reference: 0.0, absTol: 1e-6,
+      source: 'Blandford-Znajek-1977', physicsTag: 'relativistic-tidal-astro'
+    }),
+    makeComparison({
+      domain: 'relativisticRadiativeTidal', subject: 'Saturn-Enceladus-Roche', observable: 'R_Roche/R_S', unit: 'R_S',
+      simulated: saturnRoche.rocheLimitFluidM / 5.823e7, reference: 1.84, relTol: 0.03,
+      source: 'Roche-1849/Cassini', physicsTag: 'relativistic-tidal-astro'
+    }),
+    makeComparison({
+      domain: 'relativisticRadiativeTidal', subject: 'Holman-Wiegert(e=0,mu=0.5)', observable: 'a_critP/a_bin', unit: '1',
+      simulated: hwEq.rCritPAu, reference: 2.39, relTol: 0.05,
+      source: 'Holman-Wiegert-1999', physicsTag: 'relativistic-tidal-astro'
+    })
+  );
+
+  // --- DOMAIN 9: XENOBIOLOGY, ASTROBIOLOGY & EVOLUTIONARY ALLOMETRY (Bains 2024 / Kiang / Kleiber / Euler) ---
+  const earthSolv = classifySolventBains2024({ tempK: 288, pressurePa: 101325, volatileFrac: 0.04, hasSolidCrust: true });
+  const titanSolv = classifySolventBains2024({ tempK: 94, pressurePa: 146700, volatileFrac: 0.06, hasSolidCrust: true });
+  const venusSolv = classifySolventBains2024({ tempK: 735, pressurePa: 9.2e6, volatileFrac: 0.025, hasSolidCrust: true });
+  const earthPhoto = solvePhotobiologySpectrum({ stellarTeffK: 5778, pressurePa: 101325, solvent: 'H2O' });
+  const mDwarfPhoto = solvePhotobiologySpectrum({ stellarTeffK: 3050, pressurePa: 120000, solvent: 'H2O' });
+  const earthRedox = deriveRedoxAndBiosignatures({ solvent: 'H2O', tempK: 288, pressurePa: 101325, stellarTeffK: 5778 });
+  const ecoLowG = synthesizeWorldEcosystem({ worldName: 'LowG', tempK: 288, pressurePa: 101325, gravityMS2: 1.62, rhoAtmKgM3: 1.2, stellarTeffK: 5778, hasLiquidSurface: true, seed: 101 });
+  const ecoHighG = synthesizeWorldEcosystem({ worldName: 'HighG', tempK: 288, pressurePa: 101325, gravityMS2: 14.8, rhoAtmKgM3: 1.8, stellarTeffK: 3150, hasLiquidSurface: true, seed: 202 });
+  domainBuckets.xenobiologyAstrobiology.push(
+    makeQualitativeComparison({
+      domain: 'xenobiologyAstrobiology', subject: 'Earth(288K,1bar)', observable: 'solvent',
+      simulated: earthSolv.solvent, reference: 'H2O',
+      source: 'Bains-Petkowski-Seager-2024', physicsTag: 'xenobiology-ecology'
+    }),
+    makeQualitativeComparison({
+      domain: 'xenobiologyAstrobiology', subject: 'Titan(94K,1.47bar)', observable: 'solvent',
+      simulated: titanSolv.solvent, reference: 'CH4',
+      source: 'Bains-Petkowski-Seager-2024', physicsTag: 'xenobiology-ecology'
+    }),
+    makeQualitativeComparison({
+      domain: 'xenobiologyAstrobiology', subject: 'Venus(735K,92bar)', observable: 'solvent',
+      simulated: venusSolv.solvent, reference: 'H2SO4',
+      source: 'Bains-Petkowski-Seager-2024', physicsTag: 'xenobiology-ecology'
+    }),
+    makeComparison({
+      domain: 'xenobiologyAstrobiology', subject: 'G2V-Chlorophyll', observable: 'lambda_redEdge', unit: 'nm',
+      simulated: earthPhoto.redEdgeNm, reference: 700, relTol: 0.12,
+      source: 'Kiang-2007', physicsTag: 'xenobiology-ecology'
+    }),
+    makeComparison({
+      domain: 'xenobiologyAstrobiology', subject: 'M-Dwarf-3Photon', observable: 'lambda_redEdge', unit: 'nm',
+      simulated: mDwarfPhoto.redEdgeNm, reference: 1050, relTol: 0.22,
+      source: 'Lehmer-2021/Takizawa-2017', physicsTag: 'xenobiology-ecology'
+    }),
+    makeComparison({
+      domain: 'xenobiologyAstrobiology', subject: 'Aerobic-O2-Respiration', observable: 'DeltaG_redox', unit: 'kJ/mol',
+      simulated: Math.abs(earthRedox.deltaGKjMol), reference: 478, relTol: 0.20,
+      source: 'Cockell-NutMEG-2019', physicsTag: 'xenobiology-ecology'
+    }),
+    makeComparison({
+      domain: 'xenobiologyAstrobiology', subject: 'Euler-Buckling(g=1.62/14.8)', observable: 'H_lowG/H_highG', unit: '1',
+      simulated: ecoLowG.bucklingHeightScale / Math.max(1e-4, ecoHighG.bucklingHeightScale), reference: Math.cbrt(14.8 / 1.62), relTol: 0.25,
+      source: 'McMahon-Euler-Allometry', physicsTag: 'xenobiology-ecology'
+    })
+  );
+
+  // --- DOMAIN 10: UNIVERSAL LAW GRAPH & 40-OOM SCHROEDER SIMULATION (SS) TREE INTEGRITY ---
+  const lgCheck = validateUniversalLawGraphContracts();
+  const ssRuntime = createDynamicSchroederScaleAtlasRuntime({
+    referenceSpacingM: 1.0,
+    rootGlobalBaseLevel: 82,
+    rootLocalMinLevel: 0,
+    rootLocalMaxLevel: 2,
+    rootLabel: 'L0-cosmic-web'
+  });
+  const cL1 = ssRuntime.ensureChartForScaleLevel({ targetGlobalLevel: 69, parentChartId: 0, originInParentUnits: [1.25, -0.4, 0.8], label: 'L1-galaxy' });
+  const cL4 = ssRuntime.ensureChartForScaleLevel({ targetGlobalLevel: 23, parentChartId: cL1.chartId, originInParentUnits: [4.8, 0.04, 2.1], label: 'L4-planet' });
+  const cL7 = ssRuntime.ensureChartForScaleLevel({ targetGlobalLevel: -49, parentChartId: cL4.chartId, originInParentUnits: [0.5, 0.25, -0.1], label: 'L7-nucleus' });
+  const ssSnap = ssRuntime.snapshotAtlas();
+  // Start a nucleon parcel inside fine chart L7 (-49), rebase UP across 40 OOM to L0 (+82) and back to L7!
+  const migUp = ssRuntime.migrateParticleBetweenCharts({
+    sourceChartId: cL7.chartId,
+    targetChartId: 0,
+    posLocal: [1.5, -0.25, 0.75],
+    massKg: 2.5,
+    linearMomentumKgMPerS: [1.2, -0.4, 0.8],
+    energyJ: 42.0
+  });
+  const migBack = ssRuntime.migrateParticleBetweenCharts({
+    sourceChartId: 0,
+    targetChartId: cL4.chartId,
+    posLocal: migUp.posLocalHi,
+    posLocalLo: migUp.posLocalLo,
+    massKg: migUp.massKg,
+    linearMomentumKgMPerS: migUp.linearMomentumKgMPerS,
+    angularMomentumKgM2PerS: migUp.angularMomentumKgM2PerS,
+    energyJ: migUp.energyJ
+  });
+  const vacLaws = resolveActiveUniversalLaws({ surfaceViewActive: true, hasSolidCrust: true, surfacePressurePa: 0, pressurePa: 0, tempK: 250, hasLiquidOcean: false });
+  const earthLaws = resolveActiveUniversalLaws({ surfaceViewActive: true, hasSolidCrust: true, surfacePressurePa: 101325, pressurePa: 101325, tempK: 288, hasLiquidOcean: true, biosphereViability: 0.9, boulderCount: 64 });
+  domainBuckets.lawGraphAndSchroederSs.push(
+    makeComparison({
+      domain: 'lawGraphAndSchroederSs', subject: 'UniversalLawGraph', observable: 'contractErrors', unit: 'count',
+      simulated: lgCheck.errors.length + lgCheck.debt.length, reference: 0, absTol: 0,
+      source: 'ULG-SS-Contract', physicsTag: 'law-graph-schroeder-ss'
+    }),
+    makeComparison({
+      domain: 'lawGraphAndSchroederSs', subject: 'UniversalLawGraph', observable: 'registeredNodes', unit: 'nodes',
+      simulated: UNIVERSAL_LAW_GRAPH_NODES.length, reference: 32, absTol: 0,
+      source: 'ULG-SS-Contract', physicsTag: 'law-graph-schroeder-ss'
+    }),
+    makeComparison({
+      domain: 'lawGraphAndSchroederSs', subject: 'SchroederAtlas(L+82..L-49)', observable: 'spanOOM', unit: 'OOM',
+      simulated: ssSnap.ordersOfMagnitude, reference: 40.0, absTol: 2.0,
+      source: 'ULG-SS-ScaleAtlas', physicsTag: 'law-graph-schroeder-ss'
+    }),
+    makeComparison({
+      domain: 'lawGraphAndSchroederSs', subject: 'Schroeder40OOM-RoundTrip', observable: 'massRelErr', unit: '1',
+      simulated: Math.abs(migBack.massKg - 2.5) / 2.5, reference: 0.0, absTol: 1e-12,
+      source: 'ULG-SS-ScaleAtlas', physicsTag: 'law-graph-schroeder-ss'
+    }),
+    makeComparison({
+      domain: 'lawGraphAndSchroederSs', subject: 'Schroeder40OOM-RoundTrip', observable: 'energyRelErr', unit: '1',
+      simulated: Math.abs(migBack.energyJ - 42.0) / 42.0, reference: 0.0, absTol: 1e-12,
+      source: 'ULG-SS-ScaleAtlas', physicsTag: 'law-graph-schroeder-ss'
+    }),
+    makeQualitativeComparison({
+      domain: 'lawGraphAndSchroederSs', subject: 'DormantZero(Vacuum-Moon)', observable: 'oceanAndFloraDormant',
+      simulated: (!vacLaws.active.some((a) => a.id === 'surface-ocean-waves' || a.id === 'surface-flora-placement')) ? 'dormant' : 'leaked',
+      reference: 'dormant',
+      source: 'ULG-StarSpec-v0.4', physicsTag: 'law-graph-schroeder-ss'
+    }),
+    makeQualitativeComparison({
+      domain: 'lawGraphAndSchroederSs', subject: 'ActiveState(Living-Earth)', observable: 'oceanAndFloraAndXenoActive',
+      simulated: (earthLaws.active.some((a) => a.id === 'surface-ocean-waves')
+        && earthLaws.active.some((a) => a.id === 'surface-flora-placement')
+        && earthLaws.active.some((a) => a.id === 'planetary-xenobiology-ecology')) ? 'active' : 'missing',
+      reference: 'active',
+      source: 'ULG-StarSpec-v0.4', physicsTag: 'law-graph-schroeder-ss'
+    })
+  );
+
   const domainSummaries = [
     summarizeDomain('nuclear', '1. Nuclear Structure (10^-15 m)', domainBuckets.nuclear),
     summarizeDomain('atomicMassAndPeriodic', '2. Atomic Weights (NIST SRD 144, Z=1..118)', domainBuckets.atomicMassAndPeriodic),
@@ -707,7 +909,10 @@ export async function runCrossScaleScientificValidation({
     summarizeDomain('compoundChemistry', '4. Compound Thermodynamics, Dielectric & Optics (NIST WebBook)', domainBuckets.compoundChemistry),
     summarizeDomain('organicAndBio', '5. Organic Chemistry & Biophysics (Huckel/pKa/Mitchell)', domainBuckets.organicAndBio),
     summarizeDomain('planetaryAtmospheres', '6. Planetary Gravity & Stratified Atmospheres (NASA Fact Sheets)', domainBuckets.planetaryAtmospheres),
-    summarizeDomain('stellarAndCosmology', '7. Stellar Evolution & Lambda-CDM Cosmology (IAU/Planck 2018)', domainBuckets.stellarAndCosmology)
+    summarizeDomain('stellarAndCosmology', '7. Stellar Evolution & Lambda-CDM Cosmology (IAU/Planck 2018)', domainBuckets.stellarAndCosmology),
+    summarizeDomain('relativisticRadiativeTidal', '8. Relativistic Kerr/BZ, Roche & Binary Astrophysics', domainBuckets.relativisticRadiativeTidal),
+    summarizeDomain('xenobiologyAstrobiology', '9. Xenobiology, Photobiology, Redox & Evolutionary Allometry', domainBuckets.xenobiologyAstrobiology),
+    summarizeDomain('lawGraphAndSchroederSs', '10. Universal Law Graph (32 Nodes) & 40-OOM Schroeder SS Tree', domainBuckets.lawGraphAndSchroederSs)
   ];
 
   for (const list of Object.values(domainBuckets)) {

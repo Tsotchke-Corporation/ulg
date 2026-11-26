@@ -25,10 +25,14 @@ test('Cross-Scale Scientific Validation Framework runs strictly offline across a
     assert.equal(report.blocksWorkflow, false);
     assert.equal(report.scientificValidation, false);
 
-    // Must cover all 7 physical scale domains from nuclear (10^-15 m) to cosmology (10^+25 m)!
-    assert.equal(report.domains.length, 7);
+    // Must cover all 10 physical & architectural domains from nuclear (10^-15 m) to cosmology (10^+25 m) + Law Graph & SS Tree!
+    assert.equal(report.domains.length, 10);
     for (const d of report.domains) {
       assert.ok(d.evaluated >= 1 || d.domainId === 'atomicMassAndPeriodic', `Domain ${d.domainId} must evaluate live ULG physics`);
+    }
+    for (const id of ['relativisticRadiativeTidal', 'xenobiologyAstrobiology', 'lawGraphAndSchroederSs']) {
+      const dom = report.domains.find((d) => d.domainId === id);
+      assert.ok(dom && dom.agrees === dom.evaluated, `Domain ${id} must pass 100% of first-principles benchmarks (got ${dom?.agrees}/${dom?.evaluated})`);
     }
 
     // Nuclear B/A & LambdaCDM cosmology must agree tightly against AME2020 & Planck 2018!

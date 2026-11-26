@@ -117,6 +117,41 @@ import {
   evaluateMorphogenesisActiveActivation,
   registerMorphogenesisActiveModule
 } from './biology/morphogenesisActiveMatterGpu.js';
+import {
+  XENOBIOLOGY_ECOLOGY_LAW_ADAPTER,
+  evaluateXenobiologyEcologyActivation,
+  registerXenobiologyEcologyModule
+} from './biology/xenobiologyEcologyEngine.js';
+import {
+  STELLAR_MLS_MPM_FUSION_LAW_ADAPTER,
+  evaluateStellarMlsMpmActivation,
+  registerStellarMlsMpmFusionModule
+} from './astrophysics/stellarMlsMpmFusionGpu.js';
+import {
+  SURFACE_TECTONICS_LAW_ADAPTER,
+  evaluateSurfaceTectonicsActivation,
+  registerSurfaceTectonicsModule
+} from './astrophysics/surfaceTectonicsErosionGpu.js';
+import {
+  SURFACE_OCEAN_WAVES_LAW_ADAPTER,
+  evaluateSurfaceOceanWavesActivation,
+  registerSurfaceOceanWavesModule
+} from './astrophysics/surfaceOceanWaveGpu.js';
+import {
+  SURFACE_DEFORMATION_MPM_LAW_ADAPTER,
+  evaluateSurfaceDeformationMpmActivation,
+  registerSurfaceDeformationMpmModule
+} from './astrophysics/surfaceDeformationMpmGpu.js';
+import {
+  SURFACE_FLORA_LAW_ADAPTER,
+  evaluateSurfaceFloraActivation,
+  registerSurfaceFloraModule
+} from './astrophysics/surfaceFloraPlacementGpu.js';
+import {
+  EMERGENT_MHD_DYNAMO_LAW_ADAPTER,
+  evaluateEmergentMhdDynamoActivation,
+  registerEmergentMhdDynamoModule
+} from './astrophysics/emergentMhdDynamoGpu.js';
 
 export const ULG_UNIVERSAL_LAW_GRAPH_SCHEMA = 'peercompute.ulg.universal-law-graph.v1';
 
@@ -575,6 +610,98 @@ export const UNIVERSAL_LAW_GRAPH_NODES = Object.freeze([
     scaleRangeM: Object.freeze([1e1, 2e5]),
     adapter: PLANETARY_ATMO_3D_CFD_LAW_ADAPTER,
     evaluateActivation: evaluatePlanetaryAtmo3dCfdActivation
+  }),
+  Object.freeze({
+    id: 'emergent-3d-mhd-dynamo',
+    methodKey: 'emergent-3d-mhd-dynamo@1',
+    title: '3D Emergent α–ω Mean-Field MHD Dynamo & Dedner-GLM Divergence Cleaning',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.ELECTROMAGNETISM,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e7, 1e22]),
+    adapter: EMERGENT_MHD_DYNAMO_LAW_ADAPTER,
+    evaluateActivation: evaluateEmergentMhdDynamoActivation
+  }),
+  Object.freeze({
+    id: 'stellar-mls-mpm-fusion',
+    methodKey: 'stellar-mls-mpm-fusion@1',
+    title: '3D GPU MLS-MPM Compressible Self-Gravitating Stellar Fusion (pp/CNO/3α) & Rayleigh–Bénard Convection',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.NUCLEAR_QUANTUM
+    ]),
+    scaleRangeM: Object.freeze([5e7, 2e12]),
+    adapter: STELLAR_MLS_MPM_FUSION_LAW_ADAPTER,
+    evaluateActivation: evaluateStellarMlsMpmActivation
+  }),
+  Object.freeze({
+    id: 'surface-tectonics-erosion',
+    methodKey: 'surface-tectonics-erosion@1',
+    title: 'GPU Voronoi Lithospheric Plate Tectonics & 48-Pass Shallow-Water Hydraulic/Thermal Erosion',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e0, 2e4]),
+    adapter: SURFACE_TECTONICS_LAW_ADAPTER,
+    evaluateActivation: evaluateSurfaceTectonicsActivation
+  }),
+  Object.freeze({
+    id: 'surface-ocean-waves',
+    methodKey: 'surface-ocean-waves@1',
+    title: 'GPU 2D Shallow-Water Ocean Wave PDE, Coriolis Ekman Drift & Sea-Ice Damping',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e-1, 1e4]),
+    adapter: SURFACE_OCEAN_WAVES_LAW_ADAPTER,
+    evaluateActivation: evaluateSurfaceOceanWavesActivation
+  }),
+  Object.freeze({
+    id: 'surface-deformation-mpm',
+    methodKey: 'surface-deformation-mpm@1',
+    title: 'Dormant-Zero Active-Zone 3D GPU MLS-MPM Impact Excavation, Thermal Melt & SE(3) Rigid Boulders',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.GRAVITY,
+      FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e-1, 2e3]),
+    adapter: SURFACE_DEFORMATION_MPM_LAW_ADAPTER,
+    evaluateActivation: evaluateSurfaceDeformationMpmActivation
+  }),
+  Object.freeze({
+    id: 'planetary-xenobiology-ecology',
+    methodKey: 'planetary-xenobiology-ecology@1',
+    title: 'First-Principles Astrobiology (7 Solvents, Multi-Photon Photobiology, NutMEG Redox, XNA & Kleiber/Euler Ecology)',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS,
+      FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.REACTION_DIFFUSION_ACTIVE
+    ]),
+    scaleRangeM: Object.freeze([1e-9, 1e7]),
+    adapter: XENOBIOLOGY_ECOLOGY_LAW_ADAPTER,
+    evaluateActivation: evaluateXenobiologyEcologyActivation
+  }),
+  Object.freeze({
+    id: 'surface-flora-placement',
+    methodKey: 'surface-flora-placement@1',
+    title: 'GPU-Instanced Biome Flora, Euler-Buckling Allometry & Snowline/Moisture Phenology Placement',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS,
+      FUNDAMENTAL_LAW_FAMILIES.RIGID_SOLID_MECHANICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS
+    ]),
+    scaleRangeM: Object.freeze([1e0, 1.5e4]),
+    adapter: SURFACE_FLORA_LAW_ADAPTER,
+    evaluateActivation: evaluateSurfaceFloraActivation
   })
 ]);
 
@@ -664,7 +791,14 @@ export function registerAllTopDownLawModules(registry) {
     registerBiopolymerFoldingModule(registry),
     registerTemplateReplicationModule(registry),
     registerMembraneBioenergeticsModule(registry),
-    registerMorphogenesisActiveModule(registry)
+    registerMorphogenesisActiveModule(registry),
+    registerEmergentMhdDynamoModule(registry),
+    registerStellarMlsMpmFusionModule(registry),
+    registerSurfaceTectonicsModule(registry),
+    registerSurfaceOceanWavesModule(registry),
+    registerSurfaceDeformationMpmModule(registry),
+    registerXenobiologyEcologyModule(registry),
+    registerSurfaceFloraModule(registry)
   ].filter(Boolean);
   return registered;
 }

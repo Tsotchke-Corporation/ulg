@@ -144,13 +144,26 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const gSpinEf = 0.5 * (bulkResult.dosAtFermiStatesPerEvAtom || 0);
   const stonerProduct = iStonerEv * gSpinEf;
 
-  // Larmor core diamagnetic susceptibility: chi_dia = -n_atom * mu_0 * e^2 / (6 m_e) * sum(<r^2>)
-  let sumR2M2 = Z * (0.65 * BOHR_TO_M) ** 2;
+  // Larmor core diamagnetic susceptibility: chi_dia = -n_atom * mu_0 * e^2 / (6 m_e) * sum(<r^2>_core)
+  // In metals, delocalized conduction electrons (nCondPerAtom) already contribute Landau diamagnetism
+  // (-1/3 chi_Pauli below), so Larmor <r^2> must integrate strictly over the localized ion core
+  // (cumulative density <= tot - nCondPerAtom) to avoid double-counting diffuse outer ns valence shells!
+  let sumR2M2 = Math.max(0.25, bulkResult.isMetal ? Math.max(0.5, Z - nCondPerAtom) : Z) * (0.55 * BOHR_TO_M) ** 2;
   if (atomResult?.radialGrid?.r && atomResult?.radialGrid?.rho) {
     const { r, rho, dx } = atomResult.radialGrid;
+    let totElec = 0;
+    for (let i = 0; i < r.length; i += 1) {
+      totElec += 4 * Math.PI * (r[i] ** 3) * rho[i] * dx;
+    }
+    const coreCut = bulkResult.isMetal ? Math.max(0, totElec - nCondPerAtom) : Infinity;
+    let cumElec = 0;
     let r2Int = 0;
     for (let i = 0; i < r.length; i += 1) {
-      r2Int += 4 * Math.PI * (r[i] ** 5) * rho[i] * dx;
+      const wShell = 4 * Math.PI * (r[i] ** 3) * rho[i] * dx;
+      if (cumElec >= coreCut) break;
+      const frac = (cumElec + wShell > coreCut) ? Math.max(0, (coreCut - cumElec) / Math.max(1e-12, wShell)) : 1.0;
+      r2Int += (r[i] * r[i]) * wShell * frac;
+      cumElec += wShell;
     }
     if (Number.isFinite(r2Int) && r2Int > 0) sumR2M2 = r2Int * (BOHR_TO_M ** 2);
   }
@@ -159,6 +172,12 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const chiPauli = bulkResult.isMetal
     ? (MU_0 * MU_B * MU_B * (bulkResult.dosAtFermiStatesPerEvAtom / EV_TO_J) * nAtom)
     : 0;
+  // In tetrahedral sp^3 covalent-network insulators/semiconductors (diamond / zincblende lattice),
+  // atomic open p-shell electrons pair into closed-shell sigma covalent bonds (zero local spin moment!).
+  const isCovalentPairedCrystal = !bulkResult.isMetal && (
+    bulkResult.crystalStructure === 'diamond' || bulkResult.crystalStructure === 'zincblende'
+  );
+  const effectiveUnpaired = isCovalentPairedCrystal ? 0 : unpaired;
 
   let magneticPhase = 'diamagnetic';
   let magneticMomentMuB = 0;
@@ -188,10 +207,10 @@ export async function deriveElectromagneticClosureWebGpu(device, {
     magneticMomentMuB = 0.6 + 0.35 * (dOcc - 4);
     curieOrNeelTempK = dOcc === 5 ? 210 : 120;
     magneticSusceptibilitySi = (MU_0 * nAtom * (magneticMomentMuB * MU_B) ** 2) / (3 * KB * (temperatureK + curieOrNeelTempK));
-  } else if (unpaired > 0 && !bulkResult.isMetal) {
+  } else if (effectiveUnpaired > 0 && !bulkResult.isMetal) {
     // Paramagnetic open-shell molecular/nonmetal (e.g. O2 triplet)
     magneticPhase = 'paramagnetic';
-    magneticMomentMuB = Math.sqrt(unpaired * (unpaired + 2));
+    magneticMomentMuB = Math.sqrt(effectiveUnpaired * (effectiveUnpaired + 2));
     magneticSusceptibilitySi = chiDiamagnetic + (MU_0 * nAtom * (magneticMomentMuB * MU_B) ** 2) / (3 * KB * Math.max(1, temperatureK));
   } else if (magneticSusceptibilitySi > 0) {
     magneticPhase = 'paramagnetic';

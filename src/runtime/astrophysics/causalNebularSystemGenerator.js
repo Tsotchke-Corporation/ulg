@@ -86,9 +86,9 @@ function classifySpectralCode(evo, isPopIII = false) {
  *   - Circumstellar (S-type): stable for `a_p < rCritS`
  */
 export function evaluateHolmanWiegertLimits(aBinAu, eBin, massRatioMu) {
-  const a = Math.max(1e-4, Number(aBinAu) || 0.2);
-  const e = Math.max(0, Math.min(0.65, Number(eBin) || 0.05));
-  const mu = Math.max(0.05, Math.min(0.5, Number(massRatioMu) || 0.35));
+  const a = Math.max(1e-4, Number.isFinite(Number(aBinAu)) ? Number(aBinAu) : 0.2);
+  const e = Math.max(0, Math.min(0.65, Number.isFinite(Number(eBin)) ? Number(eBin) : 0.05));
+  const mu = Math.max(0.05, Math.min(0.5, Number.isFinite(Number(massRatioMu)) ? Number(massRatioMu) : 0.35));
   const e2 = e * e;
   const mu2 = mu * mu;
   const rCritP = a * (1.60 + 5.10 * e - 2.22 * e2 + 4.12 * mu - 4.27 * e * mu - 5.09 * mu2 + 4.61 * e2 * mu2);

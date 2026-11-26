@@ -1,10 +1,10 @@
 # ULG Cross-Scale Scientific Validation & Calibration Scorecard
 
-- **Schema:** `ulg.science.validation.v1` (Generated: `2026-11-26T04:53:50.892Z`)
+- **Schema:** `ulg.science.validation.v1` (Generated: `2026-11-26T10:43:40.436Z`)
 - **Policy:** `advisory: true`, `runtimeAuthority: false`, `blocksWorkflow: false`, `scientificValidation: false` (offline empirical diagnostic only — never a runtime gate or lookup table)
 - **Atlas Backend:** `webgpu-vulkan-live-z118-full-md-full-chebyshev`
 - **Cached G7 Snapshots Verified:** `nist-atomic-weights`, `pubchem-periodic-table` (integrity ok: `true`, faults: `0`)
-- **Overall Empirical Audit:** **319/531 agrees (60.1%)** · 212 deviations · 0 missing
+- **Overall Empirical Audit:** **339/551 agrees (61.5%)** · 212 deviations · 0 missing
 
 ## 1. Per-Domain Quantitative Summary (`10⁻¹⁵ m → 10⁺²⁵ m`)
 
@@ -17,6 +17,9 @@
 | 5. Organic Chemistry & Biophysics (Huckel/pKa/Mitchell) | 7 | 7 | 0 | 100.0% | 3.0% | +0.0% | — |
 | 6. Planetary Gravity & Stratified Atmospheres (NASA Fact Sheets) | 29 | 29 | 0 | 100.0% | 0.8% | +0.0% | — |
 | 7. Stellar Evolution & Lambda-CDM Cosmology (IAU/Planck 2018) | 7 | 7 | 0 | 100.0% | 1.9% | -0.0% | — |
+| 8. Relativistic Kerr/BZ, Roche & Binary Astrophysics | 6 | 6 | 0 | 100.0% | 0.0% | -0.0% | — |
+| 9. Xenobiology, Photobiology, Redox & Evolutionary Allometry | 7 | 7 | 0 | 100.0% | 3.7% | +3.7% | — |
+| 10. Universal Law Graph (32 Nodes) & 40-OOM Schroeder SS Tree | 7 | 7 | 0 | 100.0% | 0.0% | +0.0% | — |
 
 ## 2. Physics-Root-Cause Calibration Triage (Ranked by Impact)
 

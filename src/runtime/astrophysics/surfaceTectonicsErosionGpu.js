@@ -18,9 +18,78 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const TECTONIC_GRID_N = 256;
 export const TECTONIC_WORLD_SPAN_M = 12800.0; // Covers full +-6.4 km 2-ring GPU clipmap!
+
+export const SURFACE_TECTONICS_LAW_ADAPTER = Object.freeze({
+  id: 'surface-tectonics-erosion',
+  lawNodeId: 'law:astrophysics-surface-tectonics-erosion',
+  orderConstraint: 'after:planetary-interior-polytope',
+  adapterMode: LAW_ADAPTER_MODES.SURFACE_INTERFACE,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['planetary-body-state', 'tectonic-plates-descriptor']),
+  writes: Object.freeze(['tectonic-field']),
+  accumulates: Object.freeze(['drainage-basin-flux']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['lithospheric-elevation-bounds', 'hydraulic-sediment-flux']),
+  validityDomain: Object.freeze({ requiresSolidCrust: true, minGridN: 64 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e0, 2e4]),
+  fundamentalLaws: Object.freeze(['voronoi-plate-tectonics', 'shallow-water-hydraulic-erosion', 'thermal-talus-repose'])
+});
+
+export function evaluateSurfaceTectonicsActivation(physicalState = {}) {
+  const active = Boolean(physicalState.surfaceViewActive) && physicalState.hasSolidCrust !== false;
+  return { active, reason: active ? 'solid-crust-surface-view-active' : 'orbital-or-gas-world-dormant' };
+}
+
+export function registerSurfaceTectonicsModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('surface-tectonics-erosion@1')) {
+    return registry.resolveModule('surface-tectonics-erosion@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'surface-tectonics-erosion', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/surfaceTectonicsErosionGpu.js',
+      entryPoint: 'erode_tectonic_step',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      erosionPasses: { type: 'number', min: 2, max: 64, required: false }
+    },
+    stateLayout: {
+      tensorId: 'surface-tectonic-field',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 4,
+      strideBytes: 16,
+      fields: ['elevNorm', 'riverMask', 'moisture', 'soilClass']
+    },
+    scaleRangeM: [1, 2e4],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: SURFACE_TECTONICS_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createSurfaceTectonicsErosionSessionWebGpu(device, {
+        erosionPasses: Number(p.erosionPasses ?? 8)
+      });
+      try {
+        const summary = { gridN: session.gridN, plateCount: session.plateCount, erosionPasses: session.erosionPasses };
+        return createSimulationArtifact?.({ schema: 'ulg.astrophysics.surface-tectonics-erosion.v1', summary }) ?? summary;
+      } finally {
+        session.dispose();
+      }
+    }
+  });
+}
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,

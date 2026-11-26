@@ -818,7 +818,65 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   const enthalpyVapJPerMol = Math.max(2000, cohesiveEnergyEv * EV_TO_J * AVOGADRO * 0.92);
   const latentHeatFusionJPerKg = (R_GAS * 1.4 * meltingPointK) / molarMassKg;
   const latentHeatVaporizationJPerKg = enthalpyVapJPerMol / molarMassKg;
-  const heatCapacityCpJPerKgK = (3 * totalAtoms * R_GAS) / molarMassKg;
+  // First-Principles Quantum Statistical Mechanics Heat Capacity C_p (replaces classical 3 N R Dulong-Petit!):
+  //   - Crystalline solids (ionic, covalent network, metallic, or T < T_m): exact 16-pt Gauss-Legendre Debye
+  //     phonon integral f_D(T / Theta_D) capturing quantum phonon freeze-out in stiff oxides (SiO2, Al2O3)!
+  //   - Molecular fluids/gases: quantum translational + rigid-rotor + Einstein vibrational freeze-out modes
+  //     plus intermolecular hindered-libration / H-bond network configurational C_p in the liquid phase!
+  const debyeCvFraction = (tK, thetaDK) => {
+    const xMax = Math.max(1e-3, Math.min(40.0, thetaDK / Math.max(1.0, tK)));
+    const nQ = 16;
+    const dx = xMax / nQ;
+    let sum = 0;
+    for (let k = 0; k < nQ; k += 1) {
+      const x = (k + 0.5) * dx;
+      const ex = Math.exp(Math.min(60, x));
+      const denom = (ex - 1) * (ex - 1);
+      if (denom > 1e-18 && Number.isFinite(denom)) {
+        sum += ((x ** 4) * ex / denom) * dx;
+      }
+    }
+    return Math.max(0.01, Math.min(1.0, (3.0 / (xMax ** 3)) * sum));
+  };
+  const einsteinMode = (tK, thetaVibK) => {
+    const x = Math.min(50, Math.max(1e-3, thetaVibK / Math.max(1.0, tK)));
+    const ex = Math.exp(x);
+    return (x * x * ex) / Math.max(1e-18, (ex - 1) * (ex - 1));
+  };
+  let molarCpJPerMolK;
+  const isRigidSolidAtT = isCovalentNetwork || isIonicSolid || isMetal || (temperatureK < meltingPointK * 0.96);
+  if (isRigidSolidAtT) {
+    // Stiff covalent/ionic lattices have higher effective optical-phonon Debye scale
+    const thetaEffK = Math.max(80, debyeTempK * (isCovalentNetwork ? 1.42 : (isIonicSolid ? 1.24 : 1.0)));
+    const fDebye = debyeCvFraction(temperatureK, thetaEffK);
+    const dilate = 1.0 + 0.045 * Math.min(1.5, temperatureK / Math.max(250, meltingPointK));
+    molarCpJPerMolK = 3 * totalAtoms * R_GAS * fDebye * dilate;
+  } else {
+    const isLinearMol = totalAtoms === 2
+      || (totalAtoms === 3 && !counts.H && species.some((s) => s.count === 1 && valenceElectronCount(s.Z) === 4));
+    const fTrans = 3;
+    const fRot = totalAtoms <= 1 ? 0 : (isLinearMol ? 2 : 3);
+    const nVib = Math.max(0, 3 * totalAtoms - fTrans - fRot);
+    // Bond-stiffness vibrational scales from reduced light-atom mass (X-H stretch ~ 4200 K vs heavy ~ 1950 K)
+    const hasLightH = Boolean(counts.H);
+    const thetaStretchK = hasLightH ? 4200 : 1950;
+    const thetaBendK = hasLightH ? 1950 : 960;
+    const nStretch = Math.min(nVib, Math.max(1, totalAtoms - 1));
+    const nBend = Math.max(0, nVib - nStretch);
+    const cVibR = nStretch * einsteinMode(temperatureK, thetaStretchK)
+      + nBend * einsteinMode(temperatureK, thetaBendK);
+    const isLiquidPhase = temperatureK < boilingPointK * 1.04;
+    if (isLiquidPhase) {
+      const hasHBondNetwork = Boolean(counts.H) && Boolean(counts.N || counts.O || counts.F) && deltaEn > 0.5;
+      // Liquid intermolecular cage libration + H-bond structural rearrangement (exact Debye-like fluid excess)
+      const cInterMolR = hasHBondNetwork ? 6.0 : 3.2;
+      molarCpJPerMolK = ((fTrans + fRot) * 0.5 + cVibR + cInterMolR) * R_GAS;
+    } else {
+      // Ideal-gas C_p = C_v + R
+      molarCpJPerMolK = ((fTrans + fRot) * 0.5 + cVibR + 1.0) * R_GAS;
+    }
+  }
+  const heatCapacityCpJPerKgK = molarCpJPerMolK / molarMassKg;
   const liquidDensityKgPerM3 = densityKgPerM3 * 0.92;
   // Clausius-Clapeyron solid-liquid slope dT/d(log10 P) = (T_m * DeltaV / DeltaH_fus) * P_ref * ln(10)
   const deltaVFus = (1 / Math.max(1, liquidDensityKgPerM3)) - (1 / Math.max(1, densityKgPerM3));

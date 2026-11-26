@@ -4187,6 +4187,12 @@ export async function mountUlgUniversesDemo() {
         `<div class="uv-stat-cell"><div class="uv-stat-k">${k}</div><div class="uv-stat-v">${v}</div></div>`
       )).join('');
     }
+    const ssSnap = physics.syncSchroederScaleChart?.(currentLevel, log10ViewSpanM);
+    const activeLawGraph = physics.getActiveUniversalLaws?.(currentLevel, log10ViewSpanM);
+    if (engineTag && ssSnap && activeLawGraph) {
+      const lvlSign = ssSnap.activeGlobalLevel >= 0 ? `+${ssSnap.activeGlobalLevel}` : `${ssSnap.activeGlobalLevel}`;
+      engineTag.textContent = `${sc.engineSchema} · SS L${lvlSign} (${ssSnap.chartCount}c/${ssSnap.spanOrdersOfMagnitude.toFixed(0)} OOM) · ${activeLawGraph.active.length}/${physics.lawGraphValidation?.nodeCount || 32} laws`;
+    }
     renderSampleDrilldownStrip();
     drawSpectrograph(target);
     drawScientificPlot();
@@ -5877,6 +5883,9 @@ export async function mountUlgUniversesDemo() {
           metalsKg: kardashev.state.metalsKg,
           volatilesKg: kardashev.state.volatilesKg
         },
+        schroederAtlas: physics.syncSchroederScaleChart?.(currentLevel, log10ViewSpanM) ?? null,
+        activeUniversalLaws: physics.getActiveUniversalLaws?.(currentLevel, log10ViewSpanM) ?? null,
+        lawGraphContracts: physics.lawGraphValidation ?? null,
         shatteredBodies: physics.getShatteredBodyIds(),
         spaceMissileCount: spaceMissiles.length,
         surfaceCraterTileKey: physics.surfaceCraterTileKey ?? null,

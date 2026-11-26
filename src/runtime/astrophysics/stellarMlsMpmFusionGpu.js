@@ -859,6 +859,21 @@ export function registerStellarMlsMpmFusionModule(registry) {
       strideBytes: 64,
       fields: ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'h', 'log10T', 'log10Rho', 'xH', 'log10EpsNuc', 'fMol', 'xIon', 'xHe', 'xZ']
     },
-    scaleRangeM: [1e8, 1e12]
+    scaleRangeM: [1e8, 1e12],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: STELLAR_MLS_MPM_FUSION_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createStellarMlsMpmFusionSessionWebGpu(device, {
+        count: 1024,
+        starMassSolar: Number(p.starMassSolar ?? 1.0)
+      });
+      try {
+        const tel = await session.step({ dt: 0.015, timeAccel: 1.0, readTelemetry: true });
+        return createSimulationArtifact?.({ schema: ULG_STELLAR_MLS_MPM_FUSION_SCHEMA, telemetry: tel }) ?? tel;
+      } finally {
+        session.dispose();
+      }
+    }
   });
 }

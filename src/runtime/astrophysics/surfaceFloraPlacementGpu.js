@@ -62,14 +62,36 @@ export function evaluateSurfaceFloraActivation(physicalState = {}) {
 
 export function registerSurfaceFloraModule(registry) {
   if (!registry || typeof registry.registerModule !== 'function') return null;
-  const desc = Object.freeze({
-    methodKey: 'surface-flora-placement@1',
-    lawAdapter: SURFACE_FLORA_LAW_ADAPTER,
+  if (registry.hasModule?.('surface-flora-placement@1')) {
+    return registry.resolveModule('surface-flora-placement@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'surface-flora-placement', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/surfaceFloraPlacementGpu.js',
+      entryPoint: 'place_surface_flora',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      biosphereViability: { type: 'number', min: 0, max: 1, required: false }
+    },
+    stateLayout: {
+      tensorId: 'surface-flora-instances',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 12,
+      strideBytes: 48,
+      fields: ['x', 'y', 'z', 'scale', 'yaw', 'morphId', 'snowFrac', 'biolum', 'r', 'g', 'b', 'alive']
+    },
+    scaleRangeM: [1, 1.5e4],
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
-    evaluateActivation: evaluateSurfaceFloraActivation
+    lawAdapter: SURFACE_FLORA_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact }) {
+      const p = capsule.input?.parameters || {};
+      const summary = { maxInstances: FLORA_MAX_INSTANCES, biosphereViability: Number(p.biosphereViability ?? 0.5) };
+      return createSimulationArtifact?.({ schema: 'ulg.astrophysics.surface-flora-placement.v1', summary }) ?? summary;
+    }
   });
-  try { registry.registerModule(desc); } catch {}
-  return desc;
 }
 
 const GPU_BUF = Object.freeze({

@@ -16,9 +16,80 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const OCEAN_GRID_N = 128;
 export const OCEAN_PATCH_HALF_M = 512.0;
+
+export const SURFACE_OCEAN_WAVES_LAW_ADAPTER = Object.freeze({
+  id: 'surface-ocean-waves',
+  lawNodeId: 'law:astrophysics-surface-ocean-waves',
+  orderConstraint: 'after:surface-tectonics-erosion',
+  adapterMode: LAW_ADAPTER_MODES.SURFACE_INTERFACE,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['ocean-height-ring', 'surface-wind-ekman-stress']),
+  writes: Object.freeze(['ocean-height-ring', 'ocean-wave-normal-foam']),
+  accumulates: Object.freeze(['wave-energy-spectrum']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['free-surface-volume', 'gravity-wave-dispersion']),
+  validityDomain: Object.freeze({ requiresLiquidOcean: true, maxIceCoverFrac: 0.98 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e-1, 1e4]),
+  fundamentalLaws: Object.freeze(['shallow-water-wave-pde', 'coriolis-ekman-drift', 'gravity-capillary-dispersion'])
+});
+
+export function evaluateSurfaceOceanWavesActivation(physicalState = {}) {
+  const hasOcean = Boolean(physicalState.hasLiquidOcean || physicalState.hasExoticOcean);
+  const ice = Number(physicalState.seaIceFrac) || 0;
+  const active = Boolean(physicalState.surfaceViewActive) && hasOcean && ice < 0.98;
+  return { active, reason: active ? 'open-liquid-surface-ocean-present' : 'dry-or-frozen-ocean-dormant' };
+}
+
+export function registerSurfaceOceanWavesModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('surface-ocean-waves@1')) {
+    return registry.resolveModule('surface-ocean-waves@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'surface-ocean-waves', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/surfaceOceanWaveGpu.js',
+      entryPoint: 'step_ocean_wave_pde',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      gravityMS2: { type: 'number', min: 0.05, max: 100, required: false }
+    },
+    stateLayout: {
+      tensorId: 'surface-ocean-wave-grid',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 4,
+      strideBytes: 16,
+      fields: ['waveH', 'dHdx', 'dHdz', 'foam']
+    },
+    scaleRangeM: [0.1, 1e4],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: SURFACE_OCEAN_WAVES_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createSurfaceOceanWaveSessionWebGpu(device, {
+        gravityMS2: Number(p.gravityMS2 ?? 9.81)
+      });
+      try {
+        const summary = { gridN: session.gridN, enabled: session.enabled };
+        return createSimulationArtifact?.({ schema: 'ulg.astrophysics.surface-ocean-waves.v1', summary }) ?? summary;
+      } finally {
+        session.dispose();
+      }
+    }
+  });
+}
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,

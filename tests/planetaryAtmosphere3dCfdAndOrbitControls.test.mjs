@@ -19,7 +19,7 @@ const byId = (id) => REAL_SOLAR_SYSTEM_CATALOG.find((b) => b.id === id);
 test('Universal Law Graph Node #25 (planetary-atmosphere-3d-cfd) passes SS Law Adapter Contract with 0 debt', () => {
   const check = validateUniversalLawGraphContracts();
   assert.equal(check.valid, true, `Contract errors: ${check.errors.join(', ')} debt: ${check.debt.join(', ')}`);
-  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 25);
+  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 32);
   assert.equal(PLANETARY_ATMO_3D_CFD_LAW_ADAPTER.id, 'planetary-atmosphere-3d-cfd');
 
   const actJup = evaluatePlanetaryAtmo3dCfdActivation({ surfaceViewActive: true, surfacePressurePa: 1e6, hasSolidCrust: false });

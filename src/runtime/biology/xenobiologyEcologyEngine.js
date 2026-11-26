@@ -71,17 +71,40 @@ export function evaluateXenobiologyEcologyActivation(physicalState = {}) {
 
 export function registerXenobiologyEcologyModule(registry) {
   if (!registry || typeof registry.registerModule !== 'function') return null;
-  const desc = Object.freeze({
-    methodKey: 'planetary-xenobiology-ecology@1',
-    lawAdapter: XENOBIOLOGY_ECOLOGY_LAW_ADAPTER,
-    schema: ULG_XENOBIOLOGY_ECOLOGY_SCHEMA,
+  if (registry.hasModule?.('planetary-xenobiology-ecology@1')) {
+    return registry.resolveModule('planetary-xenobiology-ecology@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'planetary-xenobiology-ecology', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/biology/xenobiologyEcologyEngine.js',
+      entryPoint: 'synthesizePlanetaryEcosystem',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      tempK: { type: 'number', min: 70, max: 760, required: false },
+      pressurePa: { type: 'number', min: 0, max: 1e8, required: false }
+    },
+    stateLayout: {
+      tensorId: 'xenobiology-ecosystem-clade-web',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 4,
+      strideBytes: 16,
+      fields: ['viability', 'deltaGKjMol', 'bucklingHeight', 'biolumIntensity']
+    },
+    scaleRangeM: [1e-9, 1e7],
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
-    evaluateActivation: evaluateXenobiologyEcologyActivation
+    lawAdapter: XENOBIOLOGY_ECOLOGY_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact }) {
+      const p = capsule.input?.parameters || {};
+      const eco = synthesizeWorldEcosystem({
+        tempK: Number(p.tempK ?? 288),
+        pressurePa: Number(p.pressurePa ?? 101325)
+      });
+      return createSimulationArtifact?.({ schema: ULG_XENOBIOLOGY_ECOLOGY_SCHEMA, ecosystem: eco }) ?? eco;
+    }
   });
-  try {
-    registry.registerModule(desc);
-  } catch {}
-  return desc;
 }
 
 function clamp(x, lo, hi) {

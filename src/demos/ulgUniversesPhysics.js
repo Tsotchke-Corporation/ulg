@@ -24,8 +24,12 @@ import { ClosureRegistry } from '../runtime/ClosureRegistry.js';
 import { defaultSimulationModuleRegistry } from '../runtime/simulationModuleRegistry.js';
 import {
   registerAllTopDownLawModules,
-  resolveActiveUniversalLaws
+  resolveActiveUniversalLaws,
+  validateUniversalLawGraphContracts
 } from '../runtime/universalLawGraph.js';
+import {
+  createDynamicSchroederScaleAtlasRuntime
+} from '../runtime/sph/schroederSpatialScaleAtlasRuntime.js';
 import {
   COSMIC_EPOCH_PRESETS,
   evaluateCosmicEpochState,
@@ -927,6 +931,93 @@ export function createUlgUniversesPhysics(device, {
   }
 
   // Level 0: IllustrisTNG / Millennium-Style 2LPT Supergalactic Cosmic Web + Baryon/CMB/Reionization/Cluster-Lensing
+  // Live 40-OOM Canonical Schroeder Simulation (`SS`) Multi-Chart Scale Atlas spanning L0 (+82, 10^+25 m) -> L7 (-49, 10^-15 m)!
+  const SCHROEDER_SCALE_SPECS = Object.freeze({
+    0: { level: 82, label: 'L0-cosmic-web', parentKey: null },
+    1: { level: 69, label: 'L1-galactic-halo', parentKey: 0 },
+    2: { level: 42, label: 'L2-star-system', parentKey: 1 },
+    3: { level: 31, label: 'L3-stellar-core', parentKey: 2 },
+    4: { level: 23, label: 'L4-planetary-world', parentKey: 2 },
+    surface: { level: 4, label: 'L4-planetary-surface', parentKey: 4 },
+    5: { level: -28, label: 'L5-crystal-md', parentKey: 'surface' },
+    6: { level: -33, label: 'L6-quantum-atom', parentKey: 5 },
+    7: { level: -49, label: 'L7-atomic-nucleus', parentKey: 6 }
+  });
+  const schroederAtlasRuntime = createDynamicSchroederScaleAtlasRuntime({
+    referenceSpacingM: 1.0,
+    rootGlobalBaseLevel: 82,
+    rootLocalMinLevel: 0,
+    rootLocalMaxLevel: 2,
+    rootLabel: 'L0-cosmic-web',
+    maxActiveCharts: 64,
+    minIdleEpochsBeforeRetire: 128
+  });
+  const schroederChartIds = new Map([[0, 0]]);
+  let activeSchroederKey = 0;
+  let activeSchroederChartId = 0;
+  const lawGraphValidation = validateUniversalLawGraphContracts();
+
+  function ensureSchroederKeyChart(scaleKey) {
+    if (schroederChartIds.has(scaleKey)) return schroederChartIds.get(scaleKey);
+    const spec = SCHROEDER_SCALE_SPECS[scaleKey] || SCHROEDER_SCALE_SPECS[0];
+    const parentId = spec.parentKey != null ? ensureSchroederKeyChart(spec.parentKey) : null;
+    // Derive exact physical offset in parent chart units (double-float origin rebasing!)
+    let originInParentUnits = [0, 0, 0];
+    if (scaleKey === 2) originInParentUnits = [...galaxyFocusPos];
+    else if (scaleKey === 4 && solarEngine) {
+      const cat = getActiveSystemCatalog();
+      const bodySpec = cat[focusedSolarBodyIndex];
+      if (bodySpec && Number.isFinite(bodySpec.aAu)) originInParentUnits = [bodySpec.aAu, 0, 0];
+    } else if (scaleKey === 'surface' && surfaceLandingSite) {
+      const latR = (Number(surfaceLandingSite.latDeg) || 0) * (Math.PI / 180);
+      const lonR = (Number(surfaceLandingSite.lonDeg) || 0) * (Math.PI / 180);
+      originInParentUnits = [Math.cos(latR) * Math.cos(lonR), Math.sin(latR), Math.cos(latR) * Math.sin(lonR)];
+    }
+    const res = schroederAtlasRuntime.ensureChartForScaleLevel({
+      targetGlobalLevel: spec.level,
+      parentChartId: parentId,
+      originInParentUnits,
+      localSpanLevels: 3,
+      label: spec.label
+    });
+    schroederChartIds.set(scaleKey, res.chartId);
+    return res.chartId;
+  }
+
+  function syncSchroederScaleChart(activeLevel, log10SpanM = 24.5) {
+    const key = (activeLevel === 4 && surfaceActive) ? 'surface' : activeLevel;
+    const cid = ensureSchroederKeyChart(key);
+    activeSchroederKey = key;
+    activeSchroederChartId = cid;
+    schroederAtlasRuntime.setChartOccupancy(cid, Math.max(1, Math.round(Math.abs(log10SpanM) * 10)));
+    return getSchroederAtlasSnapshot();
+  }
+
+  function getSchroederAtlasSnapshot() {
+    const snap = schroederAtlasRuntime.snapshotAtlas();
+    const activeChart = snap.charts.find((c) => c.chartId === activeSchroederChartId) || snap.charts[0];
+    let depth = 0;
+    let cur = activeChart;
+    while (cur && cur.parentChartId != null && depth < 16) {
+      cur = snap.charts.find((c) => c.chartId === cur.parentChartId);
+      depth += 1;
+    }
+    return Object.freeze({
+      schema: snap.schema,
+      activeKey: activeSchroederKey,
+      activeChartId: activeChart?.chartId ?? 0,
+      activeChartLabel: activeChart?.label ?? 'L0-cosmic-web',
+      activeGlobalLevel: activeChart?.globalBaseLevel ?? 82,
+      activeAncestryDepth: depth,
+      chartCount: snap.chartCount,
+      minGlobalLevel: snap.minGlobalLevel,
+      maxGlobalLevel: snap.maxGlobalLevel,
+      spanOrdersOfMagnitude: Number((snap.ordersOfMagnitude ?? 0).toFixed(2)),
+      doubleFloatOriginHi: activeChart?.originHi ?? [0, 0, 0],
+      doubleFloatOriginLo: activeChart?.originLo ?? [0, 0, 0]
+    });
+  }
+
   let cosmoMode = 'web'; // 'web' | 'cmb' | 'reionization' | 'cluster-merger'
   let cosmoSession = null;
   let cosmoTelemetry = null;
@@ -2947,7 +3038,30 @@ export function createUlgUniversesPhysics(device, {
       sublimationTempK: (activeLevel === 2 && solarMode === 'comet-tails') ? 170 : 1e9,
       maxTidalStrain: (isTidalL2 || (activeLevel === 4 && planetaryMode === 'cryo-plumes')) ? 0.85 : 0,
       maxSurfaceTempK: (activeLevel === 4 && planetaryMode === 'magma-ocean') || (activeLevel === 2 && (solarMode === 'giant-impact' || solarMode === 'red-giant')) ? 2400 : 0,
-      surfaceViewActive: surfaceActive
+      surfaceViewActive: surfaceActive,
+      // Phase D Complete Universal Law Graph physical state signals (32/32 state-driven nodes!)
+      dynamoSeedB0: activeLevel === 1 ? galacticB0 : (activeLevel === 3 && stellarMode === 'fusion' ? stellarB0 : 0),
+      stellarCoreActive: activeLevel === 3 && stellarMode === 'fusion',
+      centralMassSolar: activeLevel === 3 && stellarMode === 'fusion' ? (stellarEngine?.totalMassSolar || 1.0) : 0,
+      hasSolidCrust: surfaceActive ? (surfaceSession?.env?.hasSolidCrust !== false) : (spec.kind !== 2 && spec.kind !== 0),
+      hasLiquidOcean: surfaceActive ? Boolean(surfaceSession?.env?.hasLiquidOcean) : Boolean(spec.hasOcean),
+      hasExoticOcean: surfaceActive ? Boolean(surfaceSession?.env?.hasExoticOcean) : false,
+      seaIceFrac: surfaceActive ? (Number(surfaceClimate?.seaIceFrac) || 0) : 0,
+      surfaceDeformationActive: surfaceActive && Boolean(surfaceSession?.getTelemetry?.()?.mpmActive || (surfaceSession?.getTelemetry?.()?.cratersCarved || 0) > 0 || (surfaceSession?.getTelemetry?.()?.aliveBoulders || 0) > 0),
+      mpmActive: surfaceActive && Boolean(surfaceSession?.getTelemetry?.()?.mpmActive),
+      craterCount: surfaceActive ? (Number(surfaceSession?.getTelemetry?.()?.cratersCarved) || 0) : 0,
+      boulderCount: surfaceActive ? (Number(surfaceSession?.getTelemetry?.()?.aliveBoulders) || 0) : 0,
+      biosphereViability: surfaceActive
+        ? (Number(surfaceSession?.xenobiology?.biosphereViability) || 0)
+        : (activeLevel === 4 && Number(spec.surfacePressurePa) >= 500 && Number(spec.tempK) >= 80 && Number(spec.tempK) <= 750 ? 0.5 : 0),
+      pressurePa: surfaceActive
+        ? (Number(surfaceSession?.env?.pressurePa) || 0)
+        : (activeLevel === 4 ? (Number(spec.surfacePressurePa) || 0) : 0),
+      tempK: surfaceActive
+        ? (Number(surfaceSession?.env?.tempK) || 0)
+        : (activeLevel === 4 ? (Number(spec.tempK) || 0) : 0),
+      isCryoMoon: activeLevel === 4 && (planetaryMode === 'cryo-plumes' || Boolean(surfaceSession?.env?.isCryoMoon)),
+      isMagmaOcean: activeLevel === 4 && (planetaryMode === 'magma-ocean' || Boolean(surfaceSession?.env?.isMagmaOcean))
     };
     return resolveActiveUniversalLaws(physState);
   }
@@ -3680,6 +3794,9 @@ export function createUlgUniversesPhysics(device, {
     computeSolarBarycenterAu,
     getSolarReferenceOriginAu,
     getActiveUniversalLaws,
+    syncSchroederScaleChart,
+    getSchroederAtlasSnapshot,
+    get lawGraphValidation() { return lawGraphValidation; },
     getTargetsForLevel,
     connectPeerMesh,
     disconnectPeerMesh,

@@ -30,7 +30,7 @@ test('Organic Chemistry Law Nodes #17-19 validate against Law Adapter Contract w
   const check = validateUniversalLawGraphContracts();
   assert.equal(check.valid, true, `Contract errors: ${check.errors.join(', ')} debt: ${check.debt.join(', ')}`);
   assert.equal(check.debt.length, 0);
-  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 25);
+  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 32);
   assert.equal(FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING, 'chemical-bonding');
 
   assert.equal(ORGANIC_MOLECULAR_GRAPH_LAW_ADAPTER.id, 'organic-molecular-graph-hybridization');

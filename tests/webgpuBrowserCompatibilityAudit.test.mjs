@@ -31,6 +31,7 @@ const AUDITED_WGSL_FILES = [
   'src/runtime/astrophysics/radiativePhotoionizationWindGpu.js',
   'src/runtime/astrophysics/planetaryAtmosphereElectricGpu.js',
   'src/runtime/astrophysics/planetaryAtmosphere3dCfdGpu.js',
+  'src/runtime/astrophysics/surfaceDeformationMpmGpu.js',
   'src/runtime/astrophysics/galacticIsmCoolingGpu.js',
   'src/runtime/electronicStructure/atomTdks3dWebGpu.js',
   'src/runtime/organic/reactiveBondOrderMdGpu.js',

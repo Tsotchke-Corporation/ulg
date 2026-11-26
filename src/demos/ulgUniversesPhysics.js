@@ -2540,7 +2540,12 @@ export function createUlgUniversesPhysics(device, {
     planetaryAtmoSession?.setEnableTriboelectric?.(planetaryTriboelectric);
   }
 
-  async function enterSurfaceView({ bodyIndex = planetaryBodyIndex, planetaryModeOverride = null, restoreCheckpoint = null } = {}) {
+  async function enterSurfaceView({
+    bodyIndex = planetaryBodyIndex,
+    planetaryModeOverride = null,
+    restoreCheckpoint = null,
+    initialVehicle = 'ufo'
+  } = {}) {
     let idx = bodyIndex;
     let cat = getActiveSystemCatalog();
     if (typeof idx === 'string') {
@@ -2578,9 +2583,10 @@ export function createUlgUniversesPhysics(device, {
       planetaryAtmoState,
       planetaryMode,
       gridN: quality.id === 'low' ? 81 : 129,
-      cellSizeM: 2.35,
+      cellSizeM: 9.5,
       particleCount: quality.id === 'low' ? 1024 : 2048,
       seed: (universeSeed ^ (idx * 7919 + 0x504face)) >>> 0,
+      initialVehicle,
       initialCheckpoint: restoreCheckpoint,
       label: `ulg-universes-surface-${spec.id}`
     });
@@ -3286,6 +3292,13 @@ export function createUlgUniversesPhysics(device, {
     setSurfaceControls,
     addSurfaceLookDelta,
     adjustSurfaceChaseDistance,
+    triggerSurfaceTractorPulse: (dur) => surfaceSession?.triggerTractorPulse?.(dur),
+    setSurfaceTractorBeam: (on) => surfaceSession?.setTractorBeam?.(on),
+    setSurfaceWeaponConfig: (cfg) => surfaceSession?.setWeaponConfig?.(cfg),
+    setSurfaceWeaponFire: (opts) => surfaceSession?.setWeaponFire?.(opts),
+    launchSurfaceMissile: (opts) => surfaceSession?.launchMissile?.(opts),
+    setSurfaceExternalEntities: (ext) => surfaceSession?.setExternalEntities?.(ext),
+    drainSurfaceEvents: () => surfaceSession?.drainPendingEvents?.() || { harvested: { silicates: 0, volatiles: 0, metals: 0, exotics: 0 }, peerHits: [] },
     setStellarTimeAccel,
     setSolarMode,
     setKerrSpinA,

@@ -73,9 +73,10 @@ test('LOD Pass, Rover/UFO Return Navigation, and Chemistry/Biology Scientist Too
     await page.waitForTimeout(300);
     await saveDataUrl(await page.evaluate(() => window.__ulgUniversesDemo.capturePng()), 'lod-01-earth-orbital');
 
-    // Land Rover on Mars and drive forward > 3 m so checkpoint restoration is non-trivial!
+    // Arrive on Mars in Explorer UFO, deploy Rover via Tractor Beam, and drive forward > 3 m so checkpoint restoration is non-trivial!
     await page.evaluate(async () => {
       await window.__ulgUniversesDemo.enterSurfaceView({ bodyIndex: 'mars' });
+      window.__ulgUniversesDemo.setSurfaceVehicle('rover');
       window.__ulgUniversesDemo.setSurfaceControls({ forward: true, turbo: true });
       for (let i = 0; i < 36; i += 1) await window.__ulgUniversesDemo.stepOnce();
       window.__ulgUniversesDemo.setSurfaceControls({ forward: false, turbo: false });

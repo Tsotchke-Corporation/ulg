@@ -355,14 +355,71 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   }
   lit = lit + emiss_col * emiss_eff * 1.20;
 
-  // Exponential atmospheric perspective fog + smooth horizontal radial horizon fade (zero jagged patch rim!)
+  // Exponential atmospheric perspective fog + smooth wide-horizon fade (>600 m Rover/UFO view distance!)
   let horiz_dist = length(in.world_pos.xz - cam.cam_pos.xz);
-  let fog_density = mix(0.0020, 0.0078, opt_depth);
-  let fog_amt = clamp(1.0 - exp(-dist * fog_density), 0.0, 0.92);
-  let patch_edge = smoothstep(82.0, 146.0, horiz_dist);
+  let fog_density = mix(0.00024, 0.00105, opt_depth);
+  let fog_amt = clamp(1.0 - exp(-dist * fog_density), 0.0, 0.84);
+  let patch_edge = smoothstep(420.0, 595.0, horiz_dist);
   let total_fog = clamp(max(fog_amt, patch_edge), 0.0, 1.0);
   let final_col = mix(lit, sky_hor, total_fog);
   return vec4<f32>(final_col, 1.0);
+}
+`;
+
+// Translucent & Glowing Volumetric FX Shader:
+//   tag 5.0 = Glowing Emerald-Green Translucent Glass Bubble Dome / Shield Ripple (Fresnel rim glass!)
+//   tag 6.0 = Glowing Yellow Conical Tractor Beam / 360° Rim EM Laser / Antimatter Annihilation Beam!
+const TRANSLUCENT_FX_WGSL = /* wgsl */ `
+${CAMERA_WGSL}
+
+@group(0) @binding(0) var<uniform> cam: CameraUniforms;
+
+struct VsIn {
+  @location(0) pos_curv: vec4<f32>,
+  @location(1) norm_tag: vec4<f32>,
+  @location(2) col_alpha: vec4<f32>,
+};
+
+struct VsOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) world_pos: vec3<f32>,
+  @location(1) norm: vec3<f32>,
+  @location(2) col_alpha: vec4<f32>,
+  @location(3) tag: f32,
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+  var out: VsOut;
+  out.pos = cam.view_proj * vec4<f32>(in.pos_curv.xyz, 1.0);
+  out.world_pos = in.pos_curv.xyz;
+  out.norm = in.norm_tag.xyz;
+  out.col_alpha = in.col_alpha;
+  out.tag = in.norm_tag.w;
+  return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+  let n = normalize(in.norm);
+  let v = normalize(cam.cam_pos.xyz - in.world_pos);
+  let ndv = abs(dot(n, v));
+  let fres = pow(max(0.0, 1.0 - ndv), 2.4);
+  let sun_dir = normalize(vec3<f32>(0.55, 0.72, 0.42));
+  let half_v = normalize(sun_dir + v);
+  let spec = pow(max(0.0, abs(dot(n, half_v))), 64.0);
+
+  if (in.tag < 5.5) {
+    // Glowing emerald-green translucent glass dome bubble (bright glossy rim + transparent center!)
+    let glass_col = in.col_alpha.rgb * (0.72 + 1.35 * fres) + vec3<f32>(0.78, 1.0, 0.88) * spec * 1.15;
+    let alpha = clamp(in.col_alpha.a * (0.45 + 0.85 * fres + 0.45 * spec), 0.14, 0.92);
+    return vec4<f32>(glass_col * alpha, alpha);
+  }
+  // Yellow conical tractor beam & 360° rim EM Laser / Antimatter beams (luminous soft edge falloff!)
+  let beam_edge = 0.42 + 0.78 * pow(max(0.0, ndv), 0.75);
+  let alpha = clamp(in.col_alpha.a * beam_edge, 0.04, 0.96);
+  let glow = in.col_alpha.rgb * (1.28 + 0.55 * ndv);
+  return vec4<f32>(glow * alpha, alpha);
 }
 `;
 
@@ -830,13 +887,13 @@ fn vs_main(
       pt_size = pt_size_base * sz * (0.42 + 0.55 * life_f);
       alpha = alpha_gain * fade * 0.068;
     } else if (role < 3.5) {
-      // 3D Volumetric Atmospheric CFD Cloud Strata Bank (huge soft layered cumulus/NH3/NH4SH billows!)
+      // 3D Volumetric Atmospheric CFD Cloud Strata Bank (sculpted sunlit overhead cumulus/NH3/NH4SH billows — never additive whiteout!)
       let puff_fade = sin(clamp(life_f, 0.0, 1.0) * 3.1415926);
       let d_cam = length(p_world - cam.cam_pos.xyz);
-      let near_fade = smoothstep(4.5, 16.0, d_cam);
-      col = base_rgb * 0.72;
-      pt_size = pt_size_base * sz * 2.35 * (0.85 + 0.30 * puff_fade);
-      alpha = alpha_gain * is_live * (0.45 + 0.55 * puff_fade) * near_fade * 0.27;
+      let near_fade = smoothstep(22.0, 62.0, d_cam);
+      col = base_rgb * 0.68;
+      pt_size = pt_size_base * sz * 1.48 * (0.85 + 0.25 * puff_fade);
+      alpha = alpha_gain * is_live * (0.35 + 0.45 * puff_fade) * near_fade * 0.078;
       shape = 1.0;
     } else {
       // Sleek Translucent Velocity-Aligned 3D CFD Flow Ribbon / Eddy Streamline!
@@ -1861,6 +1918,9 @@ export function createUlgUniversesRenderer(device, canvas) {
   const diskBuf = device.createBuffer({ label: 'uv-disks', size: MAX_DISKS * 48, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const MAX_LINE_VERTS = 24576;
   const lineBuf = device.createBuffer({ label: 'uv-lines', size: MAX_LINE_VERTS * 28, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
+  const MAX_COSMIC_VERTS = 16384;
+  const cosmicMeshBuf = device.createBuffer({ label: 'uv-cosmic-mesh', size: MAX_COSMIC_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
+  const cosmicFxBuf = device.createBuffer({ label: 'uv-cosmic-fx', size: MAX_COSMIC_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
 
   let nuclearVolBuf = device.createBuffer({ label: 'uv-nuclear-vol', size: 32 * 32 * 32 * 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   let nuclearVolCapacityBytes = 32 * 32 * 32 * 16;
@@ -1922,6 +1982,49 @@ export function createUlgUniversesRenderer(device, canvas) {
   const surfaceMeshBg = device.createBindGroup({
     layout: surfaceMeshPipe.getBindGroupLayout(0),
     entries: [{ binding: 0, resource: { buffer: auxCamBuf } }]
+  });
+  const cosmicMeshBg = device.createBindGroup({
+    layout: surfaceMeshPipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: camBuf } }]
+  });
+
+  const fxMod = mkMod('uv-translucent-fx', TRANSLUCENT_FX_WGSL);
+  const translucentFxPipe = device.createRenderPipeline({
+    label: 'uv-translucent-fx-pipe',
+    layout: 'auto',
+    vertex: {
+      module: fxMod,
+      entryPoint: 'vs_main',
+      buffers: [{
+        arrayStride: 48,
+        attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x4' },
+          { shaderLocation: 1, offset: 16, format: 'float32x4' },
+          { shaderLocation: 2, offset: 32, format: 'float32x4' }
+        ]
+      }]
+    },
+    fragment: {
+      module: fxMod,
+      entryPoint: 'fs_main',
+      targets: [{
+        format: sceneFormat,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+        }
+      }]
+    },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'less-equal' }
+  });
+  const surfaceFxBg = device.createBindGroup({
+    layout: translucentFxPipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: auxCamBuf } }]
+  });
+  const cosmicFxBg = device.createBindGroup({
+    layout: translucentFxPipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: camBuf } }]
   });
 
   const cloudMod = mkMod('uv-cloud', PARTICLE_CLOUD_WGSL);
@@ -2230,16 +2333,19 @@ export function createUlgUniversesRenderer(device, canvas) {
 
   function renderFrame({
     camera,
-    particleClouds = [],  // Up to 2 simultaneous zero-copy GPU clouds for seamless cross-scale zoom!
+    particleClouds = [],  // Up to 4 simultaneous zero-copy GPU clouds for seamless cross-scale zoom!
     spheres = null,
     atmoEm = null,        // Optional zero-copy live GPU spherical baroclinic + triboelectric EM buffer!
-    surfaceScene = null,  // Optional live GPU Planetary Surface Terrain + Rover/Drone solid mesh + Atmospheric Sky!
+    surfaceScene = null,  // Optional live GPU Planetary Surface Terrain + Boulders + Rover/Drone/UFO + Translucent FX!
+    cosmicMeshes = null,  // Optional `{ opaque: Float32Array, fx: Float32Array }` for 3D UFO/Remote UFOs/Probes in space!
     lightDir = [0.6, 0.75, 0.55],
     mdCloud = null,
     disks = null,
     lines = null,
     nuclearVol = null,
-    post = {}
+    post = {},
+    stereoSbs = false,    // Optional Side-by-Side Stereo VR Preview split-eye post/viewport pass
+    xrEyeTarget = null    // Optional native WebXR WebGPU `{ colorView, depthView, viewport }`
   }) {
     ensureRenderTargets(canvas.width, canvas.height);
 
@@ -2296,6 +2402,19 @@ export function createUlgUniversesRenderer(device, canvas) {
       lineVertCount = Math.min(MAX_LINE_VERTS, Math.floor(lines.length / 7));
       lineStaging.set(lines.subarray(0, lineVertCount * 7), 0);
       device.queue.writeBuffer(lineBuf, 0, lineStaging.subarray(0, lineVertCount * 7));
+    }
+
+    let cosmicOpaqueCount = 0;
+    let cosmicFxCount = 0;
+    if (cosmicMeshes) {
+      if (cosmicMeshes.opaque && cosmicMeshes.opaque.length >= 12) {
+        cosmicOpaqueCount = Math.min(MAX_COSMIC_VERTS, Math.floor(cosmicMeshes.opaque.length / 12));
+        device.queue.writeBuffer(cosmicMeshBuf, 0, cosmicMeshes.opaque.subarray(0, cosmicOpaqueCount * 12));
+      }
+      if (cosmicMeshes.fx && cosmicMeshes.fx.length >= 12) {
+        cosmicFxCount = Math.min(MAX_COSMIC_VERTS, Math.floor(cosmicMeshes.fx.length / 12));
+        device.queue.writeBuffer(cosmicFxBuf, 0, cosmicMeshes.fx.subarray(0, cosmicFxCount * 12));
+      }
     }
 
     const activeClouds = (particleClouds || []).filter((c) => c && c.buffer && c.count > 0).slice(0, MAX_CLOUD_SLOTS);
@@ -2400,6 +2519,12 @@ export function createUlgUniversesRenderer(device, canvas) {
           pass.setIndexBuffer(surfaceScene.terrainIdxBuf, 'uint32');
           pass.drawIndexed(surfaceScene.indexCount, 1, 0, 0, 0);
         }
+        if (surfaceScene.boulderVertBuf && surfaceScene.boulderVertCount > 0) {
+          pass.setPipeline(surfaceMeshPipe);
+          pass.setBindGroup(0, surfaceMeshBg);
+          pass.setVertexBuffer(0, surfaceScene.boulderVertBuf, 0, surfaceScene.boulderVertCount * 48);
+          pass.draw(surfaceScene.boulderVertCount, 1, 0, 0);
+        }
         if (surfaceScene.vehicleVertBuf && surfaceScene.vehicleVertCount > 0) {
           pass.setPipeline(surfaceMeshPipe);
           pass.setBindGroup(0, surfaceMeshBg);
@@ -2446,6 +2571,13 @@ export function createUlgUniversesRenderer(device, canvas) {
         pass.draw(6, diskCount, 0, 0);
       }
 
+      if (!surfaceScene && cosmicOpaqueCount > 0) {
+        pass.setPipeline(surfaceMeshPipe);
+        pass.setBindGroup(0, cosmicMeshBg);
+        pass.setVertexBuffer(0, cosmicMeshBuf, 0, cosmicOpaqueCount * 48);
+        pass.draw(cosmicOpaqueCount, 1, 0, 0);
+      }
+
       for (let slot = 0; slot < activeClouds.length; slot += 1) {
         const c = activeClouds[slot];
         if (c.isBackdrop) continue;
@@ -2459,19 +2591,47 @@ export function createUlgUniversesRenderer(device, canvas) {
         pass.setBindGroup(0, volumeBg);
         pass.draw(3, 1, 0, 0);
       }
+
+      // Translucent Glowing FX Pass LAST (Emerald Glass UFO Bubble, Yellow Conical Tractor Beam, 360° Rim EM Lasers & Antimatter Beams!)
+      if (surfaceScene && surfaceScene.fxVertBuf && surfaceScene.fxVertCount > 0) {
+        pass.setPipeline(translucentFxPipe);
+        pass.setBindGroup(0, surfaceFxBg);
+        pass.setVertexBuffer(0, surfaceScene.fxVertBuf, 0, surfaceScene.fxVertCount * 48);
+        pass.draw(surfaceScene.fxVertCount, 1, 0, 0);
+      } else if (!surfaceScene && cosmicFxCount > 0) {
+        pass.setPipeline(translucentFxPipe);
+        pass.setBindGroup(0, cosmicFxBg);
+        pass.setVertexBuffer(0, cosmicFxBuf, 0, cosmicFxCount * 48);
+        pass.draw(cosmicFxCount, 1, 0, 0);
+      }
       pass.end();
     }
 
     {
-      const swapView = ctx.getCurrentTexture().createView();
+      const swapView = xrEyeTarget?.colorView || ctx.getCurrentTexture().createView();
       const postPass = enc.beginRenderPass({
         colorAttachments: [{
           view: swapView,
           clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-          loadOp: 'clear',
+          loadOp: xrEyeTarget?.preserve ? 'load' : 'clear',
           storeOp: 'store'
         }]
       });
+      if (xrEyeTarget?.viewport) {
+        const vp = xrEyeTarget.viewport;
+        postPass.setViewport(vp.x, vp.y, vp.width, vp.height, 0, 1);
+      } else if (stereoSbs) {
+        const halfW = Math.max(1, Math.floor(width * 0.5));
+        postPass.setPipeline(postPipe);
+        postPass.setBindGroup(0, postBg);
+        postPass.setViewport(0, 0, halfW, height, 0, 1);
+        postPass.draw(3, 1, 0, 0);
+        postPass.setViewport(halfW, 0, width - halfW, height, 0, 1);
+        postPass.draw(3, 1, 0, 0);
+        postPass.end();
+        device.queue.submit([enc.finish()]);
+        return;
+      }
       postPass.setPipeline(postPipe);
       postPass.setBindGroup(0, postBg);
       postPass.draw(3, 1, 0, 0);
@@ -2483,7 +2643,7 @@ export function createUlgUniversesRenderer(device, canvas) {
   function dispose() {
     sceneTex?.destroy();
     depthTex?.destroy();
-    for (const b of [camBuf, ...cloudCamBufs, auxCamBuf, postUniformBuf, sphereBuf, dummyAtmoBuf, diskBuf, lineBuf, nuclearVolBuf]) {
+    for (const b of [camBuf, ...cloudCamBufs, auxCamBuf, postUniformBuf, sphereBuf, dummyAtmoBuf, diskBuf, lineBuf, cosmicMeshBuf, cosmicFxBuf, nuclearVolBuf]) {
       try { b.destroy(); } catch {}
     }
   }

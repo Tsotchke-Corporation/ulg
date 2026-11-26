@@ -18,7 +18,8 @@ export async function requestCompatibleWebGpuDevice({
   retries = 6,
   retryDelayMs = 200,
   requiredFeatures = [],
-  optionalLimits = null
+  optionalLimits = null,
+  xrCompatible = false
 } = {}) {
   if (typeof navigator === 'undefined' || !navigator.gpu) {
     throw new Error(
@@ -28,13 +29,28 @@ export async function requestCompatibleWebGpuDevice({
 
   let adapter = null;
   for (let attempt = 0; attempt < retries && !adapter; attempt += 1) {
-    // Try high-performance first, then immediately fall back to default options
-    // (macOS Safari & Apple Silicon unified-memory adapters can return null when
-    // powerPreference is specified in some WebKit builds).
-    try {
-      adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    } catch {
-      adapter = null;
+    // Try xrCompatible + high-performance when requested for WebXR WebGPU (`XRGPUBinding`),
+    // then high-performance, then plain `requestAdapter()` (Apple Silicon / Safari fallback).
+    if (xrCompatible && typeof navigator.xr !== 'undefined') {
+      try {
+        adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance', xrCompatible: true });
+      } catch {
+        adapter = null;
+      }
+      if (!adapter) {
+        try {
+          adapter = await navigator.gpu.requestAdapter({ xrCompatible: true });
+        } catch {
+          adapter = null;
+        }
+      }
+    }
+    if (!adapter) {
+      try {
+        adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      } catch {
+        adapter = null;
+      }
     }
     if (!adapter) {
       try {

@@ -827,11 +827,13 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (i >= count) { return; }
   let o = i * 16u;
   let dt = p.phys0.x;
-  let half_xz = max(30.0, p.phys1.x);
-  let half_y = max(20.0, p.phys1.y);
+  let half_xz = max(28.0, p.phys1.x);
+  let half_y = max(16.0, p.phys1.y);
   let cx = p.craft_pos.x;
   let cy = p.craft_pos.y;
   let cz = p.craft_pos.z;
+  let is_deep = p.flags.y != 0u;
+  let ground_y = p.deck2_col.w;
 
   var px = motes[o + 0u];
   var py = motes[o + 1u];
@@ -841,31 +843,47 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
   let max_life = max(1.5, motes[o + 11u]);
   let seed = motes[o + 14u];
 
+  // Vertical envelope:
+  //   - Deep fluid gas/ice giants: full 360-deg surrounding cloud canyons & zonal jet streams around craft!
+  //   - Rocky solid-crust worlds: keep 3D CFD flow ribbons sweeping right through rover/drone airspace
+  //     (ground_y + 1.4m .. +26m) and lift volumetric cumulus/haze cloud decks cleanly into the sky dome
+  //     (ground_y + 14m .. +48m) so clouds never clip underground!
+  let y_min = select(
+    select(ground_y + 1.4, ground_y + 14.0, role < 3.5),
+    cy - half_y,
+    is_deep
+  );
+  let y_max = select(
+    select(max(ground_y + 26.0, cy + 20.0), max(ground_y + 48.0, cy + 36.0), role < 3.5),
+    cy + half_y,
+    is_deep
+  );
+
   // Map mote world position into periodic 3D CFD grid centered around the exploring craft
   let rel_x = px - cx;
-  let rel_y = py - cy;
   let rel_z = pz - cz;
-  let needs_wrap = abs(rel_x) > half_xz || abs(rel_z) > half_xz || abs(rel_y) > half_y || age >= max_life;
+  let needs_wrap = abs(rel_x) > half_xz || abs(rel_z) > half_xz || py < y_min - 1.5 || py > y_max + 2.0 || age >= max_life;
   if (needs_wrap) {
     let s1 = fract(sin(seed * 91.7 + f32(p.flags.x) * 0.13 + f32(i) * 0.017) * 43758.5453);
     let s2 = fract(sin(seed * 173.3 + f32(p.flags.x) * 0.29 + f32(i) * 0.031) * 28461.1731);
     let s3 = fract(sin(seed * 251.9 + f32(p.flags.x) * 0.41 + f32(i) * 0.053) * 19537.7193);
     px = cx + (s1 * 2.0 - 1.0) * half_xz * 0.96;
-    py = cy + (s2 * 2.0 - 1.0) * half_y * 0.92;
+    py = mix(y_min, y_max, s2);
     pz = cz + (s3 * 2.0 - 1.0) * half_xz * 0.96;
     age = s1 * 0.4;
   }
 
   let gx = ((px - cx) / (2.0 * half_xz) + 0.5) * f32(p.dims.x);
-  let gy = ((py - cy) / (2.0 * half_y) + 0.5) * f32(p.dims.y);
+  let gy_norm = clamp((py - y_min) / max(4.0, y_max - y_min), 0.0, 0.999);
+  let gy = gy_norm * f32(p.dims.y);
   let gz = ((pz - cz) / (2.0 * half_xz) + 0.5) * f32(p.dims.z);
   let v_loc = sample_vel_trilin(vec3<f32>(gx, gy, gz));
   let c_loc = sample_cloud_trilin(vec3<f32>(gx, gy, gz));
 
   // Advect mote directly by live 3D GPU Navier-Stokes velocity field!
-  px = px + v_loc.x * (dt * 1.45);
-  py = py + v_loc.y * (dt * 1.45);
-  pz = pz + v_loc.z * (dt * 1.45);
+  px = px + v_loc.x * (dt * 1.55);
+  py = clamp(py + v_loc.y * (dt * 1.35), y_min, y_max);
+  pz = pz + v_loc.z * (dt * 1.55);
 
   let yn = clamp(gy / f32(p.dims.y), 0.0, 1.0);
   // Multi-deck chemical color blend across vertical cloud strata
@@ -877,19 +895,20 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
   var sz = 1.8;
   var live = 1.0;
   if (role < 3.5) {
-    // 3D Volumetric Cloud Strata Puff: visible where live GPU Clausius-Clapeyron cloud q > 0.16!
+    // 3D Volumetric Cloud Strata Puff: visible where live GPU Clausius-Clapeyron cloud q > 0.08!
     let flash_boost = c_loc.w * 2.4;
-    col = deck_rgb * (0.72 + 0.42 * yn) + vec3<f32>(0.72, 0.88, 1.0) * flash_boost;
-    sz = 3.2 + c_loc.x * 4.4;
-    live = select(0.0, clamp((c_loc.x - 0.12) * 1.45, 0.0, 1.0), c_loc.x > 0.12);
+    col = deck_rgb * (0.78 + 0.42 * yn) + vec3<f32>(0.72, 0.88, 1.0) * flash_boost;
+    sz = select(2.6 + c_loc.x * 3.8, 3.2 + c_loc.x * 4.4, is_deep);
+    let q_vis = select(c_loc.x, max(c_loc.x, p.phys1.w * 0.32), !is_deep);
+    live = select(0.0, clamp((q_vis - 0.08) * 1.65, 0.0, 1.0), q_vis > 0.08);
   } else {
     // 3D CFD Flow Streamer / Vortex Tracer: color-coded by vertical buoyancy & vorticity!
-    let vort_t = clamp(c_loc.z * 0.25, 0.0, 1.0);
-    let updraft_t = clamp(v_loc.y * 0.22 + 0.5, 0.0, 1.0);
-    let stream_col = mix(vec3<f32>(0.24, 0.72, 1.0), vec3<f32>(1.0, 0.76, 0.34), updraft_t);
-    col = mix(stream_col, vec3<f32>(1.0, 0.42, 0.72), vort_t * 0.65) * (0.85 + 0.35 * min(1.5, spd * 0.08));
-    sz = 0.55 + min(0.85, spd * 0.035);
-    live = clamp(0.32 + spd * 0.04, 0.0, 0.95);
+    let vort_t = clamp(c_loc.z * 0.28, 0.0, 1.0);
+    let updraft_t = clamp(v_loc.y * 0.24 + 0.5, 0.0, 1.0);
+    let stream_col = mix(vec3<f32>(0.24, 0.82, 1.0), vec3<f32>(1.0, 0.78, 0.32), updraft_t);
+    col = mix(stream_col, vec3<f32>(1.0, 0.44, 0.78), vort_t * 0.65) * (0.95 + 0.35 * min(1.5, spd * 0.08));
+    sz = select(0.62 + min(0.80, spd * 0.045), 0.55 + min(0.85, spd * 0.035), is_deep);
+    live = clamp(0.48 + spd * 0.05, 0.0, 1.0);
   }
 
   motes[o + 0u] = px;
@@ -1019,18 +1038,22 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
     }
   }
 
-  // Initialize 3D cloud puffs (65%) + crisp 3D CFD flow streamers (35%) in Mode 11 compatible 64-byte layout
+  // Initialize 3D cloud puffs + crisp 3D CFD flow streamers in Mode 11 compatible 64-byte layout
+  // On rocky crust worlds, tighten XZ domain and give 46% to vivid flow ribbons so 3D CFD pops right around Rover & Drone!
   const initMotes = new Float32Array(mCount * 16);
-  const boxHalfXZ = 72.0;
-  const boxHalfY = 34.0;
+  const boxHalfXZ = profile.isDeepFluid ? 72.0 : 54.0;
+  const boxHalfY = profile.isDeepFluid ? 34.0 : 22.0;
+  const cloudFrac = profile.isDeepFluid ? 0.64 : 0.68;
   for (let i = 0; i < mCount; i += 1) {
     const o = i * 16;
     const h1 = ((Math.sin(i * 12.9898 + 1.1) * 43758.5453) % 1 + 1) % 1;
     const h2 = ((Math.sin(i * 78.233 + 2.7) * 28461.1731) % 1 + 1) % 1;
     const h3 = ((Math.sin(i * 39.425 + 4.3) * 19537.7193) % 1 + 1) % 1;
-    const isCloudPuff = i < mCount * 0.64;
+    const isCloudPuff = i < mCount * cloudFrac;
     initMotes[o + 0] = (h1 * 2 - 1) * boxHalfXZ;
-    initMotes[o + 1] = (h2 * 2 - 1) * boxHalfY;
+    initMotes[o + 1] = profile.isDeepFluid
+      ? (h2 * 2 - 1) * boxHalfY
+      : (isCloudPuff ? (14.0 + h2 * 32.0) : (1.8 + h2 * 22.0));
     initMotes[o + 2] = (h3 * 2 - 1) * boxHalfXZ;
     initMotes[o + 3] = isCloudPuff ? 3.0 : 4.0;
     initMotes[o + 7] = h1 * 3.0;
@@ -1061,14 +1084,14 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
     computeBufferBinding(5, 'storage')
   ];
   const mkFluidPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-atmo-3d-cfd-fluid-${entryPoint}.v3`,
+    cacheKey: `ulg-atmo-3d-cfd-fluid-${entryPoint}.v4`,
     label: `${label}-${entryPoint}`,
     code: fluidCfd3dWgsl,
     entryPoint,
     bindings: fluidBindings
   });
   const mkPostPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-atmo-3d-cfd-post-${entryPoint}.v3`,
+    cacheKey: `ulg-atmo-3d-cfd-post-${entryPoint}.v4`,
     label: `${label}-${entryPoint}`,
     code: postCfd3dWgsl,
     entryPoint,
@@ -1175,6 +1198,7 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
     dt = 0.024,
     craftPos = [0, 0, 0],
     altKm = profile.startAltKm,
+    groundY = -9999.0,
     readTelemetry = true
   } = {}) {
     if (disposed) return lastTelemetry;
@@ -1183,6 +1207,7 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
 
     lastChemistry = evaluateAtmosphericChemistryAtAltitude(profile, altKm);
     const coriolisEff = clamp(profile.omegaRadS * 4200.0, 0.0, 2.2);
+    const safeGroundY = Number.isFinite(Number(groundY)) ? Number(groundY) : -9999.0;
 
     const ab = new ArrayBuffer(128);
     new Uint32Array(ab, 0, 8).set([
@@ -1195,7 +1220,7 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
       craftPos[0] || 0, craftPos[1] || 0, craftPos[2] || 0, lastChemistry.altKm,
       deck0Rgb[0], deck0Rgb[1], deck0Rgb[2], 0.78,
       deck1Rgb[0], deck1Rgb[1], deck1Rgb[2], 0.48,
-      deck2Rgb[0], deck2Rgb[1], deck2Rgb[2], 0.22
+      deck2Rgb[0], deck2Rgb[1], deck2Rgb[2], safeGroundY
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
@@ -1250,7 +1275,7 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
     let divRms = lastTelemetry.divergenceRms;
     let meanQ = lastTelemetry.meanCloudDensity;
 
-    if (doTel) {
+    if (doTel && !disposed && telReadBuf.mapState === 'unmapped') {
       try {
         await telReadBuf.mapAsync(GPU_BUF.MAP_READ);
         if (!disposed) {
@@ -1262,12 +1287,14 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
           divRms = f[6];
           meanQ = f[7];
         }
-        try { telReadBuf.unmap(); } catch {}
+        if (!disposed) { try { telReadBuf.unmap(); } catch {} }
       } catch (err) {
         if (!disposed && err?.name !== 'AbortError') throw err;
       } finally {
         mapInFlight = false;
       }
+    } else if (doTel) {
+      mapInFlight = false;
     }
 
     lastTelemetry = Object.freeze({

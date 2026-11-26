@@ -573,7 +573,9 @@ export async function mountLifeLabDemo() {
       if (histA.length > 96) histA.shift();
       if (histB.length > 96) histB.shift();
       if (doRead) updatePlotsAndHud();
+      await refreshTrackedPickedEntity();
       renderCurrentScene();
+      updatePickOverlay();
     } finally {
       busy = false;
     }
@@ -620,6 +622,31 @@ export async function mountLifeLabDemo() {
     return null;
   }
 
+  let followPickedEntity = false;
+
+  async function refreshTrackedPickedEntity() {
+    if (!pickedEntity || pickedEntity.index == null) return;
+    const info = getActivePickBufferInfo();
+    if (!info || !info.buffer) return;
+    const raw = await gpuPicker.readSingleEntity(info.buffer, pickedEntity.index, info.strideFloats);
+    if (!raw || !pickedEntity) return;
+    const x = raw[0]; const y = raw[1]; const z = raw[2];
+    const spd = Math.hypot(raw[4] || 0, raw[5] || 0, raw[6] || 0);
+    pickedEntity.pos = [x, y, z];
+    if (currentLayer === 'evo') {
+      const fit = raw[7] || 0;
+      pickedEntity.title = `Replicator #${pickedEntity.index} · Fitness w=${fit.toFixed(3)}`;
+      pickedEntity.details = `r_fit=${Math.hypot(x, z).toFixed(2)} · match=${((raw[3] || 0) * 100).toFixed(1)}% · live GPU genome`;
+    } else if (currentLayer === 'morph') {
+      pickedEntity.details = `Sensed Morphogen v=${(raw[7] || 0).toFixed(3)} · Speed=${spd.toFixed(2)} · θ=${(raw[3] || 0).toFixed(2)} rad`;
+    } else {
+      pickedEntity.details = `pos=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) · |v|=${spd.toFixed(2)}`;
+    }
+    if (followPickedEntity && orbitControls) {
+      orbitControls.setPose({ target: [x, y, z] }, { immediate: false });
+    }
+  }
+
   function updatePickOverlay() {
     const ret = el('pick-reticle');
     const card = el('pick-card');
@@ -663,7 +690,8 @@ export async function mountLifeLabDemo() {
       aspect: renderer.getAspect(),
       maxPickNdc: 0.14
     });
-    if (!hit) { pickedEntity = null; updatePickOverlay(); return null; }
+    if (!hit) { pickedEntity = null; followPickedEntity = false; updatePickOverlay(); return null; }
+    followPickedEntity = false;
     const spd = Math.hypot(hit.vec1[0], hit.vec1[1], hit.vec1[2]);
     let title = `Mote #${hit.index}`;
     let details = `pos=(${hit.vec0[0].toFixed(2)}, ${hit.vec0[1].toFixed(2)}, ${hit.vec0[2].toFixed(2)}) · |v|=${spd.toFixed(2)}`;
@@ -705,9 +733,10 @@ export async function mountLifeLabDemo() {
       updatePickOverlay();
     }
   });
-  el('pick-close')?.addEventListener('click', () => { pickedEntity = null; updatePickOverlay(); });
+  el('pick-close')?.addEventListener('click', () => { pickedEntity = null; followPickedEntity = false; updatePickOverlay(); });
   el('pick-zoom')?.addEventListener('click', () => {
     if (!pickedEntity) return;
+    followPickedEntity = true;
     orbitControls.focusTarget([...pickedEntity.pos], Math.min(renderer.camera.dist, 5.2));
   });
   el('sl-sim-speed')?.addEventListener('input', (e) => applySimSpeed(e.target.value));

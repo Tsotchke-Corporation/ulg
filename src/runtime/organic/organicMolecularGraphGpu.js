@@ -477,16 +477,18 @@ function buildSulflowerBearing() {
   }
 
   // --- 2. Outer Calix[11]furan Bearing Stator (11 aromatic furans + 11 sp3 -CH2- bridges) ---
+  // Calibrated so S (r=4.26 A) sits cleanly inside the real Bondi S...O van der Waals contact
+  // shell (r_vdW(S)+r_vdW(O) = 3.32 A; radial S...O gap = 2.58 A) for live elastic tooth coupling!
   const nUnits = 11;
   const dPhi = (Math.PI * 2) / nUnits;
-  const rO = 7.05;
-  const rCa = 7.82;
-  const rCb = 9.05;
-  const rHb = 10.12;
-  const rBridge = 8.88;
-  const dCa = (8.8 * Math.PI) / 180;
-  const dCb = (4.4 * Math.PI) / 180;
-  const dHb = (4.5 * Math.PI) / 180;
+  const rO = 6.84;
+  const rCa = 7.64;
+  const rCb = 8.88;
+  const rHb = 9.96;
+  const rBridge = 8.70;
+  const dCa = (8.9 * Math.PI) / 180;
+  const dCb = (4.5 * Math.PI) / 180;
+  const dHb = (4.6 * Math.PI) / 180;
 
   const unitIdx = [];
   for (let u = 0; u < nUnits; u += 1) {
@@ -817,7 +819,7 @@ export function buildOrganicMolecularGraph(spec = {}) {
           const geomRad = Math.acos(Math.max(-0.999, Math.min(0.999, vDot(e1, e2))));
           if (geomRad > 1.35 && geomRad < 2.65) eqRad = geomRad;
         }
-        angles.push({ i: nb[u].to, j, k: nb[v].to, eqRad, kAngle: atoms[j].hybridization === 'sp2' ? 2.8 : 2.1 });
+        angles.push({ i: nb[u].to, j, k: nb[v].to, eqRad, kAngle: atoms[j].hybridization === 'sp2' ? 5.2 : 3.4 });
       }
     }
   }

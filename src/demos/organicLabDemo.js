@@ -603,7 +603,9 @@ export async function mountOrganicLabDemo() {
         }
       }
       if (doRead) updateHudAndProvenance();
+      await refreshTrackedPickedAtom();
       renderCurrentScene();
+      updatePickOverlay();
     } finally {
       busy = false;
     }
@@ -640,6 +642,24 @@ export async function mountOrganicLabDemo() {
   };
   window.addEventListener('resize', handleResize);
   handleResize();
+
+  let followPickedAtom = false;
+
+  async function refreshTrackedPickedAtom() {
+    if (!pickedEntity || pickedEntity.kind !== 'atom' || !mdSession || !currentGraph) return;
+    const raw = await gpuPicker.readSingleEntity(mdSession.getResidentAtomsBuffer(), pickedEntity.index, 16);
+    if (!raw || !pickedEntity || pickedEntity.kind !== 'atom') return;
+    const x = raw[0]; const y = raw[1]; const z = raw[2];
+    const q = raw[7];
+    const spd = Math.hypot(raw[4], raw[5], raw[6]);
+    const a = currentGraph.atoms[pickedEntity.index];
+    const chiral = currentGraph.chiralCenters.find((c) => c.atomIndex === pickedEntity.index);
+    pickedEntity.pos = [x, y, z];
+    pickedEntity.details = `q=${q >= 0 ? '+' : ''}${q.toFixed(3)} e · |v|=${spd.toFixed(2)} · r=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})${chiral ? ` · Stereocenter (${chiral.configuration})` : ''}`;
+    if (followPickedAtom && orbitControls) {
+      orbitControls.setPose({ target: [x, y, z] }, { immediate: false });
+    }
+  }
 
   function updatePickOverlay() {
     const ret = el('pick-reticle');
@@ -683,7 +703,8 @@ export async function mountOrganicLabDemo() {
         aspect: renderer.getAspect(),
         maxPickNdc: 0.14
       });
-      if (!hit) { pickedEntity = null; updatePickOverlay(); return null; }
+      if (!hit) { pickedEntity = null; followPickedAtom = false; updatePickOverlay(); return null; }
+      followPickedAtom = false;
       const a = currentGraph.atoms[hit.index];
       const q = hit.vec1[3];
       const spd = Math.hypot(hit.vec1[0], hit.vec1[1], hit.vec1[2]);
@@ -718,9 +739,10 @@ export async function mountOrganicLabDemo() {
       updatePickOverlay();
     }
   });
-  el('pick-close')?.addEventListener('click', () => { pickedEntity = null; updatePickOverlay(); });
+  el('pick-close')?.addEventListener('click', () => { pickedEntity = null; followPickedAtom = false; updatePickOverlay(); });
   el('pick-zoom')?.addEventListener('click', () => {
     if (!pickedEntity) return;
+    followPickedAtom = true;
     orbitControls.focusTarget([...pickedEntity.pos], Math.min(renderer.camera.dist, 4.2));
   });
   el('sl-sim-speed')?.addEventListener('input', (e) => applySimSpeed(e.target.value));
@@ -917,6 +939,46 @@ export async function mountOrganicLabDemo() {
         mTot += m;
       }
       return Math.hypot(cx / Math.max(1e-4, mTot), cy / Math.max(1e-4, mTot), cz / Math.max(1e-4, mTot));
+    },
+    async readBearingIntegrity() {
+      if (!mdSession || !currentGraph || currentGraph.rotorMeta?.kind !== 'molecular-bearing') return null;
+      await mdSession.step({ dt: 0.012, substeps: 1, readTelemetry: true, readPositions: true });
+      const arr = mdSession.getLatestAtomsHost();
+      const n = mdSession.atomCount;
+      const rotorCount = currentGraph.rotorMeta.rotorCount || 24;
+      let minSR = 999; let maxSR = 0; let maxSOContact = 0; let minSODist = 999; let maxOFlex = 0;
+      const sCoords = [];
+      const oCoords = [];
+      for (let i = 0; i < n; i += 1) {
+        const x = arr[i * 16 + 0]; const y = arr[i * 16 + 1]; const z = arr[i * 16 + 2];
+        const Z = Math.round(arr[i * 16 + 15]);
+        if (i < rotorCount && Z === 16) {
+          const r = Math.hypot(x, y, z);
+          if (r < minSR) minSR = r;
+          if (r > maxSR) maxSR = r;
+          sCoords.push([x, y, z]);
+        } else if (i >= rotorCount && Z === 8) {
+          const init = currentGraph.atoms[i].pos;
+          const flex = Math.hypot(x - init[0], y - init[1], z - init[2]);
+          if (flex > maxOFlex) maxOFlex = flex;
+          oCoords.push([x, y, z]);
+        }
+      }
+      for (const s of sCoords) {
+        for (const o of oCoords) {
+          const d = Math.hypot(s[0] - o[0], s[1] - o[1], s[2] - o[2]);
+          if (d < minSODist) minSODist = d;
+          if (d < 3.55) maxSOContact += 1;
+        }
+      }
+      return {
+        minSRadiusA: Number(minSR.toFixed(3)),
+        maxSRadiusA: Number(maxSR.toFixed(3)),
+        minSODistA: Number(minSODist.toFixed(3)),
+        activeSOContacts: maxSOContact,
+        maxStatorOFlexA: Number(maxOFlex.toFixed(4)),
+        activeBondCount: mdSession.getTelemetry()?.activeBondCount || 0
+      };
     },
     setReactionProgress(xi, auto = false) {
       autoCycleReaction = Boolean(auto);

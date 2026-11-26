@@ -179,9 +179,10 @@ fn compute_organic_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nom = bd.ab_ord.z;
     let k_s = bd.dyn.y;
     // Continuous Morse force: U(r) = D * (1 - exp(-alpha*(r - r_eq)))^2
-    let alpha = 1.85;
-    let d_well = k_s * 0.42;
-    let ex = exp(-alpha * clamp(dist - r_eq, -0.8, 3.5));
+    // Physically deep covalent well (D_e ~ 3-5 eV) so molecules NEVER shatter under 300-600 K or bearing spin!
+    let alpha = 1.65;
+    let d_well = k_s * 0.85;
+    let ex = exp(-alpha * clamp(dist - r_eq, -0.7, 3.5));
     let f_mag = -2.0 * d_well * alpha * (1.0 - ex) * ex;
     f = f + dir * f_mag;
     pot_i = pot_i + 0.5 * d_well * (1.0 - ex) * (1.0 - ex);
@@ -273,15 +274,16 @@ fn compute_organic_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dir = dvec / dist;
     let r_sum = ri + aj.frc_r.w;
 
-    // Softened steric repulsion + dispersion outside covalent bonding core
-    let sigma = max(1.45, r_sum * 1.48);
+    // Physical van der Waals Pauli steric repulsion + dispersion outside covalent bonding core!
+    // Matches Bondi van der Waals contact radii (e.g. S + O: r_sum=1.71 -> sigma=2.94 A, r_min=3.30 A!)
+    let sigma = max(1.60, r_sum * 1.72);
     if (dist < sigma * 2.2) {
-      let sr = sigma / max(dist, sigma * 0.65);
+      let sr = sigma / max(dist, sigma * 0.68);
       let sr6 = sr * sr * sr * sr * sr * sr;
-      let f_lj = 0.035 * (2.0 * sr6 * sr6 - sr6) / max(0.45, dist);
-      // Damp short-range LJ for directly bonded neighbors (dist < r_sum * 1.38)
-      let nonbond_w = smoothstep(r_sum * 1.18, r_sum * 1.52, dist);
-      f = f + dir * clamp(f_lj * nonbond_w, -12.0, 12.0);
+      let f_lj = 0.52 * (2.0 * sr6 * sr6 - sr6) / max(0.55, dist);
+      // Damp short-range LJ for directly bonded neighbors (dist < r_sum * 1.45)
+      let nonbond_w = smoothstep(r_sum * 1.25, r_sum * 1.58, dist);
+      f = f + dir * clamp(f_lj * nonbond_w, -16.0, 16.0);
     }
 
     // Dielectric-screened QEq Coulomb force (softened at short distance)
@@ -350,26 +352,30 @@ fn compute_organic_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
       f = f + select(-f_s, f_s, i == params.react_c);
     }
   } else if (params.react_mode == 3u) {
-    // Molecular Bearing Mode (strictly topology-driven via ref_mount.w: 0 = free inner rotor, 1 = outer stator mount!):
-    //   - Stator ring atoms (w > 0.5) have a gentle elastic housing mount around ref_mount.xyz so thermal vibrations
-    //     & bearing recoil flex the stator realistically without drifting out of frame.
-    //   - Inner rotor atoms (w < 0.5) experience real tangential bearing torque (react_progress = torque drive)
-    //     + gentle axial planarity guide (z -> 0) while spinning 100% freely in the live GPU S...O LJ + QEq field!
+    // Molecular Bearing Mode (strictly topology-driven via ref_mount.w):
+    //   - w == 1.0: Outer perimeter -CH2- housing bridges get a compliant elastic mount (k = 6.5) so the outer race
+    //     stays centered while flexing realistically.
+    //   - w == 2.0: Inner stator furan rings (O, C_a, C_b, H) are 100% FREE radially & tangentially so passing
+    //     Sulfur teeth visibly flex & ripple each furan pocket via live GPU S...O Lennard-Jones + QEq forces!
+    //   - w == 0.0: Inner rotor atoms experience uniform mass-proportional torque (ZERO shear distortion) +
+    //     gentle axial thrust guide (z -> 0) while cradled radially by the 11 surrounding furan O atoms!
     let rm = ref_mount[i];
-    if (rm.w > 0.5) {
+    if (rm.w > 0.5 && rm.w < 1.5) {
       let disp = pi - rm.xyz;
-      f = f - disp * 18.0;
+      f = f - disp * 6.5;
+    } else if (rm.w >= 1.5) {
+      // Free compliant furan tooth: gentle axial planarity guide only (100% free to flex radially/tangentially!)
+      f.z = f.z - pi.z * 2.2;
     } else {
       let r_xy = max(0.25, length(pi.xy));
       let tang = vec2<f32>(-pi.y / r_xy, pi.x / r_xy);
       let m_i = 1.0 / max(1e-4, ai.pos_m.w);
-      // Exact mass-proportional uniform angular torque (a_tang / r identical for C & S -> ZERO shear distortion!)
-      // Balances gentle rotor damping gamma_rotor = 0.68 -> terminal omega ~ 0.56 * tau rad/sim-time!
-      let alpha_drive = params.react_progress * 0.38;
+      // Uniform mass-proportional angular torque (well below covalent dissociation limit even at max tau = 1.5!)
+      let alpha_drive = params.react_progress * 0.24;
       f.x = f.x + tang.x * m_i * alpha_drive * r_xy;
       f.y = f.y + tang.y * m_i * alpha_drive * r_xy;
       // Gentle axial thrust bearing restoring z -> 0 so rotor stays cleanly inside stator plane
-      f.z = f.z - pi.z * m_i * 1.6;
+      f.z = f.z - pi.z * m_i * 1.8;
     }
   }
 
@@ -397,10 +403,11 @@ fn integrate_organic_atoms(@builtin(global_invocation_id) gid: vec3<u32>) {
   let f = a.frc_r.xyz;
 
   // Deterministic pseudo-Gaussian Langevin thermal kick proportional to sqrt(T * gamma / m)
-  // For free molecular bearing rotor atoms (react_mode == 3 && ref_mount.w < 0.5), use low superlubric
-  // damping (0.32) so uniform torque spins the Sulflower smoothly with ZERO bond shear!
+  // For free molecular bearing rotor atoms (react_mode == 3 && ref_mount.w < 0.5), use smooth superlubric
+  // phonon drag + quadratic high-RPM governor so even max torque spins briskly without centrifugal bond rupture!
   let is_free_rotor = (params.react_mode == 3u && ref_mount[i].w < 0.5);
-  let gamma_eff = select(params.gamma_damp, 0.68, is_free_rotor);
+  let spd_i = length(a.vel_q.xyz);
+  let gamma_eff = select(params.gamma_damp, 0.88 + 0.38 * min(4.0, spd_i), is_free_rotor);
   let s0 = f32(i) * 19.31 + f32(params.step_index) * 3.73;
   let rx = (hash_f(s0 + 1.1) + hash_f(s0 + 2.3) - 1.0) * 1.732;
   let ry = (hash_f(s0 + 3.7) + hash_f(s0 + 5.1) - 1.0) * 1.732;
@@ -456,14 +463,17 @@ fn recenter_organic_com(@builtin(local_invocation_id) lid: vec3<u32>) {
   let inv_mtot = 1.0 / max(1e-4, wg0[0]);
   let r_com = wg_v0[0] * inv_mtot;
   let v_com = wg_v1[0] * inv_mtot;
-  // Smoothly subtract exact center-of-mass velocity & residual COM offset (never alters internal distances/angles!)
-  let corr_r = r_com * select(0.25, 0.35, is_bearing);
+  // Smoothly subtract exact center-of-mass drift:
+  //   - In bearing mode, apply only a gentle centering assist (0.04) so the real 11-fold S...O steric cradle
+  //     physically drives bearing precession/wobble while keeping the rotor cleanly inside the macrocycle!
+  let corr_r = r_com * select(0.25, 0.04, is_bearing);
+  let corr_v = v_com * select(1.0, 0.08, is_bearing);
   var j = tid;
   loop {
     if (j >= end_n) { break; }
     var a = atoms[j];
     a.pos_m = vec4<f32>(a.pos_m.xyz - corr_r, a.pos_m.w);
-    a.vel_q = vec4<f32>(a.vel_q.xyz - v_com, a.vel_q.w);
+    a.vel_q = vec4<f32>(a.vel_q.xyz - corr_v, a.vel_q.w);
     atoms[j] = a;
     j = j + 64u;
   }
@@ -503,7 +513,14 @@ fn reduce_organic_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
   loop {
     if (b >= params.bond_count) { break; }
     let bd = bonds[b];
-    if (bd.dyn.w > 0.5) {
+    if (bd.dyn.w > 1.5) {
+      // Dynamic nonbonded van der Waals / steric bearing-race contact pulse (e.g. S...O interaction!)
+      let ia = u32(round(bd.ab_ord.x));
+      let ib = u32(round(bd.ab_ord.y));
+      let dist = length(atoms[ia].pos_m.xyz - atoms[ib].pos_m.xyz);
+      let contact_w = clamp((3.55 - dist) / 1.05, 0.0, 1.0);
+      bonds[b].dyn.x = select(0.0, contact_w * 0.95, dist < 3.55);
+    } else if (bd.dyn.w > 0.5) {
       // Dynamic emergent H-bond beam slot (strictly activated by QEq charges & live D-H...A distance!)
       let ia = u32(round(bd.ab_ord.x));
       let ib = u32(round(bd.ab_ord.y));
@@ -577,11 +594,15 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
   const n = g.atomCount;
 
   // Include reactive forming bonds in the bond table so bond orders smoothly grow 0 -> 1 during SN2 / Diels-Alder!
+  // Physical covalent dissociation depth scales naturally with bond order & inverse bond length
+  // (tight C-C/C-O/C-S bonds are rock-solid ~4-5 eV; long heavy-halogen leaving bonds like C-Br are labile!).
   const bondList = g.bonds.map((b) => {
     const ra = g.atoms[b.a].rCovA;
     const rb = g.atoms[b.b].rCovA;
     const rEq = (ra + rb) * (b.order >= 2.5 ? 0.80 : (b.order >= 1.5 ? 0.89 : 1.0));
-    return { a: b.a, b: b.b, order: b.order, rEq, kMorse: 16.0 * b.order, active: 1.0, isForming: false };
+    const isWeakLeaving = rEq > 1.85;
+    const baseK = isWeakLeaving ? 14.0 : 42.0;
+    return { a: b.a, b: b.b, order: b.order, rEq, kMorse: baseK * b.order, active: 1.0, isForming: false };
   });
   let reactMode = 0;
   let reactA = 0; let reactB = 0; let reactC = 0; let reactD = 0;
@@ -604,13 +625,26 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
     reactB = g.rotorMeta.statorStart || 24;
   }
 
+  // Topology-driven bearing race roles (0 = free inner rotor, 1 = outer perimeter housing bridge, 2 = free flexing stator furan tooth!)
+  const hNeighborCount = new Uint8Array(n);
+  for (const bd of g.bonds) {
+    if (g.atoms[bd.b].Z === 1) hNeighborCount[bd.a] += 1;
+    if (g.atoms[bd.a].Z === 1) hNeighborCount[bd.b] += 1;
+  }
   const refMountInit = new Float32Array(Math.max(1, n) * 4);
   for (let i = 0; i < n; i += 1) {
     const a = g.atoms[i];
     refMountInit[i * 4 + 0] = a.pos[0];
     refMountInit[i * 4 + 1] = a.pos[1];
     refMountInit[i * 4 + 2] = a.pos[2];
-    refMountInit[i * 4 + 3] = (reactMode === 3 && i >= reactB) ? 1.0 : 0.0;
+    if (reactMode === 3 && i >= reactB) {
+      // Only outer sp3 -CH2- bridge carbons (Z===6 with 2 H neighbors) anchor to the bearing housing;
+      // all 11 inner furan rings (O, C_a, C_b, H) stay 100% free to flex & ripple as S teeth pass!
+      const isOuterBridge = (a.Z === 6 && hNeighborCount[i] >= 2);
+      refMountInit[i * 4 + 3] = isOuterBridge ? 1.0 : 2.0;
+    } else {
+      refMountInit[i * 4 + 3] = 0.0;
+    }
   }
 
   const atomInit = new Float32Array(Math.max(1, n) * 16);
@@ -641,13 +675,26 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
     }
   }
 
+  // Append nonbonded van der Waals / steric bearing-contact slots (isHBond = 2, active = 0) between
+  // rotor perimeter heteroatoms (Z > 6) and stator inner heteroatoms (Z > 6) so live S...O bearing
+  // contact forces illuminate dynamically as teeth pass within the 3.55 A van der Waals shell!
+  if (reactMode === 3) {
+    for (let i = 0; i < reactB; i += 1) {
+      if (g.atoms[i].Z <= 6) continue;
+      for (let j = reactB; j < n; j += 1) {
+        if (g.atoms[j].Z <= 6) continue;
+        bondList.push({ a: i, b: j, order: 0.5, rEq: 3.1, kMorse: 0, active: 0, isForming: true, isHBond: 2 });
+      }
+    }
+  }
+
   const bondInit = new Float32Array(Math.max(1, bondList.length) * 8);
   for (let i = 0; i < bondList.length; i += 1) {
     const bd = bondList[i];
     const o = i * 8;
     bondInit[o + 0] = bd.a; bondInit[o + 1] = bd.b; bondInit[o + 2] = bd.order; bondInit[o + 3] = bd.rEq;
     bondInit[o + 4] = bd.isForming ? 0.0 : bd.order;
-    bondInit[o + 5] = bd.kMorse; bondInit[o + 6] = bd.active; bondInit[o + 7] = bd.isHBond ? 1.0 : 0.0;
+    bondInit[o + 5] = bd.kMorse; bondInit[o + 6] = bd.active; bondInit[o + 7] = Number(bd.isHBond) || 0.0;
   }
 
   const angleInit = new Float32Array(Math.max(1, g.angles.length) * 8);
@@ -676,7 +723,7 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
     computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-organic-md-${entryPoint}.v5-com-bearing`,
+    cacheKey: `ulg-organic-md-${entryPoint}.v6-vdw-bearing`,
     label: `${label}-${entryPoint}`,
     code: reactiveBondOrderMdWgsl,
     entryPoint,

@@ -1,4 +1,4 @@
-import{Gt as e,Jt as t,Kt as n,Ut as r,Vt as i,Wt as a,Yt as o,_ as s,_t as c,a as l,bt as u,mo as d,n as f,p,po as m,qt as h,r as g,s as _,vt as v,wt as y,yt as b}from"./molecularDynamicsWebGpu-CVM2Trpi.js";import{S as x,_ as S,n as C}from"./batchedSymmetricEigensolverGpu-DvdPNMKk.js";import{n as w,r as T}from"./ClosureRegistry-BkvnpwMz.js";import{i as E}from"./residentBufferLease-EzWfR0Bs.js";import{a as D}from"./webgpuCompat-C1bfdHJP.js";var O=`peercompute.ulg.radial-kohn-sham-webgpu.v1`,k=128,A=1,j=`
+import{Gt as e,Jt as t,Kt as n,Ut as r,Vt as i,Wt as a,Yt as o,_ as s,_t as c,a as l,bt as u,mo as d,n as f,p,po as m,qt as h,r as g,s as _,vt as v,wt as y,yt as b}from"./molecularDynamicsWebGpu-CVM2Trpi.js";import{S as x,_ as S,n as C}from"./batchedSymmetricEigensolverGpu-DvdPNMKk.js";import{n as w,r as T}from"./ClosureRegistry-BkvnpwMz.js";import{i as E}from"./residentBufferLease-EzWfR0Bs.js";import{a as D}from"./webgpuCompat-B36dRVS1.js";var O=`peercompute.ulg.radial-kohn-sham-webgpu.v1`,k=128,A=1,j=`
 struct KsParams {
   n_points: u32,
   use_pbe: u32,

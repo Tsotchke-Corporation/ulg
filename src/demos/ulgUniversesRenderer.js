@@ -86,14 +86,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     + cam.cam_up.xyz * (in.ndc.y * fov)
   );
   let log_span = cam.cam_fwd.w;
-  // Subtle Milky Way galactic band visible at solar/planetary scales, darker vacuum at cosmic/quantum
-  let gal_vis = smoothstep(23.0, 17.0, log_span) * smoothstep(-4.0, 4.0, log_span);
+  // Subtle Milky Way galactic band visible ONLY when no live parent GPU galaxy skybox is active!
+  let live_parent_sky = clamp(cam.extra0.y, 0.0, 1.0);
+  let gal_vis = smoothstep(23.0, 17.0, log_span) * smoothstep(-4.0, 4.0, log_span) * (1.0 - 0.88 * live_parent_sky);
   let gal_band = exp(-pow(dir.y * 2.8 + dir.x * 0.72, 2.0) * 4.5);
   let dust = 0.5 + 0.5 * sin(dir.x * 4.5 + dir.z * 3.2) * cos(dir.y * 3.9 - dir.x * 2.8);
   let base_void = mix(vec3<f32>(0.005, 0.009, 0.020), vec3<f32>(0.004, 0.007, 0.015), smoothstep(0.0, -8.0, log_span));
   var col = base_void + vec3<f32>(0.028, 0.036, 0.068) * gal_band * dust * (0.25 + 0.75 * gal_vis);
 
-  let star_vis = smoothstep(-6.0, 6.0, log_span) * 0.85 + 0.15;
+  let star_vis = (smoothstep(-6.0, 6.0, log_span) * 0.85 + 0.15) * (1.0 - 0.65 * live_parent_sky);
   col = col + star_layer(dir, 58.0, 0.972) * 1.15 * star_vis;
   col = col + star_layer(dir, 130.0, 0.978) * 0.68 * star_vis;
   col = col + star_layer(dir, 230.0, 0.986) * 0.32 * star_vis;
@@ -387,20 +388,24 @@ fn vs_main(
 
   if (mode == 0u) {
     // L0: Supergalactic 2LPT + TreePM (16 floats/particle) — IllustrisTNG / Millennium cosmic web
+    // When world_scale < 0.0, projects onto celestial skybox sphere (radius = -world_scale) from galaxy's exact Cosmic-Web location!
     let o = iid * 16u;
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
     let box_sz = max(10.0, cam.extra1.w);
+    let is_sky = world_scale < 0.0;
+    let rel_c = raw_p - cam.extra1.xyz;
+    let d_rel_c = length(rel_c);
     // Smooth observable-horizon spherical survey vignette (eliminates harsh periodic box wall edges!)
     let r_box = length(raw_p) / box_sz;
     let sphere_fade = 1.0 - smoothstep(0.32, 0.495, r_box);
-    if (sphere_fade < 0.01) {
+    if (sphere_fade < 0.01 || (is_sky && d_rel_c < 2.0)) {
       var culled0: VsOut;
       culled0.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
       culled0.color = vec4<f32>(0.0);
       culled0.uv = vec2<f32>(0.0);
       return culled0;
     }
-    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    p_world = select(rel_c * world_scale, cam.cam_pos.xyz + (rel_c / max(1e-3, d_rel_c)) * (-world_scale), is_sky);
     let rho = clamp(raw_f32[o + 7u], 0.04, 1.0);
     let is_baryon = raw_f32[o + 12u] > 0.5;
     let col_void = vec3<f32>(0.14, 0.18, 0.62);
@@ -409,23 +414,28 @@ fn vs_main(
     var c_dm = mix(col_void, col_fil, smoothstep(0.08, 0.56, rho));
     c_dm = mix(c_dm, col_node, smoothstep(0.60, 0.96, rho));
     let c_bar = mix(vec3<f32>(0.94, 0.38, 0.22), vec3<f32>(1.0, 0.80, 0.36), smoothstep(0.18, 0.90, rho));
+    let sky_att = select(1.0, clamp(42.0 / (16.0 + d_rel_c), 0.35, 1.85), is_sky);
     col = select(c_dm, c_bar, is_baryon) * (0.78 + 1.05 * pow(rho, 0.90));
-    pt_size = pt_size_base * (0.56 + 0.92 * pow(rho, 0.85));
-    alpha = alpha_gain * (0.28 + 0.72 * pow(rho, 0.92)) * sphere_fade;
+    pt_size = pt_size_base * (0.56 + 0.92 * pow(rho, 0.85)) * select(1.0, 0.68 + 0.52 * sky_att, is_sky);
+    alpha = alpha_gain * (0.28 + 0.72 * pow(rho, 0.92)) * sphere_fade * sky_att;
   } else if (mode == 1u) {
     // L1: Realistic Flat-Rotation Spiral Galaxy (8 floats/star: pos, mass, vel, popTag)
     // popTag < 0 => invisible dark-matter NFW halo particle (provides REAL GPU gravity for flat rotation curve!)
+    // When world_scale < 0.0, renders the LIVE 32,768-star Milky Way skyband from THIS star's exact galactocentric position!
     let o = iid * 8u;
     let pop_tag = raw_f32[o + 7u];
-    if (pop_tag < 0.0) {
+    let is_sky = world_scale < 0.0;
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    let rel_g = raw_p - cam.extra1.xyz;
+    let d_rel_g = length(rel_g);
+    if (pop_tag < 0.0 || (is_sky && d_rel_g < 0.08)) {
       var culled: VsOut;
       culled.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
       culled.color = vec4<f32>(0.0);
       culled.uv = vec2<f32>(0.0);
       return culled;
     }
-    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
-    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    p_world = select(rel_g * world_scale, cam.cam_pos.xyz + (rel_g / max(1e-4, d_rel_g)) * (-world_scale), is_sky);
     let m = raw_f32[o + 3u];
     // pop_tag encodes astrophysical population (HDR linear colors tone-mapped cleanly via ACES!):
     //   [0.01..0.35]: warm golden-amber bulge & old disk K/M/G stars
@@ -435,6 +445,7 @@ fn vs_main(
     let gold_core = vec3<f32>(1.0, 0.84, 0.52);
     let ob_blue = vec3<f32>(0.42, 0.74, 1.0);
     let h2_rose = vec3<f32>(1.0, 0.32, 0.58);
+    let sky_att = select(1.0, clamp(4.2 / (0.85 + d_rel_g), 0.24, 2.15), is_sky);
     if (pop_tag < 0.35) {
       let f = clamp(pop_tag / 0.35, 0.0, 1.0);
       col = mix(gold_core, warm_bulge, f);
@@ -456,6 +467,10 @@ fn vs_main(
       col = vec3<f32>(1.0, 0.88, 0.62);
       pt_size = pt_size_base * 1.8;
       alpha = alpha_gain * 0.55;
+    }
+    if (is_sky) {
+      pt_size = pt_size * (0.65 + 0.55 * sky_att);
+      alpha = alpha * sky_att;
     }
   } else if (mode == 2u) {
     // L3: Self-Gravitating Hydro Plasma (16 floats/parcel)
@@ -483,8 +498,19 @@ fn vs_main(
     alpha = alpha_gain * (0.28 + 0.58 * dens_w);
   } else if (mode == 3u) {
     // L6: Quantum Orbital Point Cloud (4 floats/point: vec4(x, y, z, packed_meta))
+    // When world_scale < 0.0, renders as a faint faraway electron-shell sky enveloping the L7 femtometer nucleus!
     let o = iid * 4u;
-    p_world = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]) * world_scale;
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    let is_sky = world_scale < 0.0;
+    let d_q = length(raw_p);
+    if (is_sky && d_q < 0.04) {
+      var culled3: VsOut;
+      culled3.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled3.color = vec4<f32>(0.0);
+      culled3.uv = vec2<f32>(0.0);
+      return culled3;
+    }
+    p_world = select(raw_p * world_scale, cam.cam_pos.xyz + (raw_p / max(1e-4, d_q)) * (-world_scale), is_sky);
     let packed_meta = raw_f32[o + 3u];
     let mag = clamp(abs(packed_meta), 0.15, 1.0);
     let pos_phase = packed_meta >= 0.0;
@@ -493,6 +519,25 @@ fn vs_main(
     col = select(c_neg, c_pos, pos_phase) * (0.70 + 0.95 * mag);
     pt_size = pt_size_base * (0.72 + 0.55 * mag);
     alpha = alpha_gain * (0.30 + 0.70 * mag);
+  } else if (mode == 12u) {
+    // Mode 12: Rescaled Parent L5 Crystal Lattice Skybox enveloping the L6 Quantum Atom (4 floats/atom: x,y,z,w)!
+    let o = iid * 4u;
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]) - cam.extra1.xyz;
+    let d_l = length(raw_p);
+    if (d_l < 0.25) {
+      var culled12: VsOut;
+      culled12.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled12.color = vec4<f32>(0.0);
+      culled12.uv = vec2<f32>(0.0);
+      return culled12;
+    }
+    let sky_r = abs(world_scale);
+    p_world = cam.cam_pos.xyz + (raw_p / max(1e-4, d_l)) * sky_r;
+    let att = clamp(6.0 / (1.5 + d_l), 0.25, 1.6);
+    col = cam.extra2.rgb * (0.65 + 0.55 * att);
+    pt_size = pt_size_base * (0.75 + 0.65 * att);
+    alpha = alpha_gain * att;
+    shape = 1.0;
   } else if (mode == 4u) {
     // Mode 4: L2 Real-Scale Solar System Minor Bodies / Main & Kuiper Belt Asteroids (f32x2 double-float!)
     let skip_n = u32(round(cam.extra1.w));
@@ -752,22 +797,22 @@ fn vs_main(
       // 3D Volumetric Atmospheric CFD Cloud Strata Bank (huge soft layered cumulus/NH3/NH4SH billows!)
       let puff_fade = sin(clamp(life_f, 0.0, 1.0) * 3.1415926);
       let d_cam = length(p_world - cam.cam_pos.xyz);
-      let near_fade = smoothstep(5.0, 18.0, d_cam);
-      col = base_rgb * 0.48;
-      pt_size = pt_size_base * sz * 2.15 * (0.85 + 0.30 * puff_fade);
-      alpha = alpha_gain * is_live * (0.42 + 0.58 * puff_fade) * near_fade * 0.14;
+      let near_fade = smoothstep(4.5, 16.0, d_cam);
+      col = base_rgb * 0.72;
+      pt_size = pt_size_base * sz * 2.35 * (0.85 + 0.30 * puff_fade);
+      alpha = alpha_gain * is_live * (0.45 + 0.55 * puff_fade) * near_fade * 0.27;
       shape = 1.0;
     } else {
-      // Crisp Velocity-Aligned 3D CFD Flow Ribbon / Eddy Streamline!
+      // Sleek Translucent Velocity-Aligned 3D CFD Flow Ribbon / Eddy Streamline!
       let s_fade = sin(clamp(life_f, 0.0, 1.0) * 3.1415926);
       let v_raw = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
       let v_mag = length(v_raw);
-      col = base_rgb * 1.15;
-      pt_size = pt_size_base * max(0.28, sz * 0.42);
-      alpha = alpha_gain * is_live * (0.28 + 0.72 * s_fade) * 0.42;
-      if (v_mag > 0.15) {
+      col = base_rgb * 0.96;
+      pt_size = pt_size_base * max(0.24, sz * 0.36);
+      alpha = alpha_gain * is_live * (0.32 + 0.68 * s_fade) * 0.34;
+      if (v_mag > 0.12) {
         streak_axis = v_raw / v_mag;
-        streak_len = clamp(v_mag * 0.36, 1.4, 6.2);
+        streak_len = clamp(v_mag * 0.28, 1.1, 4.2);
         shape = 2.0;
       }
     }
@@ -1727,10 +1772,14 @@ export function createUlgUniversesRenderer(device, canvas) {
   let depthTex = null;
   let depthView = null;
 
-  // 4 small dedicated uniform buffers -> simultaneous multi-scale crossfading in 1 queue.submit/frame!
+  // 6 small dedicated uniform buffers -> up to 4 simultaneous multi-scale GPU clouds (incl. parent skybox!) in 1 submit/frame!
   const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const cloudCamBufA = device.createBuffer({ label: 'uv-cam-cloud-a', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const cloudCamBufB = device.createBuffer({ label: 'uv-cam-cloud-b', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const MAX_CLOUD_SLOTS = 4;
+  const cloudCamBufs = Array.from({ length: MAX_CLOUD_SLOTS }, (_, idx) => device.createBuffer({
+    label: `uv-cam-cloud-${idx}`,
+    size: 176,
+    usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
+  }));
   const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 176, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const postUniformBuf = device.createBuffer({ label: 'uv-post-uniform', size: 48, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
@@ -1822,6 +1871,24 @@ export function createUlgUniversesRenderer(device, canvas) {
     },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'less-equal' }
+  });
+  const backdropCloudPipe = device.createRenderPipeline({
+    label: 'uv-backdrop-cloud-pipe',
+    layout: 'auto',
+    vertex: { module: cloudMod, entryPoint: 'vs_main' },
+    fragment: {
+      module: cloudMod,
+      entryPoint: 'fs_main',
+      targets: [{
+        format: sceneFormat,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+        }
+      }]
+    },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'always' }
   });
 
   const sphereMod = mkMod('uv-lit-sphere', LIT_SPHERE_WGSL);
@@ -1980,17 +2047,18 @@ export function createUlgUniversesRenderer(device, canvas) {
   });
   let postBg = null;
 
-  const cloudBgCacheA = new WeakMap();
-  const cloudBgCacheB = new WeakMap();
+  const cloudBgCaches = Array.from({ length: MAX_CLOUD_SLOTS }, () => new WeakMap());
+  const backdropCloudBgCaches = Array.from({ length: MAX_CLOUD_SLOTS }, () => new WeakMap());
   const mdBgCache = new WeakMap();
 
-  function getCloudBindGroup(buf, slot) {
-    const cache = slot === 0 ? cloudBgCacheA : cloudBgCacheB;
-    const uBuf = slot === 0 ? cloudCamBufA : cloudCamBufB;
+  function getCloudBindGroup(buf, slot, isBackdrop = false) {
+    const cache = (isBackdrop ? backdropCloudBgCaches : cloudBgCaches)[slot];
+    const uBuf = cloudCamBufs[slot];
+    const pipeRef = isBackdrop ? backdropCloudPipe : particleCloudPipe;
     let bg = cache.get(buf);
     if (!bg) {
       bg = device.createBindGroup({
-        layout: particleCloudPipe.getBindGroupLayout(0),
+        layout: pipeRef.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: uBuf } },
           { binding: 1, resource: { buffer: buf } }
@@ -2159,19 +2227,20 @@ export function createUlgUniversesRenderer(device, canvas) {
       device.queue.writeBuffer(lineBuf, 0, lineStaging.subarray(0, lineVertCount * 7));
     }
 
+    const activeClouds = (particleClouds || []).filter((c) => c && c.buffer && c.count > 0).slice(0, MAX_CLOUD_SLOTS);
+    const hasLiveParentBackdrop = activeClouds.some((c) => c.isBackdrop);
     const hasAtmo = Boolean(atmoEm && atmoEm.buffer && atmoEm.width > 0 && atmoEm.height > 0);
     writeCam(
       camBuf,
       camera,
-      [camera.level || 0, 0, 0, 0],
+      [camera.level || 0, hasLiveParentBackdrop ? 1.0 : 0.0, 0, 0],
       [lightDir[0], lightDir[1], lightDir[2], 0],
       hasAtmo ? [atmoEm.width, atmoEm.height, atmoEm.sphereIndex ?? 0, 1.0] : [1, 1, -1, 0.0]
     );
 
-    const activeClouds = (particleClouds || []).filter((c) => c && c.buffer && c.count > 0).slice(0, 2);
     for (let slot = 0; slot < activeClouds.length; slot += 1) {
       const c = activeClouds[slot];
-      const uBuf = slot === 0 ? cloudCamBufA : cloudCamBufB;
+      const uBuf = cloudCamBufs[slot];
       writeCam(
         uBuf,
         camera,
@@ -2244,6 +2313,15 @@ export function createUlgUniversesRenderer(device, canvas) {
         pass.setBindGroup(0, surfaceSkyBg);
         pass.draw(3, 1, 0, 0);
 
+        // Render live rescaled parent galaxy skyband behind vacuum/thin-sky planetary horizons BEFORE solid terrain!
+        for (let slot = 0; slot < activeClouds.length; slot += 1) {
+          const c = activeClouds[slot];
+          if (!c.isBackdrop) continue;
+          pass.setPipeline(backdropCloudPipe);
+          pass.setBindGroup(0, getCloudBindGroup(c.buffer, slot, true));
+          pass.draw(6, c.count, 0, 0);
+        }
+
         if (!surfaceScene.hideTerrain && surfaceScene.terrainVertBuf && surfaceScene.terrainIdxBuf && surfaceScene.indexCount > 0) {
           pass.setPipeline(surfaceMeshPipe);
           pass.setBindGroup(0, surfaceMeshBg);
@@ -2261,6 +2339,15 @@ export function createUlgUniversesRenderer(device, canvas) {
         pass.setPipeline(backdropPipe);
         pass.setBindGroup(0, backdropBg);
         pass.draw(3, 1, 0, 0);
+
+        // Render live rescaled parent-scale GPU simulation as true 3D celestial perspective skybox BEFORE foreground!
+        for (let slot = 0; slot < activeClouds.length; slot += 1) {
+          const c = activeClouds[slot];
+          if (!c.isBackdrop) continue;
+          pass.setPipeline(backdropCloudPipe);
+          pass.setBindGroup(0, getCloudBindGroup(c.buffer, slot, true));
+          pass.draw(6, c.count, 0, 0);
+        }
       }
 
       if (lineVertCount > 0) {
@@ -2290,8 +2377,9 @@ export function createUlgUniversesRenderer(device, canvas) {
 
       for (let slot = 0; slot < activeClouds.length; slot += 1) {
         const c = activeClouds[slot];
+        if (c.isBackdrop) continue;
         pass.setPipeline(particleCloudPipe);
-        pass.setBindGroup(0, getCloudBindGroup(c.buffer, slot));
+        pass.setBindGroup(0, getCloudBindGroup(c.buffer, slot, false));
         pass.draw(6, c.count, 0, 0);
       }
 
@@ -2324,7 +2412,7 @@ export function createUlgUniversesRenderer(device, canvas) {
   function dispose() {
     sceneTex?.destroy();
     depthTex?.destroy();
-    for (const b of [camBuf, cloudCamBufA, cloudCamBufB, auxCamBuf, postUniformBuf, sphereBuf, dummyAtmoBuf, diskBuf, lineBuf, nuclearVolBuf]) {
+    for (const b of [camBuf, ...cloudCamBufs, auxCamBuf, postUniformBuf, sphereBuf, dummyAtmoBuf, diskBuf, lineBuf, nuclearVolBuf]) {
       try { b.destroy(); } catch {}
     }
   }

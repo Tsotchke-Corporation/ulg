@@ -603,7 +603,9 @@ export async function mountOrganicLabDemo() {
         }
       }
       if (doRead) updateHudAndProvenance();
+      await refreshTrackedPickedAtom();
       renderCurrentScene();
+      updatePickOverlay();
     } finally {
       busy = false;
     }
@@ -640,6 +642,24 @@ export async function mountOrganicLabDemo() {
   };
   window.addEventListener('resize', handleResize);
   handleResize();
+
+  let followPickedAtom = false;
+
+  async function refreshTrackedPickedAtom() {
+    if (!pickedEntity || pickedEntity.kind !== 'atom' || !mdSession || !currentGraph) return;
+    const raw = await gpuPicker.readSingleEntity(mdSession.getResidentAtomsBuffer(), pickedEntity.index, 16);
+    if (!raw || !pickedEntity || pickedEntity.kind !== 'atom') return;
+    const x = raw[0]; const y = raw[1]; const z = raw[2];
+    const q = raw[7];
+    const spd = Math.hypot(raw[4], raw[5], raw[6]);
+    const a = currentGraph.atoms[pickedEntity.index];
+    const chiral = currentGraph.chiralCenters.find((c) => c.atomIndex === pickedEntity.index);
+    pickedEntity.pos = [x, y, z];
+    pickedEntity.details = `q=${q >= 0 ? '+' : ''}${q.toFixed(3)} e · |v|=${spd.toFixed(2)} · r=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})${chiral ? ` · Stereocenter (${chiral.configuration})` : ''}`;
+    if (followPickedAtom && orbitControls) {
+      orbitControls.setPose({ target: [x, y, z] }, { immediate: false });
+    }
+  }
 
   function updatePickOverlay() {
     const ret = el('pick-reticle');
@@ -683,7 +703,8 @@ export async function mountOrganicLabDemo() {
         aspect: renderer.getAspect(),
         maxPickNdc: 0.14
       });
-      if (!hit) { pickedEntity = null; updatePickOverlay(); return null; }
+      if (!hit) { pickedEntity = null; followPickedAtom = false; updatePickOverlay(); return null; }
+      followPickedAtom = false;
       const a = currentGraph.atoms[hit.index];
       const q = hit.vec1[3];
       const spd = Math.hypot(hit.vec1[0], hit.vec1[1], hit.vec1[2]);
@@ -718,9 +739,10 @@ export async function mountOrganicLabDemo() {
       updatePickOverlay();
     }
   });
-  el('pick-close')?.addEventListener('click', () => { pickedEntity = null; updatePickOverlay(); });
+  el('pick-close')?.addEventListener('click', () => { pickedEntity = null; followPickedAtom = false; updatePickOverlay(); });
   el('pick-zoom')?.addEventListener('click', () => {
     if (!pickedEntity) return;
+    followPickedAtom = true;
     orbitControls.focusTarget([...pickedEntity.pos], Math.min(renderer.camera.dist, 4.2));
   });
   el('sl-sim-speed')?.addEventListener('input', (e) => applySimSpeed(e.target.value));

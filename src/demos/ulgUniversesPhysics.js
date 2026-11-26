@@ -148,6 +148,61 @@ const MOLECULE_SPECS = Object.freeze({
       { Z: 1, symbol: 'H', position: [0, -1.43, -0.88] }
     ]
   }),
+  CO2: Object.freeze({
+    formula: 'CO₂',
+    name: 'Carbon Dioxide (Linear O=C=O)',
+    atoms: [
+      { Z: 6, symbol: 'C', position: [0, 0, 0] },
+      { Z: 8, symbol: 'O', position: [0, 0, 2.19] },
+      { Z: 8, symbol: 'O', position: [0, 0, -2.19] }
+    ]
+  }),
+  CH4: Object.freeze({
+    formula: 'CH₄',
+    name: 'Methane (Tetrahedral T_d)',
+    atoms: [
+      { Z: 6, symbol: 'C', position: [0, 0, 0] },
+      { Z: 1, symbol: 'H', position: [1.19, 1.19, 1.19] },
+      { Z: 1, symbol: 'H', position: [1.19, -1.19, -1.19] },
+      { Z: 1, symbol: 'H', position: [-1.19, 1.19, -1.19] },
+      { Z: 1, symbol: 'H', position: [-1.19, -1.19, 1.19] }
+    ]
+  }),
+  NH3: Object.freeze({
+    formula: 'NH₃',
+    name: 'Ammonia (Trigonal Pyramidal C₃v)',
+    atoms: [
+      { Z: 7, symbol: 'N', position: [0, 0.42, 0] },
+      { Z: 1, symbol: 'H', position: [1.77, -0.32, 0] },
+      { Z: 1, symbol: 'H', position: [-0.885, -0.32, 1.53] },
+      { Z: 1, symbol: 'H', position: [-0.885, -0.32, -1.53] }
+    ]
+  }),
+  SiO2: Object.freeze({
+    formula: 'SiO₂',
+    name: 'Silica Unit (O=Si=O)',
+    atoms: [
+      { Z: 14, symbol: 'Si', position: [0, 0, 0] },
+      { Z: 8, symbol: 'O', position: [0, 0, 2.85] },
+      { Z: 8, symbol: 'O', position: [0, 0, -2.85] }
+    ]
+  }),
+  O2: Object.freeze({
+    formula: 'O₂',
+    name: 'Dioxygen (O=O)',
+    atoms: [
+      { Z: 8, symbol: 'O', position: [0, 0, -1.14] },
+      { Z: 8, symbol: 'O', position: [0, 0, 1.14] }
+    ]
+  }),
+  N2: Object.freeze({
+    formula: 'N₂',
+    name: 'Dinitrogen (N≡N)',
+    atoms: [
+      { Z: 7, symbol: 'N', position: [0, 0, -1.04] },
+      { Z: 7, symbol: 'N', position: [0, 0, 1.04] }
+    ]
+  }),
   CO: Object.freeze({
     formula: 'CO',
     name: 'Carbon Monoxide (Triple Bond)',
@@ -165,6 +220,90 @@ const MOLECULE_SPECS = Object.freeze({
     ]
   })
 });
+
+/**
+ * Automatic continuous scale-adaptive time dilation across all 40 orders of magnitude!
+ * Zooming inward from Cosmic Web (10^25 m) -> Galaxy -> Star System -> Planet -> Surface ->
+ * Lattice -> Atom -> Nucleus monotonically slows the physical simulation clock so every
+ * regime runs at a natural, readable dynamical cadence!
+ */
+export function computeScaleAdaptiveTimeDilation(log10SpanM, {
+  surfaceActive = false,
+  userTimeScale = 1.0
+} = {}) {
+  const span = Number.isFinite(Number(log10SpanM)) ? Number(log10SpanM) : 24.8;
+  const userMul = Math.max(0.1, Math.min(3.0, Number(userTimeScale) || 1.0));
+  if (surfaceActive) {
+    const sPerS = 1.0 * userMul;
+    return Object.freeze({
+      factor: 1.0,
+      effectiveTimeScale: userMul,
+      secondsPerWallSecond: sPerS,
+      clockLabel: `${sPerS.toFixed(1)} s/s`
+    });
+  }
+
+  // Smooth piecewise-log10 physical clock rate (seconds of simulated physics per wall-clock second)
+  // and normalized per-scale cadence multiplier (`factor`) that strictly decreases as you zoom in!
+  let secondsPerWallSecond;
+  let factor;
+  if (span >= 22.0) {
+    // L0 Cosmic Web (25.4 -> 22.0): ~160 Myr/s -> ~18 Myr/s
+    const t = Math.max(0, Math.min(1, (span - 22.0) / 3.4));
+    secondsPerWallSecond = Math.pow(10, 14.75 + t * 0.95) * userMul;
+    factor = 0.55 + 0.45 * t;
+  } else if (span >= 16.2) {
+    // L1 Spiral Galaxy (22.0 -> 16.2): ~12 Myr/s -> ~0.35 Myr/s
+    const t = Math.max(0, Math.min(1, (span - 16.2) / 5.8));
+    secondsPerWallSecond = Math.pow(10, 13.05 + t * 1.55) * userMul;
+    factor = 0.28 + 0.72 * Math.pow(t, 0.85);
+  } else if (span >= 8.75) {
+    // L2 Star System & L3 Star (16.2 -> 8.75): continuous slowing from ~45 d/s (outer 30 AU) -> ~2 hr/s (close planet/moon!)
+    const t = Math.max(0, Math.min(1, (span - 8.75) / 7.45));
+    secondsPerWallSecond = Math.pow(10, 3.85 + t * 2.75) * userMul;
+    factor = 0.14 + 0.86 * Math.pow(t, 1.35);
+  } else if (span >= 0.0) {
+    // L4 Planetary Orbit & Horizon Approach (8.75 -> 0.0): ~25 min/s -> ~1.5 s/s
+    const t = Math.max(0, Math.min(1, span / 8.75));
+    secondsPerWallSecond = Math.pow(10, 0.20 + t * 3.0) * userMul;
+    factor = 0.22 + 0.58 * t;
+  } else if (span >= -9.1) {
+    // L5 Molecular/Crystal Lattice: ~15 fs/s (femtoseconds/s)
+    const t = Math.max(0, Math.min(1, (span + 9.1) / 9.1));
+    secondsPerWallSecond = Math.pow(10, -14.1 + t * 1.2) * userMul;
+    factor = 0.45 + 0.25 * t;
+  } else if (span >= -12.8) {
+    // L6 Quantum Atom: ~12 as/s (attoseconds/s)
+    const t = Math.max(0, Math.min(1, (span + 12.8) / 3.7));
+    secondsPerWallSecond = Math.pow(10, -17.2 + t * 1.2) * userMul;
+    factor = 0.35 + 0.15 * t;
+  } else {
+    // L7 Atomic Nucleus: ~15 zs/s (zeptoseconds/s)
+    secondsPerWallSecond = 1.5e-20 * userMul;
+    factor = 0.42;
+  }
+
+  let clockLabel;
+  const s = secondsPerWallSecond;
+  if (s >= 3.15576e13) clockLabel = `${(s / 3.15576e13).toFixed(s >= 3.15576e14 ? 0 : 1)} Myr/s`;
+  else if (s >= 3.15576e10) clockLabel = `${(s / 3.15576e10).toFixed(1)} kyr/s`;
+  else if (s >= 3.15576e7) clockLabel = `${(s / 3.15576e7).toFixed(2)} yr/s`;
+  else if (s >= 86400) clockLabel = `${(s / 86400).toFixed(s >= 864000 ? 0 : 1)} d/s`;
+  else if (s >= 3600) clockLabel = `${(s / 3600).toFixed(1)} hr/s`;
+  else if (s >= 60) clockLabel = `${(s / 60).toFixed(1)} min/s`;
+  else if (s >= 0.05) clockLabel = `${s.toFixed(1)} s/s`;
+  else if (s >= 1e-12) clockLabel = `${(s * 1e12).toFixed(1)} ps/s`;
+  else if (s >= 1e-15) clockLabel = `${(s * 1e15).toFixed(1)} fs/s`;
+  else if (s >= 1e-18) clockLabel = `${(s * 1e18).toFixed(1)} as/s`;
+  else clockLabel = `${(s * 1e21).toFixed(1)} zs/s`;
+
+  return Object.freeze({
+    factor,
+    effectiveTimeScale: factor * userMul,
+    secondsPerWallSecond,
+    clockLabel
+  });
+}
 
 /**
  * Physically realistic flat-rotation-curve Galaxy initializer (8-float interleaved ABI):
@@ -750,6 +889,7 @@ export function createUlgUniversesPhysics(device, {
   let mdGravity = false;
   let mdPhasePreset = 'solid';
   let mdRdfHistory = [];
+  let activeSampledMaterial = null; // Live geological/atmospheric/asteroid sample propagating down L5 -> Compounds -> L6 -> L7!
 
   // Level 6: Quantum Atom & Molecule
   let quantumZ = initialElementZ;
@@ -1802,15 +1942,20 @@ export function createUlgUniversesPhysics(device, {
     tdseTelemetry = tdseSession ? await tdseSession.stepBatch(8) : null;
   }
 
-  // ---- Per-Frame Real GPU Physics Stepping ----
+  // ---- Per-Frame Real GPU Physics Stepping (with Automatic Scale-Adaptive Time Dilation!) ----
   async function stepActiveRegimes(activeLevel, log10SpanM, timeScale = 1.0) {
     if (busy || disposed) return;
     busy = true;
+    const dilation = computeScaleAdaptiveTimeDilation(log10SpanM, {
+      surfaceActive: Boolean(surfaceActive && activeLevel === 4),
+      userTimeScale: timeScale
+    });
+    const effScale = dilation.effectiveTimeScale;
     try {
       if (activeLevel === 0) {
         if (cosmoMode !== 'web' && cosmoBaryonSession) {
           cosmoBaryonTelemetry = await cosmoBaryonSession.step({
-            dt: (cosmoMode === 'reionization' ? 0.12 : 0.08) * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: (cosmoMode === 'reionization' ? 0.12 : 0.08) * Math.max(0.15, Math.min(2.5, effScale)),
             substeps: 1,
             readTelemetry: true
           });
@@ -1822,14 +1967,14 @@ export function createUlgUniversesPhysics(device, {
           }
         }
       } else if (activeLevel === 1 && galaxyEngine) {
-        const dt = 0.009 * Math.max(0.1, Math.min(3.0, timeScale));
+        const dt = 0.009 * Math.max(0.08, Math.min(3.0, effScale));
         await galaxyEngine.step({ dt, substeps: 2, gravity: 1.0, softening: 0.35, readback: false });
         if (galacticDynamoSession) {
           const readB = (galaxyEngine.stepIndex % 4) === 0;
           galacticDynamoTelemetry = await galacticDynamoSession.step({
             particleBuffer: galaxyEngine.getResidentBuffer(),
             particleCount: galaxyEngine.count,
-            dt: 0.040 * Math.max(0.2, Math.min(2.2, timeScale)),
+            dt: 0.040 * Math.max(0.12, Math.min(2.2, effScale)),
             substeps: 1,
             readTelemetry: readB,
             readBField: readB
@@ -1840,42 +1985,42 @@ export function createUlgUniversesPhysics(device, {
         }
       } else if (activeLevel === 2) {
         if (galaxyBranch === 'smbh-core' && smbhEngine) {
-          smbhBodies = await smbhEngine.step({ dt: 0.008 * Math.max(0.1, Math.min(3.0, timeScale)), gravity: 1.0, softening: 0.08, readback: true });
+          smbhBodies = await smbhEngine.step({ dt: 0.008 * Math.max(0.08, Math.min(3.0, effScale)), gravity: 1.0, softening: 0.08, readback: true });
         } else if (solarMode === 'formation' && protoplanetarySession) {
           protoplanetaryTelemetry = await protoplanetarySession.step({
-            dt: 0.016 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.016 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
             readTelemetry: true
           });
         } else if (solarMode === 'quasar-jet' && kerrJetSession) {
           kerrJetTelemetry = await kerrJetSession.step({
-            dt: 0.028 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.028 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
             readTelemetry: true
           });
         } else if ((solarMode === 'xray-binary' || solarMode === 'bns-kilonova' || solarMode === 'type-ia' || solarMode === 'bbh-merger') && relBinarySession) {
           relBinaryTelemetry = await relBinarySession.step({
-            dt: 0.028 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.028 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 3,
             readTelemetry: true
           });
         } else if ((solarMode === 'comet-tails' || solarMode === 'hot-jupiter') && radWindL2Session) {
           radWindL2Telemetry = await radWindL2Session.step({
-            dt: 0.036 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.036 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
             readTelemetry: true
           });
         } else if ((solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant') && tidalRocheSession) {
           tidalRocheTelemetry = await tidalRocheSession.step({
-            dt: 0.024 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.024 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
             readTelemetry: true
           });
         } else if (solarEngine) {
-          // Adaptive safe symplectic substepping: faster orbital pace at 30 AU, gentler when orbiting Moon/Io!
-          const isCloseUp = log10SpanM < 10.2;
-          const dtSubYr = isCloseUp ? 0.000018 : 0.000055;
-          const substeps = Math.max(2, Math.min(48, Math.round((isCloseUp ? 8 : 24) * timeScale)));
+          // Smooth continuous scale-adaptive symplectic time dilation across 7.5 OOM of Solar System zoom!
+          const zoomNorm = Math.max(0, Math.min(1, (log10SpanM - 8.75) / 5.2));
+          const dtSubYr = (0.000010 + 0.000046 * Math.pow(zoomNorm, 1.45));
+          const substeps = Math.max(1, Math.min(48, Math.round((3 + 21 * Math.pow(zoomNorm, 1.25)) * Math.max(0.1, timeScale))));
           await solarEngine.step({ dtSubYr, substeps, readMassive: true });
           solarConservation = solarEngine.computeConservationDiagnostics();
         }
@@ -1883,7 +2028,7 @@ export function createUlgUniversesPhysics(device, {
         if (stellarMode === 'nebular-mhd' && nebulaMhdSession) {
           const readB = (nebulaMhdSession.stepIndex % 4) === 0;
           nebulaMhdTelemetry = await nebulaMhdSession.step({
-            dt: 0.022 * Math.max(0.2, Math.min(2.2, timeScale)),
+            dt: 0.022 * Math.max(0.12, Math.min(2.2, effScale)),
             substeps: 1,
             readTelemetry: true,
             readBFieldForStreamlines: readB
@@ -1893,14 +2038,14 @@ export function createUlgUniversesPhysics(device, {
           }
         } else if ((stellarMode === 'h2-pillars' || stellarMode === 'planetary-nebula' || stellarMode === 'snr-pwn') && radWindL3Session) {
           radWindL3Telemetry = await radWindL3Session.step({
-            dt: 0.032 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.032 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
             readTelemetry: true
           });
         } else if ((stellarMode === 'pulsar' || stellarMode === 'magnetar') && magnetosphereSession) {
           const readMagB = (magnetosphereSession.stepIndex % 4) === 0;
           magnetosphereTelemetry = await magnetosphereSession.step({
-            dt: 0.036 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.036 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
             readTelemetry: true,
             readBField: readMagB
@@ -1912,7 +2057,7 @@ export function createUlgUniversesPhysics(device, {
           // Static GR TOV equilibrium curve already solved on WebGPU
         } else if (stellarEngine) {
           stellarTelemetry = await stellarEngine.step({
-            dt: 0.014 * Math.max(0.2, Math.min(2.5, timeScale)),
+            dt: 0.014 * Math.max(0.12, Math.min(2.5, effScale)),
             timeAccel: stellarTimeAccel,
             readTelemetry: true
           });
@@ -1921,7 +2066,7 @@ export function createUlgUniversesPhysics(device, {
             stellarDynamoTelemetry = await stellarDynamoSession.step({
               particleBuffer: stellarEngine.getResidentBuffer(),
               particleCount: stellarEngine.count,
-              dt: 0.038 * Math.max(0.2, Math.min(2.2, timeScale)),
+              dt: 0.038 * Math.max(0.12, Math.min(2.2, effScale)),
               substeps: 1,
               readTelemetry: readStB,
               readBField: readStB
@@ -1942,13 +2087,13 @@ export function createUlgUniversesPhysics(device, {
           let sunDir = planetaryMode === 'eyeball-locked' ? [1.0, 0.0, 0.0] : [0.65, 0.25, 0.70];
           if (planetaryMode === 'cryo-plumes' && cryoPlumeSession) {
             cryoPlumeTelemetry = await cryoPlumeSession.step({
-              dt: 0.028 * Math.max(0.2, Math.min(2.5, timeScale)),
+              dt: 0.028 * Math.max(0.12, Math.min(2.5, effScale)),
               substeps: 2,
               readTelemetry: true
             });
           }
           if (solarEngine && planetaryMode !== 'eyeball-locked' && planetaryMode !== 'rogue') {
-            await solarEngine.step({ dtSubYr: 0.000012, substeps: Math.max(1, Math.round(4 * timeScale)), readMassive: true });
+            await solarEngine.step({ dtSubYr: 0.000006, substeps: Math.max(1, Math.round(2 * Math.max(0.25, effScale))), readMassive: true });
             solarConservation = solarEngine.computeConservationDiagnostics();
             const fSt = solarEngine.getMassiveBodyState64(focusedSolarBodyIndex);
             const sSt = solarEngine.getMassiveBodyState64(0);
@@ -1961,7 +2106,7 @@ export function createUlgUniversesPhysics(device, {
           // Dynamically step spherical baroclinic fluid + triboelectric lightning ONLY when active!
           if (planetaryAtmoSession) {
             planetaryAtmoTelemetry = await planetaryAtmoSession.step({
-              dtSim: 0.042 * Math.max(0.2, Math.min(2.5, timeScale)),
+              dtSim: 0.038 * Math.max(0.15, Math.min(2.5, effScale)),
               substeps: 2,
               sunDir,
               readTelemetry: true
@@ -1969,7 +2114,7 @@ export function createUlgUniversesPhysics(device, {
           }
         }
       } else if (activeLevel === 5 && mdSession) {
-        const steps = Math.max(1, Math.min(8, Math.round(3 * timeScale)));
+        const steps = Math.max(1, Math.min(6, Math.round(2 * Math.max(0.25, timeScale))));
         mdTelemetry = await mdSession.stepBatch(steps, {
           readTelemetry: true,
           targetTemperatureK: mdTempK,
@@ -1977,7 +2122,7 @@ export function createUlgUniversesPhysics(device, {
         });
         if (mdTelemetry?.rdf) mdRdfHistory = Array.from(mdTelemetry.rdf);
       } else if (activeLevel === 7 && tdseSession) {
-        const steps = Math.max(2, Math.min(24, Math.round(10 * timeScale)));
+        const steps = Math.max(2, Math.min(18, Math.round(6 * Math.max(0.25, timeScale))));
         const nextT = await tdseSession.stepBatch(steps, { nonBlocking: true });
         if (nextT) tdseTelemetry = nextT;
       }
@@ -2162,6 +2307,28 @@ export function createUlgUniversesPhysics(device, {
     return true;
   }
   function setSeed(nextSeed) { universeSeed = (Number(nextSeed) >>> 0) || 1; }
+  function setSampledMaterial(sample) {
+    activeSampledMaterial = sample ? { ...sample } : null;
+    return activeSampledMaterial;
+  }
+
+  async function applySampledMaterialToLattice(sample) {
+    if (!sample) return null;
+    activeSampledMaterial = { ...sample };
+    const zUse = Math.max(1, Math.min(118, Math.trunc(Number(sample.primaryZ) || 14)));
+    await initMolecularDynamics({
+      Z: zUse,
+      phasePreset: sample.phasePreset || 'solid',
+      tempK: Number.isFinite(Number(sample.tempK)) ? Number(sample.tempK) : null
+    });
+    quantumZ = zUse;
+    if (sample.moleculeKey && MOLECULE_SPECS[sample.moleculeKey]) {
+      quantumMoleculeKey = sample.moleculeKey;
+    }
+    nuclearZ = zUse;
+    return activeSampledMaterial;
+  }
+
   function setMdGravity(enabled) {
     mdGravity = Boolean(enabled);
     if (mdSession && typeof mdSession.setGravity === 'function') mdSession.setGravity(mdGravity);
@@ -2863,17 +3030,22 @@ export function createUlgUniversesPhysics(device, {
     if (level === 5) {
       const b = getCachedElementBundle(mdElementZ, true)?.bundle;
       const sym = b?.symbol || 'Fe';
+      const sm = activeSampledMaterial;
       return [{
         id: 'md-lattice-atom',
         level: 5,
-        name: `${sym} Representative Lattice`,
-        subtitle: `${b?.mechanical?.crystalStructure || 'crystal'} · ${mdSession?.atomCount || 0} live GPU atoms`,
+        name: sm ? `${sm.name} · ${sym} Lattice` : `${sym} Representative Lattice`,
+        subtitle: sm
+          ? `Sampled from ${sm.worldName} (${sm.locationTag}) · ${b?.mechanical?.crystalStructure || 'crystal'} · ${mdSession?.atomCount || 0} GPU atoms`
+          : `${b?.mechanical?.crystalStructure || 'crystal'} · ${mdSession?.atomCount || 0} live GPU atoms`,
         pos: [0, 0, 0],
         radius: 1.5,
         sampleZ: mdElementZ,
         tempK: mdTelemetry?.temperatureK || mdTempK,
         massLabel: `m = ${(b?.nuclear?.atomicMassU || 55.8).toFixed(2)} u`,
-        composition: `Phase: ${mdTelemetry?.emergentPhase || mdPhasePreset} · ⟨Z⟩ = ${(mdTelemetry?.meanCoordination || 0).toFixed(2)}`,
+        composition: sm
+          ? `Compounds: ${sm.compounds.slice(0, 3).map((c) => c.formula).join(' · ')} · Phase: ${mdTelemetry?.emergentPhase || mdPhasePreset}`
+          : `Phase: ${mdTelemetry?.emergentPhase || mdPhasePreset} · ⟨Z⟩ = ${(mdTelemetry?.meanCoordination || 0).toFixed(2)}`,
         nextLevel: 6
       }];
     }
@@ -2952,11 +3124,14 @@ export function createUlgUniversesPhysics(device, {
     MOLECULE_SPECS,
     COSMIC_EPOCH_PRESETS,
     get seed() { return universeSeed; },
+    get busy() { return busy; },
     get quality() { return quality; },
     get cosmicEpochId() { return cosmicEpochId; },
     get cosmicEpoch() { return cosmicEpoch; },
     get activeGalaxyEnv() { return activeGalaxyEnv; },
+    get activeStarSite() { return activeStarSite; },
     get activeCausalSystem() { return activeCausalSystem; },
+    get activeSampledMaterial() { return activeSampledMaterial; },
     get useSolReference() { return useSolReference; },
     getActiveSystemCatalog,
     getDefaultPlanetIndex,
@@ -3093,6 +3268,9 @@ export function createUlgUniversesPhysics(device, {
     setSeed,
     setMdGravity,
     setMdTemp,
+    setSampledMaterial,
+    applySampledMaterialToLattice,
+    computeScaleAdaptiveTimeDilation,
     setPlanetaryCutaway,
     setPlanetaryTriboelectric,
     setPlanetaryMode,

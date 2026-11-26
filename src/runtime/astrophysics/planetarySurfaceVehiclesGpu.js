@@ -473,6 +473,346 @@ export function evaluatePlanetaryTerrainNormal(x, z, env) {
 }
 
 // =========================================================================
+// First-Principles Local Spatial Surface & Atmospheric Material Sampler
+// (ZERO planet-name hacks! Evaluates exact crust geology/hydrology/crater/magma
+//  directly beneath (x, z) OR live 3D CFD atmospheric stratum at craft altitude!)
+// =========================================================================
+const ELEMENT_LOOKUP = Object.freeze({
+  1: { Z: 1, sym: 'H', name: 'Hydrogen' },
+  2: { Z: 2, sym: 'He', name: 'Helium' },
+  6: { Z: 6, sym: 'C', name: 'Carbon' },
+  7: { Z: 7, sym: 'N', name: 'Nitrogen' },
+  8: { Z: 8, sym: 'O', name: 'Oxygen' },
+  11: { Z: 11, sym: 'Na', name: 'Sodium' },
+  12: { Z: 12, sym: 'Mg', name: 'Magnesium' },
+  13: { Z: 13, sym: 'Al', name: 'Aluminum' },
+  14: { Z: 14, sym: 'Si', name: 'Silicon' },
+  16: { Z: 16, sym: 'S', name: 'Sulfur' },
+  17: { Z: 17, sym: 'Cl', name: 'Chlorine' },
+  18: { Z: 18, sym: 'Ar', name: 'Argon' },
+  20: { Z: 20, sym: 'Ca', name: 'Calcium' },
+  22: { Z: 22, sym: 'Ti', name: 'Titanium' },
+  26: { Z: 26, sym: 'Fe', name: 'Iron' },
+  28: { Z: 28, sym: 'Ni', name: 'Nickel' }
+});
+
+const ATMO_SPECIES_CHEMISTRY = Object.freeze({
+  H2: { formula: 'H₂', name: 'Molecular Hydrogen', primaryZ: 1, moleculeKey: 'H2', elements: [1] },
+  He: { formula: 'He', name: 'Helium', primaryZ: 2, moleculeKey: 'H2', elements: [2] },
+  CH4: { formula: 'CH₄', name: 'Methane', primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1] },
+  H2O: { formula: 'H₂O', name: 'Water', primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+  NH3: { formula: 'NH₃', name: 'Ammonia', primaryZ: 7, moleculeKey: 'NH3', elements: [7, 1] },
+  NH4SH: { formula: 'NH₄SH', name: 'Ammonium Hydrosulfide', primaryZ: 16, moleculeKey: 'NH3', elements: [7, 1, 16] },
+  H2SO4: { formula: 'H₂SO₄', name: 'Sulfuric Acid', primaryZ: 16, moleculeKey: 'H2O', elements: [16, 8, 1] },
+  CO2: { formula: 'CO₂', name: 'Carbon Dioxide', primaryZ: 6, moleculeKey: 'CO2', elements: [6, 8] },
+  CO: { formula: 'CO', name: 'Carbon Monoxide', primaryZ: 6, moleculeKey: 'CO', elements: [6, 8] },
+  N2: { formula: 'N₂', name: 'Molecular Nitrogen', primaryZ: 7, moleculeKey: 'N2', elements: [7] },
+  O2: { formula: 'O₂', name: 'Molecular Oxygen', primaryZ: 8, moleculeKey: 'O2', elements: [8] },
+  Ar: { formula: 'Ar', name: 'Argon', primaryZ: 18, moleculeKey: 'N2', elements: [18] },
+  C2H6: { formula: 'C₂H₆', name: 'Ethane / Tholins', primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1, 7] },
+  MgSiO3: { formula: 'MgSiO₃', name: 'Enstatite Silicate', primaryZ: 14, moleculeKey: 'SiO2', elements: [12, 14, 8] },
+  KCl: { formula: 'KCl', name: 'Potassium Chloride', primaryZ: 17, moleculeKey: 'H2O', elements: [17, 11] }
+});
+
+function buildElementList(zList) {
+  const seen = new Set();
+  const out = [];
+  for (const z of zList) {
+    if (seen.has(z) || !ELEMENT_LOOKUP[z]) continue;
+    seen.add(z);
+    out.push({ ...ELEMENT_LOOKUP[z] });
+  }
+  return out;
+}
+
+/**
+ * Sample the exact local material directly below/around the Rover, Drone, or UFO
+ * purely from local terrain geology, ocean/snow/magma/crater state, and 3D CFD
+ * atmospheric chemistry (ZERO planet-name hacks!).
+ */
+export function sampleLocalPlanetaryMaterial(env, vehiclePos = [0, 0, 0], {
+  activeVehicle = 'rover',
+  cfdTelemetry = null,
+  worldName = 'World'
+} = {}) {
+  const x = Number(vehiclePos?.[0]) || 0;
+  const y = Number(vehiclePos?.[1]) || 0;
+  const z = Number(vehiclePos?.[2]) || 0;
+  const seedF = ((env.seed % 997) * 0.13) + 1.7;
+
+  const groundH = env.hasSolidCrust ? evaluatePlanetaryTerrainHeight(x, z, env) : -999;
+  const altAboveGround = env.hasSolidCrust ? Math.max(0, y - groundH) : Math.max(0, y);
+
+  // Deep fluid giant OR high-altitude UFO sampling live atmospheric chemistry deck!
+  const sampleAtmo = (!env.hasSolidCrust || (activeVehicle === 'ufo' && altAboveGround > 10.0))
+    && Boolean(cfdTelemetry?.chemistry?.species?.length);
+  if (sampleAtmo) {
+    const chem = cfdTelemetry.chemistry;
+    const activeDeck = (chem.activeCloudId && chem.activeCloudId !== 'none'
+      ? chem.condensingDecks?.find((d) => d.id === chem.activeCloudId)
+      : null)
+      || (chem.condensingDecks?.length
+        ? [...chem.condensingDecks].sort((a, b) => (b.density || 0) - (a.density || 0))[0]
+        : null);
+    const primarySpeciesId = activeDeck?.id || chem.species[0]?.id || 'H2';
+    const primaryInfo = ATMO_SPECIES_CHEMISTRY[primarySpeciesId] || ATMO_SPECIES_CHEMISTRY.H2;
+    const compounds = chem.species.slice(0, 5).map((sp) => {
+      const info = ATMO_SPECIES_CHEMISTRY[sp.id] || {
+        formula: sp.id, name: sp.name || sp.id, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1]
+      };
+      return {
+        id: sp.id,
+        formula: info.formula,
+        name: info.name,
+        moleFrac: sp.moleFrac,
+        condensed: sp.condensedFrac > 1e-6,
+        primaryZ: info.primaryZ,
+        moleculeKey: info.moleculeKey,
+        elements: info.elements
+      };
+    });
+    const elZ = [];
+    for (const c of compounds) elZ.push(...c.elements);
+    const phasePreset = activeDeck
+      ? (chem.tempK < 210 ? 'solid' : 'melt')
+      : (chem.pressureBar > 12 ? 'melt' : 'vapor');
+    return {
+      id: `atmo-${primarySpeciesId.toLowerCase()}`,
+      worldName,
+      category: 'atmosphere-stratum',
+      name: activeDeck ? `${activeDeck.name} (${primaryInfo.formula})` : `${chem.activeCloudDeck} (${primaryInfo.formula})`,
+      shortLabel: activeDeck ? `${activeDeck.id} Cloud` : `${primaryInfo.formula} Stratum`,
+      locationTag: `Alt ${chem.altKm.toFixed(1)} km · ${chem.pressureBar >= 0.1 ? `${chem.pressureBar.toFixed(2)} bar` : `${(chem.pressureBar * 101.3).toFixed(1)} kPa`}`,
+      coords: [Number(x.toFixed(1)), Number(y.toFixed(1)), Number(z.toFixed(1))],
+      phasePreset,
+      tempK: Math.round(chem.tempK),
+      pressureBar: chem.pressureBar,
+      primaryZ: primaryInfo.primaryZ,
+      formula: primaryInfo.formula,
+      moleculeKey: primaryInfo.moleculeKey,
+      compounds,
+      elements: buildElementList(elZ),
+      summary: `${chem.activeCloudDeck} sampled at ${chem.altKm.toFixed(1)} km (${Math.round(chem.tempK)} K, ${chem.pressureBar.toFixed(2)} bar)`
+    };
+  }
+
+  // Solid-crust direct sub-vehicle geological & hydrological sampling (bit-matched to terrain shader!)
+  const crustH = evaluatePlanetaryCrustElevation(x, z, env);
+  const h = evaluatePlanetaryTerrainHeight(x, z, env);
+  const norm = evaluatePlanetaryTerrainNormal(x, z, env);
+  const slope = 1.0 - Math.max(0, Math.min(1, norm[1]));
+  const hNorm = Math.max(0, Math.min(1, (h / Math.max(4.0, env.terrainAmpM)) * 0.5 + 0.5));
+  const craterRaw = env.craterStrength > 0.02
+    ? (craterFieldJs(x, z, 0.022, seedF) * 0.72 + craterFieldJs(x, z, 0.068, seedF + 11.0) * 0.28) * env.craterStrength
+    : 0.0;
+  const coords = [Number(x.toFixed(1)), Number(h.toFixed(1)), Number(z.toFixed(1))];
+  const locStr = `(${x.toFixed(0)}m, ${z.toFixed(0)}m) · Elev ${h.toFixed(1)}m`;
+
+  const mkSample = (spec) => ({
+    ...spec,
+    worldName,
+    category: 'surface-sample',
+    locationTag: locStr,
+    coords,
+    pressureBar: env.pressurePa / 101325.0,
+    elements: buildElementList(spec.compounds.flatMap((c) => c.elements))
+  });
+
+  if (env.hasLiquidOcean && crustH <= env.seaLevelM + 0.08) {
+    return mkSample({
+      id: 'saline-ocean-water',
+      name: 'Saline Liquid Ocean (H₂O · NaCl)',
+      shortLabel: 'Ocean H₂O',
+      phasePreset: 'melt',
+      tempK: Math.round(Math.max(274, Math.min(340, env.tempK))),
+      primaryZ: 8,
+      formula: 'H₂O',
+      moleculeKey: 'H2O',
+      compounds: [
+        { id: 'H2O', formula: 'H₂O', name: 'Liquid Water', moleFrac: 0.965, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+        { id: 'NaCl', formula: 'NaCl', name: 'Dissolved Halite Salt', moleFrac: 0.029, primaryZ: 11, moleculeKey: 'H2O', elements: [11, 17] },
+        { id: 'CO2', formula: 'CO₂', name: 'Dissolved Carbonate', moleFrac: 0.006, primaryZ: 6, moleculeKey: 'CO2', elements: [6, 8] }
+      ],
+      summary: `Liquid volatile ocean sampled directly below craft at ${locStr}`
+    });
+  }
+
+  if (env.isMagmaOcean) {
+    const crack = 1.0 - smoothJs(Math.max(0, Math.min(1, (Math.abs(fbm2Js(x * 0.075, z * 0.075, seedF + 3.0)) - 0.12) / 0.30)));
+    const lowLava = 1.0 - smoothJs(Math.max(0, Math.min(1, (hNorm - 0.08) / 0.24)));
+    const isMolten = Math.max(crack * 0.9, lowLava) > 0.35;
+    return mkSample({
+      id: isMolten ? 'molten-silicate-magma' : 'quenched-basalt-crust',
+      name: isMolten ? 'Molten Silicate Magma (Mg₂SiO₄ · FeO)' : 'Quenched Volcanic Basalt (SiO₂ · FeO)',
+      shortLabel: isMolten ? 'Molten Magma' : 'Basalt Crust',
+      phasePreset: isMolten ? 'melt' : 'solid',
+      tempK: isMolten ? Math.round(Math.max(1750, env.tempK)) : Math.round(Math.max(920, env.tempK * 0.65)),
+      primaryZ: isMolten ? 14 : 26,
+      formula: isMolten ? 'Mg₂SiO₄' : 'SiO₂',
+      moleculeKey: 'SiO2',
+      compounds: [
+        { id: 'SiO2', formula: 'SiO₂', name: 'Silica Melt', moleFrac: 0.52, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
+        { id: 'MgSiO3', formula: 'Mg₂SiO₄', name: 'Forsterite Olivine', moleFrac: 0.28, primaryZ: 12, moleculeKey: 'SiO2', elements: [12, 14, 8] },
+        { id: 'FeO', formula: 'FeO', name: 'Ferrous Oxide', moleFrac: 0.20, primaryZ: 26, moleculeKey: 'O2', elements: [26, 8] }
+      ],
+      summary: `${isMolten ? 'Incandescent molten fissure' : 'Solidified dark volcanic plate'} sampled at ${locStr}`
+    });
+  }
+
+  if (env.isCryoMoon || (env.hasLiquidOcean && hNorm > 0.72) || (env.tempK < 155 && hNorm > 0.56)) {
+    return mkSample({
+      id: 'crystalline-water-ice',
+      name: env.isCryoMoon ? 'Cryovolcanic Water-Ice Lithosphere (H₂O Ih)' : 'Alpine Glacial Ice & Frost (H₂O · CO₂)',
+      shortLabel: 'Glacial H₂O Ice',
+      phasePreset: 'solid',
+      tempK: Math.round(Math.min(255, Math.max(70, env.tempK - (env.hasLiquidOcean ? 22 : 0)))),
+      primaryZ: 8,
+      formula: 'H₂O',
+      moleculeKey: 'H2O',
+      compounds: [
+        { id: 'H2O', formula: 'H₂O', name: 'Hexagonal Water Ice (Ih)', moleFrac: 0.86, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+        { id: 'CO2', formula: 'CO₂', name: 'Dry-Ice Clathrate', moleFrac: 0.09, primaryZ: 6, moleculeKey: 'CO2', elements: [6, 8] },
+        { id: 'NH3', formula: 'NH₃', name: 'Ammonia Hydrate', moleFrac: 0.05, primaryZ: 7, moleculeKey: 'NH3', elements: [7, 1] }
+      ],
+      summary: `Crystalline ice terrain sampled at ${locStr}`
+    });
+  }
+
+  if (env.hasLiquidOcean && h <= env.seaLevelM + 1.0) {
+    return mkSample({
+      id: 'coastal-quartz-sand',
+      name: 'Coastal Quartz & Carbonate Sand (SiO₂ · CaCO₃)',
+      shortLabel: 'Quartz Sand',
+      phasePreset: 'solid',
+      tempK: Math.round(env.tempK),
+      primaryZ: 14,
+      formula: 'SiO₂',
+      moleculeKey: 'SiO2',
+      compounds: [
+        { id: 'SiO2', formula: 'SiO₂', name: 'Crystalline Quartz', moleFrac: 0.68, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
+        { id: 'CaCO3', formula: 'CaCO₃', name: 'Biogenic Calcite', moleFrac: 0.24, primaryZ: 20, moleculeKey: 'CO2', elements: [20, 6, 8] },
+        { id: 'H2O', formula: 'H₂O', name: 'Interstitial Brine', moleFrac: 0.08, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] }
+      ],
+      summary: `Coastal sand & carbonate shoreline sampled at ${locStr}`
+    });
+  }
+
+  if (craterRaw < -0.14) {
+    return mkSample({
+      id: 'impact-crater-breccia',
+      name: 'Impact Crater Fe-Ni Breccia (Fe · Ni · SiO₂)',
+      shortLabel: 'Crater Fe-Ni',
+      phasePreset: 'solid',
+      tempK: Math.round(env.tempK),
+      primaryZ: 26,
+      formula: 'Fe-Ni',
+      moleculeKey: 'SiO2',
+      compounds: [
+        { id: 'FeNi', formula: 'Fe-Ni', name: 'Meteoritic Kamacite Alloy', moleFrac: 0.54, primaryZ: 26, moleculeKey: 'O2', elements: [26, 28] },
+        { id: 'SiO2', formula: 'SiO₂', name: 'Shocked Stishovite Silica', moleFrac: 0.34, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
+        { id: 'FeS', formula: 'FeS', name: 'Troilite Sulfide', moleFrac: 0.12, primaryZ: 16, moleculeKey: 'CO', elements: [26, 16] }
+      ],
+      summary: `Shocked impact-crater basin & metallic ejecta sampled at ${locStr}`
+    });
+  }
+
+  if (slope > 0.22 || hNorm > 0.64) {
+    return mkSample({
+      id: 'exposed-basalt-ridge',
+      name: 'Exposed Basalt & Olivine Ridge (SiO₂ · Mg₂SiO₄)',
+      shortLabel: 'Basalt Ridge',
+      phasePreset: 'solid',
+      tempK: Math.round(env.tempK),
+      primaryZ: 14,
+      formula: 'SiO₂',
+      moleculeKey: 'SiO2',
+      compounds: [
+        { id: 'SiO2', formula: 'SiO₂', name: 'Silicate Framework', moleFrac: 0.50, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
+        { id: 'Mg2SiO4', formula: 'Mg₂SiO₄', name: 'Olivine Silicate', moleFrac: 0.26, primaryZ: 12, moleculeKey: 'SiO2', elements: [12, 14, 8] },
+        { id: 'Al2O3', formula: 'Al₂O₃', name: 'Corundum / Plagioclase', moleFrac: 0.14, primaryZ: 13, moleculeKey: 'O2', elements: [13, 8] },
+        { id: 'FeO', formula: 'FeO', name: 'Iron Oxide', moleFrac: 0.10, primaryZ: 26, moleculeKey: 'O2', elements: [26, 8] }
+      ],
+      summary: `Steep bedrock outcrop & silicate ridge sampled at ${locStr}`
+    });
+  }
+
+  if (env.hasLiquidOcean) {
+    return mkSample({
+      id: 'verdant-organic-loam',
+      name: 'Organic Humus & Silicate Loam (CH₄ · SiO₂ · H₂O)',
+      shortLabel: 'Organic Loam',
+      phasePreset: 'solid',
+      tempK: Math.round(env.tempK),
+      primaryZ: 6,
+      formula: 'C-H-O',
+      moleculeKey: 'CH4',
+      compounds: [
+        { id: 'CH4', formula: 'C₆H₁₀O₅', name: 'Organic Biopolymer / Cellulose', moleFrac: 0.42, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1, 8] },
+        { id: 'SiO2', formula: 'SiO₂', name: 'Clay & Quartz Soil', moleFrac: 0.36, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
+        { id: 'H2O', formula: 'H₂O', name: 'Soil Moisture', moleFrac: 0.14, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+        { id: 'NH3', formula: 'NO₃⁻/NH₃', name: 'Fixed Nitrogen', moleFrac: 0.08, primaryZ: 7, moleculeKey: 'NH3', elements: [7, 1, 8] }
+      ],
+      summary: `Temperate organic-bearing lowland soil sampled at ${locStr}`
+    });
+  }
+
+  if (env.tempK < 135 && env.pressurePa > 3e4) {
+    return mkSample({
+      id: 'cryogenic-tholin-regolith',
+      name: 'Cryogenic Tholin & Methane Ice (C₂H₆ · CH₄ · H₂O)',
+      shortLabel: 'Tholin / CH₄',
+      phasePreset: 'solid',
+      tempK: Math.round(env.tempK),
+      primaryZ: 6,
+      formula: 'CH₄/C₂H₆',
+      moleculeKey: 'CH4',
+      compounds: [
+        { id: 'CH4', formula: 'CH₄', name: 'Hydrocarbon Clathrate', moleFrac: 0.48, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1] },
+        { id: 'H2O', formula: 'H₂O', name: 'Bedrock Water-Ice Cobbles', moleFrac: 0.34, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+        { id: 'N2', formula: 'N₂ / HCN', name: 'Photochemical Tholins', moleFrac: 0.18, primaryZ: 7, moleculeKey: 'N2', elements: [7, 6, 1] }
+      ],
+      summary: `Dense cryogenic haze-deposited hydrocarbon dunes sampled at ${locStr}`
+    });
+  }
+
+  if (env.dustTint > 0.45 && env.pressurePa > 20) {
+    return mkSample({
+      id: 'ferric-oxide-regolith',
+      name: 'Ferric Oxide & Basalt Dust (Fe₂O₃ · SiO₂ · CO₂)',
+      shortLabel: 'Ferric Fe₂O₃',
+      phasePreset: 'solid',
+      tempK: Math.round(env.tempK),
+      primaryZ: 26,
+      formula: 'Fe₂O₃',
+      moleculeKey: 'CO2',
+      compounds: [
+        { id: 'Fe2O3', formula: 'Fe₂O₃', name: 'Hematite Iron Oxide Dust', moleFrac: 0.46, primaryZ: 26, moleculeKey: 'O2', elements: [26, 8] },
+        { id: 'SiO2', formula: 'SiO₂', name: 'Basaltic Plagioclase', moleFrac: 0.40, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
+        { id: 'CO2', formula: 'CO₂', name: 'Adsorbed Carbon Dioxide', moleFrac: 0.14, primaryZ: 6, moleculeKey: 'CO2', elements: [6, 8] }
+      ],
+      summary: `Oxidized iron-rich desert regolith sampled at ${locStr}`
+    });
+  }
+
+  return mkSample({
+    id: 'anorthosite-silicate-regolith',
+    name: 'Anorthosite & Ilmenite Regolith (SiO₂ · Al₂O₃ · FeTiO₃)',
+    shortLabel: 'Silicate Regolith',
+    phasePreset: 'solid',
+    tempK: Math.round(env.tempK),
+    primaryZ: 14,
+    formula: 'SiO₂',
+    moleculeKey: 'SiO2',
+    compounds: [
+      { id: 'SiO2', formula: 'SiO₂', name: 'Silicate Feldspar', moleFrac: 0.48, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
+      { id: 'Al2O3', formula: 'Al₂O₃', name: 'Anorthosite Alumina', moleFrac: 0.28, primaryZ: 13, moleculeKey: 'O2', elements: [13, 8] },
+      { id: 'FeTiO3', formula: 'FeTiO₃', name: 'Ilmenite Ore', moleFrac: 0.24, primaryZ: 22, moleculeKey: 'O2', elements: [26, 22, 8] }
+    ],
+    summary: `Unweathered silicate regolith sampled at ${locStr}`
+  });
+}
+
+// =========================================================================
 // WebGPU Compute Kernels: 129x129 Dynamic Terrain Mesh + 2,048 Plume Particles
 // =========================================================================
 export const planetarySurfaceWgsl = /* wgsl */ `
@@ -1331,9 +1671,14 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
 
     if (Math.abs(yawIn) > 0.01) lookYawOffset += yawIn * 1.8 * dt;
 
-    // Live wind vector (gently varying crosswind proportional to env.baseWindMS; exact 0 in vacuum!)
-    const windX = env.baseWindMS * Math.cos(simTimeS * 0.09 + 0.6);
-    const windZ = env.baseWindMS * Math.sin(simTimeS * 0.09 + 0.6);
+    // Live wind vector: couple directly to live 3D WebGPU Navier-Stokes CFD velocity at craft when atmosphere is active!
+    const cfdWind = lastCfdTelemetry?.craftWindMS;
+    const windX = (cfdSession && cfdWind)
+      ? cfdWind[0]
+      : env.baseWindMS * Math.cos(simTimeS * 0.09 + 0.6);
+    const windZ = (cfdSession && cfdWind)
+      ? cfdWind[2]
+      : env.baseWindMS * Math.sin(simTimeS * 0.09 + 0.6);
 
     // --- 1. INTEGRATE 6-WHEEL ROVER WITH JUMP ROCKETS (4x Swept Micro-Substeps + 6-Wheel Triangle Collision!) ---
     if (rover.visible) {
@@ -1729,23 +2074,37 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     }
     device.queue.submit([enc.finish()]);
 
-    // Step live 3D WebGPU Stratified Atmospheric CFD whenever flying the UFO or diving in a deep fluid envelope!
-    const runCfd = Boolean(cfdSession && (activeVehicle === 'ufo' || !env.hasSolidCrust || stepIndex <= 2));
+    // Step live 3D WebGPU Stratified Atmospheric CFD on EVERY atmosphere-bearing world (Rover, Drone, AND UFO;
+    // strictly dormant / null on airless vacuum worlds where P < 20 Pa!)
+    const runCfd = Boolean(cfdSession);
+    const groundYAtFocus = env.hasSolidCrust
+      ? evaluatePlanetaryTerrainHeight(focus[0], focus[2], env)
+      : -9999.0;
+    const liveAltKm = (activeVehicle === 'ufo' || !env.hasSolidCrust)
+      ? ufo.altitudeKm
+      : Math.max(0.01, (focus[1] - groundYAtFocus) * 0.001 + 0.02);
     if (runCfd) {
       lastCfdTelemetry = await cfdSession.step({
         dt: Math.min(0.035, dtSafe * 1.35),
         craftPos: focus,
-        altKm: ufo.altitudeKm,
+        altKm: liveAltKm,
+        groundY: groundYAtFocus,
         readTelemetry: readTelemetry || (stepIndex <= 2)
       });
     }
+
+    const localSample = sampleLocalPlanetaryMaterial(env, focus, {
+      activeVehicle,
+      cfdTelemetry: lastCfdTelemetry,
+      worldName: bodySpec?.name || 'World'
+    });
 
     let activePlumes = lastTelemetry.activePlumeParticles;
     let flameCnt = lastTelemetry.flameParticles;
     let dustCnt = lastTelemetry.dustParticles;
     let meanDustSpd = lastTelemetry.meanDustSpeedMS;
 
-    if (doTel) {
+    if (doTel && !disposed && telReadBuf.mapState === 'unmapped') {
       try {
         await telReadBuf.mapAsync(GPU_BUF.MAP_READ);
         if (!disposed) {
@@ -1755,12 +2114,14 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           dustCnt = Math.round(f[2]);
           meanDustSpd = f[3];
         }
-        try { telReadBuf.unmap(); } catch {}
+        if (!disposed) { try { telReadBuf.unmap(); } catch {} }
       } catch (err) {
         if (!disposed && err?.name !== 'AbortError') throw err;
       } finally {
         mapInFlight = false;
       }
+    } else if (doTel) {
+      mapInFlight = false;
     }
 
     lastTelemetry = Object.freeze({
@@ -1795,6 +2156,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       cfdActive: runCfd,
       cfdAvailable: Boolean(cfdSession),
       cfdTelemetry: lastCfdTelemetry,
+      localSample,
       activePlumeParticles: activePlumes,
       flameParticles: flameCnt,
       dustParticles: dustCnt,
@@ -1812,6 +2174,15 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     for (const b of [paramsBuf, terrainVertBuf, terrainIdxBuf, plumesBuf, telBuf, telReadBuf, vehicleVertBuf]) {
       try { b.destroy(); } catch {}
     }
+  }
+
+  function getLocalSample() {
+    const focus = activeVehicle === 'ufo' ? ufo.pos : (activeVehicle === 'drone' ? drone.pos : rover.pos);
+    return sampleLocalPlanetaryMaterial(env, focus, {
+      activeVehicle,
+      cfdTelemetry: lastCfdTelemetry,
+      worldName: bodySpec?.name || 'World'
+    });
   }
 
   return Object.freeze({
@@ -1833,6 +2204,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     getResidentPlumesBuffer: () => plumesBuf,
     getResidentCfdMotesBuffer: () => (cfdSession ? cfdSession.getResidentMotesBuffer() : null),
     getActiveSkyEnv,
+    getLocalSample,
     getCameraPose,
     setActiveVehicle,
     setUfoAltitudeKm,

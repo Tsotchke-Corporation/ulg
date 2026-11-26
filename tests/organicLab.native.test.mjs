@@ -85,6 +85,16 @@ test('ULG Organic Chemistry Lab (organic-lab.html) live Vulkan physics, null lim
     assert.ok(bearIntegrity.maxStatorOFlexA > 0.02, `Outer Calix[11]furan O pockets must visibly flex in response to passing S teeth (maxOFlex=${bearIntegrity.maxStatorOFlexA} A)`);
     const pickedBearing = await page.evaluate(() => window.__ulgOrganicLab.pickAtCenter());
     assert.ok(pickedBearing && Number.isInteger(pickedBearing.index) && pickedBearing.index >= 0, 'GPU ray-picker must pick an atom on Sulflower Bearing');
+    // Verify atom selection reticle & 3D coordinates LIVE-TRACK the moving atom as the bearing rotates!
+    const posBeforeTrack = [...pickedBearing.pos];
+    await page.evaluate(() => window.__ulgOrganicLab.stepNow(28));
+    const trackedAfter = await page.evaluate(() => window.__ulgOrganicLab.getPickedEntity());
+    const trackDisp = Math.hypot(
+      (trackedAfter?.pos?.[0] ?? posBeforeTrack[0]) - posBeforeTrack[0],
+      (trackedAfter?.pos?.[1] ?? posBeforeTrack[1]) - posBeforeTrack[1],
+      (trackedAfter?.pos?.[2] ?? posBeforeTrack[2]) - posBeforeTrack[2]
+    );
+    assert.ok(trackDisp > 0.08, `Picked atom selection must move live with rotating atom (disp=${trackDisp.toFixed(4)} A)`);
     report.sulflowerBearing = {
       atomCount: stBearLong.telemetry.atomCount,
       omegaRadPs: Number((stBear1.telemetry.rotorOmegaRadPs || 0).toFixed(3)),
@@ -93,7 +103,8 @@ test('ULG Organic Chemistry Lab (organic-lab.html) live Vulkan physics, null lim
       changedPx: bearDiff.changedPixelCount,
       comDriftA: Number(bearComDrift.toFixed(4)),
       integrityAfter450Substeps: bearIntegrity,
-      pickedAtom: pickedBearing.title
+      pickedAtom: pickedBearing.title,
+      pickedAtomLiveTrackDispA: Number(trackDisp.toFixed(4))
     };
 
     // 0b. Anti-Jiggle COM-Drift Proof on Dihedral Rotor (n-Butane at 450 K)

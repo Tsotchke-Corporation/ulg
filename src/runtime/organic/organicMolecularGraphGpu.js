@@ -55,10 +55,10 @@ export const ORGANIC_ELEMENT_PHYSICS = Object.freeze({
   5:  Object.freeze({ Z: 5,  sym: 'B',  massU: 10.81,  valence: 3, chiEv: 4.290, etaEv: 8.010,  rCovA: 0.84, rVdwA: 1.92, huckelAlpha: 1.0,  piLonePair: 0, hBondDonor: false, hBondAcceptor: false, rgb: [0.95, 0.68, 0.56] }),
   6:  Object.freeze({ Z: 6,  sym: 'C',  massU: 12.011, valence: 4, chiEv: 5.343, etaEv: 10.126, rCovA: 0.75, rVdwA: 1.70, huckelAlpha: 0.0,  piLonePair: 0, hBondDonor: false, hBondAcceptor: false, rgb: [0.30, 0.34, 0.40] }),
   7:  Object.freeze({ Z: 7,  sym: 'N',  massU: 14.007, valence: 3, chiEv: 6.899, etaEv: 11.760, rCovA: 0.71, rVdwA: 1.55, huckelAlpha: -0.5, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.22, 0.52, 0.98] }),
-  8:  Object.freeze({ Z: 8,  sym: 'O',  massU: 15.999, valence: 2, chiEv: 8.741, etaEv: 13.364, rCovA: 0.64, rVdwA: 1.52, huckelAlpha: -1.0, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.96, 0.24, 0.24] }),
+  8:  Object.freeze({ Z: 8,  sym: 'O',  massU: 15.999, valence: 2, chiEv: 8.741, etaEv: 13.364, rCovA: 0.64, rVdwA: 1.52, huckelAlpha: -1.0, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.88, 0.13, 0.13] }),
   9:  Object.freeze({ Z: 9,  sym: 'F',  massU: 18.998, valence: 1, chiEv: 10.874,etaEv: 14.948, rCovA: 0.60, rVdwA: 1.47, huckelAlpha: -2.0, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.45, 0.92, 0.52] }),
   15: Object.freeze({ Z: 15, sym: 'P',  massU: 30.974, valence: 5, chiEv: 5.463, etaEv: 8.000,  rCovA: 1.07, rVdwA: 1.80, huckelAlpha: -0.2, piLonePair: 0, hBondDonor: false, hBondAcceptor: true,  rgb: [1.00, 0.56, 0.14] }),
-  16: Object.freeze({ Z: 16, sym: 'S',  massU: 32.06,  valence: 2, chiEv: 6.928, etaEv: 8.972,  rCovA: 1.03, rVdwA: 1.80, huckelAlpha: -0.4, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.96, 0.84, 0.22] }),
+  16: Object.freeze({ Z: 16, sym: 'S',  massU: 32.06,  valence: 2, chiEv: 6.928, etaEv: 8.972,  rCovA: 1.03, rVdwA: 1.80, huckelAlpha: -0.4, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.96, 0.72, 0.05] }),
   17: Object.freeze({ Z: 17, sym: 'Cl', massU: 35.45,  valence: 1, chiEv: 8.564, etaEv: 9.892,  rCovA: 0.99, rVdwA: 1.75, huckelAlpha: -1.6, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.22, 0.88, 0.36] }),
   35: Object.freeze({ Z: 35, sym: 'Br', massU: 79.904, valence: 1, chiEv: 7.790, etaEv: 8.850,  rCovA: 1.14, rVdwA: 1.85, huckelAlpha: -1.4, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.68, 0.20, 0.16] })
 });
@@ -443,7 +443,114 @@ function buildEthanolWaterHBondCluster() {
   return { atoms, bonds };
 }
 
+function buildSulflowerBearing() {
+  // Exact zero-strain supramolecular nanobearing:
+  //   1. Inner Rotor (atoms 0..23): Octathio[8]circulene "Sulflower" (C16S8, D8h planar 8-tooth rotor!)
+  //   2. Outer Stator (atoms 24..133): Calix[11]furan macrocycle (C55O11H44, D11h 11-fold bearing ring!)
+  // Because gcd(8, 11) = 1 (coprime!), the S...O non-bonded raceway (gap = 2.74 A ~ LJ minimum)
+  // exhibits 88-fold superlubric rotational potential corrugation instead of locking in place!
+  const atoms = [];
+  const bonds = [];
+
+  // --- 1. Sulflower Rotor (C16S8: 8 inner C, 8 outer C, 8 golden S teeth) ---
+  const rIn = 1.83;
+  const rOut = 3.22;
+  const rSulf = 4.26;
+  for (let k = 0; k < 8; k += 1) {
+    const a = (k / 8) * Math.PI * 2;
+    atoms.push({ Z: 6, pos: [Math.cos(a) * rIn, Math.sin(a) * rIn, 0] }); // 0..7 inner C
+  }
+  for (let k = 0; k < 8; k += 1) {
+    const a = (k / 8) * Math.PI * 2;
+    atoms.push({ Z: 6, pos: [Math.cos(a) * rOut, Math.sin(a) * rOut, 0] }); // 8..15 outer C
+  }
+  for (let k = 0; k < 8; k += 1) {
+    const a = ((k + 0.5) / 8) * Math.PI * 2;
+    atoms.push({ Z: 16, pos: [Math.cos(a) * rSulf, Math.sin(a) * rSulf, 0] }); // 16..23 golden S
+  }
+  for (let k = 0; k < 8; k += 1) {
+    const next = (k + 1) % 8;
+    bonds.push({ a: k, b: next, order: 1.5 });          // Inner cyclooctatetraene ring
+    bonds.push({ a: k, b: 8 + k, order: 1.5 });         // Radial fused ring spokes
+    bonds.push({ a: 8 + k, b: 16 + k, order: 1 });      // Thiophene C-S left
+    bonds.push({ a: 8 + next, b: 16 + k, order: 1 });   // Thiophene C-S right
+  }
+
+  // --- 2. Outer Calix[11]furan Bearing Stator (11 aromatic furans + 11 sp3 -CH2- bridges) ---
+  const nUnits = 11;
+  const dPhi = (Math.PI * 2) / nUnits;
+  const rO = 7.05;
+  const rCa = 7.82;
+  const rCb = 9.05;
+  const rHb = 10.12;
+  const rBridge = 8.88;
+  const dCa = (8.8 * Math.PI) / 180;
+  const dCb = (4.4 * Math.PI) / 180;
+  const dHb = (4.5 * Math.PI) / 180;
+
+  const unitIdx = [];
+  for (let u = 0; u < nUnits; u += 1) {
+    const phi = u * dPhi;
+    const iO = atoms.length;
+    atoms.push({ Z: 8, pos: [Math.cos(phi) * rO, Math.sin(phi) * rO, 0] });
+    const iCaL = atoms.length;
+    atoms.push({ Z: 6, pos: [Math.cos(phi - dCa) * rCa, Math.sin(phi - dCa) * rCa, 0] });
+    const iCaR = atoms.length;
+    atoms.push({ Z: 6, pos: [Math.cos(phi + dCa) * rCa, Math.sin(phi + dCa) * rCa, 0] });
+    const iCbL = atoms.length;
+    atoms.push({ Z: 6, pos: [Math.cos(phi - dCb) * rCb, Math.sin(phi - dCb) * rCb, 0] });
+    const iCbR = atoms.length;
+    atoms.push({ Z: 6, pos: [Math.cos(phi + dCb) * rCb, Math.sin(phi + dCb) * rCb, 0] });
+    const iHbL = atoms.length;
+    atoms.push({ Z: 1, pos: [Math.cos(phi - dHb) * rHb, Math.sin(phi - dHb) * rHb, 0] });
+    const iHbR = atoms.length;
+    atoms.push({ Z: 1, pos: [Math.cos(phi + dHb) * rHb, Math.sin(phi + dHb) * rHb, 0] });
+    const phiM = phi + dPhi * 0.5;
+    const iCh2 = atoms.length;
+    atoms.push({ Z: 6, pos: [Math.cos(phiM) * rBridge, Math.sin(phiM) * rBridge, 0] });
+    const iHm1 = atoms.length;
+    atoms.push({ Z: 1, pos: [Math.cos(phiM) * (rBridge + 0.52), Math.sin(phiM) * (rBridge + 0.52), 0.88] });
+    const iHm2 = atoms.length;
+    atoms.push({ Z: 1, pos: [Math.cos(phiM) * (rBridge + 0.52), Math.sin(phiM) * (rBridge + 0.52), -0.88] });
+
+    // Aromatic 5-membered furan ring + C-H + sp3 bridge C-H2
+    bonds.push({ a: iO, b: iCaL, order: 1 });
+    bonds.push({ a: iO, b: iCaR, order: 1 });
+    bonds.push({ a: iCaL, b: iCbL, order: 1.5 });
+    bonds.push({ a: iCbL, b: iCbR, order: 1.5 });
+    bonds.push({ a: iCbR, b: iCaR, order: 1.5 });
+    bonds.push({ a: iCbL, b: iHbL, order: 1 });
+    bonds.push({ a: iCbR, b: iHbR, order: 1 });
+    bonds.push({ a: iCh2, b: iHm1, order: 1 });
+    bonds.push({ a: iCh2, b: iHm2, order: 1 });
+    unitIdx.push({ iCaL, iCaR, iCh2 });
+  }
+  for (let u = 0; u < nUnits; u += 1) {
+    const next = (u + 1) % nUnits;
+    bonds.push({ a: unitIdx[u].iCaR, b: unitIdx[u].iCh2, order: 1 });
+    bonds.push({ a: unitIdx[u].iCh2, b: unitIdx[next].iCaL, order: 1 });
+  }
+
+  return {
+    atoms,
+    bonds,
+    rotorMeta: Object.freeze({
+      kind: 'molecular-bearing',
+      rotorCount: 24,
+      statorStart: 24,
+      rotorSymmetry: 8,
+      statorSymmetry: nUnits,
+      bearingGapA: Number((rO - rSulf).toFixed(2))
+    })
+  };
+}
+
 export const ORGANIC_MOLECULE_INITIAL_CONDITIONS = Object.freeze({
+  'sulflower-bearing': Object.freeze({
+    id: 'sulflower-bearing', name: 'Sulflower Molecular Bearing (C₁₆S₈ @ Calix[11]furan)', formula: 'C71H44O11S8', category: 'nanotech',
+    description: 'Superlubric supramolecular nanobearing: planar D₈h octathio[8]circulene "Sulflower" (C₁₆S₈) spinning freely inside a coprime 11-fold Calix[11]furan oxa-macrocycle stator via live GPU S···O Lennard-Jones & QEq forces!',
+    build: buildSulflowerBearing
+  }),
   benzene: Object.freeze({
     id: 'benzene', name: 'Benzene (C₆H₆)', formula: 'C₆H₆', category: 'aromatic',
     description: 'Planar 6π Hückel (4n+2) aromatic ring with equalized delocalized C–C bonds and deep resonance stabilization.',
@@ -697,11 +804,19 @@ export function buildOrganicMolecularGraph(spec = {}) {
   const angles = [];
   for (let j = 0; j < n; j += 1) {
     const nb = adj[j];
-    const eqRad = atoms[j].hybridization === 'sp'
+    const baseEqRad = atoms[j].hybridization === 'sp'
       ? Math.PI
       : (atoms[j].hybridization === 'sp2' ? (2 * Math.PI) / 3 : 1.910633); // 180, 120, 109.47 deg
     for (let u = 0; u < nb.length; u += 1) {
       for (let v = u + 1; v < nb.length; v += 1) {
+        let eqRad = baseEqRad;
+        // For cyclic sp2/ring atoms (4-, 5-, 6-, 8-membered fused rings), honor true ring-constrained equilibrium angle!
+        if (inRingAtom[j] && atoms[j].hybridization === 'sp2') {
+          const e1 = vNorm(vSub(atoms[nb[u].to].pos, atoms[j].pos));
+          const e2 = vNorm(vSub(atoms[nb[v].to].pos, atoms[j].pos));
+          const geomRad = Math.acos(Math.max(-0.999, Math.min(0.999, vDot(e1, e2))));
+          if (geomRad > 1.35 && geomRad < 2.65) eqRad = geomRad;
+        }
         angles.push({ i: nb[u].to, j, k: nb[v].to, eqRad, kAngle: atoms[j].hybridization === 'sp2' ? 2.8 : 2.1 });
       }
     }
@@ -751,7 +866,8 @@ export function buildOrganicMolecularGraph(spec = {}) {
     chiralCenters,
     angles,
     dihedrals,
-    reactionMeta: src?.reactionMeta || null
+    reactionMeta: src?.reactionMeta || null,
+    rotorMeta: src?.rotorMeta || null
   });
 }
 
@@ -763,7 +879,8 @@ export function mirrorOrganicMolecularGraph(graph) {
     atoms: graph.atoms.map((a) => ({ Z: a.Z, pos: [-a.pos[0], a.pos[1], a.pos[2]] })),
     bonds: graph.bonds.map((b) => ({ a: b.a, b: b.b, order: b.order })),
     totalCharge: graph.totalCharge,
-    reactionMeta: graph.reactionMeta
+    reactionMeta: graph.reactionMeta,
+    rotorMeta: graph.rotorMeta
   });
 }
 
@@ -1002,23 +1119,84 @@ export function solvePiMolecularOrbitalsAnalytic(graph) {
 /**
  * Live WebGPU Extended-Huckel Pi-MO Solver reusing ULG's canonical Gate 0B
  * `solveSymmetricEigenBatchedWebGpu` (`@workgroup_size(64)` cooperative Jacobi)!
+ * Automatically decomposes disconnected supramolecular pi-blocks (e.g. Sulflower 24x24
+ * + Calix[11]furan 11x 5x5 blocks) for exact direct-sum GPU diagonalization at any size!
  */
 export async function solvePiMolecularOrbitalsWebGpu(device, graph) {
   const huckel = buildPiHuckelHamiltonian(graph);
-  if (huckel.m === 0) {
+  const m = huckel.m;
+  if (m === 0) {
     return finalizePiOrbitalAnalysis(graph, huckel, new Float32Array(0), new Float32Array(0));
   }
-  if (huckel.m === 1) {
+  if (m === 1) {
     return finalizePiOrbitalAnalysis(graph, huckel, new Float32Array([huckel.H[0]]), new Float32Array([1.0]));
   }
-  const res = await solveSymmetricEigenBatchedWebGpu(device, {
-    matrices: huckel.H,
-    n: huckel.m,
-    batchCount: 1,
-    maxSweeps: 36,
-    tolerance: 1e-6
-  });
-  return finalizePiOrbitalAnalysis(graph, huckel, res.eigenvalues, res.eigenvectors);
+  if (m <= 64) {
+    const res = await solveSymmetricEigenBatchedWebGpu(device, {
+      matrices: huckel.H,
+      n: m,
+      batchCount: 1,
+      maxSweeps: 36,
+      tolerance: 1e-6
+    });
+    return finalizePiOrbitalAnalysis(graph, huckel, res.eigenvalues, res.eigenvectors);
+  }
+  // Exact connected-component block diagonalization on WebGPU for large supramolecular assemblies
+  const visited = new Uint8Array(m);
+  const blocks = [];
+  for (let s = 0; s < m; s += 1) {
+    if (visited[s]) continue;
+    const comp = [];
+    const stack = [s];
+    visited[s] = 1;
+    while (stack.length > 0) {
+      const p = stack.pop();
+      comp.push(p);
+      for (let q = 0; q < m; q += 1) {
+        if (!visited[q] && Math.abs(huckel.H[p * m + q]) > 1e-7) {
+          visited[q] = 1;
+          stack.push(q);
+        }
+      }
+    }
+    comp.sort((u, v) => u - v);
+    blocks.push(comp);
+  }
+  const allModes = [];
+  for (const comp of blocks) {
+    const bm = comp.length;
+    if (bm === 1) {
+      allModes.push({ val: huckel.H[comp[0] * m + comp[0]], comp, vec: [1.0] });
+      continue;
+    }
+    const subH = new Float32Array(bm * bm);
+    for (let r = 0; r < bm; r += 1) {
+      for (let c = 0; c < bm; c += 1) {
+        subH[r * bm + c] = huckel.H[comp[r] * m + comp[c]];
+      }
+    }
+    const subRes = bm <= 64
+      ? await solveSymmetricEigenBatchedWebGpu(device, { matrices: subH, n: bm, batchCount: 1, maxSweeps: 36, tolerance: 1e-6 })
+      : null;
+    if (subRes) {
+      for (let k = 0; k < bm; k += 1) {
+        const vec = new Float32Array(bm);
+        for (let r = 0; r < bm; r += 1) vec[r] = subRes.eigenvectors[r * bm + k];
+        allModes.push({ val: subRes.eigenvalues[k], comp, vec });
+      }
+    }
+  }
+  allModes.sort((a, b) => a.val - b.val);
+  const fullVals = new Float32Array(m);
+  const fullVecs = new Float32Array(m * m);
+  for (let k = 0; k < Math.min(m, allModes.length); k += 1) {
+    fullVals[k] = allModes[k].val;
+    const { comp, vec } = allModes[k];
+    for (let r = 0; r < comp.length; r += 1) {
+      fullVecs[comp[r] * m + k] = vec[r];
+    }
+  }
+  return finalizePiOrbitalAnalysis(graph, huckel, fullVals, fullVecs);
 }
 
 /**

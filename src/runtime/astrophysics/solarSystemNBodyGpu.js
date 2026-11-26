@@ -245,17 +245,20 @@ function mulberry32(seed) {
 }
 
 /**
- * Build exact zero-momentum barycentric double-float initial conditions for
- * the Solar System (`15` massive bodies + `asteroidCount` Main Belt & Kuiper Belt asteroids)
- * with optional arbitrary translation `centerOffsetAu` (strict translation invariance!).
+ * Build exact zero-momentum barycentric double-float initial conditions for ANY
+ * single-star, binary-star (`P-type` or `S-type`), or hierarchical trinary (`(A+B)+C`)
+ * planetary system catalog + `asteroidCount` minor belt bodies!
+ * Strictly translation-invariant via `centerOffsetAu`.
  */
-export function buildRealSolarSystemInitialConditions({
+export function buildProceduralStarSystemInitialConditions(catalog, {
   asteroidCount = 512,
+  beltZoneAu = null,
   seed = 20261125,
   starMassScale = 1.0,
   centerOffsetAu = [0, 0, 0]
 } = {}) {
-  const massiveCount = REAL_SOLAR_SYSTEM_CATALOG.length;
+  const cat = Array.isArray(catalog) && catalog.length > 0 ? catalog : REAL_SOLAR_SYSTEM_CATALOG;
+  const massiveCount = cat.length;
   const nAst = Math.max(0, Math.min(4096, Math.trunc(Number(asteroidCount) || 0)));
   const totalCount = massiveCount + nAst;
 
@@ -265,27 +268,67 @@ export function buildRealSolarSystemInitialConditions({
   const radiiAu = new Float64Array(totalCount);
   const kinds = new Float32Array(totalCount);
 
-  // 1. Initialize massive bodies relative to their hierarchical parent using exact Keplerian ICs
+  const mScale = Math.max(0.1, Number(starMassScale) || 1.0);
+  let starCount = 0;
   for (let i = 0; i < massiveCount; i += 1) {
-    const spec = REAL_SOLAR_SYSTEM_CATALOG[i];
-    const m = i === 0 ? spec.massSolar * Math.max(0.1, Number(starMassScale) || 1.0) : spec.massSolar;
-    masses[i] = m;
-    radiiAu[i] = spec.radiusKm * 1000 / AU_METERS;
+    const spec = cat[i];
+    const isStar = Boolean(spec.isStar) || i === 0;
+    if (isStar) starCount += 1;
+    masses[i] = isStar ? (spec.massSolar * mScale) : spec.massSolar;
+    radiiAu[i] = (spec.radiusKm * 1000) / AU_METERS;
     kinds[i] = spec.kind;
-    if (spec.parent < 0) continue;
-    const pIdx = spec.parent;
-    const mu = G_AU_SOLAR_YR * (masses[pIdx] + m);
-    const rel = keplerianElementsToCartesian(spec, mu);
-    pos64[i] = [
-      pos64[pIdx][0] + rel.pos[0],
-      pos64[pIdx][1] + rel.pos[1],
-      pos64[pIdx][2] + rel.pos[2]
-    ];
-    vel64[i] = [
-      vel64[pIdx][0] + rel.vel[0],
-      vel64[pIdx][1] + rel.vel[1],
-      vel64[pIdx][2] + rel.vel[2]
-    ];
+  }
+
+  // 1a. Initialize exact hierarchical barycentric positions/velocities for 1, 2 (binary), or 3 (trinary) stars!
+  let innerComPos = [0, 0, 0];
+  let innerComVel = [0, 0, 0];
+  let innerMass = masses[0];
+
+  if (starCount >= 2 && cat[1]?.orbitRole === 'binary-companion') {
+    const m0 = masses[0];
+    const m1 = masses[1];
+    innerMass = m0 + m1;
+    const rel = keplerianElementsToCartesian(cat[1], G_AU_SOLAR_YR * innerMass);
+    const f0 = -m1 / Math.max(1e-12, innerMass);
+    const f1 = m0 / Math.max(1e-12, innerMass);
+    pos64[0] = [rel.pos[0] * f0, rel.pos[1] * f0, rel.pos[2] * f0];
+    vel64[0] = [rel.vel[0] * f0, rel.vel[1] * f0, rel.vel[2] * f0];
+    pos64[1] = [rel.pos[0] * f1, rel.pos[1] * f1, rel.pos[2] * f1];
+    vel64[1] = [rel.vel[0] * f1, rel.vel[1] * f1, rel.vel[2] * f1];
+  }
+
+  if (starCount >= 3 && cat[2]?.orbitRole === 'trinary-outer') {
+    const m2 = masses[2];
+    const mTri = innerMass + m2;
+    const relOut = keplerianElementsToCartesian(cat[2], G_AU_SOLAR_YR * mTri);
+    const fIn = -m2 / Math.max(1e-12, mTri);
+    const f2 = innerMass / Math.max(1e-12, mTri);
+    innerComPos = [relOut.pos[0] * fIn, relOut.pos[1] * fIn, relOut.pos[2] * fIn];
+    innerComVel = [relOut.vel[0] * fIn, relOut.vel[1] * fIn, relOut.vel[2] * fIn];
+    for (let s = 0; s < 2; s += 1) {
+      pos64[s] = [pos64[s][0] + innerComPos[0], pos64[s][1] + innerComPos[1], pos64[s][2] + innerComPos[2]];
+      vel64[s] = [vel64[s][0] + innerComVel[0], vel64[s][1] + innerComVel[1], vel64[s][2] + innerComVel[2]];
+    }
+    pos64[2] = [relOut.pos[0] * f2, relOut.pos[1] * f2, relOut.pos[2] * f2];
+    vel64[2] = [relOut.vel[0] * f2, relOut.vel[1] * f2, relOut.vel[2] * f2];
+  }
+
+  // 1b. Initialize all planets & natural moons relative to their hierarchical parent (or inner binary COM when parent === -2!)
+  for (let i = starCount; i < massiveCount; i += 1) {
+    const spec = cat[i];
+    const m = masses[i];
+    if (spec.parent === -2) {
+      const mu = G_AU_SOLAR_YR * (innerMass + m);
+      const rel = keplerianElementsToCartesian(spec, mu);
+      pos64[i] = [innerComPos[0] + rel.pos[0], innerComPos[1] + rel.pos[1], innerComPos[2] + rel.pos[2]];
+      vel64[i] = [innerComVel[0] + rel.vel[0], innerComVel[1] + rel.vel[1], innerComVel[2] + rel.vel[2]];
+    } else if (spec.parent >= 0 && spec.parent < i) {
+      const pIdx = spec.parent;
+      const mu = G_AU_SOLAR_YR * (masses[pIdx] + m);
+      const rel = keplerianElementsToCartesian(spec, mu);
+      pos64[i] = [pos64[pIdx][0] + rel.pos[0], pos64[pIdx][1] + rel.pos[1], pos64[pIdx][2] + rel.pos[2]];
+      vel64[i] = [vel64[pIdx][0] + rel.vel[0], vel64[pIdx][1] + rel.vel[1], vel64[pIdx][2] + rel.vel[2]];
+    }
   }
 
   // Exact barycentric COM & zero-momentum shift over all massive bodies
@@ -298,30 +341,42 @@ export function buildRealSolarSystemInitialConditions({
     cx += m * pos64[i][0]; cy += m * pos64[i][1]; cz += m * pos64[i][2];
     px += m * vel64[i][0]; py += m * vel64[i][1]; pz += m * vel64[i][2];
   }
-  cx /= mTot; cy /= mTot; cz /= mTot;
-  const vxCom = px / mTot; const vyCom = py / mTot; const vzCom = pz / mTot;
+  cx /= Math.max(1e-12, mTot); cy /= Math.max(1e-12, mTot); cz /= Math.max(1e-12, mTot);
+  const vxCom = px / Math.max(1e-12, mTot); const vyCom = py / Math.max(1e-12, mTot); const vzCom = pz / Math.max(1e-12, mTot);
   for (let i = 0; i < massiveCount; i += 1) {
     pos64[i][0] -= cx; pos64[i][1] -= cy; pos64[i][2] -= cz;
     vel64[i][0] -= vxCom; vel64[i][1] -= vyCom; vel64[i][2] -= vzCom;
   }
+  innerComPos = [innerComPos[0] - cx, innerComPos[1] - cy, innerComPos[2] - cz];
+  innerComVel = [innerComVel[0] - vxCom, innerComVel[1] - vyCom, innerComVel[2] - vzCom];
 
-  // 2. Initialize Main Asteroid Belt (2.15..3.28 AU) & Kuiper Belt (32..46 AU) real N-body minor bodies
+  // 2. Initialize Main Belt & Kuiper Belt real N-body test-mass minor bodies around primary/inner-binary host!
   const rand = mulberry32(seed ^ 0x9e3779b9);
-  const muSun = G_AU_SOLAR_YR * masses[0];
+  const useCircumbinaryBelt = starCount >= 2 && (cat[1]?.aAu || 10) < 1.5;
+  const hostPos = useCircumbinaryBelt ? innerComPos : pos64[0];
+  const hostVel = useCircumbinaryBelt ? innerComVel : vel64[0];
+  const muHost = G_AU_SOLAR_YR * (useCircumbinaryBelt ? innerMass : masses[0]);
+  const mainIn = beltZoneAu?.innerAu ?? 2.15;
+  const mainOut = beltZoneAu?.outerAu ?? 3.30;
+  const kboIn = beltZoneAu?.kuiperInnerAu ?? 32.0;
+  const kboOut = beltZoneAu?.kuiperOuterAu ?? 46.0;
+
   for (let k = 0; k < nAst; k += 1) {
     const idx = massiveCount + k;
     const isKuiper = k >= Math.floor(nAst * 0.72);
-    const aAu = isKuiper ? (32.0 + rand() * 14.0) : (2.15 + rand() * 1.15);
+    const aAu = isKuiper
+      ? (kboIn + rand() * Math.max(0.5, kboOut - kboIn))
+      : (mainIn + rand() * Math.max(0.25, mainOut - mainIn));
     const e = isKuiper ? (0.02 + rand() * 0.14) : (0.01 + rand() * 0.16);
     const incDeg = (rand() - 0.5) * (isKuiper ? 14.0 : 12.0);
     const omDeg = rand() * 360.0;
     const wDeg = rand() * 360.0;
     const m0Deg = rand() * 360.0;
-    const rel = keplerianElementsToCartesian({ aAu, e, incDeg, omDeg, wDeg, m0Deg }, muSun);
-    pos64[idx] = [pos64[0][0] + rel.pos[0], pos64[0][1] + rel.pos[1], pos64[0][2] + rel.pos[2]];
-    vel64[idx] = [vel64[0][0] + rel.vel[0], vel64[0][1] + rel.vel[1], vel64[0][2] + rel.vel[2]];
-    masses[idx] = 0.0; // test-mass minor body perturbed by ALL 15 massive bodies
-    radiiAu[idx] = (15 + rand() * 85) * 1000 / AU_METERS;
+    const rel = keplerianElementsToCartesian({ aAu, e, incDeg, omDeg, wDeg, m0Deg }, muHost);
+    pos64[idx] = [hostPos[0] + rel.pos[0], hostPos[1] + rel.pos[1], hostPos[2] + rel.pos[2]];
+    vel64[idx] = [hostVel[0] + rel.vel[0], hostVel[1] + rel.vel[1], hostVel[2] + rel.vel[2]];
+    masses[idx] = 0.0;
+    radiiAu[idx] = ((15 + rand() * 85) * 1000) / AU_METERS;
     kinds[idx] = isKuiper ? 7 : 6;
   }
 
@@ -357,9 +412,29 @@ export function buildRealSolarSystemInitialConditions({
   return Object.freeze({
     packed,
     massiveCount,
+    starCount,
     asteroidCount: nAst,
     totalCount,
-    catalog: REAL_SOLAR_SYSTEM_CATALOG
+    catalog: cat
+  });
+}
+
+/**
+ * Build exact zero-momentum barycentric double-float initial conditions for
+ * the canonical Sol Reference Solar System (`15` massive bodies + `asteroidCount` asteroids)
+ * with optional arbitrary translation `centerOffsetAu` (strict translation invariance!).
+ */
+export function buildRealSolarSystemInitialConditions({
+  asteroidCount = 512,
+  seed = 20261125,
+  starMassScale = 1.0,
+  centerOffsetAu = [0, 0, 0]
+} = {}) {
+  return buildProceduralStarSystemInitialConditions(REAL_SOLAR_SYSTEM_CATALOG, {
+    asteroidCount,
+    seed,
+    starMassScale,
+    centerOffsetAu
   });
 }
 
@@ -478,6 +553,8 @@ fn kdk_second_kick(@builtin(global_invocation_id) gid: vec3<u32>) {
  * All time stepping is pure Newtonian mutual N-body gravity in 1 `queue.submit` per batch.
  */
 export function createSolarSystemNBodyEngineWebGpu(device, {
+  catalog = null,
+  beltZoneAu = null,
   asteroidCount = 512,
   seed = 20261125,
   starMassScale = 1.0,
@@ -488,8 +565,9 @@ export function createSolarSystemNBodyEngineWebGpu(device, {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createSolarSystemNBodyEngineWebGpu requires a live WebGPU GPUDevice');
   }
-  const ic = buildRealSolarSystemInitialConditions({
+  const ic = buildProceduralStarSystemInitialConditions(catalog || REAL_SOLAR_SYSTEM_CATALOG, {
     asteroidCount,
+    beltZoneAu,
     seed,
     starMassScale,
     centerOffsetAu
@@ -674,11 +752,12 @@ export function createSolarSystemNBodyEngineWebGpu(device, {
   return Object.freeze({
     schema: ULG_SOLAR_SYSTEM_NBODY_SCHEMA,
     get massiveCount() { return ic.massiveCount; },
+    get starCount() { return ic.starCount; },
     get asteroidCount() { return ic.asteroidCount; },
     get totalCount() { return ic.totalCount; },
     get stepIndex() { return stepIndex; },
     get simTimeYr() { return simTimeYr; },
-    get catalog() { return REAL_SOLAR_SYSTEM_CATALOG; },
+    get catalog() { return ic.catalog; },
     getResidentBuffer: () => bodiesBuf,
     getMassiveSnapshot: () => hostMassive,
     getMassiveBodyState64,

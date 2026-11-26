@@ -73,6 +73,11 @@ import {
   registerPlanetarySurfaceVehiclesModule
 } from './astrophysics/planetarySurfaceVehiclesGpu.js';
 import {
+  PLANETARY_ATMO_3D_CFD_LAW_ADAPTER,
+  evaluatePlanetaryAtmo3dCfdActivation,
+  registerPlanetaryAtmo3dCfdModule
+} from './astrophysics/planetaryAtmosphere3dCfdGpu.js';
+import {
   ORGANIC_MOLECULAR_GRAPH_LAW_ADAPTER,
   evaluateOrganicGraphActivation,
   registerOrganicMolecularGraphModule
@@ -557,6 +562,19 @@ export const UNIVERSAL_LAW_GRAPH_NODES = Object.freeze([
     scaleRangeM: Object.freeze([1e-6, 1e-1]),
     adapter: MORPHOGENESIS_ACTIVE_LAW_ADAPTER,
     evaluateActivation: evaluateMorphogenesisActiveActivation
+  }),
+  Object.freeze({
+    id: 'planetary-atmosphere-3d-cfd',
+    methodKey: 'planetary-atmosphere-3d-cfd@1',
+    title: '3D Stratified Planetary Atmospheric Navier-Stokes CFD & Multi-Species Condensation Chemistry',
+    families: Object.freeze([
+      FUNDAMENTAL_LAW_FAMILIES.HYDRODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.THERMODYNAMICS,
+      FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING
+    ]),
+    scaleRangeM: Object.freeze([1e1, 2e5]),
+    adapter: PLANETARY_ATMO_3D_CFD_LAW_ADAPTER,
+    evaluateActivation: evaluatePlanetaryAtmo3dCfdActivation
   })
 ]);
 
@@ -638,6 +656,7 @@ export function registerAllTopDownLawModules(registry) {
     registerRadiativePhotoionizationWindModule(registry),
     registerTidalRocheDisruptionModule(registry),
     registerPlanetarySurfaceVehiclesModule(registry),
+    registerPlanetaryAtmo3dCfdModule(registry),
     registerOrganicMolecularGraphModule(registry),
     registerReactiveBondOrderMdModule(registry),
     registerAcidBaseCatalysisModule(registry),

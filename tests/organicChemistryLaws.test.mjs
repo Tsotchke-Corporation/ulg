@@ -30,7 +30,7 @@ test('Organic Chemistry Law Nodes #17-19 validate against Law Adapter Contract w
   const check = validateUniversalLawGraphContracts();
   assert.equal(check.valid, true, `Contract errors: ${check.errors.join(', ')} debt: ${check.debt.join(', ')}`);
   assert.equal(check.debt.length, 0);
-  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 24);
+  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 25);
   assert.equal(FUNDAMENTAL_LAW_FAMILIES.CHEMICAL_BONDING, 'chemical-bonding');
 
   assert.equal(ORGANIC_MOLECULAR_GRAPH_LAW_ADAPTER.id, 'organic-molecular-graph-hybridization');
@@ -139,12 +139,23 @@ test('Constitutional Isomers (Ethanol vs Dimethyl Ether) & First-Principles Bron
   assert.ok(abAcidWater.netChargeAtPh < -0.8, `Acetic acid at pH 7 should be anionic (got ${abAcidWater.netChargeAtPh})`);
   assert.ok(Math.abs(abAcidLowPh.netChargeAtPh) < 0.05, `Acetic acid at pH 1 should be neutral (got ${abAcidLowPh.netChargeAtPh})`);
 
-  // All 15 molecular graph ICs build cleanly with finite coordinates and non-empty bonds
+  // All molecular graph ICs (including Sulflower Molecular Bearing!) build cleanly with finite coordinates and non-empty bonds
   for (const id of Object.keys(ORGANIC_MOLECULE_INITIAL_CONDITIONS)) {
     const g = buildOrganicMolecularGraph(id);
     assert.ok(g.atomCount >= 6, `${id} must have atoms`);
     assert.ok(g.bondCount >= 4, `${id} must have bonds`);
   }
+
+  // Verify Sulflower Molecular Bearing (C16S8 rotor inside coprime 11-fold Calix[11]furan stator)
+  const bearing = buildOrganicMolecularGraph('sulflower-bearing');
+  assert.equal(bearing.atomCount, 134, 'Sulflower @ Calix[11]furan must have 24 + 110 = 134 atoms');
+  assert.equal(bearing.formula, 'C71H44O11S8');
+  assert.equal(bearing.rotorMeta?.kind, 'molecular-bearing');
+  assert.equal(bearing.rotorMeta?.rotorSymmetry, 8);
+  assert.equal(bearing.rotorMeta?.statorSymmetry, 11);
+  assert.ok(bearing.rotorMeta?.bearingGapA > 2.5 && bearing.rotorMeta?.bearingGapA < 3.1, `Bearing S...O gap must match LJ minimum (~2.79 A, got ${bearing.rotorMeta?.bearingGapA})`);
+  const piBear = solvePiMolecularOrbitalsAnalytic(bearing);
+  assert.ok(piBear.piAtomCount >= 24, 'Sulflower bearing must include conjugated pi system');
 });
 
 test('Universal Law Graph dynamically activates Organic Chemistry laws only when organic molecules are present', () => {

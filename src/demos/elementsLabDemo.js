@@ -107,6 +107,7 @@ import {
 } from '../runtime/gpuMath/molecularDynamicsWebGpu.js';
 import { ClosureRegistry } from '../runtime/ClosureRegistry.js';
 import { defaultSimulationModuleRegistry } from '../runtime/simulationModuleRegistry.js';
+import { createTargetOrbitControls } from '../runtime/shared/targetOrbitControls.js';
 import { createElementsLabWebGpuRenderer } from './elementsLabWebGpuRenderer.js';
 import { ABOUT_ULG_DOC, ULG_LINKS, getSimulationDoc } from './elementsLabSimDocs.js';
 
@@ -501,8 +502,8 @@ let activePtFilter = 'all';
 
 // Interactive simulation controls state
 const uiState = {
-  // Global physical timestep (dt) & playback speed scale (0.05x slow-mo .. 2.0x)
-  simSpeed: 1.0,
+  // Global physical timestep (dt) & playback speed scale (0.05x slow-mo .. 2.0x; default 0.50x calm motion!)
+  simSpeed: 0.5,
   // Tab 1: Nuclear TDSE, Fission Saddle & Bateman Decay
   nuclearViewMode: 'tdse',        // 'tdse' | 'fission' | 'bateman'
   tdsePlaying: true,
@@ -776,11 +777,17 @@ async function handlePolytopePointer(e, isClick = false) {
   redrawCurrentTab();
 }
 
+let orbitControls = null;
+
 function resetCameraView() {
-  camYaw = 0.42;
-  camPitch = 0.28;
-  camDist = 2.85;
-  renderViewportSync();
+  if (orbitControls) {
+    orbitControls.reset({ immediate: false });
+  } else {
+    camYaw = 0.42;
+    camPitch = 0.28;
+    camDist = 2.85;
+    renderViewportSync();
+  }
 }
 
 function isPolytope2dProbeMode() {
@@ -789,121 +796,53 @@ function isPolytope2dProbeMode() {
 
 function attachCanvasInteractions() {
   let polyHoverPending = false;
-  const activePointers = new Map();
-  let lastPinchDist = 0;
-  let tapStart = null;
-  let lastCleanTap = null;
+  const polyPointers = new Set();
 
-  function pinchDistance() {
-    const pts = [...activePointers.values()];
-    if (pts.length < 2) return 0;
-    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-  }
-
-  canvas.addEventListener('pointerdown', (e) => {
-    if (isPolytope2dProbeMode()) {
-      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      try { canvas.setPointerCapture?.(e.pointerId); } catch {}
-      handlePolytopePointer(e, true);
-      return;
-    }
-
-    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    try { canvas.setPointerCapture?.(e.pointerId); } catch {}
-    if (activePointers.size === 1) {
-      isDragging = true;
-      lastPtrX = e.clientX;
-      lastPtrY = e.clientY;
-      lastPinchDist = 0;
-      tapStart = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, t: performance.now(), pointerType: e.pointerType };
-    } else if (activePointers.size >= 2) {
-      isDragging = false;
-      tapStart = null;
-      lastCleanTap = null;
-      lastPinchDist = pinchDistance();
-    }
-  });
-
-  canvas.addEventListener('pointermove', (e) => {
-    if (isPolytope2dProbeMode()) {
-      if (e.pointerType !== 'mouse' && !activePointers.has(e.pointerId)) return;
-      if (!polyHoverPending) {
-        polyHoverPending = true;
-        handlePolytopePointer(e, activePointers.has(e.pointerId)).finally(() => { polyHoverPending = false; });
-      }
-      return;
-    }
-    if (!activePointers.has(e.pointerId)) return;
-    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-    if (tapStart && tapStart.id === e.pointerId && Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) > 8) {
-      tapStart.moved = true;
-    }
-
-    if (activePointers.size >= 2) {
-      const dist = pinchDistance();
-      if (lastPinchDist > 4 && dist > 4) {
-        const scale = lastPinchDist / dist;
-        camDist = Math.max(1.3, Math.min(5.4, camDist * scale));
-        renderViewportSync();
-      }
-      lastPinchDist = dist;
-      return;
-    }
-
-    if (!isDragging) return;
-    const dx = e.clientX - lastPtrX;
-    const dy = e.clientY - lastPtrY;
-    lastPtrX = e.clientX;
-    lastPtrY = e.clientY;
-    const sens = e.pointerType === 'touch' ? 0.0105 : 0.008;
-    camYaw += dx * sens;
-    camPitch = Math.max(-1.25, Math.min(1.25, camPitch + dy * sens));
-    renderViewportSync();
-  });
-
-  const stop = (e) => {
-    const wasCleanTap = Boolean(
-      tapStart && tapStart.id === e.pointerId && !tapStart.moved && activePointers.size === 1
-      && (performance.now() - tapStart.t) < 280
-    );
-    const tapType = tapStart?.pointerType || e.pointerType;
-    activePointers.delete(e.pointerId);
-    if (activePointers.size === 1) {
-      const rem = [...activePointers.values()][0];
-      lastPtrX = rem.x;
-      lastPtrY = rem.y;
-      isDragging = !isPolytope2dProbeMode();
-      lastPinchDist = 0;
-    } else {
-      isDragging = false;
-      lastPinchDist = 0;
-      if (wasCleanTap && currentTab === 'polytope' && uiState.polytopeViewMode === '3d-surface') {
-        // Clean click/tap on 3D Polytope Surface evaluates live GPU probe and drops the 3D vertical pin!
+  // Target-anchored spherical OrbitControls (smooth damping, wheel/pinch dolly-to-target, dblclick reset!)
+  orbitControls = createTargetOrbitControls(canvas, {
+    yaw: camYaw,
+    pitch: camPitch,
+    dist: camDist,
+    target: [0, 0, 0],
+    minDist: 1.3,
+    maxDist: 5.4,
+    minPitch: -1.25,
+    maxPitch: 1.25,
+    enablePan: false,
+    enableDamping: true,
+    invertYaw: true,
+    shouldIgnorePointer: () => isPolytope2dProbeMode(),
+    onClick: (_cx, _cy, e) => {
+      if (currentTab === 'polytope' && uiState.polytopeViewMode === '3d-surface') {
         handlePolytopePointer(e, true);
-      } else if (wasCleanTap && tapType === 'touch' && !isPolytope2dProbeMode()) {
-        const now = performance.now();
-        if (lastCleanTap && (now - lastCleanTap.t) < 300 && Math.hypot(e.clientX - lastCleanTap.x, e.clientY - lastCleanTap.y) < 32) {
-          lastCleanTap = null;
-          resetCameraView();
-        } else {
-          lastCleanTap = { x: e.clientX, y: e.clientY, t: now };
-        }
       }
-      tapStart = null;
+    },
+    onChange: (pose) => {
+      camYaw = pose.yaw;
+      camPitch = pose.pitch;
+      camDist = pose.dist;
+      renderViewportSync();
     }
-  };
-  canvas.addEventListener('pointerup', stop);
-  canvas.addEventListener('pointercancel', stop);
-  canvas.addEventListener('dblclick', () => {
-    if (!isPolytope2dProbeMode()) resetCameraView();
   });
-  canvas.addEventListener('wheel', (e) => {
-    if (isPolytope2dProbeMode()) return;
-    e.preventDefault();
-    camDist = Math.max(1.3, Math.min(5.4, camDist + Math.sign(e.deltaY) * 0.18));
-    renderViewportSync();
-  }, { passive: false });
+
+  // Dedicated 2D Polytope phase-diagram probe interactions when in 2D map mode
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!isPolytope2dProbeMode()) return;
+    polyPointers.add(e.pointerId);
+    try { canvas.setPointerCapture?.(e.pointerId); } catch {}
+    handlePolytopePointer(e, true);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!isPolytope2dProbeMode()) return;
+    if (e.pointerType !== 'mouse' && !polyPointers.has(e.pointerId)) return;
+    if (!polyHoverPending) {
+      polyHoverPending = true;
+      handlePolytopePointer(e, polyPointers.has(e.pointerId)).finally(() => { polyHoverPending = false; });
+    }
+  });
+  const stopPoly = (e) => { polyPointers.delete(e.pointerId); };
+  canvas.addEventListener('pointerup', stopPoly);
+  canvas.addEventListener('pointercancel', stopPoly);
   resetViewBtn?.addEventListener('click', () => resetCameraView());
 }
 
@@ -4358,6 +4297,7 @@ async function stepActiveSimulationOnce() {
 
 let frameCounter = 0;
 let rafId = null;
+let lastLoopMs = performance.now();
 
 function scheduleNextFrame() {
   if (document.hidden || rafId != null) return;
@@ -4368,12 +4308,18 @@ function tickSimulationLoop(nowMs) {
   rafId = null;
   if (document.hidden) return;
   frameCounter += 1;
-  const spd = Math.max(0.05, Math.min(2.0, Number(uiState.simSpeed) || 1.0));
+  const dtLoopSec = Math.max(0.004, Math.min(0.05, ((nowMs || performance.now()) - lastLoopMs) * 0.001));
+  lastLoopMs = nowMs || performance.now();
+  const spd = Math.max(0.05, Math.min(2.0, Number(uiState.simSpeed) || 0.5));
   const dtScale = Math.min(1.0, spd);
+
+  // Smooth damped target-anchored OrbitControls inertia update
+  if (orbitControls) orbitControls.update(dtLoopSec);
 
   // User-requested optional rotation ONLY when user explicitly clicked Rotate (starts OFF!)
   if (uiState.autoRotate && (currentTab === 'atomic' || currentTab === 'compound')) {
     camYaw += 0.008 * spd;
+    orbitControls?.setPose({ yaw: camYaw }, { immediate: true });
   }
 
   // 1. Live WebGPU 3D Maxwell-Kohn-Sham Electron-Cloud + 2D Maxwell–ADE-FDTD stepping on Tab 3!
@@ -5734,7 +5680,7 @@ async function boot() {
   if (urlState.molShowOrbitalOverlay != null) uiState.molShowOrbitalOverlay = urlState.molShowOrbitalOverlay;
   if (urlState.vibDeuterated != null) uiState.vibIsotopeDeuterated = urlState.vibDeuterated;
   if (urlState.polytopeRegime) uiState.polytopeRegime = urlState.polytopeRegime;
-  if (urlState.simSpeed != null) setSimSpeed(urlState.simSpeed);
+  setSimSpeed(urlState.simSpeed != null ? urlState.simSpeed : uiState.simSpeed);
   if (urlState.mdGravity != null) uiState.mdGravity = Boolean(urlState.mdGravity);
   if (urlState.hasExplicitQuantumNumbers) {
     if (urlState.n != null) uiState.n = urlState.n;
@@ -5759,6 +5705,7 @@ async function boot() {
     camYaw = urlState.camera.yaw;
     camPitch = urlState.camera.pitch;
     if (urlState.camera.dist != null) camDist = urlState.camera.dist;
+    orbitControls?.setPose({ yaw: camYaw, pitch: camPitch, dist: camDist }, { immediate: true, updateHome: true });
   }
 
   if (urlState.specimenKind === 'reaction' && urlState.reactants) {

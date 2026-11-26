@@ -22,7 +22,7 @@ test('planetary-surface-vehicles@1 obeys ULG Law Adapter Contract, Star Spec zer
   const check = validateUniversalLawGraphContracts();
   assert.equal(check.valid, true, `Contract errors: ${check.errors.join(', ')} debt: ${check.debt.join(', ')}`);
   assert.equal(check.debt.length, 0);
-  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 24);
+  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 25);
   assert.equal(PLANETARY_SURFACE_LAW_ADAPTER.id, 'planetary-surface-vehicles');
 
   const src = fs.readFileSync(path.join(ROOT, 'src/runtime/astrophysics/planetarySurfaceVehiclesGpu.js'), 'utf8');

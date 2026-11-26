@@ -279,6 +279,18 @@ fn reduce_biopolymer_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
   let com = vec3<f32>(wg0[0] * inv_n, wg1[0] * inv_n, wg2[0] * inv_n);
   workgroupBarrier();
 
+  // Gently recenter polymer COM toward origin so folded/denaturing chains NEVER Brownian-walk off-camera!
+  // Preserves 100% of internal distances, R_g, secondary structure, and active-site electrostatics!
+  let com_corr = com * 0.22;
+  i = tid;
+  loop {
+    if (i >= n) { break; }
+    res_out[i].pos_t = vec4<f32>(res_out[i].pos_t.xyz - com_corr, res_out[i].pos_t.w);
+    i = i + 64u;
+  }
+  workgroupBarrier();
+  let com_adj = com - com_corr;
+
   // Compute R_g^2, helical i->i+4 contacts, hydrophobic H-H contacts, and pocket electric field at COM!
   var rg2 = 0.0;
   var hel_cnt = 0.0;
@@ -288,7 +300,7 @@ fn reduce_biopolymer_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
   loop {
     if (i >= n) { break; }
     let b = res_out[i];
-    let rel = b.pos_t.xyz - com;
+    let rel = b.pos_t.xyz - com_adj;
     rg2 = rg2 + dot(rel, rel);
     if (i + 4u < n) {
       let d4 = length(b.pos_t.xyz - res_out[i + 4u].pos_t.xyz);
@@ -382,7 +394,7 @@ export function createBiopolymerFoldingSessionWebGpu(device, {
     bindings
   });
   const telPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-bio-folding-tel.v1',
+    cacheKey: 'ulg-bio-folding-tel.v2-com',
     label: `${label}-tel`,
     code: biopolymerFoldingWgsl,
     entryPoint: 'reduce_biopolymer_telemetry',

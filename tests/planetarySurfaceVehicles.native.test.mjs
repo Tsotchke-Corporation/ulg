@@ -195,13 +195,19 @@ test('Planetary Surface View (Jump-Rocket Rover + Atmospheric Drone) live Vulkan
     await snapGpu(page, '08-magma-ocean-rover');
     await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceControls({ forward: false, jump: false }));
 
-    // --- 6. JUPITER CLOUD DECK (GAS GIANT -> AUTO DRONE!) ---
+    // --- 6. JUPITER 3D ATMOSPHERIC CFD (GAS GIANT -> AUTO BUOYANT DISC UFO!) ---
     await page.evaluate(() => window.__ulgUniversesDemo.enterSurfaceView({ bodyIndex: 'jupiter', planetaryModeOverride: 'standard' }));
     await stepN(16);
     const stJup = await page.evaluate(() => window.__ulgUniversesDemo.getState());
-    assert.equal(stJup.surfaceVehicle, 'drone', 'Gas giant without solid crust must auto-deploy Atmospheric Drone');
-    await snapGpu(page, '09-jupiter-cloud-drone');
-    report.jupiter = { vehicle: stJup.surfaceVehicle, g: Number(stJup.surfaceGravityMS2.toFixed(2)) };
+    assert.equal(stJup.surfaceVehicle, 'ufo', 'Gas giant without solid crust must auto-deploy Buoyant 3D CFD Research UFO');
+    assert.ok(stJup.surfaceTelemetry?.cfdActive, 'Gas giant dive must run live 3D WebGPU Atmospheric CFD');
+    await snapGpu(page, '09-jupiter-cfd-ufo');
+    report.jupiter = {
+      vehicle: stJup.surfaceVehicle,
+      g: Number(stJup.surfaceGravityMS2.toFixed(2)),
+      deck: stJup.surfaceTelemetry?.cfdTelemetry?.chemistry?.activeCloudDeck,
+      windMS: Number((stJup.surfaceTelemetry?.cfdTelemetry?.rmsWindMS || 0).toFixed(2))
+    };
 
     // --- 7. CLEAN EXIT BACK TO L4 ORBITAL VIEW ---
     await page.evaluate(() => window.__ulgUniversesDemo.exitSurfaceView());

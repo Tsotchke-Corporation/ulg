@@ -449,8 +449,20 @@ fn atmo_step_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let dh_dy = ((cyp.flow.z - cym.flow.z) / (2.0 * dy) + 0.45 * (cyp.flow.w - cym.flow.w) / (2.0 * dy)) * pole_taper;
 
   // Real Coriolis parameter f = 2 * Omega_scaled * sin(lat):
-  let f_rot = clamp((params.omega_rot / 7.2921e-5) * (params.radius_m / 6.371e6), 0.05, 14.0) * 2.2 * sin_lat;
-  let p_grad_u = -dh_dx;
+  let rot_scale = clamp((params.omega_rot / 7.2921e-5) * (params.radius_m / 6.371e6), 0.05, 14.0);
+  let f_rot = rot_scale * 2.2 * sin_lat;
+
+  // Physical Hadley / Ferrel / Polar 3-Cell Meridional Circulation (continuous function of Rossby/rotation number!):
+  //   - Fast/Earth-like rotator (rot_scale >= 0.35): Trade easterlies at equator, Ferrel westerlies at mid-latitudes,
+  //     ITCZ moist convergence near lat=0, clear subtropical descending dry belt near |lat|~26 deg, baroclinic storm tracks at |lat|~48 deg!
+  //   - Slow rotator (rot_scale < 0.35): single global Hadley cell!
+  let three_cell_w = smoothstep(0.18, 0.55, rot_scale);
+  let u_target_zonal = mix(
+    0.25 * raw_cos,
+    0.58 * sin(2.0 * lat) * sin(2.0 * lat) - 0.34 * pow(raw_cos, 3.0),
+    three_cell_w
+  );
+  let p_grad_u = -dh_dx + (u_target_zonal - adv.flow.x) * 0.22;
   let p_grad_v = -dh_dy;
 
   // Exact implicit Coriolis rotation (energy-conserving, unconditionally stable for ANY f_rot!)
@@ -458,32 +470,39 @@ fn atmo_step_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v_pre = adv.flow.y + p_grad_v * dt;
   let alpha = f_rot * dt;
   let denom = 1.0 + alpha * alpha;
-  let drag = 1.0 / (1.0 + 0.10 * dt);
+  let drag = 1.0 / (1.0 + 0.12 * dt);
   var u_new = ((u_pre + alpha * v_pre) / denom) * drag * (0.45 + 0.55 * pole_taper);
   var v_new = ((v_pre - alpha * u_pre) / denom) * drag * (0.35 + 0.65 * pole_taper);
 
-  // Mild Laplacian hyperviscosity preventing grid-scale noise while keeping eddies crisp
+  // Smooth Laplacian hyperviscosity preventing grid-scale noise while keeping synoptic Rossby cyclones crisp!
   let lap_u = (cxp.flow.x + cxm.flow.x + cyp.flow.x + cym.flow.x - 4.0 * c0.flow.x);
   let lap_v = (cxp.flow.y + cxm.flow.y + cyp.flow.y + cym.flow.y - 4.0 * c0.flow.y);
-  u_new = clamp(u_new + 0.04 * lap_u, -2.6, 2.6);
-  v_new = clamp(v_new + 0.04 * lap_v, -2.2, 2.2);
+  u_new = clamp(u_new + 0.055 * lap_u, -2.4, 2.4);
+  v_new = clamp(v_new + 0.055 * lap_v, -2.0, 2.0);
 
-  let h_new = clamp(adv.flow.z - 0.48 * div_v * dt + 0.16 * (t_new - adv.flow.z) * dt + 0.03 * (cxp.flow.z + cxm.flow.z + cyp.flow.z + cym.flow.z - 4.0 * c0.flow.z), -1.5, 1.5);
+  let h_new = clamp(adv.flow.z - 0.46 * div_v * dt + 0.16 * (t_new - adv.flow.z) * dt + 0.04 * (cxp.flow.z + cxm.flow.z + cyp.flow.z + cym.flow.z - 4.0 * c0.flow.z), -1.5, 1.5);
 
-  // True Condensation-Subsidence-Rainout Equilibrium:
-  // Clouds condense in cyclonic/convergent updrafts (-div_v > 0, strong |vort|) and CLEAR in subsiding ridges (div_v > 0)!
-  let updraft = max(0.0, -div_v - 0.10) + max(0.0, abs(vort) - 0.55) * 0.24;
-  let subsidence = max(0.0, div_v + 0.05);
+  // True Hadley/Ferrel Condensation-Subsidence-Rainout Equilibrium:
+  //   - Moist updrafts in ITCZ (lat ~ 0) and baroclinic mid-latitude cyclone tracks (|lat| ~ 48 deg)
+  //   - Clear subsiding subtropical high-pressure belts (|lat| ~ 26 deg) letting oceans & continents shine cleanly!
+  let abs_lat = abs(lat);
+  let itcz_band = exp(-pow(abs_lat / 0.17, 2.0));
+  let storm_track = exp(-pow((abs_lat - 0.84) / 0.24, 2.0));
+  let subtrop_dry = exp(-pow((abs_lat - 0.45) / 0.19, 2.0)) * three_cell_w;
+  let updraft = max(0.0, -div_v - 0.08) + max(0.0, abs(vort) - 0.45) * 0.28 + (0.28 * itcz_band + 0.22 * storm_track) * three_cell_w;
+  let subsidence = max(0.0, div_v + 0.04) + 0.42 * subtrop_dry;
   let wind_spd = length(vec2<f32>(u_new, v_new));
-  let evap_src = params.volatile_frac * (0.06 * insol + 0.36 * updraft) * pole_taper * dt;
-  let rain_sink = (max(0.0, adv.chem.x - 0.24) * 0.85 + subsidence * 0.55 * adv.chem.x + 0.16 * adv.chem.x) * dt;
-  let q_cloud = clamp(adv.chem.x + evap_src - rain_sink + 0.025 * (cxp.chem.x + cxm.chem.x + cyp.chem.x + cym.chem.x - 4.0 * c0.chem.x), 0.0, 0.96);
+  let evap_src = params.volatile_frac * (0.04 * insol + 0.34 * updraft) * pole_taper * dt;
+  let rain_sink = (max(0.0, adv.chem.x - 0.28) * 0.90 + subsidence * 0.65 * adv.chem.x + 0.15 * adv.chem.x) * dt;
+  let lap_cloud = cxp.chem.x + cxm.chem.x + cyp.chem.x + cym.chem.x - 4.0 * c0.chem.x;
+  let q_cloud = clamp(adv.chem.x + evap_src - rain_sink + 0.055 * lap_cloud, 0.0, 0.94);
 
   // Dry aeolian saltation plumes lifted by high-speed baroclinic storm fronts & dust devils
   let saltation = max(0.0, wind_spd - 0.22) * 1.15 + max(0.0, abs(vort) - 0.45) * 0.35;
   let dust_lift = params.dust_avail * saltation * (0.35 + 0.65 * insol) * pole_taper * 0.65 * dt;
   let dust_settle = (adv.chem.y * 0.34 + subsidence * 0.25 * adv.chem.y) * dt;
-  let q_dust = clamp(adv.chem.y + dust_lift - dust_settle + 0.025 * (cxp.chem.y + cxm.chem.y + cyp.chem.y + cym.chem.y - 4.0 * c0.chem.y), 0.0, 0.95);
+  let lap_dust = cxp.chem.y + cxm.chem.y + cyp.chem.y + cym.chem.y - 4.0 * c0.chem.y;
+  let q_dust = clamp(adv.chem.y + dust_lift - dust_settle + 0.045 * lap_dust, 0.0, 0.94);
 
   var out: AtmoCell;
   out.flow = vec4<f32>(u_new, v_new, h_new, t_new);
@@ -530,9 +549,9 @@ fn atmo_triboelectric_charge(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   // Ohmic ion conductivity leakage
-  let rho_q = clamp(em_adv.em0.x * exp(-0.18 * dt) + dq, -8.0, 8.0);
-  // Crisp crackling discharge decay so flashes sparkle inside convective fronts!
-  let flash_decay = em_adv.em0.w * exp(-4.8 * dt);
+  let rho_q = clamp(em_adv.em0.x * exp(-0.22 * dt) + dq, -8.0, 8.0);
+  // Crisp localized convective lightning decay (prevents smeared cyan squares across the globe!)
+  let flash_decay = em_adv.em0.w * exp(-7.8 * dt);
 
   var out = em_adv;
   out.em0 = vec4<f32>(rho_q, em_adv.em0.y, em_adv.em0.z, flash_decay);
@@ -696,25 +715,37 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
   let phys = bodyParams || deriveAtmosphereParamsFromBody({ radiusKm: 6371, massSolar: 3.003e-6, atm: 0.72, tempK: 288, kind: 1, color1: [0.06, 0.26, 0.58] });
   let triboEnabled = Boolean(enableTriboelectric);
 
-  // Seed initial baroclinic Rossby wave perturbations + small cloud/dust nuclei (zero hardcoded cyclones!)
+  // Seed smooth, physically coherent Hadley/Ferrel/Rossby synoptic cloud bands & baroclinic jets
+  // (ZERO uncorrelated per-cell white noise -> eliminates speckled/blocky weather!)
   const rand = mulberry32(seed);
+  const p1 = rand() * Math.PI * 2;
+  const p2 = rand() * Math.PI * 2;
+  const p3 = rand() * Math.PI * 2;
   const atmoInit = new Float32Array(total * 8);
   const emInit = new Float32Array(total * 8);
   for (let iy = 0; iy < H; iy += 1) {
     const lat = (0.5 - (iy + 0.5) / H) * Math.PI;
+    const absLat = Math.abs(lat);
     const cosL = Math.cos(lat);
+    const itcz = Math.exp(-Math.pow(absLat / 0.18, 2));
+    const midLat = Math.exp(-Math.pow((absLat - 0.82) / 0.28, 2));
+    const subtropClear = 1.0 - 0.72 * Math.exp(-Math.pow((absLat - 0.44) / 0.20, 2));
     for (let ix = 0; ix < W; ix += 1) {
       const lon = ((ix + 0.5) / W - 0.5) * 2 * Math.PI;
       const o = (iy * W + ix) * 8;
-      // Gentle baroclinic jet + multi-mode Rossby perturbation (non-linear cyclones emerge from Coriolis!)
-      const jet = 0.28 * Math.sin(2 * lat) * Math.sin(2 * lat) - 0.14 * cosL;
-      const pert = 0.12 * Math.sin(3 * lon + 2 * lat) + 0.08 * Math.cos(5 * lon - 3 * lat) + (rand() - 0.5) * 0.08;
-      atmoInit[o + 0] = jet + pert;
-      atmoInit[o + 1] = 0.08 * Math.cos(4 * lon + lat) + (rand() - 0.5) * 0.06;
-      atmoInit[o + 2] = 0.18 * Math.sin(3 * lon) * cosL;
+      // Smooth baroclinic zonal jet + multi-mode tilted Rossby waves (natural swirling cyclones!)
+      const jet = 0.52 * Math.sin(2 * lat) * Math.sin(2 * lat) - 0.30 * Math.pow(Math.max(0, cosL), 3);
+      const rossby = 0.14 * Math.sin(3 * lon + 2.4 * lat + p1) + 0.10 * Math.cos(5 * lon - 3.2 * lat + p2);
+      atmoInit[o + 0] = jet + rossby;
+      atmoInit[o + 1] = 0.11 * Math.cos(4 * lon + 1.5 * lat + p2) + 0.06 * Math.sin(6 * lon - 2.0 * lat + p3);
+      atmoInit[o + 2] = 0.20 * Math.sin(3 * lon + lat + p1) * cosL;
       atmoInit[o + 3] = 0.70 * cosL;
-      atmoInit[o + 4] = phys.volatileCloudFrac * (0.25 + 0.35 * rand());
-      atmoInit[o + 5] = phys.dustAvailability * (0.18 + 0.30 * rand());
+      // Coherent synoptic cloud cover: wispy ITCZ wave + mid-latitude baroclinic frontal bands, clear subtropics!
+      const waveCloud = 0.5 + 0.32 * Math.sin(3 * lon - 4.2 * lat + p1) + 0.18 * Math.cos(6 * lon + 5.0 * lat + p3);
+      const synopCloud = Math.max(0.02, Math.min(0.88, (0.48 * itcz + 0.56 * midLat * waveCloud + 0.14 * waveCloud) * subtropClear));
+      const synopDust = Math.max(0.04, Math.min(0.82, 0.28 + 0.30 * (0.5 + 0.5 * Math.sin(2 * lon + 2.2 * lat + p2)) * cosL));
+      atmoInit[o + 4] = phys.volatileCloudFrac * synopCloud;
+      atmoInit[o + 5] = phys.dustAvailability * synopDust;
       atmoInit[o + 6] = 0.0;
       atmoInit[o + 7] = 0.0;
 
@@ -732,7 +763,7 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
     computeBufferBinding(5, 'storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-planetary-atmo-em-${entryPoint}.v1`,
+    cacheKey: `ulg-planetary-atmo-em-${entryPoint}.v2-hadley`,
     label: `${label}-${entryPoint}`,
     code: planetaryAtmoElectricWgsl,
     entryPoint,

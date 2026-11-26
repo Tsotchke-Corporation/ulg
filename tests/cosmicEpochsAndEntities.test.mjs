@@ -27,8 +27,8 @@ test('All 24 Universal Law Graph nodes validate cleanly with 0 errors, 0 private
   const check = validateUniversalLawGraphContracts();
   assert.equal(check.valid, true, `Errors: ${check.errors.join(', ')} debt: ${check.debt.join(', ')}`);
   assert.equal(check.debt.length, 0);
-  assert.equal(check.nodeCount, 24);
-  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 24);
+  assert.equal(check.nodeCount, 25);
+  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 25);
 
   for (const rel of [
     'src/runtime/astrophysics/cosmicEpochState.js',

@@ -32,7 +32,7 @@ test('Emergent Biology Law Nodes #20-24 validate cleanly against Law Adapter Con
   const check = validateUniversalLawGraphContracts();
   assert.equal(check.valid, true, `Contract errors: ${check.errors.join(', ')} debt: ${check.debt.join(', ')}`);
   assert.equal(check.debt.length, 0);
-  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 24);
+  assert.equal(UNIVERSAL_LAW_GRAPH_NODES.length, 25);
   assert.equal(FUNDAMENTAL_LAW_FAMILIES.SOFT_MATTER_BIOPHYSICS, 'soft-matter-biophysics');
   assert.equal(FUNDAMENTAL_LAW_FAMILIES.REACTION_DIFFUSION_ACTIVE, 'reaction-diffusion-active');
 

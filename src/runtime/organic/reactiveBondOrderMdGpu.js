@@ -130,11 +130,15 @@ struct OrgDihedral {
 @group(0) @binding(3) var<storage, read> angles: array<OrgAngle>;
 @group(0) @binding(4) var<storage, read> dihedrals: array<OrgDihedral>;
 @group(0) @binding(5) var<storage, read_write> telemetry: array<vec4<f32>>;
+// Reference coordinates for bearing stator mount (xyz = ref_pos, w = isStatorFlag 0/1)
+@group(0) @binding(6) var<storage, read> ref_mount: array<vec4<f32>>;
 
 var<workgroup> wg0: array<f32, 64>;
 var<workgroup> wg1: array<f32, 64>;
 var<workgroup> wg2: array<f32, 64>;
 var<workgroup> wg3: array<f32, 64>;
+var<workgroup> wg_v0: array<vec3<f32>, 64>;
+var<workgroup> wg_v1: array<vec3<f32>, 64>;
 
 fn hash_f(x: f32) -> f32 {
   return fract(sin(x * 127.1 + params.seed_f * 31.7) * 43758.5453);
@@ -247,10 +251,14 @@ fn compute_organic_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
       let dv_dphi = -0.5 * v_n * n_per * sin(n_per * phi - gam);
       let g0 = n1h * (lb2 / max(0.25, l1));
       let g3 = -n2h * (lb2 / max(0.25, l2));
+      // Exact Newton's-3rd-Law Blondel-Karplus analytical dihedral gradients (F0 + F1 + F2 + F3 === 0 identically!)
+      let inv_lb2_2 = 1.0 / max(0.12, lb2 * lb2);
+      let c1 = clamp(dot(b1, b2) * inv_lb2_2, -1.8, 1.8);
+      let c3 = clamp(dot(b3, b2) * inv_lb2_2, -1.8, 1.8);
       if (i0 == i) { f = f - g0 * dv_dphi; }
       else if (i3 == i) { f = f - g3 * dv_dphi; }
-      else if (i1 == i) { f = f + (g0 * 0.7 - g3 * 0.3) * dv_dphi; }
-      else { f = f + (g3 * 0.7 - g0 * 0.3) * dv_dphi; }
+      else if (i1 == i) { f = f + ((1.0 + c1) * g0 - c3 * g3) * dv_dphi; }
+      else { f = f + (-c1 * g0 + (1.0 + c3) * g3) * dv_dphi; }
       pot_i = pot_i + 0.125 * v_n * (1.0 + cos(n_per * phi - gam));
     }
   }
@@ -341,15 +349,37 @@ fn compute_organic_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
       let f_s = -6.2 * (d - r_target) * (dv / d);
       f = f + select(-f_s, f_s, i == params.react_c);
     }
+  } else if (params.react_mode == 3u) {
+    // Molecular Bearing Mode (strictly topology-driven via ref_mount.w: 0 = free inner rotor, 1 = outer stator mount!):
+    //   - Stator ring atoms (w > 0.5) have a gentle elastic housing mount around ref_mount.xyz so thermal vibrations
+    //     & bearing recoil flex the stator realistically without drifting out of frame.
+    //   - Inner rotor atoms (w < 0.5) experience real tangential bearing torque (react_progress = torque drive)
+    //     + gentle axial planarity guide (z -> 0) while spinning 100% freely in the live GPU S...O LJ + QEq field!
+    let rm = ref_mount[i];
+    if (rm.w > 0.5) {
+      let disp = pi - rm.xyz;
+      f = f - disp * 18.0;
+    } else {
+      let r_xy = max(0.25, length(pi.xy));
+      let tang = vec2<f32>(-pi.y / r_xy, pi.x / r_xy);
+      let m_i = 1.0 / max(1e-4, ai.pos_m.w);
+      // Exact mass-proportional uniform angular torque (a_tang / r identical for C & S -> ZERO shear distortion!)
+      // Balances gentle rotor damping gamma_rotor = 0.68 -> terminal omega ~ 0.56 * tau rad/sim-time!
+      let alpha_drive = params.react_progress * 0.38;
+      f.x = f.x + tang.x * m_i * alpha_drive * r_xy;
+      f.y = f.y + tang.y * m_i * alpha_drive * r_xy;
+      // Gentle axial thrust bearing restoring z -> 0 so rotor stays cleanly inside stator plane
+      f.z = f.z - pi.z * m_i * 1.6;
+    }
   }
 
-  // Gentle harmonic box confinement far outside (r > 7.5 A) so unbound clusters stay in frame
+  // Gentle harmonic box confinement far outside (r > 13.5 A) so unbound clusters stay in frame
   let r_com = length(pi);
-  if (r_com > 7.5) {
-    f = f - (pi / r_com) * (r_com - 7.5) * 2.0;
+  if (r_com > 13.5) {
+    f = f - (pi / r_com) * (r_com - 13.5) * 2.0;
   }
 
-  atoms[i].frc_r = vec4<f32>(clamp(f, vec3<f32>(-45.0), vec3<f32>(45.0)), ri);
+  atoms[i].frc_r = vec4<f32>(clamp(f, vec3<f32>(-85.0), vec3<f32>(85.0)), ri);
   // Temporarily stash per-atom potential in telemetry scratch via reduction kernel
   if (i == 0u) {
     telemetry[1].x = pot_i;
@@ -367,20 +397,76 @@ fn integrate_organic_atoms(@builtin(global_invocation_id) gid: vec3<u32>) {
   let f = a.frc_r.xyz;
 
   // Deterministic pseudo-Gaussian Langevin thermal kick proportional to sqrt(T * gamma / m)
+  // For free molecular bearing rotor atoms (react_mode == 3 && ref_mount.w < 0.5), use low superlubric
+  // damping (0.32) so uniform torque spins the Sulflower smoothly with ZERO bond shear!
+  let is_free_rotor = (params.react_mode == 3u && ref_mount[i].w < 0.5);
+  let gamma_eff = select(params.gamma_damp, 0.68, is_free_rotor);
   let s0 = f32(i) * 19.31 + f32(params.step_index) * 3.73;
   let rx = (hash_f(s0 + 1.1) + hash_f(s0 + 2.3) - 1.0) * 1.732;
   let ry = (hash_f(s0 + 3.7) + hash_f(s0 + 5.1) - 1.0) * 1.732;
   let rz = (hash_f(s0 + 7.3) + hash_f(s0 + 9.9) - 1.0) * 1.732;
-  let sigma_v = sqrt(max(0.0, params.temp_k * 0.00018 * params.gamma_damp * inv_m * dt));
+  let sigma_v = sqrt(max(0.0, params.temp_k * 0.00018 * gamma_eff * inv_m * dt));
 
   var v = a.vel_q.xyz + f * (inv_m * dt);
-  v = v * exp(-params.gamma_damp * dt) + vec3<f32>(rx, ry, rz) * sigma_v;
+  v = v * exp(-gamma_eff * dt) + vec3<f32>(rx, ry, rz) * sigma_v;
   v = clamp(v, vec3<f32>(-12.0), vec3<f32>(12.0));
   let p = a.pos_m.xyz + v * dt;
 
   a.pos_m = vec4<f32>(p, inv_m);
   a.vel_q = vec4<f32>(v, a.vel_q.w);
   atoms[i] = a;
+}
+
+// Kernel 2b: Parallel Zero-COM-Drift & Linear-Momentum Anchor (@workgroup_size(64))
+// Eliminates Langevin random-walk & translational drift so NO compound ever jiggles out of view!
+// Preserves 100% of internal vibrations, torsions, H-bonding, SN2/Diels-Alder reactions, & bearing rotation!
+@compute @workgroup_size(64)
+fn recenter_organic_com(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x;
+  let is_bearing = params.react_mode == 3u;
+  let end_n = select(params.atom_count, max(1u, params.react_a), is_bearing);
+  var m_sum = 0.0;
+  var mr_sum = vec3<f32>(0.0);
+  var mv_sum = vec3<f32>(0.0);
+  var i = tid;
+  loop {
+    if (i >= end_n) { break; }
+    let a = atoms[i];
+    let m = 1.0 / max(1e-4, a.pos_m.w);
+    m_sum = m_sum + m;
+    mr_sum = mr_sum + a.pos_m.xyz * m;
+    mv_sum = mv_sum + a.vel_q.xyz * m;
+    i = i + 64u;
+  }
+  wg0[tid] = m_sum;
+  wg_v0[tid] = mr_sum;
+  wg_v1[tid] = mv_sum;
+  workgroupBarrier();
+  var s = 32u;
+  loop {
+    if (s == 0u) { break; }
+    if (tid < s) {
+      wg0[tid] = wg0[tid] + wg0[tid + s];
+      wg_v0[tid] = wg_v0[tid] + wg_v0[tid + s];
+      wg_v1[tid] = wg_v1[tid] + wg_v1[tid + s];
+    }
+    workgroupBarrier();
+    s = s >> 1u;
+  }
+  let inv_mtot = 1.0 / max(1e-4, wg0[0]);
+  let r_com = wg_v0[0] * inv_mtot;
+  let v_com = wg_v1[0] * inv_mtot;
+  // Smoothly subtract exact center-of-mass velocity & residual COM offset (never alters internal distances/angles!)
+  let corr_r = r_com * select(0.25, 0.35, is_bearing);
+  var j = tid;
+  loop {
+    if (j >= end_n) { break; }
+    var a = atoms[j];
+    a.pos_m = vec4<f32>(a.pos_m.xyz - corr_r, a.pos_m.w);
+    a.vel_q = vec4<f32>(a.vel_q.xyz - v_com, a.vel_q.w);
+    atoms[j] = a;
+    j = j + 64u;
+  }
 }
 
 // Kernel 3: Parallel 64-Thread Telemetry & Emergent Bond/H-Bond Reduction
@@ -454,6 +540,23 @@ fn reduce_organic_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
     let inst_t = (wg0[0] / (1.5 * n_f)) * 9200.0;
     let rg = sqrt(wg3[0] / n_f);
     telemetry[0] = vec4<f32>(inst_t, wg1[0], wg2[0], rg);
+    // Compute rotor angular velocity omega (rad/sim-time) & angle theta for bearing mode
+    if (params.react_mode == 3u && params.react_a >= 3u) {
+      var lz = 0.0;
+      var iz = 0.0;
+      for (var k = 0u; k < params.react_a; k = k + 1u) {
+        let ak = atoms[k];
+        let mk = 1.0 / max(1e-4, ak.pos_m.w);
+        lz = lz + mk * (ak.pos_m.x * ak.vel_q.y - ak.pos_m.y * ak.vel_q.x);
+        iz = iz + mk * (ak.pos_m.x * ak.pos_m.x + ak.pos_m.y * ak.pos_m.y);
+      }
+      let omega = lz / max(1e-3, iz);
+      let a0 = atoms[0].pos_m.xy;
+      let theta = atan2(a0.y, a0.x);
+      telemetry[1] = vec4<f32>(telemetry[1].x, omega, theta, 1.0);
+    } else {
+      telemetry[1] = vec4<f32>(telemetry[1].x, 0.0, 0.0, 0.0);
+    }
   }
 }
 `;
@@ -495,6 +598,19 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
       { a: reactA, b: reactB, order: 1.0, rEq: 1.54, kMorse: 12.0, active: 1.0, isForming: true },
       { a: reactC, b: reactD, order: 1.0, rEq: 1.54, kMorse: 12.0, active: 1.0, isForming: true }
     );
+  } else if (g.rotorMeta?.kind === 'molecular-bearing') {
+    reactMode = 3;
+    reactA = g.rotorMeta.rotorCount || 24;
+    reactB = g.rotorMeta.statorStart || 24;
+  }
+
+  const refMountInit = new Float32Array(Math.max(1, n) * 4);
+  for (let i = 0; i < n; i += 1) {
+    const a = g.atoms[i];
+    refMountInit[i * 4 + 0] = a.pos[0];
+    refMountInit[i * 4 + 1] = a.pos[1];
+    refMountInit[i * 4 + 2] = a.pos[2];
+    refMountInit[i * 4 + 3] = (reactMode === 3 && i >= reactB) ? 1.0 : 0.0;
   }
 
   const atomInit = new Float32Array(Math.max(1, n) * 16);
@@ -556,10 +672,11 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'read-only-storage'),
     computeBufferBinding(4, 'read-only-storage'),
-    computeBufferBinding(5, 'storage')
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-organic-md-${entryPoint}.v1`,
+    cacheKey: `ulg-organic-md-${entryPoint}.v5-com-bearing`,
     label: `${label}-${entryPoint}`,
     code: reactiveBondOrderMdWgsl,
     entryPoint,
@@ -567,6 +684,7 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
   });
   const forcePipe = mkPipe('compute_organic_forces');
   const intPipe = mkPipe('integrate_organic_atoms');
+  const comPipe = mkPipe('recenter_organic_com');
   const telPipe = mkPipe('reduce_organic_telemetry');
 
   const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
@@ -574,6 +692,7 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
   const bondsBuf = device.createBuffer({ label: `${label}-bonds`, size: bondInit.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC | GPU_BUF.COPY_DST });
   const anglesBuf = device.createBuffer({ label: `${label}-angles`, size: angleInit.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const dihedralsBuf = device.createBuffer({ label: `${label}-dihedrals`, size: dihInit.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
+  const refMountBuf = device.createBuffer({ label: `${label}-ref-mount`, size: refMountInit.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 32, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telReadBuf = device.createBuffer({ label: `${label}-tel-rd`, size: 32, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
   const atomsReadBuf = device.createBuffer({ label: `${label}-atoms-rd`, size: atomInit.byteLength, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
@@ -582,6 +701,7 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
   device.queue.writeBuffer(bondsBuf, 0, bondInit);
   device.queue.writeBuffer(anglesBuf, 0, angleInit);
   device.queue.writeBuffer(dihedralsBuf, 0, dihInit);
+  device.queue.writeBuffer(refMountBuf, 0, refMountInit);
 
   const bg = createCachedExplicitBindGroup(device, {
     layout: forcePipe.bindGroupLayout,
@@ -592,13 +712,14 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
       { binding: 2, resource: { buffer: bondsBuf } },
       { binding: 3, resource: { buffer: anglesBuf } },
       { binding: 4, resource: { buffer: dihedralsBuf } },
-      { binding: 5, resource: { buffer: telBuf } }
+      { binding: 5, resource: { buffer: telBuf } },
+      { binding: 6, resource: { buffer: refMountBuf } }
     ]
   });
 
   let curTempK = Math.max(5, Number(temperatureK) || 300);
   let curEps = Math.max(1, Number(dielectricEr) || 1.0);
-  let reactProgress = 0.0;
+  let reactProgress = reactMode === 3 ? 0.45 : 0.0;
   let stepIndex = 0;
   let mapInFlight = false;
   let disposed = false;
@@ -628,7 +749,7 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
     curEps = Math.max(1.0, Math.min(100.0, Number(eps) || 1.0));
     curQeq = solveQeqCharges(g, { dielectricEr: curEps });
   }
-  function setReactionProgress(p) { reactProgress = Math.max(0, Math.min(1, Number(p) || 0)); }
+  function setReactionProgress(p) { reactProgress = Math.max(0, Math.min(reactMode === 3 ? 1.5 : 1, Number(p) || 0)); }
 
   async function step({ dt = 0.014, substeps = 4, readTelemetry = true, readPositions = false } = {}) {
     if (disposed) return lastTelemetry;
@@ -651,6 +772,8 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
       pass.dispatchWorkgroups(wgAtoms);
       pass.setPipeline(intPipe.pipeline);
       pass.dispatchWorkgroups(wgAtoms);
+      pass.setPipeline(comPipe.pipeline);
+      pass.dispatchWorkgroups(1);
       if (s === sub - 1) {
         pass.setPipeline(telPipe.pipeline);
         pass.dispatchWorkgroups(1);
@@ -671,6 +794,8 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
     let actB = lastTelemetry.activeBondCount;
     let hbCnt = lastTelemetry.hBondCount;
     let rg = lastTelemetry.radiusOfGyrationA;
+    let rotorOmega = lastTelemetry.rotorOmegaRadPs ?? 0;
+    let rotorTheta = lastTelemetry.rotorThetaRad ?? 0;
 
     if (doTel) {
       try {
@@ -678,8 +803,10 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
         if (doPos) maps.push(atomsReadBuf.mapAsync(GPU_BUF.MAP_READ));
         await Promise.all(maps);
         if (!disposed) {
-          const f = new Float32Array(telReadBuf.getMappedRange(0, 16));
+          const f = new Float32Array(telReadBuf.getMappedRange(0, 32));
           instT = f[0]; actB = Math.round(f[1]); hbCnt = Math.round(f[2]); rg = f[3];
+          rotorOmega = f[5] || 0;
+          rotorTheta = f[6] || 0;
           if (doPos) latestAtomsHost = new Float32Array(atomsReadBuf.getMappedRange().slice(0));
         }
         try { telReadBuf.unmap(); } catch {}
@@ -703,6 +830,8 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
       activeBondCount: actB,
       hBondCount: hbCnt,
       radiusOfGyrationA: rg,
+      rotorOmegaRadPs: rotorOmega,
+      rotorThetaRad: rotorTheta,
       dipoleDebye: curQeq.dipoleDebye,
       bornSolvationKjMol: curQeq.bornSolvationKjMol,
       accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
@@ -714,7 +843,7 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
   function dispose() {
     if (disposed) return;
     disposed = true;
-    for (const b of [paramsBuf, atomsBuf, bondsBuf, anglesBuf, dihedralsBuf, telBuf, telReadBuf, atomsReadBuf]) {
+    for (const b of [paramsBuf, atomsBuf, bondsBuf, anglesBuf, dihedralsBuf, refMountBuf, telBuf, telReadBuf, atomsReadBuf]) {
       try { b.destroy(); } catch {}
     }
   }

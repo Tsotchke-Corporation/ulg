@@ -23,6 +23,23 @@ export const LIFE_LAB_ABOUT_ULG = Object.freeze({
 });
 
 export const LIFE_MODE_DOCS = Object.freeze({
+  'organism-overview': {
+    title: 'Interactive Xenobiology Specimen Vivarium / Containment Aquarium',
+    badge: '3D Organism Overview · Interactive Lab',
+    scale: '10⁻¹ → 10⁺¹ m',
+    equations: [
+      'Kleiber Allometry: BMR = B₀ · M^0.75 · Q₁₀^((T − T_ref)/10)  |  Euler Buckling: H_max ∝ (E / ρg)^(1/3)',
+      'Bains–Petkowski–Seager (2024) 7-Solvent Framework + Kiang/Lehmer Multi-Photon Z-Scheme Photobiology',
+      'Thermodynamic Redox Yield ΔG (kJ/mol e⁻) + NutMEG Biomass Scaling + 4–12 Letter XNA Eigen Threshold'
+    ],
+    whatYouSee:
+      'A live, self-behaving alien organism (creature, plant, fungus, aero-leviathan, or chemotroph) housed inside a containment vivarium replicating its homeworld solvent, temperature, and host-star spectrum. Select a tool (Inspect, Probe, Heat, Cool, Neuro-Stim, or Biopsy) and click directly on ANY anatomical part to trigger physical, behavioral, and physiological responses or drill straight into its cellular membranes, folded proteins, XNA, and neural waves!',
+    experiments: [
+      'Click 👉 Probe on a creature’s head vs torso vs limbs, or on a fungus cap (eruption of glowing spores!) or plant frond (seismonastic leaf folding!).',
+      'Click 🔥 Heat repeatedly to watch Q₁₀ metabolic rate surge, radiator sails flush, and thermal stress warnings near T_denature — then click 💉 Biopsy to inspect live protein unfolding in Layer 2!',
+      'Switch world clades in the Vivarium selector to compare Fauna, Flora, and Fungi evolved under H₂O, Titan CH₄, M-Dwarf NIR, Venus H₂SO₄, Europa vents, and Jovian cloud decks.'
+    ]
+  },
   'lipid-soup': {
     title: 'Amphiphile Spontaneous Self-Assembly (Hydrophobic Micelles & Proto-Bilayers)',
     badge: '3-Bead GPU MD · ε_hp Self-Assembly',

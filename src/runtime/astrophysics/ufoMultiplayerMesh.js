@@ -531,11 +531,12 @@ export function createUfoMultiplayerMesh({
     return out;
   }
 
-  function getRemotePeersForContext({ level, bodyId, surfaceActive } = {}) {
+  function getRemotePeersForContext({ level, bodyId, systemKey = null, surfaceActive } = {}) {
     const out = [];
     for (const peer of getAllRemotePeers()) {
-      const sameSurface = Boolean(surfaceActive) && Boolean(peer.surfaceActive) && (!bodyId || peer.bodyId === bodyId);
-      const sameSpace = !surfaceActive && !peer.surfaceActive && (level == null || peer.level === level);
+      const sameSystem = !systemKey || !peer.systemKey || peer.systemKey === systemKey;
+      const sameSurface = Boolean(surfaceActive) && Boolean(peer.surfaceActive) && sameSystem && (!bodyId || peer.bodyId === bodyId);
+      const sameSpace = !surfaceActive && !peer.surfaceActive && sameSystem && (level == null || peer.level === level);
       if (sameSurface || sameSpace) {
         out.push(peer);
       }

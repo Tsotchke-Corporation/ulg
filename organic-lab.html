@@ -70,23 +70,35 @@
       .sidebar::-webkit-scrollbar, .right-dock::-webkit-scrollbar { width: 5px; }
       .sidebar::-webkit-scrollbar-thumb, .right-dock::-webkit-scrollbar-thumb { background: rgba(124,164,240,0.25); border-radius: 3px; }
 
-      .acc-group { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-      .acc-group.active-group { border-color: rgba(86, 194, 255, 0.62); }
+      .acc-group {
+        background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+        overflow: hidden; flex-shrink: 0; transition: border-color 0.14s ease;
+      }
+      .acc-group.active-group { border-color: rgba(86, 194, 255, 0.70); box-shadow: 0 0 0 1px rgba(86, 194, 255, 0.15); }
       .acc-header {
         width: 100%; background: transparent; border: none; color: var(--text);
-        padding: 7px 9px; font-size: 11px; font-weight: 700; cursor: pointer;
-        display: flex; align-items: center; justify-content: space-between; text-align: left;
+        padding: 7px 9px; min-height: 31px; font-size: 11px; font-weight: 700; cursor: pointer;
+        display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;
+        flex-shrink: 0;
       }
-      .acc-header:hover { background: rgba(86, 194, 255, 0.08); }
-      .acc-group.active-group > .acc-header { background: rgba(86, 194, 255, 0.14); color: #fff; }
-      .acc-chev { font-size: 10px; color: var(--muted); transition: transform 0.14s; }
+      .acc-header:hover { background: rgba(86, 194, 255, 0.10); }
+      .acc-group.active-group > .acc-header { background: rgba(86, 194, 255, 0.16); color: #fff; }
+      .acc-header-right { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+      .acc-count {
+        font-family: ui-monospace, monospace; font-size: 9.5px; font-weight: 700;
+        padding: 1px 5px; border-radius: 999px; background: rgba(86, 194, 255, 0.12);
+        color: var(--muted);
+      }
+      .acc-group.active-group > .acc-header .acc-count { background: rgba(86, 194, 255, 0.28); color: #f0f9ff; }
+      .acc-chev { font-size: 10px; color: var(--muted); transition: transform 0.14s; display: inline-block; }
       .acc-group.open > .acc-header .acc-chev { transform: rotate(90deg); color: var(--accent); }
-      .acc-body { display: none; padding: 5px 7px 7px; border-top: 1px solid rgba(124,164,240,0.12); flex-direction: column; gap: 3px; }
+      .acc-body { display: none; padding: 5px 7px 7px; border-top: 1px solid rgba(124,164,240,0.12); flex-direction: column; gap: 4px; }
       .acc-group.open > .acc-body { display: flex; }
       .mode-btn {
         width: 100%; background: rgba(255,255,255,0.025); border: 1px solid transparent;
         color: #cbd5e1; border-radius: 6px; padding: 5px 8px; font-size: 11px;
         cursor: pointer; text-align: left; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+        flex-shrink: 0;
       }
       .mode-btn:hover { background: rgba(86,194,255,0.12); border-color: rgba(86,194,255,0.34); color: #fff; }
       .mode-btn.active { background: rgba(124,77,255,0.28); border-color: #a78bfa; color: #fff; font-weight: 700; }
@@ -96,7 +108,7 @@
       .card {
         background: var(--card); border: 1px solid var(--border);
         border-radius: 8px; padding: 8px 9px; font-size: 11px;
-        display: flex; flex-direction: column; gap: 6px;
+        display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
       }
       .card h3 {
         margin: 0; font-size: 10px; font-weight: 800; color: var(--accent);
@@ -171,7 +183,7 @@
 
       .plot-card {
         background: rgba(10, 15, 28, 0.92); border: 1px solid var(--border);
-        border-radius: 8px; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px;
+        border-radius: 8px; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px; flex-shrink: 0;
       }
       .plot-head { display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 800; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
       .plot-head span:last-child { color: var(--muted); font-family: ui-monospace, monospace; font-weight: 600; text-transform: none; }
@@ -301,14 +313,14 @@
         </div>
 
         <div class="acc-group open active-group" data-group="nanotech">
-          <button class="acc-header" type="button"><span>0. Supramolecular Nanotech</span><span class="acc-chev">▸</span></button>
+          <button class="acc-header" type="button" aria-expanded="true"><span>0. Supramolecular Nanotech</span><span class="acc-header-right"><span class="acc-count">1</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
             <button class="mode-btn active" data-mode="sulflower-bearing" type="button"><span>Sulflower Bearing</span><small>C₁₆S₈@Calix[11]</small></button>
           </div>
         </div>
 
-        <div class="acc-group open" data-group="aromatic">
-          <button class="acc-header" type="button"><span>1. Conjugation &amp; π-Aromaticity</span><span class="acc-chev">▸</span></button>
+        <div class="acc-group" data-group="aromatic">
+          <button class="acc-header" type="button" aria-expanded="false"><span>1. Conjugation &amp; π-Aromaticity</span><span class="acc-header-right"><span class="acc-count">5</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
             <button class="mode-btn" data-mode="benzene" type="button"><span>Benzene</span><small>C₆H₆ · 6π</small></button>
             <button class="mode-btn" data-mode="cyclobutadiene" type="button"><span>Cyclobutadiene</span><small>C₄H₄ · 4π</small></button>
@@ -318,8 +330,8 @@
           </div>
         </div>
 
-        <div class="acc-group open" data-group="conformational">
-          <button class="acc-header" type="button"><span>2. Conformations, Chirality &amp; Isomers</span><span class="acc-chev">▸</span></button>
+        <div class="acc-group" data-group="conformational">
+          <button class="acc-header" type="button" aria-expanded="false"><span>2. Conformations, Chirality &amp; Isomers</span><span class="acc-header-right"><span class="acc-count">7</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
             <button class="mode-btn" data-mode="cyclohexane" type="button"><span>Cyclohexane Chair</span><small>C₆H₁₂ · sp³</small></button>
             <button class="mode-btn" data-mode="butane" type="button"><span>n-Butane Rotor</span><small>C₄H₁₀</small></button>
@@ -331,16 +343,16 @@
           </div>
         </div>
 
-        <div class="acc-group open" data-group="reactions">
-          <button class="acc-header" type="button"><span>3. Reactive Bond-Order Mechanisms</span><span class="acc-chev">▸</span></button>
+        <div class="acc-group" data-group="reactions">
+          <button class="acc-header" type="button" aria-expanded="false"><span>3. Reactive Bond-Order Mechanisms</span><span class="acc-header-right"><span class="acc-count">2</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
             <button class="mode-btn" data-mode="sn2-walden" type="button"><span>SN2 Walden Inversion</span><small>Cl⁻+CH₃Br</small></button>
             <button class="mode-btn" data-mode="diels-alder" type="button"><span>Diels–Alder [4+2]</span><small>Pericyclic</small></button>
           </div>
         </div>
 
-        <div class="acc-group open" data-group="kinetics">
-          <button class="acc-header" type="button"><span>4. Acid-Base &amp; Autocatalytic Networks</span><span class="acc-chev">▸</span></button>
+        <div class="acc-group" data-group="kinetics">
+          <button class="acc-header" type="button" aria-expanded="false"><span>4. Acid-Base &amp; Autocatalytic</span><span class="acc-header-right"><span class="acc-count">4</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
             <button class="mode-btn" data-mode="acetic-acid" type="button"><span>Acetic Acid pKa</span><small>CH₃COOH</small></button>
             <button class="mode-btn" data-mode="frank-chiral" type="button"><span>Frank Chiral Breaking</span><small>128² L/D</small></button>

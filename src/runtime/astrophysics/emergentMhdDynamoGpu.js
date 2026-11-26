@@ -21,8 +21,84 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_EMERGENT_DYNAMO_SCHEMA = 'ulg.astrophysics.emergent-3d-mhd-dynamo-webgpu.v1';
+
+export const EMERGENT_MHD_DYNAMO_LAW_ADAPTER = Object.freeze({
+  id: 'emergent-3d-mhd-dynamo',
+  lawNodeId: 'law:astrophysics-emergent-3d-mhd-dynamo',
+  orderConstraint: 'after:galactic-mhd-evolution',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['plasma-particle-velocities', 'magnetic-field-glm-grid']),
+  writes: Object.freeze(['magnetic-field-glm-grid']),
+  accumulates: Object.freeze(['magnetic-energy-divb-telemetry']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['solenoidal-div-b-glm', 'magnetic-helicity-quenched']),
+  validityDomain: Object.freeze({ requiresNonZeroSeedB0: true, gridNMin: 12 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e7, 1e22]),
+  fundamentalLaws: Object.freeze(['mean-field-alpha-omega-induction', 'dedner-glm-divergence-cleaning', 'dynamical-alpha-quenching'])
+});
+
+export function evaluateEmergentMhdDynamoActivation(physicalState = {}) {
+  const b0 = Math.abs(Number(physicalState.dynamoSeedB0 ?? physicalState.magneticFieldStrength) || 0);
+  const hasPlasma = (Number(physicalState.galacticBodyCount) || 0) >= 64
+    || (Number(physicalState.coreTempK) || 0) >= 1e5
+    || Boolean(physicalState.ionizedGasPresent);
+  const active = b0 > 1e-6 && hasPlasma;
+  return { active, reason: active ? 'magnetized-shearing-plasma-dynamo-active' : 'zero-seed-b0-or-neutral-dormant' };
+}
+
+export function registerEmergentMhdDynamoModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('emergent-3d-mhd-dynamo@1')) {
+    return registry.resolveModule('emergent-3d-mhd-dynamo@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'emergent-3d-mhd-dynamo', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/emergentMhdDynamoGpu.js',
+      entryPoint: 'step_induction_glm',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      initialB0: { type: 'number', min: 0, max: 5, required: false }
+    },
+    stateLayout: {
+      tensorId: 'emergent-mhd-dynamo-bfield',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 4,
+      strideBytes: 16,
+      fields: ['Bx', 'By', 'Bz', 'psiGlm']
+    },
+    scaleRangeM: [1e7, 1e22],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: EMERGENT_MHD_DYNAMO_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createEmergent3dDynamoFieldWebGpu(device, {
+        gridN: 16,
+        initialB0: Number(p.initialB0 ?? 0.3)
+      });
+      try {
+        return createSimulationArtifact?.({
+          schema: ULG_EMERGENT_DYNAMO_SCHEMA,
+          summary: { gridN: session.gridN, initialB0: session.initialB0 }
+        }) ?? { gridN: session.gridN, initialB0: session.initialB0 };
+      } finally {
+        session.dispose();
+      }
+    }
+  });
+}
 
 const GPU_BUF = Object.freeze({
   MAP_READ: 0x0001,

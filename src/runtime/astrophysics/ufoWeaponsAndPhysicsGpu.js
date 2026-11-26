@@ -459,6 +459,9 @@ export function appendIconicUfoGeometry(opaqueOut, fxOut, {
   yaw = 0,
   pitch = 0,
   roll = 0,
+  basisRight = null,
+  basisUp = null,
+  basisFwd = null,
   radius = UFO_RADIUS_M,
   rimAngle = 0,
   vertThrust = 0,
@@ -471,14 +474,23 @@ export function appendIconicUfoGeometry(opaqueOut, fxOut, {
   shieldFlash = 0,
   curvFn = (p) => p
 } = {}) {
-  const cy = Math.cos(yaw); const sy = Math.sin(yaw);
-  const cp = Math.cos(pitch); const sp = Math.sin(pitch);
-  const cr = Math.cos(roll); const sr = Math.sin(roll);
-  const uFwd = normalize3([sy * cp, -sp, cy * cp]);
-  const uRight0 = normalize3([cy, 0, -sy]);
-  const uUp0 = normalize3(cross3(uFwd, uRight0));
-  const uRight = normalize3([uRight0[0] * cr + uUp0[0] * sr, uRight0[1] * cr + uUp0[1] * sr, uRight0[2] * cr + uUp0[2] * sr]);
-  const uUp = normalize3(cross3(uFwd, uRight));
+  let uRight;
+  let uUp;
+  let uFwd;
+  if (Array.isArray(basisRight) && Array.isArray(basisUp) && Array.isArray(basisFwd)) {
+    uRight = normalize3(basisRight);
+    uUp = normalize3(basisUp);
+    uFwd = normalize3(basisFwd);
+  } else {
+    const cy = Math.cos(yaw); const sy = Math.sin(yaw);
+    const cp = Math.cos(pitch); const sp = Math.sin(pitch);
+    const cr = Math.cos(roll); const sr = Math.sin(roll);
+    uFwd = normalize3([sy * cp, -sp, cy * cp]);
+    const uRight0 = normalize3([cy, 0, -sy]);
+    const uUp0 = normalize3(cross3(uFwd, uRight0));
+    uRight = normalize3([uRight0[0] * cr + uUp0[0] * sr, uRight0[1] * cr + uUp0[1] * sr, uRight0[2] * cr + uUp0[2] * sr]);
+    uUp = normalize3(cross3(uFwd, uRight));
+  }
 
   const base = curvFn(pos);
   const s = radius / 9.15; // Normalize geometry proportions to true 60-foot (R=9.15 m) saucer!

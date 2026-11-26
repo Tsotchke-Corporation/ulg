@@ -115,7 +115,7 @@ export function evaluateRocheAndTidalHeating({
 export const tidalRocheWgsl = /* wgsl */ `
 struct TidalParams {
   particle_count: u32,
-  mode_code: u32,      // 0=roche_rubble_disruption+rings, 1=giant_impact_magma_disk, 2=cryovolcanic_plumes, 3=red_giant_engulfment
+  mode_code: u32,      // 0=roche_rubble_disruption+rings, 1=giant_impact_magma_disk, 2=cryovolcanic_plumes, 3=red_giant_engulfment, 4=catastrophic_shatter, 5=tde_spaghettification
   step_index: u32,
   pad0: u32,
   dt: f32,
@@ -162,6 +162,49 @@ fn step_tidal_roche(@builtin(global_invocation_id) gid: vec3<u32>) {
   var intact = p.vel_bond.w;
   let dt = params.dt;
   let mode = params.mode_code;
+
+  if (mode == 5u) {
+    // Mode 5: Tidal Disruption Event (TDE) — Star spaghettified by a Supermassive Black Hole!
+    // Bound half returns along a relativistic apsidal-precessing fallback stream into a super-Eddington
+    // self-intersecting shock disk; unbound half sweeps outward on a blazing hyperbolic tidal tail!
+    let r_tde = max(params.r_host * 1.05, length(loc));
+    let n_r = loc / r_tde;
+    // Paczynski-Wiita pseudo-Newtonian GR potential: a = -GM / (r - r_s)^2 drives real apsidal precession!
+    let r_s = params.r_host * 0.62;
+    let r_eff = max(0.32, r_tde - r_s);
+    var acc_tde = -n_r * (params.gm_host / (r_eff * r_eff));
+    // Shock dissipation & circularization inside r < 3.6*r_host heats stream to 10^6 K UV/X-ray flare!
+    let in_shock = 1.0 - smoothstep(params.r_host * 1.4, params.r_host * 4.4, r_tde);
+    if (in_shock > 0.05 && p.therm_id.z < 1.5) {
+      let v_rad = dot(vel, n_r);
+      vel = vel - n_r * (v_rad * in_shock * 1.45 * dt);
+      vel.y = vel.y * (1.0 - in_shock * 1.8 * dt);
+    }
+    vel = vel + acc_tde * dt;
+    loc = loc + vel * dt;
+    var age_t = p.therm_id.w + dt;
+    // Recycle accreted or escaped parcels continuously from the plunging stellar pericenter stream
+    if (length(loc) < params.r_host * 1.12 || length(loc) > 16.5 || age_t > 8.5) {
+      let is_unbound = p.meta0.x > 0.66;
+      let s_u = p.meta0.y;
+      let spread = (p.meta0.z - 0.5) * 0.28;
+      let ang0 = -0.65 + s_u * 1.85;
+      let r_p = params.r_host * (1.85 + s_u * 2.2);
+      loc = vec3<f32>(cos(ang0) * r_p + spread, spread * 0.35, sin(ang0) * r_p + spread);
+      let tang = normalize(vec3<f32>(-sin(ang0), 0.05 * spread, cos(ang0)));
+      let v_circ = sqrt(params.gm_host / max(0.5, r_p - r_s));
+      let v_fac = select(0.76 + 0.32 * p.meta0.y, 1.38 + 0.32 * p.meta0.y, is_unbound);
+      vel = tang * (v_circ * v_fac) + normalize(loc) * select(-0.35, 0.58, is_unbound);
+      age_t = 0.0;
+    }
+    let flare_t = clamp(0.42 + 1.55 * in_shock + 0.35 * smoothstep(2.5, 0.8, r_tde), 0.22, 2.0);
+    p.pos_m = vec4<f32>(loc + params.center_offset.xyz, p.pos_m.w);
+    p.vel_bond = vec4<f32>(vel, 0.0);
+    p.therm_id = vec4<f32>(flare_t, 3.2 * (1.0 + in_shock), p.therm_id.z, age_t);
+    p.meta0.w = 1.0;
+    parts[i] = p;
+    return;
+  }
 
   if (mode == 4u) {
     // Catastrophic Antimatter / Kinetic Shatter: incandescent rocky/molten/icy fragments
@@ -356,7 +399,7 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createTidalRocheDisruptionSessionWebGpu requires a live WebGPU GPUDevice');
   }
-  const modeMap = { 'roche-rings': 0, 'giant-impact': 1, 'cryo-plumes': 2, 'red-giant-engulf': 3, 'catastrophic-shatter': 4 };
+  const modeMap = { 'roche-rings': 0, 'giant-impact': 1, 'cryo-plumes': 2, 'red-giant-engulf': 3, 'catastrophic-shatter': 4, tde: 5 };
   const modeCode = modeMap[mode] ?? 0;
   const n = Math.max(256, Math.min(32768, Math.trunc(particleCount)));
   const rand = mulberry32(seed);
@@ -430,6 +473,55 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
       intact = 0.0;
       role = 2.0;
       tempN = 0.6;
+    } else if (modeCode === 5) {
+      // Tidal Disruption Event (TDE): plunging star shredded into a glowing spiraling fallback disk
+      // + sweeping unbound hyperbolic tidal tail around a central SMBH!
+      const isDisk = i < n * 0.44;
+      const isFallback = i >= n * 0.44 && i < n * 0.74;
+      if (isDisk) {
+        const th = rand() * Math.PI * 2;
+        const rD = rHostSim * (1.55 + Math.pow(rand(), 0.75) * 3.1);
+        const vc = Math.sqrt(gmHost / Math.max(0.4, rD - rHostSim * 0.62));
+        lx = Math.cos(th) * rD;
+        ly = (rand() - 0.5) * (0.14 + 0.08 * rD);
+        lz = Math.sin(th) * rD;
+        vx = -Math.sin(th) * vc;
+        vy = (rand() - 0.5) * 0.15;
+        vz = Math.cos(th) * vc;
+        role = 1.0;
+        tempN = 1.45 + 0.55 * (1.0 - (rD - rHostSim * 1.55) / (rHostSim * 3.2));
+      } else if (isFallback) {
+        // Bound eccentric fallback stream arching from pericenter out to apocenter and plunging back in!
+        const s = rand();
+        const ang = -0.3 + s * Math.PI * 1.45;
+        const rStream = rHostSim * (1.8 + 5.8 * Math.sin(s * Math.PI * 0.85));
+        const wid = 0.18 + 0.28 * s;
+        lx = Math.cos(ang) * rStream + (rand() - 0.5) * wid;
+        ly = Math.sin(ang * 0.5) * 0.45 + (rand() - 0.5) * wid * 0.5;
+        lz = Math.sin(ang) * rStream + (rand() - 0.5) * wid;
+        const vc = Math.sqrt(gmHost / Math.max(0.5, rStream)) * (0.86 + 0.15 * rand());
+        vx = -Math.sin(ang) * vc;
+        vy = (rand() - 0.5) * 0.12;
+        vz = Math.cos(ang) * vc;
+        role = 1.0;
+        tempN = 0.95 + 0.85 * (1.0 - s);
+      } else {
+        // Unbound hyperbolic tidal tail sweeping gracefully away from pericenter!
+        const s = rand();
+        const ang = 0.25 + s * 1.95;
+        const rTail = rHostSim * (2.2 + Math.pow(s, 1.15) * 10.5);
+        const wid = 0.22 + 0.48 * s;
+        lx = Math.cos(ang) * rTail + (rand() - 0.5) * wid;
+        ly = (s - 0.3) * 0.85 + (rand() - 0.5) * wid * 0.5;
+        lz = Math.sin(ang) * rTail + (rand() - 0.5) * wid;
+        const vc = Math.sqrt(gmHost / Math.max(0.6, rTail)) * 1.38;
+        vx = -Math.sin(ang) * vc + Math.cos(ang) * 0.65;
+        vy = 0.08;
+        vz = Math.cos(ang) * vc + Math.sin(ang) * 0.65;
+        role = 3.0;
+        tempN = Math.max(0.35, 1.35 - s * 0.95);
+      }
+      intact = 0.0;
     } else if (modeCode === 4) {
       // Catastrophic Antimatter Shatter: spherical shell + molten core exploding outward at v_ej!
       const u_r = Math.cbrt(rand());
@@ -475,7 +567,7 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
     computeBufferBinding(2, 'storage')
   ];
   const stepPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-tidal-roche-step.v2-shatter',
+    cacheKey: 'ulg-tidal-roche-step.v3-tde',
     label: `${label}-step`,
     code: tidalRocheWgsl,
     entryPoint: 'step_tidal_roche',
@@ -636,6 +728,17 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
         kind: 3,
         atm: 0.14
       });
+    } else if (modeCode === 5) {
+      // Central Supermassive Black Hole event horizon + EHT asymmetric photon ring!
+      out.push({
+        pos: [ox * worldScale, oy * worldScale, oz * worldScale],
+        radius: rHostSim * 0.72 * worldScale,
+        color0: [0.0, 0.0, 0.0],
+        color1: [0.0, 0.0, 0.0],
+        kind: 5,
+        atm: 0.0
+      });
+      return out;
     } else if (modeCode === 4) {
       // Catastrophic Shatter leaves NO intact parent sphere (only a tiny molten remnant core if desired, or pure fragments!)
       return out;

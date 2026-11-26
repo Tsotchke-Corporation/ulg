@@ -19,6 +19,7 @@
       --gold: #fbbf24;
       --green: #34d399;
       --rose: #fb7185;
+      --deck-w: 372px;
       --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     }
@@ -49,7 +50,6 @@
     }
     #uv-canvas:active { cursor: grabbing; }
 
-    /* Subtle HUD reticle overlay canvas for crisp target callouts & selection brackets */
     #uv-reticle-canvas {
       position: fixed;
       inset: 0;
@@ -59,7 +59,6 @@
       z-index: 4;
     }
 
-    /* Glass panels */
     .uv-glass {
       background: var(--panel);
       backdrop-filter: blur(14px);
@@ -69,39 +68,42 @@
       border-radius: 12px;
     }
 
-    /* Top Bar */
+    /* ===== TOP-LEFT NAVIGATION & FLIGHT BRIDGE STRIP ===== */
     .uv-topbar {
       position: fixed;
-      top: 12px;
-      left: 12px;
-      right: 12px;
+      top: 10px;
+      left: 10px;
+      right: calc(var(--deck-w) + 22px);
       display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 10px;
+      flex-direction: column;
+      gap: 5px;
       z-index: 20;
       pointer-events: none;
+      transition: right 180ms ease;
+    }
+    body.deck-collapsed .uv-topbar {
+      right: 68px;
     }
     .uv-topbar > * { pointer-events: auto; }
 
-    .uv-brand-strip {
+    .uv-top-row {
       display: flex;
-      flex-direction: column;
+      align-items: center;
+      flex-wrap: wrap;
       gap: 6px;
-      max-width: calc(100vw - 340px);
     }
 
     .uv-brand-pill {
       display: inline-flex;
       align-items: center;
-      gap: 10px;
-      padding: 7px 12px;
+      gap: 8px;
+      padding: 6px 11px;
       width: fit-content;
     }
 
     .uv-brand-title {
-      font-weight: 700;
-      font-size: 13px;
+      font-weight: 800;
+      font-size: 12.5px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       background: linear-gradient(95deg, #e0f2fe, #38bdf8 55%, #c084fc);
@@ -114,9 +116,9 @@
     .uv-status-metrics {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       font-family: var(--mono);
-      font-size: 11px;
+      font-size: 10.5px;
       color: var(--muted);
     }
 
@@ -129,42 +131,77 @@
       flex-shrink: 0;
     }
     .uv-dot.paused { background: var(--gold); box-shadow: 0 0 8px var(--gold); }
-    .uv-dot.busy { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+    /* Global Orbit <-> 6-DOF UFO Segmented Switch */
+    .uv-mode-switch {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px;
+      gap: 3px;
+      border-radius: 10px;
+    }
+    .uv-mode-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all 140ms ease;
+      white-space: nowrap;
+    }
+    .uv-mode-btn:hover { color: var(--text); background: rgba(30, 52, 88, 0.55); }
+    .uv-mode-btn.active {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.34), rgba(56, 189, 248, 0.30));
+      border-color: rgba(52, 211, 153, 0.72);
+      color: #ecfdf5;
+      box-shadow: 0 0 12px rgba(52, 211, 153, 0.26);
+    }
+    .uv-mode-btn.orbit-mode.active {
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.32), rgba(167, 139, 250, 0.28));
+      border-color: var(--border-hi);
+      color: #e0f2fe;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.26);
+    }
+
+    .uv-gamepad-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 9px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      border-radius: 9px;
+    }
+    .uv-gamepad-pill.connected {
+      border-color: rgba(52, 211, 153, 0.65);
+      color: #6ee7b7;
+      background: rgba(6, 78, 59, 0.45);
+    }
+
+    .uv-quick-utils {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
 
     .uv-scale-rail {
       display: flex;
       align-items: center;
-      gap: 4px;
-      padding: 4px 6px;
+      gap: 3px;
+      padding: 3px 5px;
       overflow-x: auto;
       scrollbar-width: none;
+      width: fit-content;
       max-width: 100%;
     }
     .uv-scale-rail::-webkit-scrollbar { display: none; }
-
-    .uv-zoom-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 5px 10px;
-      font-family: var(--mono);
-      font-size: 10.5px;
-      color: var(--muted);
-    }
-    .uv-zoom-bar input[type="range"] {
-      flex: 1;
-      min-width: 140px;
-      accent-color: var(--accent);
-      cursor: pointer;
-      height: 4px;
-    }
-    .uv-zoom-readout {
-      color: #e0f2fe;
-      font-weight: 600;
-      min-width: 74px;
-      text-align: right;
-      white-space: nowrap;
-    }
 
     .uv-rung-btn {
       appearance: none;
@@ -172,17 +209,17 @@
       background: rgba(15, 25, 45, 0.55);
       color: var(--muted);
       font-family: var(--mono);
-      font-size: 10.5px;
+      font-size: 10px;
       line-height: 1.15;
-      padding: 5px 8px;
-      border-radius: 8px;
+      padding: 4px 7px;
+      border-radius: 7px;
       cursor: pointer;
       display: flex;
       flex-direction: column;
       align-items: flex-start;
       gap: 1px;
       white-space: nowrap;
-      transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+      transition: all 140ms ease;
     }
     .uv-rung-btn:hover {
       background: rgba(30, 52, 88, 0.72);
@@ -193,23 +230,29 @@
       background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(167, 139, 250, 0.22));
       border-color: var(--border-hi);
       color: #ffffff;
-      box-shadow: 0 0 14px rgba(56, 189, 248, 0.24);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.22);
     }
     .uv-rung-exp {
-      font-size: 9.5px;
+      font-size: 9px;
       opacity: 0.78;
       color: var(--accent);
     }
     .uv-rung-btn.active .uv-rung-exp { opacity: 1; color: #bae6fd; }
 
+    .uv-epoch-zoom-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      max-width: 100%;
+    }
     .uv-epoch-rail {
       display: flex;
       align-items: center;
-      gap: 4px;
-      padding: 3px 6px;
+      gap: 3px;
+      padding: 3px 5px;
       overflow-x: auto;
       scrollbar-width: none;
-      max-width: 100%;
     }
     .uv-epoch-rail::-webkit-scrollbar { display: none; }
     .uv-epoch-btn {
@@ -218,9 +261,9 @@
       background: rgba(15, 25, 45, 0.48);
       color: var(--muted);
       font-family: var(--mono);
-      font-size: 10px;
-      padding: 3px 7px;
-      border-radius: 7px;
+      font-size: 9.5px;
+      padding: 3px 6px;
+      border-radius: 6px;
       cursor: pointer;
       white-space: nowrap;
       transition: all 140ms ease;
@@ -232,15 +275,33 @@
       color: #fef3c7;
     }
 
-    /* Top-right compact button cluster */
-    .uv-actions {
+    .uv-zoom-bar {
       display: flex;
       align-items: center;
       gap: 6px;
-      position: relative;
-      flex-shrink: 0;
+      padding: 4px 9px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      min-width: 220px;
+      flex: 0 1 310px;
+    }
+    .uv-zoom-bar input[type="range"] {
+      flex: 1;
+      min-width: 90px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      height: 4px;
+    }
+    .uv-zoom-readout {
+      color: #e0f2fe;
+      font-weight: 700;
+      min-width: 64px;
+      text-align: right;
+      white-space: nowrap;
     }
 
+    /* Buttons */
     .uv-btn {
       appearance: none;
       border: 1px solid var(--border);
@@ -249,14 +310,14 @@
       -webkit-backdrop-filter: blur(12px);
       color: var(--text);
       font-family: var(--sans);
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
-      padding: 7px 11px;
-      border-radius: 9px;
+      padding: 5px 9px;
+      border-radius: 8px;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 5px;
       transition: all 140ms ease;
       white-space: nowrap;
     }
@@ -266,9 +327,9 @@
     }
     .uv-btn.active {
       border-color: var(--accent);
-      background: rgba(14, 116, 144, 0.38);
+      background: rgba(14, 116, 144, 0.40);
       color: #e0f2fe;
-      box-shadow: 0 0 16px rgba(56, 189, 248, 0.28);
+      box-shadow: 0 0 14px rgba(56, 189, 248, 0.28);
     }
     .uv-btn.primary {
       background: linear-gradient(135deg, rgba(14, 165, 233, 0.85), rgba(99, 102, 241, 0.82));
@@ -276,61 +337,293 @@
       color: #ffffff;
       box-shadow: 0 4px 18px rgba(14, 165, 233, 0.35);
     }
-    .uv-btn.primary:hover {
-      filter: brightness(1.12);
-      transform: translateY(-1px);
-    }
-    .uv-btn.primary:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-      transform: none;
-      filter: none;
-    }
+    .uv-btn.primary:hover { filter: brightness(1.12); transform: translateY(-1px); }
+    .uv-btn.primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; filter: none; }
     .uv-btn.subtle {
       background: rgba(15, 23, 42, 0.72);
-      font-size: 11.5px;
-      padding: 6px 10px;
+      font-size: 10.5px;
+      padding: 5px 8px;
     }
     .uv-btn.icon-only {
-      padding: 7px 9px;
-      min-width: 32px;
+      padding: 5px 7px;
+      min-width: 28px;
       justify-content: center;
     }
 
-    /* Drawers (Config / Sim / Help) */
-    .uv-drawer {
+    /* ===== UNIFIED PERSPECTIVE-AWARE RIGHT COMMAND DECK ===== */
+    #uv-command-deck {
       position: fixed;
-      top: 56px;
-      right: 12px;
-      width: 318px;
-      max-width: calc(100vw - 24px);
-      max-height: calc(100vh - 82px);
+      top: 10px;
+      right: 10px;
+      bottom: 10px;
+      width: var(--deck-w);
+      max-width: calc(100vw - 20px);
+      z-index: 26;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: width 180ms ease;
+    }
+    #uv-command-deck.collapsed {
+      width: 46px;
+    }
+
+    .uv-deck-tabs {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      padding: 5px 6px;
+      border-bottom: 1px solid rgba(112, 168, 255, 0.22);
+      background: rgba(4, 9, 20, 0.65);
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+      flex-shrink: 0;
+    }
+    .uv-deck-tabs::-webkit-scrollbar { display: none; }
+    #uv-command-deck.collapsed .uv-deck-tabs {
+      flex-direction: column;
+      border-bottom: none;
+      padding: 6px 4px;
+      height: 100%;
       overflow-y: auto;
-      padding: 12px 14px;
-      z-index: 30;
+      align-items: stretch;
+    }
+
+    .uv-deck-tab {
+      appearance: none;
+      border: 1px solid transparent;
+      background: rgba(15, 25, 45, 0.55);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9.5px;
+      font-weight: 700;
+      padding: 4px 5px;
+      border-radius: 7px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      white-space: nowrap;
+      transition: all 130ms ease;
+      flex-shrink: 0;
+    }
+    .uv-deck-tab:hover { color: var(--text); border-color: rgba(112, 168, 255, 0.35); background: rgba(24, 42, 74, 0.78); }
+    .uv-deck-tab.active {
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.30), rgba(167, 139, 250, 0.26));
+      border-color: var(--border-hi);
+      color: #ffffff;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.24);
+    }
+    #uv-command-deck.collapsed .uv-deck-tab .uv-tab-lbl { display: none; }
+    #uv-command-deck.collapsed .uv-deck-body { display: none; }
+
+    .uv-deck-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(112, 168, 255, 0.3) transparent;
+    }
+
+    /* Deck Panes — strictly ONE visible at a time! ZERO overlapping drawers! */
+    .uv-deck-pane {
       display: none;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
     }
-    .uv-drawer.open { display: flex; }
+    .uv-deck-pane.open { display: flex; }
+
+    /* Inspector inside Scanner Pane */
+    #uv-inspector.collapsed .uv-inspector-body { display: none; }
+    .uv-inspector-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .uv-target-kicker {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    .uv-target-name {
+      font-size: 14.5px;
+      font-weight: 700;
+      color: #ffffff;
+      line-height: 1.22;
+    }
+    .uv-target-sub {
+      font-size: 10.5px;
+      color: var(--muted);
+      margin-top: 2px;
+      line-height: 1.3;
+    }
+    .uv-inspector-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    /* Orbital Remote-Sensing Biosignature & Mineral Spectroscopy Card */
+    .uv-remote-box {
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 9px;
+      border-radius: 9px;
+      border: 1px solid rgba(52, 211, 153, 0.34);
+      background: rgba(5, 22, 34, 0.72);
+    }
+    .uv-remote-box.active { display: flex; }
+    .uv-remote-box.level-strong { border-color: rgba(52, 211, 153, 0.65); background: rgba(5, 36, 32, 0.68); }
+    .uv-remote-box.level-subsurface { border-color: rgba(56, 189, 248, 0.58); background: rgba(7, 28, 46, 0.68); }
+    .uv-remote-box.level-tentative { border-color: rgba(251, 191, 36, 0.56); background: rgba(36, 26, 10, 0.62); }
+    .uv-remote-box.level-sterile { border-color: rgba(148, 163, 184, 0.28); background: rgba(12, 20, 36, 0.68); }
+    .uv-remote-badge {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      font-weight: 800;
+      color: #ecfdf5;
+      letter-spacing: 0.02em;
+    }
+    .uv-remote-summary {
+      font-size: 10.5px;
+      color: #cbd5e1;
+      line-height: 1.35;
+    }
+    .uv-remote-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .uv-remote-pill {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      padding: 2px 6px;
+      border-radius: 5px;
+      border: 1px solid rgba(112, 168, 255, 0.28);
+      background: rgba(15, 28, 52, 0.78);
+      color: #bae6fd;
+    }
+    .uv-remote-pill.bio {
+      border-color: rgba(52, 211, 153, 0.65);
+      background: rgba(6, 95, 70, 0.55);
+      color: #a7f3d0;
+    }
+    .uv-remote-pill.mineral {
+      border-color: rgba(251, 191, 36, 0.38);
+      background: rgba(66, 32, 6, 0.42);
+      color: #fde68a;
+    }
+    .uv-remote-flux-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+      border-top: 1px solid rgba(148, 163, 184, 0.16);
+      padding-top: 4px;
+    }
+
+    .uv-spec-wrap { display: flex; flex-direction: column; gap: 3px; }
+    .uv-spec-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+    }
+    #uv-spectrograph-canvas {
+      width: 100%;
+      height: 24px;
+      border-radius: 5px;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      background: #04070e;
+      display: block;
+    }
+
+    .uv-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 5px 7px;
+    }
+    .uv-stat-cell {
+      background: rgba(10, 18, 34, 0.68);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 7px;
+      padding: 5px 7px;
+    }
+    .uv-stat-k {
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .uv-stat-v {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .uv-plot-box { display: flex; flex-direction: column; gap: 3px; }
+    #uv-plot-canvas {
+      width: 100%;
+      height: 70px;
+      border-radius: 7px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(4, 9, 18, 0.88);
+      display: block;
+    }
+
+    .uv-inspector-actions {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .uv-inspector-actions .uv-btn.primary { flex: 1; justify-content: center; }
+
+    .uv-provenance-foot {
+      font-family: var(--mono);
+      font-size: 9px;
+      color: rgba(148, 163, 184, 0.78);
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      border-top: 1px solid rgba(148, 163, 184, 0.12);
+      padding-top: 5px;
+    }
 
     .uv-drawer-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       border-bottom: 1px solid rgba(148, 163, 184, 0.16);
-      padding-bottom: 7px;
+      padding-bottom: 6px;
     }
     .uv-drawer-title {
-      font-size: 11.5px;
+      font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: #bae6fd;
     }
-
     .uv-section-label {
-      font-size: 10px;
+      font-size: 9.5px;
       font-weight: 700;
       letter-spacing: 0.09em;
       text-transform: uppercase;
@@ -343,21 +636,11 @@
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      font-size: 12px;
+      font-size: 11.5px;
       color: var(--text);
     }
-
-    .uv-row input[type="range"] {
-      flex: 1;
-      accent-color: var(--accent);
-      cursor: pointer;
-    }
-    .uv-row input[type="checkbox"] {
-      width: 15px;
-      height: 15px;
-      accent-color: var(--accent);
-      cursor: pointer;
-    }
+    .uv-row input[type="range"] { flex: 1; accent-color: var(--accent); cursor: pointer; }
+    .uv-row input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
     .uv-row select, .uv-row input[type="text"] {
       background: rgba(15, 23, 42, 0.9);
       border: 1px solid var(--border);
@@ -368,22 +651,18 @@
       font-size: 11px;
     }
 
-    .uv-seg-group {
-      display: flex;
-      gap: 4px;
-      flex-wrap: wrap;
-    }
+    .uv-seg-group { display: flex; gap: 4px; flex-wrap: wrap; }
     .uv-seg-btn {
       flex: 1;
-      min-width: 52px;
+      min-width: 48px;
       appearance: none;
       border: 1px solid var(--border);
       background: rgba(15, 23, 42, 0.65);
       color: var(--muted);
       font-family: var(--mono);
-      font-size: 10.5px;
+      font-size: 10px;
       font-weight: 600;
-      padding: 5px 7px;
+      padding: 5px 6px;
       border-radius: 7px;
       cursor: pointer;
       transition: all 120ms ease;
@@ -395,553 +674,18 @@
       color: #ffffff;
     }
 
-    /* Bottom-Left Target Analysis & Live Plot Card */
-    .uv-inspector {
-      position: fixed;
-      left: 12px;
-      bottom: 12px;
-      width: 364px;
-      max-width: calc(100vw - 24px);
-      max-height: calc(100vh - 154px);
-      overflow-y: auto;
-      z-index: 20;
-      padding: 10px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 7px;
-      transition: transform 180ms ease;
-    }
-    .uv-inspector.collapsed .uv-inspector-body { display: none; }
-
-    .uv-inspector-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .uv-target-kicker {
-      font-family: var(--mono);
-      font-size: 10px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--accent);
-    }
-    .uv-target-name {
-      font-size: 15px;
-      font-weight: 700;
-      color: #ffffff;
-      line-height: 1.2;
-    }
-    .uv-target-sub {
-      font-size: 11px;
-      color: var(--muted);
-      margin-top: 1px;
-    }
-
-    .uv-inspector-body {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .uv-spec-wrap {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-    }
-    .uv-spec-label {
-      display: flex;
-      justify-content: space-between;
-      font-family: var(--mono);
-      font-size: 9.5px;
-      color: var(--muted);
-    }
-    #uv-spectrograph-canvas {
-      width: 100%;
-      height: 22px;
-      border-radius: 5px;
-      border: 1px solid rgba(148, 163, 184, 0.24);
-      background: #04070e;
-      display: block;
-    }
-
-    .uv-stats-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 5px 8px;
-    }
-    .uv-stat-cell {
-      background: rgba(10, 18, 34, 0.68);
-      border: 1px solid rgba(148, 163, 184, 0.14);
-      border-radius: 7px;
-      padding: 5px 7px;
-    }
-    .uv-stat-k {
-      font-family: var(--mono);
-      font-size: 9.5px;
-      color: var(--muted);
-      text-transform: uppercase;
-    }
-    .uv-stat-v {
-      font-family: var(--mono);
-      font-size: 11.5px;
-      font-weight: 600;
-      color: #f1f5f9;
-      margin-top: 1px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .uv-plot-box {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-    }
-    #uv-plot-canvas {
-      width: 100%;
-      height: 70px;
-      border-radius: 7px;
-      border: 1px solid rgba(148, 163, 184, 0.2);
-      background: rgba(4, 9, 18, 0.88);
-      display: block;
-    }
-
-    .uv-inspector-actions {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-    }
-    .uv-inspector-actions .uv-btn.primary { flex: 1; justify-content: center; }
-
-    .uv-provenance-foot {
-      font-family: var(--mono);
-      font-size: 9.5px;
-      color: rgba(148, 163, 184, 0.78);
-      display: flex;
-      justify-content: space-between;
-      gap: 6px;
-      border-top: 1px solid rgba(148, 163, 184, 0.12);
-      padding-top: 5px;
-    }
-
-    /* Bottom-Right Breadcrumb & Controls Hint */
-    .uv-bottom-right {
-      position: fixed;
-      right: 12px;
-      bottom: 12px;
-      z-index: 15;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 6px;
-      pointer-events: none;
-    }
-    .uv-bottom-right > * { pointer-events: auto; }
-
-    .uv-breadcrumb {
-      padding: 6px 10px;
-      font-family: var(--mono);
-      font-size: 10.5px;
-      color: var(--muted);
-      max-width: min(440px, calc(100vw - 410px));
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .uv-breadcrumb strong { color: #e0f2fe; font-weight: 600; }
-
-    .uv-hint-pill {
-      padding: 5px 10px;
-      font-size: 10.5px;
-      color: rgba(168, 189, 218, 0.85);
-      border-radius: 999px;
-    }
-
-    /* Hyperdrive Warp Transition Banner */
-    #uv-warp-overlay {
-      position: fixed;
-      inset: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      pointer-events: none;
-      z-index: 25;
-      opacity: 0;
-      transition: opacity 220ms ease;
-    }
-    #uv-warp-overlay.active { opacity: 1; }
-    .uv-warp-card {
-      padding: 14px 26px;
-      text-align: center;
-      border-color: rgba(56, 189, 248, 0.65);
-      background: rgba(4, 12, 28, 0.72);
-      box-shadow: 0 0 40px rgba(56, 189, 248, 0.35);
-    }
-    .uv-warp-kicker {
-      font-family: var(--mono);
-      font-size: 10.5px;
-      letter-spacing: 0.22em;
-      text-transform: uppercase;
-      color: #7dd3fc;
-    }
-    .uv-warp-title {
-      font-size: 20px;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      color: #ffffff;
-      margin-top: 3px;
-    }
-    .uv-warp-sub {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: #cbd5e1;
-      margin-top: 4px;
-    }
-
-    /* Help Menu & Modal */
-    .uv-help-item {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      padding: 8px 9px;
-      border-radius: 8px;
-      border: 1px solid rgba(148, 163, 184, 0.14);
-      background: rgba(15, 23, 42, 0.65);
-      color: var(--text);
-      text-decoration: none;
-      text-align: left;
-      cursor: pointer;
-      transition: border-color 120ms ease, background 120ms ease;
-    }
-    .uv-help-item:hover {
-      border-color: var(--border-hi);
-      background: rgba(24, 42, 74, 0.85);
-    }
-    .uv-help-item-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 12px;
-      font-weight: 600;
-      color: #f8fafc;
-    }
-    .uv-help-item-top small {
-      font-family: var(--mono);
-      font-size: 10px;
-      color: var(--accent);
-    }
-    .uv-help-item-desc {
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.35;
-    }
-    .uv-triad-links {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .uv-triad-links a {
-      flex: 1;
-      text-align: center;
-      font-family: var(--mono);
-      font-size: 10.5px;
-      color: #bae6fd;
-      text-decoration: none;
-      padding: 5px 6px;
-      border-radius: 7px;
-      border: 1px solid rgba(112, 168, 255, 0.25);
-      background: rgba(15, 23, 42, 0.72);
-    }
-    .uv-triad-links a:hover { border-color: var(--accent); color: #ffffff; }
-
-    /* Modal Backdrop */
-    #uv-modal-backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(2, 6, 14, 0.76);
-      backdrop-filter: blur(8px);
-      z-index: 50;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-    }
-    #uv-modal-backdrop.open { display: flex; }
-    .uv-modal {
-      width: 620px;
-      max-width: 100%;
-      max-height: 86vh;
-      overflow-y: auto;
-      padding: 18px 20px;
-      background: var(--panel-strong);
-      border: 1px solid var(--border-hi);
-      border-radius: 14px;
-      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75);
-      user-select: text;
-    }
-    .uv-modal h2 {
-      margin: 0 0 4px 0;
-      font-size: 18px;
-      color: #ffffff;
-    }
-    .uv-modal-sub {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--accent);
-      margin-bottom: 12px;
-    }
-    .uv-modal p, .uv-modal li {
-      font-size: 13px;
-      line-height: 1.55;
-      color: #cbd5e1;
-    }
-    .uv-modal code {
-      font-family: var(--mono);
-      font-size: 11.5px;
-      background: rgba(30, 41, 59, 0.85);
-      padding: 1px 5px;
-      border-radius: 4px;
-      color: #7dd3fc;
-    }
-    .uv-eq-box {
-      font-family: var(--mono);
-      font-size: 11.5px;
-      background: rgba(5, 11, 22, 0.9);
-      border: 1px solid rgba(56, 189, 248, 0.3);
-      border-radius: 8px;
-      padding: 9px 11px;
-      color: #e0f2fe;
-      margin: 10px 0;
-      white-space: pre-wrap;
-    }
-
-    /* WebGPU Fallback */
-    #uv-webgpu-fallback {
-      position: fixed;
-      inset: 0;
-      background: rgba(3, 6, 13, 0.94);
-      z-index: 60;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-    }
-    #uv-webgpu-fallback.visible { display: flex; }
-    .uv-fallback-card {
-      max-width: 480px;
-      padding: 22px;
-      text-align: center;
-    }
-
-    @media (max-width: 820px) {
-      .uv-brand-strip { max-width: calc(100vw - 24px); }
-      .uv-topbar { flex-direction: column; align-items: stretch; gap: 6px; }
-      .uv-actions { justify-content: flex-end; }
-      .uv-bottom-right { display: none; }
-      .uv-inspector { width: calc(100vw - 24px); bottom: 10px; left: 12px; padding: 10px; }
-      .uv-drawer { top: 108px; }
-    }
-
-    /* Planetary Surface TinyPlanet Vehicle Controls HUD (Rover + Jump Rockets + Atmospheric Drone) */
-    #uv-surface-hud {
-      position: fixed;
-      left: 50%;
-      bottom: 14px;
-      transform: translateX(-50%);
-      z-index: 22;
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      gap: 7px;
-      padding: 9px 13px;
-      max-width: calc(100vw - 24px);
-    }
-    #uv-surface-hud.active { display: flex; }
-    .uv-surf-telemetry {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 10px;
-      font-family: var(--mono);
-      font-size: 11px;
-      color: #cbd5e1;
-    }
-    .uv-surf-telemetry strong { color: #38bdf8; }
-    .uv-surf-telemetry .warn { color: #fbbf24; }
-    .uv-surf-telemetry .good { color: #34d399; }
-    .uv-surf-pills {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 6px;
-    }
-    .uv-surf-pill {
-      appearance: none;
-      border: 1px solid var(--border);
-      background: rgba(15, 25, 45, 0.84);
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 700;
-      padding: 7px 12px;
-      border-radius: 999px;
-      cursor: pointer;
-      transition: all 120ms ease;
-      touch-action: none;
-    }
-    .uv-surf-pill:hover { border-color: var(--border-hi); background: rgba(24, 46, 82, 0.94); }
-    .uv-surf-pill.active, .uv-surf-pill:active {
-      background: linear-gradient(135deg, rgba(56, 189, 248, 0.40), rgba(167, 139, 250, 0.36));
-      border-color: var(--accent);
-      color: #ffffff;
-      box-shadow: 0 0 14px rgba(56, 189, 248, 0.35);
-    }
-    .uv-surf-pill.rocket {
-      border-color: rgba(251, 146, 60, 0.65);
-      background: rgba(124, 45, 18, 0.52);
-      color: #ffedd5;
-    }
-    .uv-surf-pill.rocket.firing, .uv-surf-pill.rocket:active {
-      background: linear-gradient(135deg, rgba(249, 115, 22, 0.88), rgba(234, 179, 8, 0.78));
-      border-color: #fde047;
-      color: #ffffff;
-      box-shadow: 0 0 18px rgba(249, 115, 22, 0.55);
-    }
-    .uv-surf-pill.sample {
-      border-color: rgba(52, 211, 153, 0.65);
-      background: rgba(6, 78, 59, 0.56);
-      color: #d1fae5;
-    }
-    .uv-surf-pill.sample:hover {
-      border-color: rgba(110, 231, 183, 0.95);
-      background: rgba(4, 120, 87, 0.72);
-    }
-    .uv-sample-strip {
-      display: none;
-      flex-direction: column;
-      gap: 5px;
-      padding: 7px 8px;
-      border-radius: 8px;
-      background: rgba(6, 36, 46, 0.58);
-      border: 1px solid rgba(52, 211, 153, 0.34);
-    }
-    .uv-sample-strip.active { display: flex; }
-    .uv-sample-head {
-      font-family: var(--mono);
-      font-size: 10px;
-      color: #6ee7b7;
-      display: flex;
-      justify-content: space-between;
-      gap: 6px;
-      align-items: center;
-    }
-    .uv-chip-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-      align-items: center;
-    }
-    .uv-chip-lbl {
-      font-family: var(--mono);
-      font-size: 9.5px;
-      color: var(--muted);
-      margin-right: 2px;
-    }
-    .uv-chip {
-      appearance: none;
-      border: 1px solid rgba(112, 168, 255, 0.30);
-      background: rgba(15, 28, 52, 0.78);
-      color: #e2e8f0;
-      border-radius: 5px;
-      padding: 2px 6px;
-      font-family: var(--mono);
-      font-size: 10px;
-      cursor: pointer;
-      transition: border-color 110ms ease, background 110ms ease;
-    }
-    .uv-chip:hover { border-color: var(--border-hi); background: rgba(30, 58, 102, 0.86); }
-    .uv-chip.active { border-color: #34d399; background: rgba(6, 95, 70, 0.62); color: #ecfdf5; }
-    .uv-chip.compound { border-color: rgba(56, 189, 248, 0.36); color: #bae6fd; }
-    .uv-surf-keys {
-      font-family: var(--mono);
-      font-size: 10px;
-      color: var(--muted);
-      text-align: center;
-    }
-    .uv-touch-pads {
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 84px;
-      z-index: 21;
-      display: none;
-      justify-content: space-between;
-      padding: 0 18px;
-      pointer-events: none;
-    }
-    .uv-touch-pads.active { display: flex; }
-    .uv-joy-pad {
-      width: 112px;
-      height: 112px;
-      border-radius: 50%;
-      border: 1px solid rgba(112, 168, 255, 0.36);
-      background: rgba(7, 13, 25, 0.45);
-      backdrop-filter: blur(8px);
-      position: relative;
-      pointer-events: auto;
-      touch-action: none;
-    }
-    .uv-joy-knob {
-      width: 44px;
-      height: 44px;
-      border-radius: 50%;
-      background: rgba(56, 189, 248, 0.42);
-      border: 1px solid rgba(186, 230, 253, 0.85);
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      transform: translate(-50%, -50%);
-      pointer-events: none;
-    }
-    .uv-joy-label {
-      position: absolute;
-      bottom: -18px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-family: var(--mono);
-      font-size: 9.5px;
-      color: var(--muted);
-      white-space: nowrap;
-    }
-    /* Full-Spectrum Dual-Caret EM Sensor Stack Floating Bar */
-    #uv-em-sensor-bar {
-      position: fixed;
-      top: 56px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 24;
-      display: none;
-      flex-direction: column;
-      gap: 7px;
-      padding: 10px 14px;
-      width: min(560px, calc(100vw - 24px));
-    }
-    #uv-em-sensor-bar.open { display: flex; }
+    /* Full-Spectrum EM Sensor Stack (cleanly docked inside Command Deck!) */
     .uv-em-head {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       font-family: var(--mono);
-      font-size: 11px;
+      font-size: 10.5px;
     }
     .uv-em-track {
       position: relative;
-      height: 28px;
+      height: 30px;
       border-radius: 8px;
       background: linear-gradient(90deg,
         #3b0764 0%, #6d28d9 16%, #2563eb 34%,
@@ -984,15 +728,10 @@
       display: flex;
       justify-content: space-between;
       font-family: var(--mono);
-      font-size: 9.5px;
+      font-size: 9px;
       color: var(--muted);
-      padding: 0 2px;
     }
-    .uv-em-presets {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-    }
+    .uv-em-presets { display: flex; flex-wrap: wrap; gap: 5px; }
     .uv-em-presets button {
       appearance: none;
       border: 1px solid var(--border);
@@ -1001,7 +740,7 @@
       font-family: var(--mono);
       font-size: 10px;
       font-weight: 700;
-      padding: 4px 8px;
+      padding: 5px 8px;
       border-radius: 6px;
       cursor: pointer;
     }
@@ -1011,12 +750,34 @@
       color: #ffffff;
     }
 
-    /* Explorer Cargo & Specimen Bay Inventory */
+    /* Flight Console & Gamepad Card */
+    .uv-flight-card {
+      background: rgba(10, 18, 34, 0.72);
+      border: 1px solid rgba(52, 211, 153, 0.28);
+      border-radius: 9px;
+      padding: 8px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .uv-gamepad-map {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+      line-height: 1.48;
+      background: rgba(5, 11, 22, 0.72);
+      border: 1px solid rgba(112, 168, 255, 0.16);
+      border-radius: 7px;
+      padding: 6px 8px;
+    }
+    .uv-gamepad-map strong { color: #bae6fd; }
+
+    /* Cargo Inventory */
     .uv-cargo-list {
       display: flex;
       flex-direction: column;
       gap: 6px;
-      max-height: 210px;
+      max-height: 220px;
       overflow-y: auto;
       padding-right: 2px;
     }
@@ -1040,16 +801,11 @@
     }
     .uv-cargo-item-sub {
       font-family: var(--mono);
-      font-size: 10px;
+      font-size: 9.5px;
       color: var(--muted);
       line-height: 1.35;
     }
-    .uv-cargo-item-actions {
-      display: flex;
-      gap: 5px;
-      flex-wrap: wrap;
-      margin-top: 2px;
-    }
+    .uv-cargo-item-actions { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 2px; }
     .uv-cargo-item-actions a, .uv-cargo-item-actions button {
       appearance: none;
       text-decoration: none;
@@ -1068,24 +824,294 @@
       background: rgba(239, 68, 68, 0.14);
       color: #fca5a5;
     }
-    .uv-cargo-res-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 6px;
-    }
+    .uv-cargo-res-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
     .uv-cargo-res-cell {
       border: 1px solid var(--border);
       background: rgba(15, 25, 45, 0.65);
       border-radius: 8px;
       padding: 6px 8px;
       font-family: var(--mono);
-      font-size: 10.5px;
+      font-size: 10px;
     }
-    .uv-cargo-res-cell span { display: block; font-size: 9.5px; color: var(--muted); }
-    .uv-cargo-res-cell strong { color: #e0f2fe; font-size: 12px; }
+    .uv-cargo-res-cell span { display: block; font-size: 9px; color: var(--muted); }
+    .uv-cargo-res-cell strong { color: #e0f2fe; font-size: 11.5px; }
+
+    /* Sampled Material Strip */
+    .uv-sample-strip {
+      display: none;
+      flex-direction: column;
+      gap: 5px;
+      padding: 7px 8px;
+      border-radius: 8px;
+      background: rgba(6, 36, 46, 0.58);
+      border: 1px solid rgba(52, 211, 153, 0.34);
+    }
+    .uv-sample-strip.active { display: flex; }
+    .uv-sample-head {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: #6ee7b7;
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      align-items: center;
+    }
+    .uv-chip-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+    .uv-chip-lbl { font-family: var(--mono); font-size: 9px; color: var(--muted); margin-right: 2px; }
+    .uv-chip {
+      appearance: none;
+      border: 1px solid rgba(112, 168, 255, 0.30);
+      background: rgba(15, 28, 52, 0.78);
+      color: #e2e8f0;
+      border-radius: 5px;
+      padding: 2px 6px;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      cursor: pointer;
+    }
+    .uv-chip:hover { border-color: var(--border-hi); background: rgba(30, 58, 102, 0.86); }
+    .uv-chip.active { border-color: #34d399; background: rgba(6, 95, 70, 0.62); color: #ecfdf5; }
+    .uv-chip.compound { border-color: rgba(56, 189, 248, 0.36); color: #bae6fd; }
+
+    /* Bottom-Left Perspective Breadcrumb & Dynamic Hint */
+    .uv-bottom-left {
+      position: fixed;
+      left: 10px;
+      bottom: 10px;
+      right: calc(var(--deck-w) + 22px);
+      z-index: 15;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 5px;
+      pointer-events: none;
+      transition: right 180ms ease;
+    }
+    body.deck-collapsed .uv-bottom-left { right: 68px; }
+    .uv-bottom-left > * { pointer-events: auto; }
+    .uv-breadcrumb {
+      padding: 5px 10px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .uv-breadcrumb strong { color: #e0f2fe; font-weight: 600; }
+    .uv-hint-pill {
+      padding: 4px 10px;
+      font-size: 10px;
+      color: rgba(168, 189, 218, 0.88);
+      border-radius: 999px;
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Planetary Surface Controls HUD (centered cleanly left of Command Deck!) */
+    #uv-surface-hud {
+      position: fixed;
+      left: 10px;
+      right: calc(var(--deck-w) + 22px);
+      bottom: 10px;
+      z-index: 22;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      max-width: 980px;
+      margin: 0 auto;
+      transition: right 180ms ease;
+    }
+    body.deck-collapsed #uv-surface-hud { right: 68px; }
+    #uv-surface-hud.active { display: flex; }
+    .uv-surf-telemetry {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: #cbd5e1;
+    }
+    .uv-surf-telemetry strong { color: #38bdf8; }
+    .uv-surf-telemetry .warn { color: #fbbf24; }
+    .uv-surf-telemetry .good { color: #34d399; }
+    .uv-surf-pills { display: flex; align-items: center; flex-wrap: wrap; justify-content: center; gap: 5px; }
+    .uv-surf-pill {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.84);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 6px 10px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: all 120ms ease;
+      touch-action: none;
+    }
+    .uv-surf-pill:hover { border-color: var(--border-hi); background: rgba(24, 46, 82, 0.94); }
+    .uv-surf-pill.active, .uv-surf-pill:active {
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.40), rgba(167, 139, 250, 0.36));
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    .uv-surf-pill.rocket {
+      border-color: rgba(251, 146, 60, 0.65);
+      background: rgba(124, 45, 18, 0.52);
+      color: #ffedd5;
+    }
+    .uv-surf-pill.rocket.firing, .uv-surf-pill.rocket:active {
+      background: linear-gradient(135deg, rgba(249, 115, 22, 0.88), rgba(234, 179, 8, 0.78));
+      border-color: #fde047;
+      color: #ffffff;
+    }
+    .uv-surf-pill.sample {
+      border-color: rgba(52, 211, 153, 0.65);
+      background: rgba(6, 78, 59, 0.56);
+      color: #d1fae5;
+    }
+    .uv-surf-keys { font-family: var(--mono); font-size: 9.5px; color: var(--muted); text-align: center; }
+
+    /* Touch Joysticks */
+    .uv-touch-pads {
+      position: fixed;
+      left: 0;
+      right: calc(var(--deck-w) + 12px);
+      bottom: 84px;
+      z-index: 21;
+      display: none;
+      justify-content: space-between;
+      padding: 0 18px;
+      pointer-events: none;
+    }
+    .uv-touch-pads.active { display: flex; }
+    .uv-joy-pad {
+      width: 112px;
+      height: 112px;
+      border-radius: 50%;
+      border: 1px solid rgba(112, 168, 255, 0.36);
+      background: rgba(7, 13, 25, 0.45);
+      backdrop-filter: blur(8px);
+      position: relative;
+      pointer-events: auto;
+      touch-action: none;
+    }
+    .uv-joy-knob {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: rgba(56, 189, 248, 0.42);
+      border: 1px solid rgba(186, 230, 253, 0.85);
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .uv-joy-label {
+      position: absolute;
+      bottom: -18px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    /* Help Items, Warp Banner, Modals */
+    .uv-help-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 7px 9px;
+      border-radius: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      background: rgba(15, 23, 42, 0.65);
+      color: var(--text);
+      text-decoration: none;
+      text-align: left;
+      cursor: pointer;
+    }
+    .uv-help-item:hover { border-color: var(--border-hi); background: rgba(24, 42, 74, 0.85); }
+    .uv-help-item-top { display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; font-weight: 600; color: #f8fafc; }
+    .uv-help-item-top small { font-family: var(--mono); font-size: 9.5px; color: var(--accent); }
+    .uv-help-item-desc { font-size: 10.5px; color: var(--muted); line-height: 1.35; }
+    .uv-triad-links { display: flex; gap: 6px; flex-wrap: wrap; }
+    .uv-triad-links a {
+      flex: 1; text-align: center; font-family: var(--mono); font-size: 10px;
+      color: #bae6fd; text-decoration: none; padding: 5px 6px; border-radius: 7px;
+      border: 1px solid rgba(112, 168, 255, 0.25); background: rgba(15, 23, 42, 0.72);
+    }
+
+    #uv-warp-overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; pointer-events: none;
+      z-index: 25; opacity: 0; transition: opacity 220ms ease;
+    }
+    #uv-warp-overlay.active { opacity: 1; }
+    .uv-warp-card {
+      padding: 14px 26px; text-align: center; border-color: rgba(56, 189, 248, 0.65);
+      background: rgba(4, 12, 28, 0.72); box-shadow: 0 0 40px rgba(56, 189, 248, 0.35);
+    }
+    .uv-warp-kicker { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase; color: #7dd3fc; }
+    .uv-warp-title { font-size: 20px; font-weight: 800; letter-spacing: 0.08em; color: #ffffff; margin-top: 3px; }
+    .uv-warp-sub { font-family: var(--mono); font-size: 11px; color: #cbd5e1; margin-top: 4px; }
+
+    #uv-modal-backdrop {
+      position: fixed; inset: 0; background: rgba(2, 6, 14, 0.76);
+      backdrop-filter: blur(8px); z-index: 50; display: none;
+      align-items: center; justify-content: center; padding: 16px;
+    }
+    #uv-modal-backdrop.open { display: flex; }
+    .uv-modal {
+      width: 620px; max-width: 100%; max-height: 86vh; overflow-y: auto;
+      padding: 18px 20px; background: var(--panel-strong);
+      border: 1px solid var(--border-hi); border-radius: 14px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75); user-select: text;
+    }
+    .uv-modal h2 { margin: 0 0 4px 0; font-size: 18px; color: #ffffff; }
+    .uv-modal-sub { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-bottom: 12px; }
+    .uv-modal p, .uv-modal li { font-size: 13px; line-height: 1.55; color: #cbd5e1; }
+    .uv-modal code { font-family: var(--mono); font-size: 11.5px; background: rgba(30, 41, 59, 0.85); padding: 1px 5px; border-radius: 4px; color: #7dd3fc; }
+    .uv-eq-box {
+      font-family: var(--mono); font-size: 11.5px; background: rgba(5, 11, 22, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px;
+      padding: 9px 11px; color: #e0f2fe; margin: 10px 0; white-space: pre-wrap;
+    }
+
+    #uv-webgpu-fallback {
+      position: fixed; inset: 0; background: rgba(3, 6, 13, 0.94); z-index: 60;
+      display: none; align-items: center; justify-content: center; padding: 20px;
+    }
+    #uv-webgpu-fallback.visible { display: flex; }
+    .uv-fallback-card { max-width: 480px; padding: 22px; text-align: center; }
 
     @media (hover: hover) and (pointer: fine) {
       .uv-touch-pads.active:not(.force-visible) { display: none; }
+    }
+
+    @media (max-width: 920px) {
+      :root { --deck-w: min(330px, calc(100vw - 20px)); }
+      .uv-topbar { right: 10px; }
+      #uv-command-deck {
+        top: auto;
+        bottom: 10px;
+        height: 46vh;
+        width: calc(100vw - 20px);
+      }
+      #uv-command-deck.collapsed { height: 42px; width: calc(100vw - 20px); }
+      #uv-command-deck.collapsed .uv-deck-tabs { flex-direction: row; height: auto; }
+      .uv-bottom-left { display: none; }
+      #uv-surface-hud { right: 10px; }
     }
   </style>
 </head>
@@ -1093,329 +1119,405 @@
   <canvas id="uv-canvas"></canvas>
   <canvas id="uv-reticle-canvas"></canvas>
 
-  <!-- Top Navigation & 40-OOM Scale Ladder -->
+  <!-- Top-Left Slim Telemetry, Scale Ladder & Global Orbit ↔ 6-DOF UFO Switch -->
   <header class="uv-topbar">
-    <div class="uv-brand-strip">
+    <div class="uv-top-row">
       <div class="uv-brand-pill uv-glass">
         <span class="uv-dot" id="uv-status-dot"></span>
         <span class="uv-brand-title">ULG Universes</span>
         <span class="uv-status-metrics">
           <span id="uv-scale-badge" title="Current physical length scale span">10⁺²⁵ m</span>
           <span>·</span>
-          <span id="uv-clock-badge" title="Automatic scale-adaptive physical clock rate (slows automatically as you zoom in!)">150 Myr/s</span>
+          <span id="uv-clock-badge" title="Automatic scale-adaptive physical clock rate">150 Myr/s</span>
           <span>·</span>
-          <span id="uv-fps-badge" title="Live WebGPU render cadence and active compute steps">WebGPU</span>
+          <span id="uv-fps-badge" title="Live WebGPU render cadence">WebGPU</span>
         </span>
       </div>
-      <nav class="uv-scale-rail uv-glass" id="uv-scale-rail" aria-label="40-Order-of-Magnitude Scale Ladder"></nav>
+
+      <!-- Global Orbit Controls vs 6-DOF Quaternion UFO Flight Toggle (Works Everywhere!) -->
+      <div class="uv-mode-switch uv-glass" role="group" aria-label="Global Camera & Flight Regime">
+        <button id="uv-mode-orbit-btn" class="uv-mode-btn orbit-mode active" type="button" title="Classic Orbit Controls: drag to orbit target, scroll to zoom continuously across 40 orders of magnitude (Toggle: Tab)">🪐 Orbit</button>
+        <button id="uv-mode-ufo-btn" class="uv-mode-btn" type="button" title="6-DOF Quaternion UFO Free-Flight: full X/Y/Z 3D rotation, interstellar/planetary/intergalactic cruise, zoom waaaay out (0.55×–45×), + Xbox Gamepad (Toggle: Tab)">🛸 UFO 6-DOF</button>
+      </div>
+
+      <span id="uv-gamepad-badge" class="uv-gamepad-pill uv-glass" title="Connect any Xbox / standard gamepad to steer the UFO in full 3D (Sticks: Thrust/Look, LB/RB: Roll Z, D-Pad: Chase & Scale Zoom, RT: Warp)">🎮 No Pad</span>
+
+      <div class="uv-quick-utils">
+        <button id="uv-cockpit-btn" class="uv-btn" type="button" title="Toggle 3rd-Person Flying Saucer vs Inside-the-Green-Glass-Dome 3D Cockpit View (Shortcut: V)">🛸 Cockpit</button>
+        <button id="uv-xr-btn" class="uv-btn" type="button" title="Enter native WebXR WebGPU headset mode or Side-by-Side Stereo VR Preview">🥽 XR</button>
+        <button id="uv-share-btn" class="uv-btn" type="button" title="Copy a seedable URL link to your exact universe, epoch, star/planet, and multiplayer room">🔗 Share</button>
+        <button id="uv-room-btn" class="uv-btn" type="button" title="Join or leave a PeerCompute multiplayer UFO room (locks timescale to 1.0x)">🌐 Solo</button>
+        <button id="uv-autopilot-btn" class="uv-btn" type="button" title="Toggle hands-free 40-OOM Autopilot tour">▶ Tour</button>
+      </div>
+    </div>
+
+    <nav class="uv-scale-rail uv-glass" id="uv-scale-rail" aria-label="40-Order-of-Magnitude Scale Ladder"></nav>
+
+    <div class="uv-epoch-zoom-row">
       <nav class="uv-epoch-rail uv-glass" id="uv-epoch-rail" aria-label="Cosmic Evolutionary Epoch"></nav>
-      <div class="uv-zoom-bar uv-glass" title="Continuous 40-Order-of-Magnitude Zoom Scrubber — drag or scroll the mouse wheel anywhere to zoom seamlessly from 10⁺²⁵ m to 10⁻¹⁵ m">
+      <div class="uv-zoom-bar uv-glass" title="Continuous 42-Order-of-Magnitude Scale Zoom Scrubber (10²⁷ m → 10⁻¹⁵ m)">
         <span>10²⁷m</span>
         <input id="uv-zoom-slider" type="range" min="-14.8" max="26.95" step="0.02" value="26.6" dir="rtl" aria-label="Continuous 42-OOM Scale Zoom" />
         <span>10⁻¹⁵m</span>
         <span class="uv-zoom-readout" id="uv-zoom-readout">204 Mpc</span>
       </div>
     </div>
-
-    <div class="uv-actions">
-      <button id="uv-cargo-btn" class="uv-btn" type="button" title="Open Explorer Cargo &amp; Specimen Inventory: abducted flora/fauna, sampled materials, harvested elements &amp; Kardashev fleet (Shortcut: I)">🎒 Cargo</button>
-      <button id="uv-em-sensor-btn" class="uv-btn" type="button" title="Toggle Full-Spectrum Dual-Caret EM Sensor Stack (Gamma 10⁻¹³ m → Radio 10 m mapped to visible colors)">🌈 EM</button>
-      <button id="uv-cockpit-btn" class="uv-btn" type="button" title="Toggle 3rd-Person Flying Saucer vs Inside-the-Green-Glass-Dome 3D Cockpit View (Shortcut: V)">🛸 Cockpit</button>
-      <button id="uv-xr-btn" class="uv-btn" type="button" title="Enter native WebXR WebGPU headset mode (XRGPUBinding) or Side-by-Side Stereo VR Preview">🥽 XR</button>
-      <button id="uv-share-btn" class="uv-btn" type="button" title="Copy a seedable URL link to your exact universe, epoch, position, and multiplayer room">🔗 Share</button>
-      <button id="uv-room-btn" class="uv-btn" type="button" title="Join or leave a PeerCompute multiplayer UFO room (locks timescale to synchronized 1.0x!)">🌐 Solo</button>
-      <button id="uv-autopilot-btn" class="uv-btn" type="button" title="Toggle hands-free Autopilot tour from the Cosmic Web (10²⁵ m) down to the Atomic Nucleus (10⁻¹⁵ m)">▶ Tour</button>
-      <button id="uv-sim-btn" class="uv-btn" type="button" title="Open Simulation controls: pause, time scale, Big Bang, reseed, and active-scale physics settings">🎛 Sim</button>
-      <button id="uv-config-btn" class="uv-btn" type="button" title="Open Visual &amp; Engine Config: quality, Schwarzschild lensing, orbit trails, Retro CRT, and PeerCompute mesh">⚙ Config</button>
-      <button id="uv-help-btn" class="uv-btn icon-only" type="button" title="Help, equations for this scale, other ULG labs, and GitHub links">?</button>
-    </div>
   </header>
 
-  <!-- Full-Spectrum Dual-Caret EM Sensor Stack (10^-13 m Gamma -> 10^1 m Radio) -->
-  <section id="uv-em-sensor-bar" class="uv-glass" aria-label="Full-Spectrum Dual-Caret EM Sensor Stack">
-    <div class="uv-em-head">
-      <span><strong style="color:#38bdf8;">EM SENSOR STACK</strong> · <span id="uv-em-readout">👁 Human Visible (380–750 nm)</span></span>
-      <button id="uv-em-close-btn" class="uv-btn subtle icon-only" type="button" title="Close EM Sensor bar">✕</button>
-    </div>
-    <div id="uv-em-track" class="uv-em-track" title="Drag left/right carets [λ_min, λ_max] or slide the spectral bar between them across 14 decades of EM wavelengths">
-      <div id="uv-em-window" class="uv-em-window"></div>
-      <div id="uv-em-caret-min" class="uv-em-caret" title="Short-wavelength caret λ_min (mapped to Violet/Blue)">◀</div>
-      <div id="uv-em-caret-max" class="uv-em-caret" title="Long-wavelength caret λ_max (mapped to Red)">▶</div>
-    </div>
-    <div class="uv-em-ticks">
-      <span>γ 10⁻¹³m</span><span>X-Ray</span><span>UV</span><span style="color:#6ee7b7;">VIS</span><span>Thermal IR</span><span>μW/CMB</span><span>Radio 10m</span>
-    </div>
-    <div class="uv-em-presets" id="uv-em-presets">
-      <button type="button" class="active" data-em-preset="vis">👁 Visible</button>
-      <button type="button" data-em-preset="ir">🔥 Thermal IR</button>
-      <button type="button" data-em-preset="uv">⚡ UV / Aurora</button>
-      <button type="button" data-em-preset="xray">☢️ X-Ray / γ</button>
-      <button type="button" data-em-preset="radio">📡 21cm Radio</button>
-      <button type="button" data-em-preset="cmb">🌌 CMB μW</button>
-    </div>
-  </section>
+  <!-- Unified Perspective-Aware Right-Edge Saucer Bridge & Scientific Command Deck -->
+  <aside id="uv-command-deck" class="uv-glass" aria-label="Saucer Bridge Scientific Command Deck">
+    <nav class="uv-deck-tabs" aria-label="Command Deck Modules">
+      <button id="uv-scan-btn" class="uv-deck-tab active" data-deck-tab="scan" type="button" title="Scanner, Orbital Biosignature & Mineral Spectroscopy, & Live GPU Plot">📡<span class="uv-tab-lbl">Scan</span></button>
+      <button id="uv-em-sensor-btn" class="uv-deck-tab" data-deck-tab="em" type="button" title="Full-Spectrum Dual-Caret EM Sensor Stack (Gamma 10⁻¹³ m → Radio 10 m)">🌈<span class="uv-tab-lbl">EM</span></button>
+      <button id="uv-flight-btn" class="uv-deck-tab" data-deck-tab="flight" type="button" title="6-DOF UFO Controls, Motion Regimes, Chase Zoom (0.55×–45×), Weapons & Xbox Gamepad">🛸<span class="uv-tab-lbl">Flight</span></button>
+      <button id="uv-cargo-btn" class="uv-deck-tab" data-deck-tab="cargo" type="button" title="Saucer Cargo & Specimen Bay: abducted lifeforms, material samples & Kardashev fleet (Key: I)">🎒<span class="uv-tab-lbl">Cargo</span></button>
+      <button id="uv-sim-btn" class="uv-deck-tab" data-deck-tab="sim" type="button" title="Simulation controls: pause, time scale, Big Bang, reseed & active-scale physics">🎛<span class="uv-tab-lbl">Sim</span></button>
+      <button id="uv-config-btn" class="uv-deck-tab" data-deck-tab="config" type="button" title="Engine & Visual Config: quality, lensing, orbits, Retro CRT & PeerCompute mesh">⚙<span class="uv-tab-lbl">Cfg</span></button>
+      <button id="uv-help-btn" class="uv-deck-tab" data-deck-tab="help" type="button" title="About this scale, governing equations, other ULG labs & Triad links">?</button>
+      <button id="uv-deck-collapse-btn" class="uv-deck-tab" type="button" style="margin-left:auto;" title="Collapse or expand Command Deck for pure full-screen cosmos view">❯</button>
+    </nav>
 
-  <!-- Collapsible Explorer Cargo & Specimen Bay Inventory Drawer -->
-  <aside id="uv-cargo-drawer" class="uv-drawer uv-glass" aria-label="Explorer Cargo &amp; Specimen Inventory">
-    <div class="uv-drawer-head">
-      <span class="uv-drawer-title">🎒 Saucer Cargo &amp; Specimen Bay</span>
-      <button class="uv-btn subtle icon-only" data-close-drawer="uv-cargo-drawer" type="button" title="Close Cargo Inventory">✕</button>
-    </div>
-
-    <div class="uv-section-label">🧬 Abducted Life Specimens (Tractor Beam)</div>
-    <div id="uv-cargo-specimens" class="uv-cargo-list">
-      <div class="uv-cargo-item-sub">No life forms aboard yet. Land on a living world and hold <strong>T</strong> (Tractor Beam) over trees or roaming animals to abduct &amp; examine them in Bio Lab.</div>
-    </div>
-
-    <div class="uv-section-label">🧪 Collected Material &amp; Compound Samples</div>
-    <div id="uv-cargo-samples" class="uv-cargo-list">
-      <div class="uv-cargo-item-sub">No material samples collected yet. Press <strong>G</strong> on any surface, asteroid, comet, or cloud deck to sample.</div>
-    </div>
-
-    <div class="uv-section-label">⛏️ Harvested Elements &amp; Kardashev Fleet</div>
-    <div id="uv-cargo-resources" class="uv-cargo-res-grid"></div>
-    <div class="uv-seg-group" style="margin-top:6px;">
-      <button id="uv-cargo-probe-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">🤖 Launch Probe</button>
-      <button id="uv-cargo-dyson-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">☀️ Build Dyson</button>
-    </div>
-  </aside>
-
-  <!-- Collapsible Sim Controls Drawer -->
-  <aside id="uv-sim-drawer" class="uv-drawer uv-glass" aria-label="Simulation Controls">
-    <div class="uv-drawer-head">
-      <span class="uv-drawer-title">Simulation Control</span>
-      <button class="uv-btn subtle icon-only" data-close-drawer="uv-sim-drawer" type="button" title="Close Simulation drawer">✕</button>
-    </div>
-
-    <div class="uv-seg-group">
-      <button id="uv-pause-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Pause or resume live WebGPU physics integration">⏸ Pause</button>
-      <button id="uv-orbit-up-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Ascend one scale level upward toward the Cosmic Web">↑ Orbit Up</button>
-    </div>
-
-    <div class="uv-row" title="Adjust real-time physical integration speed multiplier">
-      <span>Time Scale</span>
-      <input id="uv-timescale-slider" type="range" min="0.1" max="3.0" step="0.05" value="1.0" />
-      <span id="uv-timescale-val" style="font-family:var(--mono);font-size:11px;min-width:34px;text-align:right;">1.0×</span>
-    </div>
-
-    <div class="uv-seg-group">
-      <button id="uv-bigbang-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Reset the universe to early cosmology (a = 0.05, z = 19) and re-run GPU Zel'dovich evolution">✦ Big Bang</button>
-      <button id="uv-reseed-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;" title="Generate a brand-new seeded cosmos across all 8 scales">🎲 Reseed</button>
-    </div>
-
-    <div class="uv-section-label">Active Scale Physics</div>
-    <div id="uv-scale-controls" style="display:flex;flex-direction:column;gap:8px;"></div>
-  </aside>
-
-  <!-- Collapsible Visual & Engine Config Drawer -->
-  <aside id="uv-config-drawer" class="uv-drawer uv-glass" aria-label="Configuration">
-    <div class="uv-drawer-head">
-      <span class="uv-drawer-title">Engine &amp; Visual Config</span>
-      <button class="uv-btn subtle icon-only" data-close-drawer="uv-config-drawer" type="button" title="Close Config drawer">✕</button>
-    </div>
-
-    <div class="uv-section-label">GPU Particle / Sample Quality</div>
-    <div class="uv-seg-group" id="uv-quality-group" title="Adjust live WebGPU particle counts across Cosmic Web, Galaxy Scale-Atlas, Hydro Plasma, MD, and Quantum Orbital Cloud">
-      <button class="uv-seg-btn" data-quality="low" type="button">LOW</button>
-      <button class="uv-seg-btn active" data-quality="med" type="button">MED</button>
-      <button class="uv-seg-btn" data-quality="high" type="button">HIGH</button>
-      <button class="uv-seg-btn" data-quality="ultra" type="button">ULTRA</button>
-    </div>
-
-    <div class="uv-section-label">Optics &amp; Overlays</div>
-    <label class="uv-row" title="Toggle real-time WGSL Schwarzschild Einstein-ring gravitational lensing around black holes">
-      <span>Schwarzschild Lensing</span>
-      <input id="uv-lensing-toggle" type="checkbox" checked />
-    </label>
-    <label class="uv-row" title="Toggle live osculating Keplerian orbit paths and simulation box guides">
-      <span>Orbit Paths &amp; Guides</span>
-      <input id="uv-orbits-toggle" type="checkbox" checked />
-    </label>
-    <label class="uv-row" title="Toggle 3D hyperdrive travel trajectory line">
-      <span>Travel Path</span>
-      <input id="uv-travel-toggle" type="checkbox" checked />
-    </label>
-    <label class="uv-row" title="Slowly orbit camera automatically (OFF by default for steady physics inspection)">
-      <span>Camera Auto-Spin</span>
-      <input id="uv-autospin-toggle" type="checkbox" />
-    </label>
-
-    <div class="uv-section-label">Retro Display Mode</div>
-    <label class="uv-row" title="Enable optional Retro CRT scanlines, phosphor vignette, and pixelation post-pass">
-      <span>Retro CRT &amp; Scanlines</span>
-      <input id="uv-crt-toggle" type="checkbox" />
-    </label>
-    <div class="uv-row" title="Pixel quantization factor when Retro CRT mode is active">
-      <span>Pixelation</span>
-      <input id="uv-pixel-slider" type="range" min="1" max="6" step="1" value="3" />
-      <span id="uv-pixel-val" style="font-family:var(--mono);font-size:11px;min-width:24px;text-align:right;">3×</span>
-    </div>
-
-    <div class="uv-section-label">PeerCompute Distributed Mesh</div>
-    <div class="uv-row">
-      <input id="uv-peer-url" type="text" placeholder="ws://127.0.0.1:8787" style="flex:1;min-width:0;" title="Optional PeerCompute WebSocket relay URL for 2-of-2 distributed material derivation quorum" />
-    </div>
-    <div class="uv-row">
-      <select id="uv-peer-role" title="PeerCompute mesh node role">
-        <option value="requester">requester</option>
-        <option value="responder">responder</option>
-        <option value="observer">observer</option>
-      </select>
-      <button id="uv-peer-connect-btn" class="uv-btn subtle" type="button" title="Connect or disconnect PeerCompute distributed derivation mesh">Join Mesh</button>
-    </div>
-    <div id="uv-peer-status" style="font-family:var(--mono);font-size:10.5px;color:var(--muted);">Local GPU · 0 remote peers</div>
-  </aside>
-
-  <!-- Collapsible Help & Demos Drawer -->
-  <aside id="uv-help-drawer" class="uv-drawer uv-glass" aria-label="Help and ULG Links">
-    <div class="uv-drawer-head">
-      <span class="uv-drawer-title">ULG Help &amp; Labs</span>
-      <button class="uv-btn subtle icon-only" data-close-drawer="uv-help-drawer" type="button" title="Close Help menu">✕</button>
-    </div>
-
-    <button id="uv-about-scale-btn" class="uv-help-item" type="button" title="Read the governing equations, active WebGPU shader, and physical provenance of the current scale">
-      <span class="uv-help-item-top"><span>ⓘ About Current Scale</span><small id="uv-help-scale-tag">L0</small></span>
-      <span class="uv-help-item-desc">Governing physics, live WebGPU kernels, and accuracy tier for this regime.</span>
-    </button>
-
-    <button id="uv-about-ulg-btn" class="uv-help-item" type="button" title="Read how ULG unifies 40 orders of magnitude from nuclei to cosmic web on WebGPU">
-      <span class="uv-help-item-top"><span>✦ About ULG Universes</span><small>40 OOM</small></span>
-      <span class="uv-help-item-desc">Zero scripted animations: every scale runs real ULG WebGPU compute shaders.</span>
-    </button>
-
-    <div class="uv-section-label">Other ULG Flagship Apps</div>
-    <a class="uv-help-item" href="./index.html" title="Open ULG Studio Continuum — interactive 3D WebGPU MLS-MPM fluids, phase transitions, refraction &amp; reactions">
-      <span class="uv-help-item-top"><span>Studio Continuum ↗</span><small>10⁻³ → 10⁺² m</small></span>
-      <span class="uv-help-item-desc">3D WebGPU MLS-MPM fluid, phase change, optics &amp; reactive continuum studio.</span>
-    </a>
-    <a class="uv-help-item" href="./elements-lab.html" title="Open Material Physics Lab — 24 live WebGPU simulations across all Z = 1..118 elements, compounds &amp; polytope atlases">
-      <span class="uv-help-item-top"><span>Material Physics Lab ↗</span><small>Z = 1..118</small></span>
-      <span class="uv-help-item-desc">Full Periodic Table nuclear, Dirac–KS, FDTD optics, reactive MD &amp; Polytope Atlas lab.</span>
-    </a>
-    <a class="uv-help-item" href="./organic-lab.html" title="Open ULG Organic Chemistry Lab — GPU Hückel π-MOs, chirality R↔S, H-bonds, SN2, Diels-Alder &amp; Frank chiral symmetry breaking">
-      <span class="uv-help-item-top"><span>Organic Chemistry Lab ↗</span><small>10⁻¹⁰ → 10⁻⁶ m</small></span>
-      <span class="uv-help-item-desc">GPU π-MO orbitals, chirality, reactive bond-order MD, pKa &amp; autocatalytic networks.</span>
-    </a>
-    <a class="uv-help-item" href="./life-lab.html" title="Open ULG Biophysics &amp; Emergent Life Lab — amphiphile protocells, biopolymer folding, Eigen threshold, Hodgkin-Huxley &amp; Turing active matter">
-      <span class="uv-help-item-top"><span>Biophysics &amp; Life Lab ↗</span><small>10⁻⁹ → 10⁻² m</small></span>
-      <span class="uv-help-item-desc">Self-assembling vesicles, folding catalysis, evolution, chemiosmosis &amp; active morphogenesis.</span>
-    </a>
-
-    <div class="uv-section-label">Source Code &amp; Triad</div>
-    <a class="uv-help-item" href="https://github.com/Tsotchke-Corporation/ulg" target="_blank" rel="noopener noreferrer" title="Open the Universal Law Graph repository on GitHub">
-      <span class="uv-help-item-top"><span>↗ GitHub — ULG Repository</span><small>Tsotchke-Corp</small></span>
-      <span class="uv-help-item-desc">github.com/Tsotchke-Corporation/ulg</span>
-    </a>
-    <div class="uv-triad-links">
-      <a href="https://github.com/MetaverseJS/peercompute" target="_blank" rel="noopener noreferrer" title="PeerCompute distributed WebGPU scheduling &amp; peer fabric">PeerCompute ↗</a>
-      <a href="https://github.com/tsotchke/eshkol" target="_blank" rel="noopener noreferrer" title="Eshkol mathematical &amp; higher-order AD closure compiler">Eshkol ↗</a>
-      <a href="https://github.com/tsotchke/moonlab" target="_blank" rel="noopener noreferrer" title="MoonLab quantum &amp; many-body response engine">MoonLab ↗</a>
-    </div>
-  </aside>
-
-  <!-- Bottom-Left Target Analysis & Live 2D GPU Scientific Plot Card -->
-  <section id="uv-inspector" class="uv-inspector uv-glass" aria-label="Target Analysis">
-    <div class="uv-inspector-head">
-      <div style="min-width:0;">
-        <div class="uv-target-kicker" id="uv-target-kicker">L0 · COSMIC WEB · 10⁺²⁵ m</div>
-        <div class="uv-target-name" id="uv-target-name">Initializing WebGPU Cosmos…</div>
-        <div class="uv-target-sub" id="uv-target-sub">3D-FFT FLRW TreePM · 200 Mpc/h</div>
-      </div>
-      <div style="display:flex;gap:4px;flex-shrink:0;">
-        <button id="uv-info-quick-btn" class="uv-btn subtle icon-only" type="button" title="About the physics and WebGPU kernels at this scale">ⓘ</button>
-        <button id="uv-collapse-btn" class="uv-btn subtle icon-only" type="button" title="Collapse or expand the Target Analysis panel">−</button>
-      </div>
-    </div>
-
-    <div class="uv-inspector-body">
-      <div class="uv-spec-wrap">
-        <div class="uv-spec-label">
-          <span id="uv-spec-title">EMISSION SPECTROGRAPH</span>
-          <span id="uv-comp-text">H 74% · He 25% · Met 1%</span>
+    <div class="uv-deck-body">
+      <!-- PANE 1: SCANNER & ORBITAL BIOSIGNATURE / MINERAL SPECTROSCOPY (#uv-inspector) -->
+      <section id="uv-inspector" class="uv-deck-pane open" aria-label="Target Analysis & Orbital Remote Sensing">
+        <div class="uv-inspector-head">
+          <div style="min-width:0;">
+            <div class="uv-target-kicker" id="uv-target-kicker">L0 · COSMIC WEB · 10⁺²⁵ m</div>
+            <div class="uv-target-name" id="uv-target-name">Initializing WebGPU Cosmos…</div>
+            <div class="uv-target-sub" id="uv-target-sub">3D-FFT FLRW TreePM · 200 Mpc/h</div>
+          </div>
+          <div style="display:flex;gap:4px;flex-shrink:0;">
+            <button id="uv-info-quick-btn" class="uv-btn subtle icon-only" type="button" title="About the physics and WebGPU kernels at this scale">ⓘ</button>
+            <button id="uv-collapse-btn" class="uv-btn subtle icon-only" type="button" title="Collapse or expand Scanner details">−</button>
+          </div>
         </div>
-        <canvas id="uv-spectrograph-canvas" width="336" height="22"></canvas>
-      </div>
 
-      <div class="uv-stats-grid" id="uv-stats-grid">
-        <div class="uv-stat-cell"><div class="uv-stat-k">Scale Factor</div><div class="uv-stat-v">—</div></div>
-        <div class="uv-stat-cell"><div class="uv-stat-k">Redshift</div><div class="uv-stat-v">—</div></div>
-        <div class="uv-stat-cell"><div class="uv-stat-k">Density σ</div><div class="uv-stat-v">—</div></div>
-        <div class="uv-stat-cell"><div class="uv-stat-k">GPU Submits</div><div class="uv-stat-v">—</div></div>
-      </div>
+        <div class="uv-inspector-body">
+          <!-- Orbital Remote Sensing: Biosignatures, Atmospheric Gases, Minerals & Host Starlight Flux -->
+          <div id="uv-remote-sensing-box" class="uv-remote-box" aria-label="Orbital Remote Sensing Spectroscopy"></div>
 
-      <div class="uv-sample-strip" id="uv-sample-strip" aria-label="Sampled Planetary Material Drill-Down"></div>
+          <div class="uv-spec-wrap">
+            <div class="uv-spec-label">
+              <span id="uv-spec-title">EMISSION / ABSORPTION SPECTROGRAPH</span>
+              <span id="uv-comp-text">H 74% · He 25% · Met 1%</span>
+            </div>
+            <canvas id="uv-spectrograph-canvas" width="336" height="24"></canvas>
+          </div>
 
-      <div class="uv-plot-box">
-        <div class="uv-spec-label">
-          <span id="uv-plot-title">GPU MATTER POWER SPECTRUM P(k)</span>
-          <span id="uv-plot-meta">16 k-bins</span>
+          <div class="uv-stats-grid" id="uv-stats-grid">
+            <div class="uv-stat-cell"><div class="uv-stat-k">Scale Factor</div><div class="uv-stat-v">—</div></div>
+            <div class="uv-stat-cell"><div class="uv-stat-k">Redshift</div><div class="uv-stat-v">—</div></div>
+            <div class="uv-stat-cell"><div class="uv-stat-k">Density σ</div><div class="uv-stat-v">—</div></div>
+            <div class="uv-stat-cell"><div class="uv-stat-k">GPU Submits</div><div class="uv-stat-v">—</div></div>
+          </div>
+
+          <div class="uv-sample-strip" id="uv-sample-strip" aria-label="Sampled Planetary Material Drill-Down"></div>
+
+          <div class="uv-plot-box">
+            <div class="uv-spec-label">
+              <span id="uv-plot-title">GPU MATTER POWER SPECTRUM P(k)</span>
+              <span id="uv-plot-meta">16 k-bins</span>
+            </div>
+            <canvas id="uv-plot-canvas" width="336" height="86"></canvas>
+          </div>
+
+          <div class="uv-inspector-actions">
+            <button id="uv-dive-btn" class="uv-btn primary" type="button" title="Initiate Hyperdrive dive into the selected target">⚡ INITIATE HYPERDRIVE</button>
+            <button id="uv-focus-mote-btn" class="uv-btn" type="button" style="display:none;border-color:rgba(250,204,21,0.55);color:#fef08a;" title="Lock camera focus onto this clicked GPU mote">🎯 Focus</button>
+            <button id="uv-surface-quick-btn" class="uv-btn" type="button" style="display:none;border-color:rgba(251,146,60,0.55);color:#ffedd5;" title="Land / Dive onto this world (Shortcut: L)">🚙 Land</button>
+            <button id="uv-return-btn" class="uv-btn subtle" type="button" title="Return to the parent cosmic scale above">↑ Orbit</button>
+          </div>
+
+          <div class="uv-provenance-foot">
+            <span id="uv-engine-tag">supergalactic-flrw-treepm.v1</span>
+            <span title="G7 scientific database comparisons are offline and advisory; runtime outputs are declared unvalidated">sciVal: false</span>
+          </div>
         </div>
-        <canvas id="uv-plot-canvas" width="336" height="86"></canvas>
-      </div>
+      </section>
 
-      <div class="uv-inspector-actions">
-        <button id="uv-dive-btn" class="uv-btn primary" type="button" title="Initiate Hyperdrive dive into the selected target and activate the next WebGPU physics engine">⚡ INITIATE HYPERDRIVE</button>
-        <button id="uv-focus-mote-btn" class="uv-btn" type="button" style="display:none;border-color:rgba(250,204,21,0.55);color:#fef08a;" title="Lock camera focus onto this clicked GPU mote and track its live motion">🎯 Focus</button>
-        <button id="uv-surface-quick-btn" class="uv-btn" type="button" style="display:none;border-color:rgba(251,146,60,0.55);color:#ffedd5;" title="Land 6-Wheel Jump-Rocket Rover &amp; Coaxial Atmospheric Drone on this world (Shortcut: L)">🚙 Land</button>
-        <button id="uv-return-btn" class="uv-btn subtle" type="button" title="Return to the parent cosmic scale above">↑ Orbit</button>
-      </div>
+      <!-- PANE 2: FULL-SPECTRUM DUAL-CARET EM SENSOR STACK (#uv-em-sensor-bar) -->
+      <section id="uv-em-sensor-bar" class="uv-deck-pane" aria-label="Full-Spectrum Dual-Caret EM Sensor Stack">
+        <div class="uv-drawer-head">
+          <span class="uv-drawer-title">🌈 Full-Spectrum EM Sensor Stack</span>
+          <button id="uv-em-close-btn" class="uv-btn subtle icon-only" type="button" title="Return to Scanner tab">✕</button>
+        </div>
+        <div class="uv-em-head">
+          <span id="uv-em-readout" style="color:#e0f2fe;font-weight:700;">👁 Human Visible (380–750 nm)</span>
+        </div>
+        <div id="uv-em-track" class="uv-em-track" title="Drag left/right carets [λ_min, λ_max] or slide the spectral window across 14 decades of EM wavelengths">
+          <div id="uv-em-window" class="uv-em-window"></div>
+          <div id="uv-em-caret-min" class="uv-em-caret" title="Short-wavelength caret λ_min (Violet/Blue)">◀</div>
+          <div id="uv-em-caret-max" class="uv-em-caret" title="Long-wavelength caret λ_max (Red)">▶</div>
+        </div>
+        <div class="uv-em-ticks">
+          <span>γ 10⁻¹³m</span><span>X-Ray</span><span>UV</span><span style="color:#6ee7b7;">VIS</span><span>IR</span><span>μW</span><span>Radio 10m</span>
+        </div>
+        <div class="uv-section-label">Spectral Band Presets</div>
+        <div class="uv-em-presets" id="uv-em-presets">
+          <button type="button" class="active" data-em-preset="vis">👁 Visible</button>
+          <button type="button" data-em-preset="jwst">🔭 JWST IR</button>
+          <button type="button" data-em-preset="ir">🔥 Thermal IR</button>
+          <button type="button" data-em-preset="uv">⚡ UV / Aurora</button>
+          <button type="button" data-em-preset="xray">☢️ X-Ray / γ</button>
+          <button type="button" data-em-preset="radio">📡 21cm Radio</button>
+          <button type="button" data-em-preset="cmb">🌌 CMB μW</button>
+        </div>
+        <div class="uv-gamepad-map">
+          <strong>Observatory Tip:</strong> Switch to <strong>🔭 JWST IR</strong> on L1 Spiral Galaxies or L3 H II Pillars to pierce optically opaque dust and expose embedded protostars. Switch to <strong>📡 21cm Radio</strong> or <strong>☢️ X-Ray</strong> on L1 Galaxies to reveal asynchronous blinking Pulsars &amp; accreting X-Ray Binaries — click one and Dive!
+        </div>
+      </section>
 
-      <div class="uv-provenance-foot">
-        <span id="uv-engine-tag">supergalactic-flrw-treepm.v1</span>
-        <span title="G7 scientific database comparisons are offline and advisory; runtime outputs are declared unvalidated">sciVal: false</span>
-      </div>
+      <!-- PANE 3: 6-DOF UFO FLIGHT CONSOLE, CHASE ZOOM, WEAPONS & XBOX GAMEPAD (#uv-flight-pane) -->
+      <section id="uv-flight-pane" class="uv-deck-pane" aria-label="6-DOF UFO Flight &amp; Weapons Console">
+        <div class="uv-drawer-head">
+          <span class="uv-drawer-title">🛸 6-DOF Saucer Bridge &amp; Flight</span>
+          <button class="uv-btn subtle icon-only" data-close-drawer="uv-flight-pane" type="button" title="Return to Scanner tab">✕</button>
+        </div>
+
+        <div class="uv-flight-card">
+          <div class="uv-row">
+            <span style="font-family:var(--mono);font-size:10.5px;color:#6ee7b7;font-weight:700;" id="uv-flight-regime-lbl">INTERGALACTIC WARP</span>
+            <span style="font-family:var(--mono);font-size:11px;color:#e0f2fe;font-weight:700;" id="uv-flight-speed-lbl">0.00 Mpc/s</span>
+          </div>
+          <div class="uv-seg-group">
+            <button id="uv-flight-orbit-btn" class="uv-seg-btn active" type="button">🪐 Orbit Mode</button>
+            <button id="uv-flight-ufo-btn" class="uv-seg-btn" type="button">🛸 UFO 6-DOF (Tab)</button>
+          </div>
+          <div class="uv-row" style="font-family:var(--mono);font-size:10px;color:var(--muted);">
+            <span>3D Attitude (X·Y·Z)</span>
+            <span id="uv-flight-attitude-lbl" style="color:#bae6fd;">P +0.0° · Y +0.0° · R +0.0°</span>
+          </div>
+          <div class="uv-seg-group">
+            <button id="uv-flight-level-btn" class="uv-seg-btn" type="button" title="Level horizon (Key: R / Gamepad L3)">⚖ Level (R)</button>
+            <button id="uv-flight-reset-btn" class="uv-seg-btn" type="button" title="Re-center UFO ahead of target">🎯 Re-Center</button>
+            <button id="uv-flight-cockpit-btn" class="uv-seg-btn" type="button" title="Toggle Inside-Dome 3D Cockpit (Key: V)">👁 Cockpit</button>
+          </div>
+        </div>
+
+        <div class="uv-section-label">Wide Chase Camera Zoom (0.55× → 45×)</div>
+        <div class="uv-row">
+          <input id="uv-flight-chase-slider" type="range" min="0.55" max="45" step="0.05" value="1.0" />
+          <span id="uv-flight-chase-val" style="font-family:var(--mono);font-size:11px;min-width:44px;text-align:right;color:#e0f2fe;">1.0×</span>
+        </div>
+        <div class="uv-seg-group" id="uv-chase-presets">
+          <button class="uv-seg-btn" data-chase-zoom="0.7" type="button">Close</button>
+          <button class="uv-seg-btn active" data-chase-zoom="1.0" type="button">1×</button>
+          <button class="uv-seg-btn" data-chase-zoom="5.0" type="button">5×</button>
+          <button class="uv-seg-btn" data-chase-zoom="16.0" type="button">16×</button>
+          <button class="uv-seg-btn" data-chase-zoom="40.0" type="button">40× Way Out</button>
+        </div>
+
+        <div class="uv-section-label">360° Rim Weapons &amp; Tractor (Space + Surface)</div>
+        <div class="uv-seg-group">
+          <button id="uv-flight-fire-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;border-color:rgba(251,146,60,0.55);color:#ffedd5;">🔫 Fire (X)</button>
+          <button id="uv-flight-missile-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">🚀 Missile (M)</button>
+          <button id="uv-flight-tractor-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;border-color:rgba(250,204,21,0.55);color:#fef08a;">🛸 Beam (T)</button>
+        </div>
+
+        <div class="uv-section-label">🎮 Xbox Gamepad &amp; 6-DOF Keyboard Controls</div>
+        <div id="uv-flight-gamepad-status" class="uv-gamepad-map">
+          <strong>Status:</strong> Connect Xbox controller &amp; press any button.<br/>
+          <strong>Left Stick:</strong> Thrust Fwd/Back + Strafe · <strong>Right Stick:</strong> Pitch X + Yaw Y<br/>
+          <strong>LB / RB:</strong> Full 360° Roll Z · <strong>RT / LT:</strong> Warp Boost / Brake<br/>
+          <strong>A / B:</strong> Ascend / Descend · <strong>X / Y:</strong> Fire / Tractor Beam<br/>
+          <strong>D-Pad ↑/↓:</strong> Chase Zoom In / Way Out · <strong>←/→:</strong> 40-OOM Scale<br/>
+          <strong>View:</strong> UFO ↔ Orbit · <strong>Menu:</strong> Cockpit · <strong>L3:</strong> Level · <strong>R3:</strong> Missile<br/>
+          <strong>Keys (UFO Mode):</strong> WASD thrust · Space/C up/dn · Q/E roll Z · Arrows/Drag pitch &amp; yaw · Wheel chase zoom (Shift+Wheel scale).
+        </div>
+      </section>
+
+      <!-- PANE 4: SAUCER CARGO & SPECIMEN BAY (#uv-cargo-drawer) -->
+      <section id="uv-cargo-drawer" class="uv-deck-pane" aria-label="Explorer Cargo &amp; Specimen Inventory">
+        <div class="uv-drawer-head">
+          <span class="uv-drawer-title">🎒 Saucer Cargo &amp; Specimen Bay</span>
+          <button class="uv-btn subtle icon-only" data-close-drawer="uv-cargo-drawer" type="button" title="Return to Scanner tab">✕</button>
+        </div>
+
+        <div class="uv-section-label">🧬 Abducted Life Specimens (Tractor Beam)</div>
+        <div id="uv-cargo-specimens" class="uv-cargo-list">
+          <div class="uv-cargo-item-sub">No life forms aboard yet. Land on a living world and hold <strong>T</strong> (Tractor Beam) over trees or roaming animals to abduct &amp; examine them in Bio Aquarium.</div>
+        </div>
+
+        <div class="uv-section-label">🧪 Collected Material &amp; Compound Samples</div>
+        <div id="uv-cargo-samples" class="uv-cargo-list">
+          <div class="uv-cargo-item-sub">No material samples collected yet. Press <strong>G</strong> on any surface, asteroid, comet, or cloud deck to sample.</div>
+        </div>
+
+        <div class="uv-section-label">⛏️ Harvested Elements &amp; Kardashev Fleet</div>
+        <div id="uv-cargo-resources" class="uv-cargo-res-grid"></div>
+        <div class="uv-seg-group" style="margin-top:4px;">
+          <button id="uv-cargo-probe-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">🤖 Launch Probe</button>
+          <button id="uv-cargo-dyson-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">☀️ Build Dyson</button>
+        </div>
+      </section>
+
+      <!-- PANE 5: SIMULATION CONTROLS (#uv-sim-drawer) -->
+      <section id="uv-sim-drawer" class="uv-deck-pane" aria-label="Simulation Controls">
+        <div class="uv-drawer-head">
+          <span class="uv-drawer-title">🎛 Simulation Control</span>
+          <button class="uv-btn subtle icon-only" data-close-drawer="uv-sim-drawer" type="button" title="Return to Scanner tab">✕</button>
+        </div>
+
+        <div class="uv-seg-group">
+          <button id="uv-pause-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">⏸ Pause</button>
+          <button id="uv-orbit-up-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">↑ Orbit Up</button>
+        </div>
+
+        <div class="uv-row">
+          <span>Time Scale</span>
+          <input id="uv-timescale-slider" type="range" min="0.1" max="3.0" step="0.05" value="1.0" />
+          <span id="uv-timescale-val" style="font-family:var(--mono);font-size:11px;min-width:34px;text-align:right;">1.0×</span>
+        </div>
+
+        <div class="uv-seg-group">
+          <button id="uv-bigbang-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">✦ Big Bang</button>
+          <button id="uv-reseed-btn" class="uv-btn subtle" type="button" style="flex:1;justify-content:center;">🎲 Reseed</button>
+        </div>
+
+        <div class="uv-section-label">Active Scale Physics</div>
+        <div id="uv-scale-controls" style="display:flex;flex-direction:column;gap:8px;"></div>
+      </section>
+
+      <!-- PANE 6: ENGINE & VISUAL CONFIG (#uv-config-drawer) -->
+      <section id="uv-config-drawer" class="uv-deck-pane" aria-label="Configuration">
+        <div class="uv-drawer-head">
+          <span class="uv-drawer-title">⚙ Engine &amp; Visual Config</span>
+          <button class="uv-btn subtle icon-only" data-close-drawer="uv-config-drawer" type="button" title="Return to Scanner tab">✕</button>
+        </div>
+
+        <div class="uv-section-label">GPU Particle / Sample Quality</div>
+        <div class="uv-seg-group" id="uv-quality-group">
+          <button class="uv-seg-btn" data-quality="low" type="button">LOW</button>
+          <button class="uv-seg-btn active" data-quality="med" type="button">MED</button>
+          <button class="uv-seg-btn" data-quality="high" type="button">HIGH</button>
+          <button class="uv-seg-btn" data-quality="ultra" type="button">ULTRA</button>
+        </div>
+
+        <div class="uv-section-label">Optics &amp; Overlays</div>
+        <label class="uv-row"><span>Schwarzschild Lensing</span><input id="uv-lensing-toggle" type="checkbox" checked /></label>
+        <label class="uv-row"><span>Orbit Paths &amp; Guides</span><input id="uv-orbits-toggle" type="checkbox" checked /></label>
+        <label class="uv-row"><span>Travel Path</span><input id="uv-travel-toggle" type="checkbox" checked /></label>
+        <label class="uv-row"><span>Camera Auto-Spin</span><input id="uv-autospin-toggle" type="checkbox" /></label>
+
+        <div class="uv-section-label">Retro Display Mode</div>
+        <label class="uv-row"><span>Retro CRT &amp; Scanlines</span><input id="uv-crt-toggle" type="checkbox" /></label>
+        <div class="uv-row">
+          <span>Pixelation</span>
+          <input id="uv-pixel-slider" type="range" min="1" max="6" step="1" value="3" />
+          <span id="uv-pixel-val" style="font-family:var(--mono);font-size:11px;min-width:24px;text-align:right;">3×</span>
+        </div>
+
+        <div class="uv-section-label">PeerCompute Distributed Mesh</div>
+        <div class="uv-row">
+          <input id="uv-peer-url" type="text" placeholder="ws://127.0.0.1:8787" style="flex:1;min-width:0;" />
+        </div>
+        <div class="uv-row">
+          <select id="uv-peer-role">
+            <option value="requester">requester</option>
+            <option value="responder">responder</option>
+            <option value="observer">observer</option>
+          </select>
+          <button id="uv-peer-connect-btn" class="uv-btn subtle" type="button">Join Mesh</button>
+        </div>
+        <div id="uv-peer-status" style="font-family:var(--mono);font-size:10px;color:var(--muted);">Local GPU · 0 remote peers</div>
+      </section>
+
+      <!-- PANE 7: HELP & ULG LABS (#uv-help-drawer) -->
+      <section id="uv-help-drawer" class="uv-deck-pane" aria-label="Help and ULG Links">
+        <div class="uv-drawer-head">
+          <span class="uv-drawer-title">? ULG Help &amp; Labs</span>
+          <button class="uv-btn subtle icon-only" data-close-drawer="uv-help-drawer" type="button" title="Return to Scanner tab">✕</button>
+        </div>
+
+        <button id="uv-about-scale-btn" class="uv-help-item" type="button">
+          <span class="uv-help-item-top"><span>ⓘ About Current Scale</span><small id="uv-help-scale-tag">L0</small></span>
+          <span class="uv-help-item-desc">Governing physics, live WebGPU kernels, and accuracy tier for this regime.</span>
+        </button>
+
+        <button id="uv-about-ulg-btn" class="uv-help-item" type="button">
+          <span class="uv-help-item-top"><span>✦ About ULG Universes</span><small>40 OOM</small></span>
+          <span class="uv-help-item-desc">Zero scripted animations: every scale runs real ULG WebGPU compute shaders.</span>
+        </button>
+
+        <div class="uv-section-label">Other ULG Flagship Apps</div>
+        <a class="uv-help-item" href="./index.html">
+          <span class="uv-help-item-top"><span>Studio Continuum ↗</span><small>10⁻³ → 10⁺² m</small></span>
+          <span class="uv-help-item-desc">3D WebGPU MLS-MPM fluid, phase change, optics &amp; reactive continuum studio.</span>
+        </a>
+        <a class="uv-help-item" href="./elements-lab.html">
+          <span class="uv-help-item-top"><span>Material Physics Lab ↗</span><small>Z = 1..118</small></span>
+          <span class="uv-help-item-desc">Full Periodic Table nuclear, Dirac–KS, FDTD optics, reactive MD &amp; Polytope Atlas lab.</span>
+        </a>
+        <a class="uv-help-item" href="./organic-lab.html">
+          <span class="uv-help-item-top"><span>Organic Chemistry Lab ↗</span><small>10⁻¹⁰ → 10⁻⁶ m</small></span>
+          <span class="uv-help-item-desc">GPU π-MO orbitals, chirality, reactive bond-order MD, pKa &amp; autocatalytic networks.</span>
+        </a>
+        <a class="uv-help-item" href="./life-lab.html">
+          <span class="uv-help-item-top"><span>Biophysics &amp; Life Lab ↗</span><small>10⁻⁹ → 10⁻² m</small></span>
+          <span class="uv-help-item-desc">Specimen Vivarium Aquarium, protocells, biopolymer folding, evolution &amp; active morphogenesis.</span>
+        </a>
+
+        <div class="uv-section-label">Source Code &amp; Triad</div>
+        <a class="uv-help-item" href="https://github.com/Tsotchke-Corporation/ulg" target="_blank" rel="noopener noreferrer">
+          <span class="uv-help-item-top"><span>↗ GitHub — ULG Repository</span><small>Tsotchke-Corp</small></span>
+          <span class="uv-help-item-desc">github.com/Tsotchke-Corporation/ulg</span>
+        </a>
+        <div class="uv-triad-links">
+          <a href="https://github.com/MetaverseJS/peercompute" target="_blank" rel="noopener noreferrer">PeerCompute ↗</a>
+          <a href="https://github.com/tsotchke/eshkol" target="_blank" rel="noopener noreferrer">Eshkol ↗</a>
+          <a href="https://github.com/tsotchke/moonlab" target="_blank" rel="noopener noreferrer">MoonLab ↗</a>
+        </div>
+      </section>
     </div>
-  </section>
+  </aside>
 
-  <!-- Bottom-Right Breadcrumb & Controls Hint -->
-  <div class="uv-bottom-right">
+  <!-- Bottom-Left Breadcrumb & Dynamic Flight/Orbit Controls Hint -->
+  <div class="uv-bottom-left">
     <div class="uv-breadcrumb uv-glass" id="uv-breadcrumb"><strong>Cosmic Web</strong></div>
-    <div class="uv-hint-pill uv-glass" id="uv-hint-pill">Scroll: Continuous 40-OOM Zoom · Drag: Orbit · Click ANY Mote: Inspect GPU Data · Dbl-Click: Focus/Zoom</div>
+    <div class="uv-hint-pill uv-glass" id="uv-hint-pill">Tab: UFO 6-DOF ↔ Orbit · Scroll: 40-OOM Zoom · Drag: Orbit · Click ANY Mote: Inspect GPU Data</div>
   </div>
 
-  <!-- Planetary Surface Vehicle Controls HUD (TinyPlanetControls: Rover + Jump Rockets + Atmospheric Drone) -->
+  <!-- Planetary Surface Vehicle Controls HUD -->
   <div id="uv-touch-pads" class="uv-touch-pads" aria-label="Surface Touch Joysticks">
     <div id="uv-joy-move" class="uv-joy-pad"><div class="uv-joy-knob" id="uv-joy-move-knob"></div><span class="uv-joy-label">DRIVE / FLY</span></div>
     <div id="uv-joy-look" class="uv-joy-pad"><div class="uv-joy-knob" id="uv-joy-look-knob"></div><span class="uv-joy-label">LOOK</span></div>
   </div>
-  <section id="uv-surface-hud" class="uv-glass" aria-label="Planetary Surface & Atmospheric Explorer Controls">
+  <section id="uv-surface-hud" class="uv-glass" aria-label="Planetary Surface &amp; Atmospheric Explorer Controls">
     <div class="uv-surf-telemetry" id="uv-surf-telemetry">
       <span><strong>ROVER</strong> · g=3.72 m/s² · ρ=0.016 kg/m³ · Alt 0.0 m · Fuel 100%</span>
     </div>
-    <div class="uv-surf-telemetry" id="uv-surf-chem-bar" style="display:none;gap:6px;font-size:10.5px;border-top:1px solid rgba(120,175,255,0.16);padding-top:5px;">
-    </div>
-    <div class="uv-surf-telemetry" id="uv-surf-reaction-bar" style="display:none;gap:6px;font-size:10.5px;color:#fde68a;border-top:1px solid rgba(251,191,36,0.22);padding-top:4px;">
-    </div>
-    <div class="uv-surf-pills" id="uv-surf-weapon-bar" style="border-top:1px solid rgba(120,175,255,0.16);padding-top:5px;">
-      <button class="uv-surf-pill active" data-weapon="laser" type="button" title="Full-Spectrum Tunable EM Laser (10⁻¹³ m Gamma → 10 m Radio) firing from the 360° saucer rim [Key: 1]">⚡ EM Laser</button>
-      <button class="uv-surf-pill" data-weapon="missile" type="button" title="Rim-launched guided thermobaric missiles carving GPU MLS-MPM craters &amp; scattering boulders [Key: 2 / M]">🚀 Missile (M)</button>
-      <button class="uv-surf-pill" data-weapon="antimatter" type="button" title="Antimatter annihilation beam (E = 2mc², 511 keV gamma flash &amp; mega-crater) [Key: 3]">🟣 Antimatter</button>
-      <button id="uv-weapon-fire-btn" class="uv-surf-pill rocket" type="button" title="Hold X or click/hold to fire active 360° rim weapon">🔫 FIRE (X)</button>
-      <button id="uv-tractor-btn" class="uv-surf-pill" type="button" style="border-color:rgba(250,204,21,0.55);color:#fef08a;" title="Hold/Toggle T for Yellow Conical Tractor Beam: lift rigid boulders &amp; harvest elemental resources">🛸 TRACTOR (T)</button>
-      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#bae6fd;" title="Tune EM laser wavelength logarithmically from Gamma (10⁻¹³ m) through X-Ray, UV, Visible, IR, Microwave, to Radio (10 m)">
+    <div class="uv-surf-telemetry" id="uv-surf-chem-bar" style="display:none;gap:6px;font-size:10px;border-top:1px solid rgba(120,175,255,0.16);padding-top:4px;"></div>
+    <div class="uv-surf-telemetry" id="uv-surf-reaction-bar" style="display:none;gap:6px;font-size:10px;color:#fde68a;border-top:1px solid rgba(251,191,36,0.22);padding-top:4px;"></div>
+    <div class="uv-surf-pills" id="uv-surf-weapon-bar" style="border-top:1px solid rgba(120,175,255,0.16);padding-top:4px;">
+      <button class="uv-surf-pill active" data-weapon="laser" type="button">⚡ EM Laser</button>
+      <button class="uv-surf-pill" data-weapon="missile" type="button">🚀 Missile (M)</button>
+      <button class="uv-surf-pill" data-weapon="antimatter" type="button">🟣 Antimatter</button>
+      <button id="uv-weapon-fire-btn" class="uv-surf-pill rocket" type="button">🔫 FIRE (X)</button>
+      <button id="uv-tractor-btn" class="uv-surf-pill" type="button" style="border-color:rgba(250,204,21,0.55);color:#fef08a;">🛸 TRACTOR (T)</button>
+      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#bae6fd;">
         <span>λ</span>
-        <input id="uv-lambda-slider" type="range" min="-13" max="1" step="0.05" value="-6.27" style="width:82px;accent-color:#34d399;" />
-        <span id="uv-lambda-readout" style="min-width:78px;color:#6ee7b7;font-weight:700;">532 nm VIS</span>
+        <input id="uv-lambda-slider" type="range" min="-13" max="1" step="0.05" value="-6.27" style="width:76px;accent-color:#34d399;" />
+        <span id="uv-lambda-readout" style="min-width:74px;color:#6ee7b7;font-weight:700;">532 nm VIS</span>
       </label>
-      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#fde68a;" title="Tune EM laser / Antimatter output power from 1 kW up to Kardashev Reactor Cap (10¹² → 10²⁶ W)">
+      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#fde68a;">
         <span>P</span>
-        <input id="uv-power-slider" type="range" min="3" max="26" step="0.2" value="8.4" style="width:62px;accent-color:#f59e0b;" />
-        <span id="uv-power-readout" style="min-width:54px;font-weight:700;">250 MW</span>
+        <input id="uv-power-slider" type="range" min="3" max="26" step="0.2" value="8.4" style="width:58px;accent-color:#f59e0b;" />
+        <span id="uv-power-readout" style="min-width:50px;font-weight:700;">250 MW</span>
       </label>
-      <button id="uv-probe-btn" class="uv-surf-pill sample" type="button" title="Spend 40 kg Metals + 40 kg Silicates to deploy a self-replicating Von Neumann Probe (Key: P)">🤖 Probe (P)</button>
+      <button id="uv-probe-btn" class="uv-surf-pill sample" type="button">🤖 Probe (P)</button>
       <span id="uv-kardashev-badge" style="font-family:var(--mono);font-size:10px;color:#6ee7b7;padding:0 4px;">K 0.72 · 0 Probes</span>
     </div>
     <div class="uv-surf-pills">
-      <button id="uv-surf-sample-btn" class="uv-surf-pill sample" type="button" title="Press G to activate the yellow tractor beam, sample directly below your craft, and inspect its atomic lattice, compounds, and elements">🔬 SAMPLE BELOW (G)</button>
-      <button id="uv-surf-timewarp-btn" class="uv-surf-pill" type="button" title="Cycle Surface Orbital Time-Warp (1× → 10³× → 10⁵× → 10⁶×) to watch real sunrises, sunsets, orbiting moons, eclipses, and seasonal winters!">⏩ 1× SKY</button>
-      <a id="uv-surf-xeno-btn" class="uv-surf-pill sample" href="./life-lab.html" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;" title="Open this planet's native solvent, temperature, and stellar pigment directly in the Biophysics &amp; Xenobiology Lab">🧬 BIO LAB ↗</a>
-      <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to ascend in UFO/Drone or fire Rover Jump Rockets">⬆ ASCEND (Space)</button>
-      <button id="uv-surf-descend-btn" class="uv-surf-pill" type="button" title="Hold Ctrl/C to dive deeper toward surface or atmospheric strata">⬇ DIVE (C)</button>
-      <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to Beam Down Rover via tractor beam, deploy Drone, or return to the 60-ft UFO">🚙 BEAM DOWN ROVER (F)</button>
-      <button id="uv-surf-cam-btn" class="uv-surf-pill" type="button" title="Press V to toggle 3rd-Person Chase and Inside-the-Green-Glass-Dome 3D Cockpit View">📷 3RD CAM (V)</button>
-      <button id="uv-surf-orbit-btn" class="uv-surf-pill" type="button" title="Press Esc to launch back to Orbital Planetary View">🚀 ORBIT (Esc)</button>
+      <button id="uv-surf-sample-btn" class="uv-surf-pill sample" type="button">🔬 SAMPLE BELOW (G)</button>
+      <button id="uv-surf-timewarp-btn" class="uv-surf-pill" type="button">⏩ 1× SKY</button>
+      <a id="uv-surf-xeno-btn" class="uv-surf-pill sample" href="./life-lab.html" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;">🧬 BIO LAB ↗</a>
+      <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button">⬆ ASCEND (Space)</button>
+      <button id="uv-surf-descend-btn" class="uv-surf-pill" type="button">⬇ DIVE (C)</button>
+      <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button">🚙 BEAM DOWN ROVER (F)</button>
+      <button id="uv-surf-cam-btn" class="uv-surf-pill" type="button">📷 3RD CAM (V)</button>
+      <button id="uv-surf-orbit-btn" class="uv-surf-pill" type="button">🚀 ORBIT (Esc)</button>
     </div>
-    <div class="uv-surf-keys" id="uv-surf-keys">WASD: Fly/Drive · Space/C: Up/Down · X: Fire Rim Weapon · M: Missile · T: Yellow Tractor Beam · G: Sample → Lattice · F: Beam Down Rover/Drone/UFO · V: Cockpit · P: Von Neumann Probe · Esc: Orbit</div>
+    <div class="uv-surf-keys" id="uv-surf-keys">WASD / Xbox Sticks: Fly/Drive · Wheel / D-Pad: Chase Zoom (0.45×–18×) · Space/C: Up/Down · X: Fire · T: Tractor · G: Sample · F: Vehicle · V: Cockpit · Esc: Orbit</div>
   </section>
 
   <!-- Hyperdrive Transition Overlay -->

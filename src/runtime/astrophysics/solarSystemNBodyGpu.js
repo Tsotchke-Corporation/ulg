@@ -153,13 +153,15 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     composition: 'N₂ 94.2% · CH₄ 5.6% Atm · H₂O/Silicate Interior'
   },
   {
-    id: 'uranus', name: 'Uranus', subtitle: 'Tilted Ice Giant · 19.20 AU',
+    id: 'uranus', name: 'Uranus', subtitle: 'Tilted Ringed Ice Giant (97.8°) · 19.20 AU',
     parent: 0, kind: 3, massSolar: 4.3658e-5, radiusKm: 25362.0,
     aAu: 19.2184, e: 0.0463, incDeg: 0.773, omDeg: 74.01, wDeg: 96.99, m0Deg: 142.2,
     axialObliquityDeg: 97.77, spinAxisLonDeg: 168.0, rotationPeriodHr: -17.24, tidallyLocked: false,
     color0: [0.56, 0.84, 0.90], color1: [0.42, 0.72, 0.82], atm: 0.58, surfacePressurePa: 1.0e5, tempK: 59,
+    ringed: true, ringInnerKm: 38000, ringOuterKm: 51149,
+    ringColor: [0.60, 0.72, 0.82], ringNormal: [0.985, 0.14, 0.10],
     centralP: 260e9, coreZ: 14, mantleZ: 8, surfZ: 6,
-    composition: 'H₂O/NH₃/CH₄ Superionic Mantle · H₂/He Atm'
+    composition: 'H₂O/NH₃/CH₄ Superionic Mantle · Vertical ε-Ring System'
   },
   {
     id: 'neptune', name: 'Neptune', subtitle: 'Supersonic-Wind Ice Giant · 30.07 AU',
@@ -214,6 +216,42 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     color0: [0.30, 0.28, 0.27], color1: [0.16, 0.15, 0.15], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.12, tempK: 268,
     centralP: 8.0, coreZ: 6, mantleZ: 14, surfZ: 6,
     composition: 'C-Type Chondrite · Magnetite · Hydrated Clay & Organics'
+  },
+  {
+    id: 'enceladus', name: 'Enceladus', subtitle: 'Cryovolcanic Ocean Moon (Saturn) · 237,948 km',
+    parent: 10, kind: 3, massSolar: 5.43e-11, radiusKm: 252.1,
+    aAu: 0.001591, e: 0.0047, incDeg: 2.5, omDeg: 112.0, wDeg: 16.0, m0Deg: 215.0,
+    axialObliquityDeg: 0.02, spinAxisLonDeg: 80.0, rotationPeriodHr: 32.885, tidallyLocked: true, isCryoMoon: true,
+    color0: [0.95, 0.97, 0.99], color1: [0.52, 0.74, 0.92], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.42, tempK: 75,
+    centralP: 6.5e7, coreZ: 14, mantleZ: 8, surfZ: 8,
+    composition: 'Bright H₂O Ice Crust · Global Subsurface Ocean · Tiger-Stripe Plumes'
+  },
+  {
+    id: 'triton', name: 'Triton', subtitle: 'Retrograde Captured Kuiper Moon (Neptune) · 354,759 km',
+    parent: 13, kind: 3, massSolar: 1.076e-8, radiusKm: 1353.4,
+    aAu: 0.002371, e: 0.000016, incDeg: 156.885, omDeg: 177.6, wDeg: 220.5, m0Deg: 120.0,
+    axialObliquityDeg: 0.0, spinAxisLonDeg: 44.0, rotationPeriodHr: -141.04, tidallyLocked: true, isCryoMoon: true,
+    color0: [0.85, 0.78, 0.74], color1: [0.54, 0.44, 0.48], atm: 0.04, surfacePressurePa: 1.4, volatileMassFrac: 0.34, tempK: 38,
+    centralP: 1.6e9, coreZ: 14, mantleZ: 8, surfZ: 7,
+    composition: 'N₂/CH₄/CO Cryo-Frost Crust · Cantaloupe Terrain · Nitrogen Geysers'
+  },
+  {
+    id: 'pluto', name: 'Pluto', subtitle: 'Kuiper Belt Binary Dwarf Planet · 39.48 AU',
+    parent: 0, kind: 3, massSolar: 6.55e-9, radiusKm: 1188.3,
+    aAu: 39.482, e: 0.2488, incDeg: 17.16, omDeg: 110.30, wDeg: 113.83, m0Deg: 14.5,
+    axialObliquityDeg: 122.53, spinAxisLonDeg: 133.0, rotationPeriodHr: -153.29, tidallyLocked: false, isCryoMoon: true,
+    color0: [0.84, 0.76, 0.68], color1: [0.46, 0.26, 0.20], atm: 0.05, surfacePressurePa: 1.0, volatileMassFrac: 0.30, tempK: 44,
+    centralP: 1.1e9, coreZ: 14, mantleZ: 8, surfZ: 7,
+    composition: 'N₂ Ice Tombaugh Basin · CH₄ Tholin Highlands · H₂O Ice Bedrock'
+  },
+  {
+    id: 'charon', name: 'Charon', subtitle: 'Binary Dwarf Companion (Pluto) · 19,591 km',
+    parent: 21, kind: 3, massSolar: 7.98e-10, radiusKm: 606.0,
+    aAu: 0.000131, e: 0.0002, incDeg: 17.2, omDeg: 110.3, wDeg: 114.0, m0Deg: 194.5,
+    axialObliquityDeg: 122.5, spinAxisLonDeg: 133.0, rotationPeriodHr: -153.29, tidallyLocked: true,
+    color0: [0.64, 0.62, 0.60], color1: [0.44, 0.26, 0.22], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.28, tempK: 53,
+    centralP: 3.1e8, coreZ: 14, mantleZ: 8, surfZ: 8,
+    composition: 'H₂O/NH₃ Cryo-Ice Crust · Mordor Macula Tholin Polar Cap'
   }
 ]);
 

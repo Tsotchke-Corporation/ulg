@@ -16,6 +16,77 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
+
+export const SURFACE_DEFORMATION_MPM_LAW_ADAPTER = Object.freeze({
+  id: 'surface-deformation-mpm',
+  lawNodeId: 'law:astrophysics-surface-deformation-mpm',
+  orderConstraint: 'after:planetary-surface-vehicles',
+  adapterMode: LAW_ADAPTER_MODES.EXACT_NEAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['surface-deform-field', 'mpm-ejecta-points', 'rigid-boulder-poses']),
+  writes: Object.freeze(['surface-deform-field', 'mpm-ejecta-points', 'rigid-boulder-vertices']),
+  accumulates: Object.freeze(['crater-thermal-ledger', 'mpm-momentum-grid']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['ejecta-linear-momentum', 'thermal-enthalpy-diffusion', 'rigid-boulder-se3']),
+  validityDomain: Object.freeze({ requiresSolidCrust: true, dormantZeroWhenQuiescent: true }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e-1, 2e3]),
+  fundamentalLaws: Object.freeze(['active-zone-mls-mpm-plasticity', 'crater-excavation-thermal-diffusion', 'se3-rigid-boulder-contact'])
+});
+
+export function evaluateSurfaceDeformationMpmActivation(physicalState = {}) {
+  const active = Boolean(physicalState.surfaceViewActive)
+    && physicalState.hasSolidCrust !== false
+    && Boolean(physicalState.surfaceDeformationActive || physicalState.mpmActive || physicalState.craterCount > 0 || physicalState.boulderCount > 0);
+  return { active, reason: active ? 'active-surface-crater-mpm-or-boulders' : 'quiescent-surface-mpm-dormant' };
+}
+
+export function registerSurfaceDeformationMpmModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('surface-deformation-mpm@1')) {
+    return registry.resolveModule('surface-deformation-mpm@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'surface-deformation-mpm', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/surfaceDeformationMpmGpu.js',
+      entryPoint: 'mpm_g2p_advect',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      gravityMS2: { type: 'number', min: 0.01, max: 100, required: false }
+    },
+    stateLayout: {
+      tensorId: 'surface-deform-and-mpm-points',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 4,
+      strideBytes: 16,
+      fields: ['heightDelta', 'tempK', 'meltFrac', 'charFrac']
+    },
+    scaleRangeM: [0.1, 2e3],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: SURFACE_DEFORMATION_MPM_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createSurfaceDeformationMpmSessionWebGpu(device, {
+        env: { gravityMS2: Number(p.gravityMS2 ?? 9.81), tempK: 288, hasSolidCrust: true }
+      });
+      try {
+        const summary = { mpmPointCount: session.mpmPointCount, aliveBoulderCount: session.aliveBoulderCount };
+        return createSimulationArtifact?.({ schema: 'ulg.astrophysics.surface-deformation-mpm.v1', summary }) ?? summary;
+      } finally {
+        session.dispose();
+      }
+    }
+  });
+}
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,

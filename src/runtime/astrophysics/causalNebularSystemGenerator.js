@@ -86,9 +86,9 @@ function classifySpectralCode(evo, isPopIII = false) {
  *   - Circumstellar (S-type): stable for `a_p < rCritS`
  */
 export function evaluateHolmanWiegertLimits(aBinAu, eBin, massRatioMu) {
-  const a = Math.max(1e-4, Number(aBinAu) || 0.2);
-  const e = Math.max(0, Math.min(0.65, Number(eBin) || 0.05));
-  const mu = Math.max(0.05, Math.min(0.5, Number(massRatioMu) || 0.35));
+  const a = Math.max(1e-4, Number.isFinite(Number(aBinAu)) ? Number(aBinAu) : 0.2);
+  const e = Math.max(0, Math.min(0.65, Number.isFinite(Number(eBin)) ? Number(eBin) : 0.05));
+  const mu = Math.max(0.05, Math.min(0.5, Number.isFinite(Number(massRatioMu)) ? Number(massRatioMu) : 0.35));
   const e2 = e * e;
   const mu2 = mu * mu;
   const rCritP = a * (1.60 + 5.10 * e - 2.22 * e2 + 4.12 * mu - 4.27 * e * mu - 5.09 * mu2 + 4.61 * e2 * mu2);
@@ -227,7 +227,8 @@ export function deriveStarSystemFromGalacticLocation({
   popTag = 0.48,
   starIndex = 0,
   seed = 20261125,
-  forceMultiplicity = null
+  forceMultiplicity = null,
+  forceExoticStage = null
 } = {}) {
   const ep = cosmicEpoch || evaluateCosmicEpochState({ redshiftZ: 0.0 });
   const gEnv = galaxyEnv || deriveGalaxyEnvironmentFromCosmicContext({ cosmicEpoch: ep, seed });
@@ -328,13 +329,48 @@ export function deriveStarSystemFromGalacticLocation({
   const starLetters = ['A', 'B', 'C'];
 
   const stars = initMasses.map((m0, idx) => {
-    const evo = evaluateStellarEvolutionaryState({
+    let evo = evaluateStellarEvolutionaryState({
       massSolar: m0,
       ageGyr: systemAgeGyr,
       metallicitySolar
     });
+    // Optional explicit exotic host override (e.g., diving into an EM-picked blinking Pulsar/Magnetar/XRB BH in L1!)
+    if (idx === 0 && typeof forceExoticStage === 'string' && forceExoticStage.length > 0) {
+      const fSt = forceExoticStage.toLowerCase();
+      if (fSt === 'neutron-star' || fSt === 'pulsar' || fSt === 'magnetar') {
+        evo = {
+          ...evo,
+          stage: fSt === 'magnetar' ? 'magnetar' : 'neutron-star',
+          remnantClass: 'neutron-star',
+          massSolar: fSt === 'magnetar' ? 1.58 : 1.44,
+          radiusSolar: 0.0000172,
+          luminositySolar: fSt === 'magnetar' ? 0.42 : 0.18,
+          effectiveTempK: fSt === 'magnetar' ? 1200000 : 850000
+        };
+      } else if (fSt === 'stellar-black-hole' || fSt === 'black-hole') {
+        evo = {
+          ...evo,
+          stage: 'stellar-black-hole',
+          remnantClass: 'black-hole',
+          massSolar: 11.4,
+          radiusSolar: 0.000048,
+          luminositySolar: 0.38,
+          effectiveTempK: 1.5e7
+        };
+      } else if (fSt === 'white-dwarf') {
+        evo = {
+          ...evo,
+          stage: 'white-dwarf',
+          remnantClass: 'white-dwarf',
+          massSolar: 0.64,
+          radiusSolar: 0.0125,
+          luminositySolar: 0.018,
+          effectiveTempK: 19500
+        };
+      }
+    }
     const bb = blackbodyStarColors(evo.effectiveTempK);
-    const specCode = classifySpectralCode(evo, gEnv.isPrimordialPopIII);
+    const specCode = evo.stage === 'magnetar' ? 'SGR' : (evo.stage === 'neutron-star' ? 'PSR' : classifySpectralCode(evo, gEnv.isPrimordialPopIII));
     const isRemnant = evo.remnantClass !== 'none';
     // Clamp visual rendering radius for ultra-compact NS/BH so it stays inspectable while retaining true physics metadata
     const radiusKm = Math.max(12, evo.radiusSolar * 695700);
@@ -343,10 +379,10 @@ export function deriveStarSystemFromGalacticLocation({
     const hPct = Math.max(60.0, 100.0 - hePct - zPct);
     const compStr = evo.stage === 'white-dwarf'
       ? 'Degenerate C/O Core · Thin H/He Envelope'
-      : (evo.stage === 'neutron-star'
-        ? 'Superfluid Neutron Interior · Iron Crust'
+      : ((evo.stage === 'neutron-star' || evo.stage === 'magnetar')
+        ? 'Superfluid Neutron Interior · Magnetized Iron Crust'
         : (evo.stage === 'stellar-black-hole'
-          ? 'Relativistic Kerr Event Horizon'
+          ? 'Relativistic Kerr Event Horizon · Accretion Disk'
           : `H ${hPct.toFixed(1)}% · He ${hePct.toFixed(1)}% · Metals ${zPct.toFixed(2)}% ([Fe/H]=${feH >= 0 ? '+' : ''}${feH.toFixed(2)})`));
     return Object.freeze({
       component: starLetters[idx],
@@ -360,8 +396,20 @@ export function deriveStarSystemFromGalacticLocation({
       radiusKm,
       luminositySolar: Math.max(1e-4, evo.luminositySolar),
       effectiveTempK: Math.max(1200, evo.effectiveTempK || 5778),
-      color0: evo.stage === 'white-dwarf' ? [0.80, 0.94, 1.0] : (evo.stage === 'neutron-star' ? [0.68, 0.88, 1.0] : bb.color0),
-      color1: evo.stage === 'white-dwarf' ? [0.46, 0.72, 1.0] : (evo.stage === 'neutron-star' ? [0.76, 0.36, 1.0] : bb.color1),
+      color0: evo.stage === 'white-dwarf'
+        ? [0.80, 0.94, 1.0]
+        : (evo.stage === 'magnetar'
+          ? [1.0, 0.78, 0.98]
+          : (evo.stage === 'neutron-star'
+            ? [0.74, 0.95, 1.0]
+            : (evo.stage === 'stellar-black-hole' ? [0.0, 0.0, 0.0] : bb.color0))),
+      color1: evo.stage === 'white-dwarf'
+        ? [0.46, 0.72, 1.0]
+        : (evo.stage === 'magnetar'
+          ? [0.86, 0.28, 0.96]
+          : (evo.stage === 'neutron-star'
+            ? [0.58, 0.28, 1.0]
+            : (evo.stage === 'stellar-black-hole' ? [1.0, 0.72, 0.28] : bb.color1))),
       isRemnant,
       composition: compStr
     });
@@ -436,12 +484,15 @@ export function deriveStarSystemFromGalacticLocation({
   const primary = stars[0];
   let recommendedL3Regime = 'fusion';
   let nebulaBadge = 'MLS-MPM Nuclear Fusion Star';
-  if (primary.stage === 'neutron-star') {
+  if (primary.stage === 'magnetar') {
+    recommendedL3Regime = 'magnetar';
+    nebulaBadge = 'Ultra-Magnetized SGR Magnetar';
+  } else if (primary.stage === 'neutron-star') {
     recommendedL3Regime = systemAgeGyr < 0.08 ? 'snr-pwn' : 'pulsar';
     nebulaBadge = recommendedL3Regime === 'snr-pwn' ? 'Core-Collapse SNR / PWN' : 'Relativistic Magnetized Pulsar';
   } else if (primary.stage === 'stellar-black-hole') {
-    recommendedL3Regime = 'snr-pwn';
-    nebulaBadge = 'Hypernova Remnant / Black Hole';
+    recommendedL3Regime = 'black-hole';
+    nebulaBadge = 'Relativistic Kerr Black Hole';
   } else if (primary.stage === 'white-dwarf') {
     if (rand() < 0.28) {
       recommendedL3Regime = 'planetary-nebula';
@@ -589,10 +640,12 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     rMaxStableAu = Math.min(rMaxStableAu, hwOut.rCritSAu * 0.90);
   }
 
-  // Primordial metal-free Pop III or stellar BH or destroyed-window systems form 0 rocky/Earth-like planets!
+  // Primordial metal-free Pop III or destroyed-window systems form 0 planets;
+  // Neutron Stars / Pulsars can form rare fallback-disk metallic/carbon Pulsar Planets (PSR B1257+12!),
+  // and Stellar Black Holes can host surviving outer fallback-disk worlds!
+  const isPulsarHost = stars[0].stage === 'neutron-star' || stars[0].stage === 'magnetar';
+  const isBlackHoleHost = stars[0].stage === 'stellar-black-hole' || stars[0].stage === 'hypernova-remnant';
   const canFormPlanets = nebulaEnv.metallicitySolar >= 0.015
-    && stars[0].stage !== 'stellar-black-hole'
-    && stars[0].stage !== 'neutron-star'
     && rMaxStableAu > rMinStableAu * 1.45;
 
   // Determine number of planets from solid disk mass Sigma_solid (~ 10^[Fe/H]) and available radial span!
@@ -601,7 +654,12 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     const logSpan = Math.log(rMaxStableAu / rMinStableAu);
     const maxBySpacing = Math.max(1, Math.min(8, Math.floor(logSpan / 0.48)));
     const metFactor = Math.max(0.25, Math.min(1.25, 0.65 + 0.35 * (nebulaEnv.feH + 1.0)));
-    planetCount = Math.max(1, Math.min(maxBySpacing, Math.round((2 + rand() * 5) * metFactor)));
+    if (isPulsarHost || isBlackHoleHost) {
+      // Compact fallback-disk rocky/iron/diamond-carbon remnant planets (PSR B1257+12 style!)
+      planetCount = Math.max(2, Math.min(4, Math.round(2 + rand() * 2)));
+    } else {
+      planetCount = Math.max(1, Math.min(maxBySpacing, Math.round((2 + rand() * 5) * metFactor)));
+    }
   }
 
   // Fischer-Valenti (2005) gas-giant core-accretion probability scales strongly with metallicity!

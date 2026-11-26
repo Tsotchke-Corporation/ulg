@@ -233,7 +233,10 @@ test('Orbital Landing-Site Correspondence, Gas-Giant Horizon/Cloud Occlusion, Tr
   });
   assert.equal(spec.kind, 'fauna');
   assert.equal(spec.solvent, 'CH4');
-  assert.ok(spec.speciesName.includes('Glider'), `Low-g dense-air Titan fauna should emerge as Aero-Glider (got ${spec.speciesName})`);
+  assert.ok(['aero-gasbag', 'wing-glider', 'radial-tentacular'].includes(spec.bodyPlan),
+    `Low-g dense-air Titan fauna should emerge with buoyant/gliding morphology (got ${spec.bodyPlan} / ${spec.speciesName})`);
+  assert.match(spec.speciesName, /^[A-Z][a-z]+ [a-z]+$/, `Specimen must receive a procedural Latinate binomial (got ${spec.speciesName})`);
+  assert.equal(spec.recommendedBioMode, 'organism-overview', 'Abducted specimen must default to interactive 3D Bio Aquarium overview');
   const url = buildLifeLabXenobiologyUrl(spec.profile, spec.recommendedBioMode, spec);
   const parsed = parseXenobiologyFromSearch(url.split('?')[1]);
   assert.equal(parsed?.abductedSpecimen?.speciesName, spec.speciesName);

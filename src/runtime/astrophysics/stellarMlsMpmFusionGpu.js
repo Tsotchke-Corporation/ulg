@@ -27,10 +27,117 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
 import { getGate1StellarBurnConstants } from './stellarNucleosynthesisBridge.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_STELLAR_MLS_MPM_FUSION_SCHEMA = 'ulg.astrophysics.stellar-mls-mpm-fusion-webgpu.v1';
+
+export const STELLAR_MLS_MPM_FUSION_LAW_ADAPTER = Object.freeze({
+  id: 'stellar-mls-mpm-fusion',
+  lawNodeId: 'law:astrophysics-stellar-mls-mpm-fusion',
+  orderConstraint: 'after:nebular-mhd-collapse',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['stellar-mpm-parcels', 'gate1-nuclear-qvalues', 'radial-enclosed-mass']),
+  writes: Object.freeze(['stellar-mpm-parcels', 'stellar-mpm-eulerian-grid']),
+  accumulates: Object.freeze(['stellar-fusion-convection-telemetry']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['mass', 'nucleon-fractions', 'linear-momentum', 'first-law-energy']),
+  validityDomain: Object.freeze({ requiresSelfGravitatingPlasma: true, minMassSolar: 0.012 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([5e7, 2e12]),
+  fundamentalLaws: Object.freeze(['mls-mpm-compressible-hydro', 'hydrostatic-self-gravity', 'pp-cno-triple-alpha-fusion', 'stefan-boltzmann-cooling', 'rayleigh-benard-convection'])
+});
+
+export function evaluateStellarMlsMpmActivation(physicalState = {}) {
+  const m = Number(physicalState.starMassSolar ?? physicalState.centralMassSolar) || 0;
+  const active = Boolean(physicalState.stellarCoreActive) || (m >= 0.012 && (Number(physicalState.coreTempK) || 0) >= 1e5);
+  return { active, reason: active ? 'self-gravitating-stellar-plasma-present' : 'sub-stellar-or-quiescent-dormant' };
+}
+
+// 5 First-Principles Physical Stellar Structure Regimes (all driven by ONE general 3D MLS-MPM solver!)
+export const STELLAR_MLS_MPM_PROFILES = Object.freeze({
+  'main-sequence-star': Object.freeze({
+    id: 'main-sequence-star',
+    label: 'G2V Solar Main Sequence (1.0 M☉)',
+    starMassSolar: 1.0,
+    rStar: 5.2,
+    coreTempK: 1.56e7,
+    surfaceTempK: 5778,
+    xH0: 0.72,
+    xHe0: 0.26,
+    xZ0: 0.02,
+    radPressCoeff: 0.18,
+    surfaceCoolCoeff: 0.38,
+    gasEosCoeff: 0.52,
+    convSeedAmp: 0.45
+  }),
+  'blue-supergiant': Object.freeze({
+    id: 'blue-supergiant',
+    label: 'O/B Blue Supergiant (22 M☉ · CNO)',
+    starMassSolar: 22.0,
+    rStar: 5.6,
+    coreTempK: 3.85e7,
+    surfaceTempK: 28500,
+    xH0: 0.70,
+    xHe0: 0.28,
+    xZ0: 0.02,
+    radPressCoeff: 0.44,
+    surfaceCoolCoeff: 0.24,
+    gasEosCoeff: 0.62,
+    convSeedAmp: 0.78
+  }),
+  'red-supergiant': Object.freeze({
+    id: 'red-supergiant',
+    label: 'Red Supergiant Betelgeuse (16 M☉ · 3α)',
+    starMassSolar: 16.0,
+    rStar: 6.3,
+    coreTempK: 1.65e8,
+    surfaceTempK: 3450,
+    xH0: 0.42,
+    xHe0: 0.52,
+    xZ0: 0.06,
+    radPressCoeff: 0.34,
+    surfaceCoolCoeff: 0.58,
+    gasEosCoeff: 0.46,
+    convSeedAmp: 1.18
+  }),
+  'agb-carbon': Object.freeze({
+    id: 'agb-carbon',
+    label: 'AGB Carbon Thermal-Pulse Star (3.2 M☉)',
+    starMassSolar: 3.2,
+    rStar: 6.0,
+    coreTempK: 1.18e8,
+    surfaceTempK: 2950,
+    xH0: 0.50,
+    xHe0: 0.42,
+    xZ0: 0.08,
+    radPressCoeff: 0.28,
+    surfaceCoolCoeff: 0.54,
+    gasEosCoeff: 0.48,
+    convSeedAmp: 0.96
+  }),
+  'brown-dwarf': Object.freeze({
+    id: 'brown-dwarf',
+    label: 'Banded Methane Brown Dwarf (0.045 M☉ · T/Y)',
+    starMassSolar: 0.045,
+    rStar: 4.5,
+    coreTempK: 1.8e6,
+    surfaceTempK: 1150,
+    xH0: 0.74,
+    xHe0: 0.24,
+    xZ0: 0.02,
+    radPressCoeff: 0.04,
+    surfaceCoolCoeff: 0.72,
+    gasEosCoeff: 0.38,
+    convSeedAmp: 0.32
+  })
+});
 
 const GPU_BUF = Object.freeze({
   MAP_READ: 0x0001,
@@ -44,6 +151,10 @@ const GPU_BUF = Object.freeze({
 const GRID_N = 24;
 const GRID_TOTAL = GRID_N * GRID_N * GRID_N; // 13,824 cells
 const RADIAL_BINS = 64;
+const COM_SLOTS = 8; // [sum_m, sum_mx, sum_my, sum_mz, sum_px, sum_py, sum_pz, pad]
+const Q_COM_M = 256.0;
+const Q_COM_X = 128.0;
+const Q_COM_V = 128.0;
 
 function mulberry32(seed) {
   let a = (seed >>> 0) || 1;
@@ -99,9 +210,13 @@ struct StellarMpmParams {
 const GRID_N: u32 = ${GRID_N}u;
 const GRID_TOTAL: u32 = ${GRID_TOTAL}u;
 const RADIAL_BINS: u32 = ${RADIAL_BINS}u;
+const COM_OFFSET: u32 = ${GRID_TOTAL * 5 + RADIAL_BINS}u;
 const Q_M: f32 = 4096.0;
 const Q_P: f32 = 1024.0;
 const Q_E: f32 = 512.0;
+const Q_COM_M: f32 = ${Q_COM_M.toFixed(1)};
+const Q_COM_X: f32 = ${Q_COM_X.toFixed(1)};
+const Q_COM_V: f32 = ${Q_COM_V.toFixed(1)};
 
 fn cell_index(cx: u32, cy: u32, cz: u32) -> u32 {
   return (cz * GRID_N + cy) * GRID_N + cx;
@@ -120,11 +235,11 @@ fn bspline3(x_rel: f32) -> vec3<f32> {
   return vec3<f32>(0.5 * a * a, 0.75 - b * b, 0.5 * c * c);
 }
 
-// Kernel 1: Clear 24^3 MPM grid accumulators, radial shell bins & telemetry
+// Kernel 1: Clear 24^3 MPM grid accumulators, radial shell bins, COM reduction & telemetry
 @compute @workgroup_size(64)
 fn clear_mpm_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
-  let total_accum = GRID_TOTAL * 5u + RADIAL_BINS;
+  let total_accum = GRID_TOTAL * 5u + RADIAL_BINS + 8u;
   if (i < total_accum) {
     atomicStore(&grid_accum[i], 0);
   }
@@ -137,7 +252,7 @@ fn clear_mpm_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }
 
-// Kernel 2: Quadratic B-spline 3x3x3 MLS-MPM Particle-to-Grid (P2G) + Radial Mass Shell Histogram
+// Kernel 2: Quadratic B-spline 3x3x3 MLS-MPM Particle-to-Grid (P2G) + Radial Mass Shell Histogram + Exact COM Reduction
 @compute @workgroup_size(64)
 fn p2g_stellar_mpm(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x;
@@ -148,6 +263,15 @@ fn p2g_stellar_mpm(@builtin(global_invocation_id) gid: vec3<u32>) {
   let vel = pt.vel_smooth.xyz;
   let log_t = clamp(pt.thermo.x, 3.3, 8.8);
   let temp_mk = pow(10.0, log_t - 6.0); // Temperature in MegaKelvin (15.0 = 1.5e7 K solar core!)
+
+  // Exact Center-of-Mass (COM) & net-momentum Galilean frame reduction (prevents any long-horizon core drift!)
+  atomicAdd(&grid_accum[COM_OFFSET + 0u], i32(round(m * Q_COM_M)));
+  atomicAdd(&grid_accum[COM_OFFSET + 1u], i32(round(m * pos.x * Q_COM_X)));
+  atomicAdd(&grid_accum[COM_OFFSET + 2u], i32(round(m * pos.y * Q_COM_X)));
+  atomicAdd(&grid_accum[COM_OFFSET + 3u], i32(round(m * pos.z * Q_COM_X)));
+  atomicAdd(&grid_accum[COM_OFFSET + 4u], i32(round(m * vel.x * Q_COM_V)));
+  atomicAdd(&grid_accum[COM_OFFSET + 5u], i32(round(m * vel.y * Q_COM_V)));
+  atomicAdd(&grid_accum[COM_OFFSET + 6u], i32(round(m * vel.z * Q_COM_V)));
 
   // Deposit into radial shell histogram for O(N) exact enclosed self-gravity M(<r)!
   let r = length(pos);
@@ -184,7 +308,7 @@ fn p2g_stellar_mpm(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }
 
-// Kernel 3: Parallel Prefix Sum of Radial Mass Shells -> Exact Enclosed Mass M(<r) (64 threads!)
+// Kernel 3: Parallel Prefix Sum of Radial Mass Shells -> Exact Enclosed Mass M(<r) + Exact COM Position/Velocity!
 @compute @workgroup_size(64)
 fn resolve_radial_gravity(@builtin(local_invocation_id) lid: vec3<u32>) {
   let tid = lid.x;
@@ -194,6 +318,23 @@ fn resolve_radial_gravity(@builtin(local_invocation_id) lid: vec3<u32>) {
     sum_m = sum_m + f32(atomicLoad(&grid_accum[GRID_TOTAL * 5u + b])) / Q_M;
   }
   radial_enclosed[tid] = sum_m;
+  if (tid == 0u) {
+    let m_tot = max(1e-4, f32(atomicLoad(&grid_accum[COM_OFFSET + 0u])) / Q_COM_M);
+    let com_x = (f32(atomicLoad(&grid_accum[COM_OFFSET + 1u])) / Q_COM_X) / m_tot;
+    let com_y = (f32(atomicLoad(&grid_accum[COM_OFFSET + 2u])) / Q_COM_X) / m_tot;
+    let com_z = (f32(atomicLoad(&grid_accum[COM_OFFSET + 3u])) / Q_COM_X) / m_tot;
+    let vcm_x = (f32(atomicLoad(&grid_accum[COM_OFFSET + 4u])) / Q_COM_V) / m_tot;
+    let vcm_y = (f32(atomicLoad(&grid_accum[COM_OFFSET + 5u])) / Q_COM_V) / m_tot;
+    let vcm_z = (f32(atomicLoad(&grid_accum[COM_OFFSET + 6u])) / Q_COM_V) / m_tot;
+    radial_enclosed[RADIAL_BINS + 0u] = com_x;
+    radial_enclosed[RADIAL_BINS + 1u] = com_y;
+    radial_enclosed[RADIAL_BINS + 2u] = com_z;
+    radial_enclosed[RADIAL_BINS + 3u] = m_tot;
+    radial_enclosed[RADIAL_BINS + 4u] = vcm_x;
+    radial_enclosed[RADIAL_BINS + 5u] = vcm_y;
+    radial_enclosed[RADIAL_BINS + 6u] = vcm_z;
+    radial_enclosed[RADIAL_BINS + 7u] = 0.0;
+  }
 }
 
 // Kernel 4: Eulerian Grid Ideal-Gas + Radiation EOS + Nuclear Burn + Photospheric Cooling
@@ -232,10 +373,10 @@ fn grid_eos_burn(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Stefan-Boltzmann Photospheric Radiative Cooling on outer convective boundary (r > 0.72 R_star)
   let surf_frac = smoothstep(p.r_star * 0.68, p.r_star * 1.04, r);
-  let t_surf_cool = p.surface_cool_coeff * surf_frac * pow(clamp(temp_mk, 0.004, 15.0), 1.65) * p.dt;
+  let t_surf_cool = p.surface_cool_coeff * surf_frac * pow(clamp(temp_mk, 0.0010, 15.0), 1.65) * p.dt;
   // Nuclear volumetric heating raises core entropy -> buoyant Rayleigh-Benard convective plumes!
   let dt_heat = eps_tot * 0.045 * p.dt * p.time_accel;
-  temp_mk = clamp(temp_mk + dt_heat - t_surf_cool, 0.0045, 220.0);
+  temp_mk = clamp(temp_mk + dt_heat - t_surf_cool, 0.0010, 220.0);
 
   // Ideal-gas + Radiation EOS: P = c_gas * rho * T + c_rad * T^4
   let p_gas = p.gas_eos_coeff * m * temp_mk;
@@ -295,6 +436,10 @@ fn grid_momentum_step(@builtin(global_invocation_id) gid: vec3<u32>) {
   let acc_buoy = r_hat * (d_temp * 4.2 * buoy_zone);
 
   var v_next = g0.xyz + clamp(acc_press + acc_grav + acc_buoy + coriolis, vec3<f32>(-28.0), vec3<f32>(28.0)) * p.dt;
+  // Exact zero-momentum Galilean co-moving frame stabilization (prevents star core COM drift/yeeting!)
+  let com_pos = vec3<f32>(radial_enclosed[RADIAL_BINS + 0u], radial_enclosed[RADIAL_BINS + 1u], radial_enclosed[RADIAL_BINS + 2u]);
+  let com_vel = vec3<f32>(radial_enclosed[RADIAL_BINS + 4u], radial_enclosed[RADIAL_BINS + 5u], radial_enclosed[RADIAL_BINS + 6u]);
+  v_next = v_next - com_vel * 0.65 - com_pos * (1.25 * p.dt);
   // Soft reflective boundary near domain walls
   let edge_d = max(abs(cell_pos.x), max(abs(cell_pos.y), abs(cell_pos.z)));
   if (edge_d > p.box_half * 0.88) {
@@ -357,10 +502,12 @@ fn g2p_advect_burn(@builtin(global_invocation_id) gid: vec3<u32>) {
   eps_grid = max(0.0, eps_grid * inv_w);
 
   // FLIP/PIC hybrid (92% PIC + 8% FLIP keeps convective plumes razor sharp without numerical dissipation!)
-  var vel = mix(pt.vel_smooth.xyz, v_pic, 0.92);
+  let com_pos = vec3<f32>(radial_enclosed[RADIAL_BINS + 0u], radial_enclosed[RADIAL_BINS + 1u], radial_enclosed[RADIAL_BINS + 2u]);
+  let com_vel = vec3<f32>(radial_enclosed[RADIAL_BINS + 4u], radial_enclosed[RADIAL_BINS + 5u], radial_enclosed[RADIAL_BINS + 6u]);
+  var vel = mix(pt.vel_smooth.xyz, v_pic, 0.92) - com_vel * 0.45;
   let spd = length(vel);
   if (spd > 14.0) { vel = vel * (14.0 / spd); }
-  pos = pos + vel * p.dt;
+  pos = pos + vel * p.dt - com_pos * 0.14;
 
   // Keep plasma parcels inside gravitational sphere
   let r_new = length(pos);
@@ -370,8 +517,8 @@ fn g2p_advect_burn(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   // Smooth particle thermal coupling to Eulerian MPM temperature + radiative core/surface gradient
-  let old_mk = pow(10.0, clamp(pt.thermo.x, 3.3, 8.8) - 6.0);
-  let new_mk = clamp(mix(old_mk, t_grid_mk, 0.32), 0.0045, 220.0);
+  let old_mk = pow(10.0, clamp(pt.thermo.x, 2.95, 8.8) - 6.0);
+  let new_mk = clamp(mix(old_mk, t_grid_mk, 0.28), 0.0010, 220.0);
   let log_t = log2(new_mk * 1.0e6) * 0.3010299956639812;
   let log_rho = clamp(-2.2 + log2(max(1e-5, rho_grid * 14.0)) * 0.3010299956639812, -8.0, 6.0);
 
@@ -417,25 +564,35 @@ fn g2p_advect_burn(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 export function buildStellarMlsMpmInitialParcels({
   count = 5120,
-  starMassSolar = 1.0,
-  rStar = 5.2,
-  coreTempK = 1.56e7,
-  surfaceTempK = 5778,
-  xH0 = 0.72,
-  xHe0 = 0.26,
-  xZ0 = 0.02,
+  stellarClass = 'main-sequence-star',
+  starMassSolar,
+  rStar,
+  coreTempK,
+  surfaceTempK,
+  xH0,
+  xHe0,
+  xZ0,
+  convSeedAmp,
   seed = 20261125
 } = {}) {
+  const prof = STELLAR_MLS_MPM_PROFILES[stellarClass] || STELLAR_MLS_MPM_PROFILES['main-sequence-star'];
+  const mSolar = Number.isFinite(Number(starMassSolar)) ? Number(starMassSolar) : prof.starMassSolar;
+  const rS = Number.isFinite(Number(rStar)) ? Number(rStar) : prof.rStar;
+  const tCore = Number.isFinite(Number(coreTempK)) ? Number(coreTempK) : prof.coreTempK;
+  const tSurf = Number.isFinite(Number(surfaceTempK)) ? Number(surfaceTempK) : prof.surfaceTempK;
+  const xHInit = Number.isFinite(Number(xH0)) ? Number(xH0) : prof.xH0;
+  const xHeInit = Number.isFinite(Number(xHe0)) ? Number(xHe0) : prof.xHe0;
+  const cAmp = Number.isFinite(Number(convSeedAmp)) ? Number(convSeedAmp) : prof.convSeedAmp;
   const rand = mulberry32(seed);
   const data = new Float32Array(count * 16);
-  const totalSimMass = 100.0 * Math.max(0.12, Number(starMassSolar) || 1.0);
+  const totalSimMass = 100.0 * Math.max(0.12, Math.min(2.2, Math.pow(Math.max(0.04, mSolar), 0.22)));
   const mEach = totalSimMass / Math.max(1, count);
 
   for (let i = 0; i < count; i += 1) {
     // Lane-Emden n=3 / convective envelope radial density sampling (dense hot fusing core + billowing convective shell!)
     const u = rand();
-    const rNorm = Math.pow(u, 0.56);
-    const r = rNorm * rStar;
+    const rNorm = Math.pow(u, stellarClass === 'red-supergiant' ? 0.68 : 0.56);
+    const r = rNorm * rS;
     const cosTh = 2.0 * rand() - 1.0;
     const sinTh = Math.sqrt(Math.max(0, 1.0 - cosTh * cosTh));
     const phi = rand() * Math.PI * 2;
@@ -443,22 +600,27 @@ export function buildStellarMlsMpmInitialParcels({
     const y = r * cosTh;
     const z = r * sinTh * Math.sin(phi);
 
-    // Subtle differential rotation + buoyant convective seed perturbations (zero scripted animation!)
-    const omega = 0.32 * (1.0 - 0.22 * cosTh * cosTh);
-    const convSeed = (rand() - 0.5) * 0.45 * Math.sin(rNorm * Math.PI);
+    // Differential rotation + giant convective supergranule plumes (Betelgeuse!) or banded methane jets (Brown Dwarf!)
+    const omega = (stellarClass === 'brown-dwarf' ? 0.68 : 0.32) * (1.0 - 0.22 * cosTh * cosTh);
+    const supergranule = stellarClass === 'red-supergiant' ? (Math.sin(phi * 3.0) * Math.cos(cosTh * 4.0) * 0.65) : 0.0;
+    const convSeed = ((rand() - 0.5) * cAmp + supergranule) * Math.sin(rNorm * Math.PI);
     const vx = -z * omega + (x / Math.max(0.1, r)) * convSeed;
     const vy = (y / Math.max(0.1, r)) * convSeed;
     const vz = x * omega + (z / Math.max(0.1, r)) * convSeed;
 
-    // Hydrostatic radial temperature profile: T_core (15.6 MK) -> T_photosphere (5778 K)
-    const tLocalK = Math.max(surfaceTempK, coreTempK * Math.pow(Math.max(0.0002, 1.0 - rNorm * rNorm * 0.995), 2.35));
+    // Hydrostatic radial temperature profile: T_core -> T_photosphere (bloated cool convective RSG/AGB envelope vs hot O/B radiative shell!)
+    const bandMod = stellarClass === 'brown-dwarf' ? (0.85 + 0.30 * Math.sin(cosTh * 14.0)) : 1.0;
+    const envExp = (stellarClass === 'red-supergiant' || stellarClass === 'agb-carbon')
+      ? 5.2
+      : (stellarClass === 'blue-supergiant' ? 1.35 : 2.35);
+    const tLocalK = Math.max(tSurf * bandMod, tCore * Math.pow(Math.max(0.0001, 1.0 - rNorm * rNorm * 0.996), envExp));
     const logT = Math.log10(tLocalK);
     const logRho = 2.18 * Math.pow(1.0 - rNorm, 1.4) - 2.6;
     const coreHeBump = Math.exp(-rNorm * rNorm * 14.0) * 0.14;
-    const xh = Math.max(0.05, xH0 - coreHeBump);
-    const xhe = xHe0 + coreHeBump;
+    const xh = Math.max(0.05, xHInit - coreHeBump);
+    const xhe = Math.min(0.92, xHeInit + coreHeBump);
     const xz = Math.max(0.001, 1.0 - xh - xhe);
-    const logEps = rNorm < 0.28 ? (3.2 - rNorm * 10.0) : -6.0;
+    const logEps = (rNorm < 0.28 && tCore > 8e6) ? (3.2 - rNorm * 10.0) : -6.0;
 
     const o = i * 16;
     data[o + 0] = x; data[o + 1] = y; data[o + 2] = z; data[o + 3] = mEach;
@@ -471,21 +633,28 @@ export function buildStellarMlsMpmInitialParcels({
 
 export function createStellarMlsMpmFusionSessionWebGpu(device, {
   count = 5120,
-  starMassSolar = 1.0,
-  rStar = 5.2,
+  stellarClass = 'main-sequence-star',
+  starMassSolar,
+  rStar,
   boxHalf = 7.5,
-  coreTempK = 1.56e7,
-  surfaceTempK = 5778,
+  coreTempK,
+  surfaceTempK,
   seed = 20261125,
   label = 'ulg-stellar-mls-mpm-fusion'
 } = {}) {
+  const prof = STELLAR_MLS_MPM_PROFILES[stellarClass] || STELLAR_MLS_MPM_PROFILES['main-sequence-star'];
+  const effMass = Number.isFinite(Number(starMassSolar)) ? Number(starMassSolar) : prof.starMassSolar;
+  const effRStar = Number.isFinite(Number(rStar)) ? Number(rStar) : prof.rStar;
+  const effCoreT = Number.isFinite(Number(coreTempK)) ? Number(coreTempK) : prof.coreTempK;
+  const effSurfT = Number.isFinite(Number(surfaceTempK)) ? Number(surfaceTempK) : prof.surfaceTempK;
   const n = Math.max(512, Math.min(16384, Math.trunc(count)));
   const initData = buildStellarMlsMpmInitialParcels({
     count: n,
-    starMassSolar,
-    rStar,
-    coreTempK,
-    surfaceTempK,
+    stellarClass,
+    starMassSolar: effMass,
+    rStar: effRStar,
+    coreTempK: effCoreT,
+    surfaceTempK: effSurfT,
     seed
   });
   const burnConsts = getGate1StellarBurnConstants();
@@ -499,7 +668,7 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
 
   const gridAccumBuf = device.createBuffer({
     label: `${label}-grid-accum`,
-    size: (GRID_TOTAL * 5 + RADIAL_BINS) * 4,
+    size: (GRID_TOTAL * 5 + RADIAL_BINS + COM_SLOTS) * 4,
     usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
   });
   const gridStateBuf = device.createBuffer({
@@ -509,7 +678,7 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
   });
   const radialBuf = device.createBuffer({
     label: `${label}-radial`,
-    size: RADIAL_BINS * 4,
+    size: (RADIAL_BINS + COM_SLOTS) * 4,
     usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
   });
   const telBuf = device.createBuffer({
@@ -537,7 +706,7 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
     computeBufferBinding(5, 'storage')
   ];
   const mk = (ep) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-stellar-mls-mpm-fusion-${ep}.v1`,
+    cacheKey: `ulg-stellar-mls-mpm-fusion-${ep}.v2`,
     label: `${label}-${ep}`,
     code: stellarMlsMpmFusionWgsl,
     entryPoint: ep,
@@ -566,19 +735,22 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
   let stepIndex = 0;
   let disposed = false;
   let mapInFlight = false;
-  const totalMassSolar = Math.max(0.12, Number(starMassSolar) || 1.0);
+  const totalMassSolar = Math.max(0.02, effMass);
   let lastTelemetry = Object.freeze({
     schema: ULG_STELLAR_MLS_MPM_FUSION_SCHEMA,
     solver: 'webgpu-3d-mls-mpm-nuclear-fusion',
+    stellarClass: prof.id,
+    stellarLabel: prof.label,
+    stage: prof.label,
     stepIndex: 0,
     particleCount: n,
     gridN: GRID_N,
-    coreTempK,
-    peakTempK: coreTempK,
+    coreTempK: effCoreT,
+    peakTempK: effCoreT,
     peakEpsNuc: 1.0,
-    meanXH: 0.71,
-    meanXHe: 0.27,
-    meanXZ: 0.02,
+    meanXH: prof.xH0,
+    meanXHe: prof.xHe0,
+    meanXZ: prof.xZ0,
     convectiveRmsVel: 0.25,
     activeFusionParcels: Math.round(n * 0.14),
     ppThermalMeV: burnConsts.ppThermalMeV,
@@ -586,7 +758,7 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
     scientificValidation: false
   });
 
-  const wgClear = Math.ceil((GRID_TOTAL * 5 + RADIAL_BINS) / 64);
+  const wgClear = Math.ceil((GRID_TOTAL * 5 + RADIAL_BINS + COM_SLOTS) / 64);
   const wgGrid = Math.ceil(GRID_TOTAL / 64);
   const wgPts = Math.ceil(n / 64);
 
@@ -601,16 +773,16 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
     new Float32Array(ab, 16, 12).set([
       dtSafe,
       boxHalf,
-      0.32, // gravitational constant tuned for hydrostatic balance at R_star=5.2, M=100
-      rStar,
-      (burnConsts.ppThermalMeV / 26.2) * 1.45,
-      0.85,
-      0.60,
+      0.32,
+      effRStar,
+      (burnConsts.ppThermalMeV / 26.2) * (prof.id === 'brown-dwarf' ? 0.08 : 1.45),
+      prof.id === 'blue-supergiant' ? 1.85 : 0.85,
+      (prof.id === 'red-supergiant' || prof.id === 'agb-carbon') ? 1.75 : 0.60,
       accel,
-      0.18, // radiation pressure coeff
-      0.38, // Stefan-Boltzmann photospheric cooling coeff
-      0.52, // ideal gas pressure coeff
-      0.996 // gentle viscosity damping
+      prof.radPressCoeff,
+      prof.surfaceCoolCoeff,
+      prof.gasEosCoeff,
+      0.996
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
@@ -650,6 +822,9 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
           lastTelemetry = Object.freeze({
             schema: ULG_STELLAR_MLS_MPM_FUSION_SCHEMA,
             solver: 'webgpu-3d-mls-mpm-nuclear-fusion',
+            stellarClass: prof.id,
+            stellarLabel: prof.label,
+            stage: prof.label,
             stepIndex,
             particleCount: n,
             gridN: GRID_N,
@@ -679,6 +854,27 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
     return lastTelemetry;
   }
 
+  async function readbackBodies() {
+    if (disposed) return new Float32Array(0);
+    const byteLength = n * 64;
+    const stage = device.createBuffer({
+      label: 'stellar-mls-mpm-diag-readback',
+      size: byteLength,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    try {
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(particleBuf, 0, stage, 0, byteLength);
+      device.queue.submit([enc.finish()]);
+      await stage.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(stage.getMappedRange()).slice();
+      stage.unmap();
+      return out;
+    } finally {
+      try { stage.destroy(); } catch {}
+    }
+  }
+
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -689,13 +885,18 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
 
   return Object.freeze({
     schema: ULG_STELLAR_MLS_MPM_FUSION_SCHEMA,
+    lawAdapter: STELLAR_MLS_MPM_FUSION_LAW_ADAPTER,
     solver: 'webgpu-3d-mls-mpm-nuclear-fusion',
     count: n,
     strideFloats: 16,
+    stellarClass: prof.id,
+    surfaceTempK: effSurfT,
+    coreTempK: effCoreT,
     totalMassSolar,
     get stepIndex() { return stepIndex; },
     getResidentBuffer: () => particleBuf,
     getTelemetry: () => lastTelemetry,
+    readbackBodies,
     step,
     dispose
   });
@@ -724,6 +925,21 @@ export function registerStellarMlsMpmFusionModule(registry) {
       strideBytes: 64,
       fields: ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'h', 'log10T', 'log10Rho', 'xH', 'log10EpsNuc', 'fMol', 'xIon', 'xHe', 'xZ']
     },
-    scaleRangeM: [1e8, 1e12]
+    scaleRangeM: [1e8, 1e12],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: STELLAR_MLS_MPM_FUSION_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createStellarMlsMpmFusionSessionWebGpu(device, {
+        count: 1024,
+        starMassSolar: Number(p.starMassSolar ?? 1.0)
+      });
+      try {
+        const tel = await session.step({ dt: 0.015, timeAccel: 1.0, readTelemetry: true });
+        return createSimulationArtifact?.({ schema: ULG_STELLAR_MLS_MPM_FUSION_SCHEMA, telemetry: tel }) ?? tel;
+      } finally {
+        session.dispose();
+      }
+    }
   });
 }

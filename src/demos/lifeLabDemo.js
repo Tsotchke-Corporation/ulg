@@ -34,6 +34,7 @@ import {
   deriveXenobiologyProfile,
   parseXenobiologyFromSearch
 } from '../runtime/biology/xenobiologySynthesizer.js';
+import { createVivariumOrganismController } from '../runtime/biology/xenobiologyAnatomyMesh.js';
 
 function triggerLifeDownload(filename, text, mime = 'text/plain;charset=utf-8') {
   try {
@@ -160,6 +161,7 @@ function drawPhasePortraitPlot(canvas, traceMv = []) {
 }
 
 function layerForMode(modeId) {
+  if (modeId === 'organism-overview') return 'vivarium';
   if (modeId === 'lipid-soup' || modeId === 'protocell-vesicle' || modeId === 'lipid-bilayer') return 'membrane';
   if (modeId === 'amphipathic-helix-bundle' || modeId === 'globular-hydrophobic-core' || modeId === 'beta-hairpin-fold') return 'fold';
   if (modeId === 'quasispecies-evolution') return 'evo';
@@ -283,8 +285,40 @@ export async function mountLifeLabDemo() {
   let readbackStagingBuf = null;
   let readbackStagingBytes = 0;
   let readbackBusy = false;
+  let vivSolidBuf = null;
+  let vivGlassBuf = null;
+  let vivBeadsBuf = null;
+  let vivSolidVertCount = 0;
+  let vivGlassVertCount = 0;
+  let vivBeadCount = 0;
+  let vivTool = 'probe';
+  let activeVivariumSpecimen = null;
+  let pendingBiopsyAction = null;
   const startTimeMs = performance.now();
   let orbitControls = null;
+
+  function ensureVivariumGpuBuffers() {
+    if (!vivSolidBuf) {
+      vivSolidBuf = device.createBuffer({ label: 'ulg-life-viv-solid', size: 24576 * 48, usage: 0x0020 | 0x0008 });
+      vivGlassBuf = device.createBuffer({ label: 'ulg-life-viv-glass', size: 4096 * 48, usage: 0x0020 | 0x0008 });
+      vivBeadsBuf = device.createBuffer({ label: 'ulg-life-viv-beads', size: 256 * 48, usage: 0x0080 | 0x0008 });
+    }
+  }
+
+  function uploadVivariumFrame() {
+    if (!activeSession || currentLayer !== 'vivarium') return;
+    ensureVivariumGpuBuffers();
+    const frame = activeSession.buildFrameBuffers();
+    const sCount = Math.min(24576, frame.solidVertCount);
+    const gCount = Math.min(4096, frame.glassVertCount);
+    const bCount = Math.min(256, frame.beadCount);
+    if (sCount > 0) device.queue.writeBuffer(vivSolidBuf, 0, frame.solidF32.subarray(0, sCount * 12));
+    if (gCount > 0) device.queue.writeBuffer(vivGlassBuf, 0, frame.glassF32.subarray(0, gCount * 12));
+    if (bCount > 0) device.queue.writeBuffer(vivBeadsBuf, 0, frame.beadsF32.subarray(0, bCount * 12));
+    vivSolidVertCount = sCount;
+    vivGlassVertCount = gCount;
+    vivBeadCount = bCount;
+  }
 
   async function readResidentFloats(srcBuf, floatCount) {
     if (!srcBuf || floatCount <= 0 || disposed || readbackBusy) return null;
@@ -328,7 +362,9 @@ export async function mountLifeLabDemo() {
   function refreshCameraForMode(modeId) {
     const layer = layerForMode(modeId);
     let pose;
-    if (layer === 'membrane') {
+    if (layer === 'vivarium') {
+      pose = { yaw: 0.42, pitch: 0.24, dist: 10.6, target: [0, -0.35, 0] };
+    } else if (layer === 'membrane') {
       if (modeId === 'protocell-vesicle') pose = { yaw: 0.55, pitch: 0.35, dist: 17.5, target: [0, 0, 0] };
       else if (modeId === 'lipid-bilayer') pose = { yaw: 0.62, pitch: 0.42, dist: 17.5, target: [0, 0, 0] };
       else pose = { yaw: 0.52, pitch: 0.44, dist: 18.0, target: [0, 0, 0] };
@@ -365,7 +401,64 @@ export async function mountLifeLabDemo() {
     });
     el('prov-laws').textContent = `${laws.active.length} active (${laws.active.map((l) => l.id.split('-')[0]).join(', ')})`;
 
-    if (currentLayer === 'membrane') {
+    if (currentLayer === 'vivarium') {
+      const sp = activeSession.specimen || {};
+      const prof = activeXenoProfile || deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
+      el('pill-name').textContent = `${sp.speciesName || 'Specimen'} · ${prof.worldName}`;
+      el('pill-tag').textContent = `${sp.morphClass || sp.bodyPlan || 'Vivarium'}`;
+      el('st-m1-lbl').textContent = 'Kleiber';
+      el('st-m1-val').textContent = `${t.kleiberWatts} W`;
+      el('st-m2-lbl').textContent = 'Tissue T';
+      el('st-m2-val').textContent = `${t.localTissueTempK} K`;
+      el('st-m3-lbl').textContent = 'Arousal';
+      el('st-m3-val').textContent = `${Math.round((t.arousal || 0) * 100)}%`;
+      el('prov-tier').textContent = 'Tier-2';
+      el('prov-entities').textContent = `${sp.speciesName || 'Organism'} (${sp.kingdom || 'fauna'} · ${sp.xnaAlphabetSize || 4}-base XNA)`;
+      el('prov-inv').textContent = `${prof.redox?.metabolicPathway?.split('(')[0]?.trim() || 'Redox'} · ΔG=${sp.deltaGKjMol ?? prof.redox?.deltaGKjMol ?? -478} kJ/mol`;
+      if (el('val-viv-kingdom')) el('val-viv-kingdom').textContent = (sp.kingdom || 'fauna').toUpperCase();
+      if (el('val-viv-plan')) el('val-viv-plan').textContent = sp.morphClass || sp.bodyPlan || '—';
+
+      const p3AltBtn = el('btn-p3-alt');
+      if (p3AltBtn) p3AltBtn.style.display = 'none';
+      el('p1-title').textContent = 'Kleiber Metabolism & Arousal';
+      el('p1-sub').textContent = `${t.kleiberWatts} W · ${t.heartRateBpm} bpm`;
+      drawLinePlot(plot1, {
+        xMin: 0, xMax: Math.max(20, histA.length), yMin: 0, yMax: Math.max(40, ...histA, t.kleiberWatts * 1.4) * 1.15,
+        series: [
+          { pts: histA.map((v, i) => [i, v]), color: '#34d399', width: 2.1 },
+          { pts: histB.map((v, i) => [i, v * Math.max(20, t.kleiberWatts)]), color: '#facc15', width: 1.7 }
+        ],
+        labelX: 'Vivarium Physiology (W / Arousal)'
+      });
+      el('p2-title').textContent = 'Thermal Survival Envelope';
+      el('p2-sub').textContent = `T=${t.localTissueTempK}K (T_den=${t.tDenatureK}K)`;
+      const tMinPlot = Math.max(60, Math.min(t.tOptK - 70, t.localTissueTempK - 25));
+      const tMaxPlot = Math.max(t.tDenatureK + 40, t.localTissueTempK + 25);
+      drawLinePlot(plot2, {
+        xMin: tMinPlot, xMax: tMaxPlot, yMin: 0, yMax: 1.15,
+        series: [{
+          pts: Array.from({ length: 31 }, (_, i) => {
+            const tk = tMinPlot + (i / 30) * (tMaxPlot - tMinPlot);
+            const sig = 1.0 / (1.0 + Math.exp((tk - t.tDenatureK) / 14.0));
+            const cold = Math.exp(-Math.pow(Math.max(0, t.tOptK - tk) / 48.0, 2));
+            return [tk, Math.min(1.0, sig * (0.25 + 0.75 * cold))];
+          }),
+          color: '#fb7185', width: 2.1
+        }],
+        vMarker: t.localTissueTempK, labelX: 'Tissue Temp (K)'
+      });
+      const curve = prof.photobiology?.spectralCurve || [];
+      el('p3-title').textContent = `Photobiology (λ_edge=${prof.photobiology?.redEdgeNm || 705}nm)`;
+      el('p3-sub').textContent = `${prof.photobiology?.zSchemePhotons ?? 2}γ Z-Scheme`;
+      drawLinePlot(plot3, {
+        xMin: 300, xMax: 1400, yMin: 0, yMax: 1.1,
+        series: [
+          { pts: curve.map((c) => [c.lamNm, c.fluxNorm]), color: '#facc15', width: 1.8 },
+          { pts: curve.map((c) => [c.lamNm, c.absorb]), color: '#34d399', width: 2.2 }
+        ],
+        vMarker: prof.photobiology?.redEdgeNm || 705, labelX: 'Wavelength λ (nm)'
+      });
+    } else if (currentLayer === 'membrane') {
       el('st-m1-lbl').textContent = 'Tail Coord';
       el('st-m1-val').textContent = t.meanTailCoordination.toFixed(2);
       el('st-m2-lbl').textContent = 'Head Order';
@@ -601,22 +694,68 @@ export async function mountLifeLabDemo() {
     if (myToken !== modeSwitchToken || disposed) return;
     currentMode = modeId;
     currentLayer = layerForMode(modeId);
-    if (activeSession) { activeSession.dispose(); activeSession = null; }
+    if (activeSession) { activeSession.dispose?.(); activeSession = null; }
     pickedEntity = null;
     el('pick-card')?.classList.remove('open');
     if (el('pick-reticle')) el('pick-reticle').style.display = 'none';
     histA = []; histB = []; histC = []; csvRows = []; lastFoldCoordsF32 = null;
 
     document.querySelectorAll('.mode-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.mode === modeId));
-    for (const id of ['ctrl-membrane', 'ctrl-fold', 'ctrl-evo', 'ctrl-hh', 'ctrl-morph']) {
-      el(id).style.display = id === `ctrl-${currentLayer}` ? 'flex' : 'none';
+    const activeBtnEl = document.querySelector(`.mode-btn[data-mode="${modeId}"]`);
+    const activeGrpEl = activeBtnEl?.closest('.acc-group') || null;
+    document.querySelectorAll('.acc-group').forEach((grp) => {
+      const isAct = grp === activeGrpEl;
+      grp.classList.toggle('active-group', isAct);
+      grp.classList.toggle('open', isAct);
+      grp.querySelector('.acc-header')?.setAttribute('aria-expanded', isAct ? 'true' : 'false');
+    });
+    for (const id of ['ctrl-vivarium', 'ctrl-membrane', 'ctrl-fold', 'ctrl-evo', 'ctrl-hh', 'ctrl-morph']) {
+      if (el(id)) el(id).style.display = id === `ctrl-${currentLayer}` ? 'flex' : 'none';
     }
 
     const doc = LIFE_MODE_DOCS[modeId];
     el('hud-title').textContent = doc?.title || modeId;
     el('hud-sub').textContent = (doc?.whatYouSee || '').slice(0, 148) + '…';
 
-    if (currentLayer === 'membrane') {
+    if (currentLayer === 'vivarium') {
+      if (!activeXenoProfile) activeXenoProfile = deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
+      const prof = activeXenoProfile;
+      const cladeList = [];
+      if (prof.abductedSpecimen) cladeList.push(prof.abductedSpecimen);
+      for (const s of (prof.species || [])) {
+        if (!cladeList.some((c) => c.speciesName === s.speciesName)) cladeList.push(s);
+      }
+      if (!activeVivariumSpecimen || !cladeList.some((c) => c.speciesName === activeVivariumSpecimen.speciesName)) {
+        // Prioritize explicitly abducted specimen first; otherwise showcase the world's flagship motile Fauna in the aquarium!
+        activeVivariumSpecimen = prof.abductedSpecimen
+          || cladeList.find((c) => c.kingdom === 'fauna')
+          || cladeList[0]
+          || null;
+      }
+      const sel = el('sel-viv-species');
+      if (sel) {
+        sel.innerHTML = cladeList.map((s, idx) => {
+          const ic = s.kingdom === 'flora' ? '🌿' : (s.kingdom === 'fungi' ? '🍄' : (s.bodyPlan === 'aero-gasbag' ? '🎈' : (s.bodyPlan === 'aquatic-swimmer' ? '🐟' : '🐾')));
+          return `<option value="${idx}">${ic} ${s.speciesName} (${s.morphClass})</option>`;
+        }).join('');
+        const curIdx = Math.max(0, cladeList.findIndex((c) => c.speciesName === activeVivariumSpecimen?.speciesName));
+        sel.value = String(curIdx);
+      }
+      activeSession = createVivariumOrganismController(activeVivariumSpecimen, prof);
+      const t0 = activeSession.getTelemetry();
+      if (el('sl-viv-temp')) {
+        el('sl-viv-temp').value = String(t0.chamberTempK);
+        el('val-viv-temp').textContent = `${t0.chamberTempK} K`;
+      }
+      if (el('viv-anatomy-box')) {
+        const sp = activeSession.specimen;
+        el('viv-anatomy-box').innerHTML = `<strong><em>${sp.speciesName}</em></strong> (${sp.morphClass})<br/>Solvent: ${prof.solventFormula} · ${sp.xnaAlphabetSize || 4}-base ${sp.xnaBackbone || 'XNA'}<br/>Skeleton: ${sp.skeleton || 'Endoskeleton'}<br/>Click anywhere on the body with <strong>${vivTool.toUpperCase()}</strong>!`;
+      }
+      if (el('btn-viv-biopsy-jump')) el('btn-viv-biopsy-jump').style.display = 'none';
+      pendingBiopsyAction = null;
+      activeSession.step(0.02);
+      uploadVivariumFrame();
+    } else if (currentLayer === 'membrane') {
       const initMode = modeId === 'protocell-vesicle' ? 'vesicle' : (modeId === 'lipid-bilayer' ? 'bilayer' : 'soup');
       activeSession = createAmphiphileMembraneSessionWebGpu(device, {
         lipidCount: initMode === 'vesicle' ? 320 : 280,
@@ -680,7 +819,20 @@ export async function mountLifeLabDemo() {
   function renderCurrentScene() {
     if (!activeSession) return;
     const timeSec = (performance.now() - startTimeMs) * 0.001;
-    if (currentLayer === 'membrane') {
+    if (currentLayer === 'vivarium') {
+      renderer.renderFrame({
+        specimenSolidBuffer: vivSolidBuf,
+        specimenSolidVertCount: vivSolidVertCount,
+        specimenGlassBuffer: vivGlassBuf,
+        specimenGlassVertCount: vivGlassVertCount,
+        bioBeadsBuffer: vivBeadsBuf,
+        bioBeadCount: vivBeadCount,
+        bioLinkMode: 0,
+        bioLinkCount: 0,
+        sphereScale: 0.72,
+        timeSec
+      });
+    } else if (currentLayer === 'membrane') {
       const clipVal = Number.isFinite(Number(params.memClipZ)) && Number(params.memClipZ) < 7.8 ? Number(params.memClipZ) : 999.0;
       renderer.renderFrame({
         bioBeadsBuffer: activeSession.getResidentBeadsBuffer(),
@@ -751,7 +903,16 @@ export async function mountLifeLabDemo() {
       const doRead = forceRead || (frameCount % 4 === 0);
       let tel = null;
       const dtScale = useSpeed ? Math.max(0.2, Math.min(1.0, spd * 1.4)) : 1.0;
-      if (currentLayer === 'membrane') {
+      if (currentLayer === 'vivarium') {
+        activeSession.step(0.032 * Math.max(0.35, spd * 1.8));
+        uploadVivariumFrame();
+        tel = activeSession.getTelemetry();
+        if (doRead) {
+          histA.push(tel.kleiberWatts);
+          histB.push(tel.arousal);
+          csvRows.push([tel.stepIndex, tel.kleiberWatts, tel.localTissueTempK, tel.arousal]);
+        }
+      } else if (currentLayer === 'membrane') {
         tel = await activeSession.step({ dt: 0.015 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(4 * spd)) : 4, readTelemetry: doRead });
         if (doRead) {
           histA.push(tel.meanTailCoordination); histB.push(tel.radialHeadOrder);
@@ -888,7 +1049,52 @@ export async function mountLifeLabDemo() {
     }
   }
 
+  function handleVivariumPartInteraction(tool, hit, worldPt = null) {
+    if (currentLayer !== 'vivarium' || !activeSession) return null;
+    const res = activeSession.applyInteraction(tool, hit, worldPt);
+    uploadVivariumFrame();
+    const t = activeSession.getTelemetry();
+    histA.push(t.kleiberWatts);
+    histB.push(t.arousal);
+    if (el('viv-anatomy-box')) {
+      el('viv-anatomy-box').innerHTML = `<strong>${res.partLabel}</strong> (${res.localTempK} K)<br/>${res.reactionText}<br/><span style="color:#8cb2ab;">Tissue: ${res.tissue}</span>`;
+    }
+    const biopsyBtn = el('btn-viv-biopsy-jump');
+    if (res.biopsyAction) {
+      pendingBiopsyAction = res.biopsyAction;
+      if (biopsyBtn) {
+        biopsyBtn.style.display = 'inline-flex';
+        biopsyBtn.textContent = `🔬 Biopsy → ${res.biopsyAction.targetMode}`;
+      }
+    } else if (res.localTempK >= (t.tDenatureK - 10)) {
+      pendingBiopsyAction = { targetLayer: 'fold', targetMode: 'amphipathic-helix-bundle', tissueTempK: res.localTempK, fasta: activeSession.specimen?.fasta };
+      if (biopsyBtn) {
+        biopsyBtn.style.display = 'inline-flex';
+        biopsyBtn.textContent = `🔥 Watch ${res.localTempK} K Denaturation →`;
+      }
+    }
+    pickedEntity = {
+      index: null,
+      pos: hit?.point || hit?.center || [...activeSession.state.pos],
+      title: `${res.partLabel} (${tool.toUpperCase()})`,
+      details: `${res.reactionText} · Tissue: ${res.tissue}`
+    };
+    updatePlotsAndHud();
+    renderCurrentScene();
+    updatePickOverlay();
+    return res;
+  }
+
   async function pickAtClientPoint(clientX, clientY) {
+    if (currentLayer === 'vivarium' && activeSession) {
+      const rect = canvas.getBoundingClientRect();
+      const ndcX = ((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+      const ndcY = 1 - ((clientY - rect.top) / Math.max(1, rect.height)) * 2;
+      const ray = renderer.unprojectRay(ndcX, ndcY);
+      const hit = activeSession.rayPickPart(ray.origin, ray.dir);
+      if (!hit) { pickedEntity = null; updatePickOverlay(); return null; }
+      return handleVivariumPartInteraction(vivTool, hit, hit.point);
+    }
     if (currentLayer === 'hh') {
       activeSession?.triggerStimulus?.();
       renderCurrentScene();
@@ -970,11 +1176,58 @@ export async function mountLifeLabDemo() {
   });
   applySimSpeed(simSpeed);
 
-  document.querySelectorAll('.acc-header').forEach((h) => h.addEventListener('click', () => h.parentElement.classList.toggle('open')));
+  document.querySelectorAll('.acc-header').forEach((h) => h.addEventListener('click', () => {
+    const grp = h.closest('.acc-group');
+    if (!grp) return;
+    const isNowOpen = grp.classList.toggle('open');
+    h.setAttribute('aria-expanded', isNowOpen ? 'true' : 'false');
+  }));
   document.querySelectorAll('.mode-btn').forEach((btn) => btn.addEventListener('click', () => {
     el('life-sidebar').classList.remove('mobile-open');
     selectMode(btn.dataset.mode);
   }));
+
+  // Layer 0 (Specimen Vivarium / Aquarium) controls
+  const setVivToolUi = (tool) => {
+    vivTool = tool;
+    const labels = { inspect: '🔍 Inspect', probe: '👉 Probe', heat: '🔥 Heat', cool: '❄️ Cool', stim: '⚡ Stim', sample: '💉 Biopsy' };
+    if (el('val-viv-tool')) el('val-viv-tool').textContent = labels[tool] || tool;
+    document.querySelectorAll('#viv-tool-row [data-viv-tool]').forEach((b) => b.classList.toggle('active', b.dataset.vivTool === tool));
+  };
+  document.querySelectorAll('#viv-tool-row [data-viv-tool]').forEach((b) => {
+    b.addEventListener('click', () => setVivToolUi(b.dataset.vivTool));
+  });
+  el('sel-viv-species')?.addEventListener('change', () => {
+    const prof = activeXenoProfile || deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
+    const list = [];
+    if (prof.abductedSpecimen) list.push(prof.abductedSpecimen);
+    for (const s of (prof.species || [])) if (!list.some((c) => c.speciesName === s.speciesName)) list.push(s);
+    const chosen = list[Number(el('sel-viv-species').value) || 0];
+    if (chosen) {
+      activeVivariumSpecimen = chosen;
+      void selectMode('organism-overview');
+    }
+  });
+  el('sl-viv-temp')?.addEventListener('input', (e) => {
+    const tk = Number(e.target.value);
+    if (el('val-viv-temp')) el('val-viv-temp').textContent = `${Math.round(tk)} K`;
+    activeSession?.setChamberTempK?.(tk);
+    updatePlotsAndHud();
+  });
+  el('btn-viv-reset')?.addEventListener('click', () => {
+    activeSession?.reset?.();
+    uploadVivariumFrame();
+    updatePlotsAndHud();
+    renderCurrentScene();
+  });
+  el('btn-viv-biopsy-jump')?.addEventListener('click', () => {
+    if (!pendingBiopsyAction) return;
+    if (pendingBiopsyAction.targetLayer === 'fold' && Number.isFinite(pendingBiopsyAction.tissueTempK)) {
+      params.foldTempK = Math.min(850, Math.max(100, pendingBiopsyAction.tissueTempK));
+      if (el('sl-fold-temp')) { el('sl-fold-temp').value = String(params.foldTempK); el('val-fold-temp').textContent = `${Math.round(params.foldTempK)} K`; }
+    }
+    void selectMode(pendingBiopsyAction.targetMode, pendingBiopsyAction.fasta || null);
+  });
 
   // Layer 1 controls
   el('sl-mem-eps').addEventListener('input', (e) => { params.memEpsHp = Number(e.target.value); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); activeSession?.setHydrophobicCoupling?.(params.memEpsHp); updatePlotsAndHud(); });
@@ -1147,11 +1400,13 @@ export async function mountLifeLabDemo() {
         : `${profile.solventLabel} · ${tempDispK} K`;
     }
     if (el('xeno-world-summary')) {
+      const biosig = (profile.redox?.biosignatures || []).slice(0, 2).join(' · ');
       el('xeno-world-summary').textContent = abd
-        ? `🛸 ABDUCTED ${abd.kind.toUpperCase()} (${abd.speciesName} · ${abd.morphClass}) from ${profile.worldName} (${abd.latDeg.toFixed(1)}°, ${abd.lonDeg.toFixed(1)}°) · ${profile.membraneType} · εr=${profile.dielectricEr} · Seq: ${abd.fasta.slice(0, 18)}…`
-        : `${profile.worldName}: ${profile.membraneType} · εr=${profile.dielectricEr} · ${profile.civStage}`;
+        ? `🛸 ABDUCTED ${(abd.kingdom || abd.kind || 'fauna').toUpperCase()} (${abd.speciesName} · ${abd.morphClass}) from ${profile.worldName} (${Number(abd.latDeg || 0).toFixed(1)}°, ${Number(abd.lonDeg || 0).toFixed(1)}°) · ${profile.membraneType} · ${profile.xnaAlphabetSize || 4}-base ${profile.xnaBackbone || 'XNA'}`
+        : `${profile.worldName}: ${profile.membraneType} · ${(profile.species || []).length} Clades · ${biosig || profile.civStage}`;
     }
-    const modeToLoad = targetMode || lp.recommendedMode || 'protocell-vesicle';
+    activeVivariumSpecimen = abd || (profile.species || []).find((s) => s.kingdom === 'fauna') || (profile.species || [])[0] || null;
+    const modeToLoad = targetMode || (abd ? 'organism-overview' : (lp.recommendedMode || 'organism-overview'));
     await selectMode(modeToLoad, modeToLoad.includes('fold') || modeToLoad.includes('helix') || modeToLoad.includes('hairpin') ? lp.foldSeq : null);
     if (el('pill-name')) {
       el('pill-name').textContent = abd
@@ -1217,6 +1472,25 @@ export async function mountLifeLabDemo() {
       if (!preset) return null;
       await applyXenobiologyProfile(deriveXenobiologyProfile(preset), { targetMode: preset.recommendedMode });
       return api.getState();
+    },
+    setVivariumTool(tool) { setVivToolUi(tool); return vivTool; },
+    selectVivariumSpecies(idx) {
+      const prof = activeXenoProfile || deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
+      const list = [];
+      if (prof.abductedSpecimen) list.push(prof.abductedSpecimen);
+      for (const s of (prof.species || [])) if (!list.some((c) => c.speciesName === s.speciesName)) list.push(s);
+      const chosen = list[Math.max(0, Math.min(list.length - 1, Number(idx) || 0))];
+      if (chosen) {
+        activeVivariumSpecimen = chosen;
+        return selectMode('organism-overview').then(() => api.getState());
+      }
+      return Promise.resolve(api.getState());
+    },
+    interactVivarium(tool = vivTool, partId = null) {
+      if (currentLayer !== 'vivarium' || !activeSession) return null;
+      setVivToolUi(tool);
+      const partObj = partId ? { id: partId, center: [...activeSession.state.pos], point: [...activeSession.state.pos] } : { id: 'head', center: [...activeSession.state.pos], point: [...activeSession.state.pos] };
+      return handleVivariumPartInteraction(tool, partObj, partObj.point);
     },
     async selectMode(modeId, customSeq = null) { await selectMode(modeId, customSeq); return api.getState(); },
     setParams(patch = {}) {
@@ -1306,9 +1580,12 @@ export async function mountLifeLabDemo() {
       disposed = true;
       cancelAnimationFrame(rafId);
       orbitControls?.dispose();
-      activeSession?.dispose();
+      activeSession?.dispose?.();
       gpuPicker.dispose();
       if (readbackStagingBuf) try { readbackStagingBuf.destroy(); } catch {}
+      if (vivSolidBuf) try { vivSolidBuf.destroy(); } catch {}
+      if (vivGlassBuf) try { vivGlassBuf.destroy(); } catch {}
+      if (vivBeadsBuf) try { vivBeadsBuf.destroy(); } catch {}
       renderer.dispose();
     }
   };

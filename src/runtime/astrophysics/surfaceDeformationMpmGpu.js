@@ -31,7 +31,7 @@ const MPM_GY = 24;
 const MPM_GZ = 32;
 const MPM_MAX_POINTS = 2048;
 const MAX_BOULDERS = 64;
-const MAX_CRATER_STAMPS = 96;
+export const MAX_CRATER_STAMPS = 512;
 
 function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 function normalize3(v) {
@@ -338,6 +338,210 @@ fn g2p_mpm_ejecta(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 // =========================================================================
+// 1B. Parallel 1-Submit GPU Crater Replay & GPU SE(3) Boulder Skinning Shaders
+// =========================================================================
+const CRATER_REPLAY_WGSL = /* wgsl */ `
+struct ReplayParams {
+  grid_n: u32,
+  stamp_count: u32,
+  pad0: u32,
+  pad1: u32,
+  patch_half_m: f32,
+  ambient_temp_k: f32,
+  pad2: f32,
+  pad3: f32,
+};
+
+struct CraterStampRec {
+  pos_rad_dep: vec4<f32>, // x, z, radiusM, depthM
+  therm_kind: vec4<f32>,  // tempK, melt, char, kind (1=missile, 2=laser, 3=antimatter)
+};
+
+@group(0) @binding(0) var<uniform> rp: ReplayParams;
+@group(0) @binding(1) var<storage, read> stamps: array<CraterStampRec>;
+@group(0) @binding(2) var<storage, read_write> deform_field: array<vec4<f32>>;
+
+@compute @workgroup_size(8, 8)
+fn replay_crater_stamps(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let n = rp.grid_n;
+  if (gid.x >= n || gid.y >= n) { return; }
+  let idx = gid.y * n + gid.x;
+  let u = (f32(gid.x) / f32(n - 1u)) * 2.0 - 1.0;
+  let v = (f32(gid.y) / f32(n - 1u)) * 2.0 - 1.0;
+  let wx = u * rp.patch_half_m;
+  let wz = v * rp.patch_half_m;
+
+  var cell = deform_field[idx];
+  if (cell.y < 10.0) { cell.y = rp.ambient_temp_k; }
+
+  for (var i = 0u; i < rp.stamp_count; i = i + 1u) {
+    let st = stamps[i];
+    let rad = max(0.5, st.pos_rad_dep.z);
+    let dx = wx - st.pos_rad_dep.x;
+    let dz = wz - st.pos_rad_dep.y;
+    let r = sqrt(dx * dx + dz * dz);
+    let rn = r / rad;
+    if (rn >= 1.85) { continue; }
+    let kind = u32(round(st.therm_kind.w));
+    if (kind == 2u) {
+      let spot = exp(-rn * rn * 2.2);
+      cell.x = clamp(cell.x - st.pos_rad_dep.w * spot, -48.0, 22.0);
+      cell.y = max(cell.y, rp.ambient_temp_k + (st.therm_kind.x - rp.ambient_temp_k) * spot * 0.45);
+      cell.z = clamp(cell.z + st.therm_kind.y * spot, 0.0, 1.0);
+      cell.w = clamp(cell.w + st.therm_kind.z * spot, 0.0, 1.0);
+    } else {
+      let bowl = max(0.0, 1.0 - rn * rn);
+      let rim_d = rn - 1.12;
+      let rim = exp(-(rim_d * rim_d) * 14.0) * 0.24;
+      let dh = -st.pos_rad_dep.w * bowl + st.pos_rad_dep.w * rim;
+      cell.x = clamp(cell.x + dh, -48.0, 22.0);
+      let heat_w = exp(-rn * rn * 1.45);
+      cell.y = max(cell.y, rp.ambient_temp_k + (st.therm_kind.x - rp.ambient_temp_k) * heat_w * 0.35);
+      cell.z = clamp(cell.z + st.therm_kind.y * heat_w, 0.0, 1.0);
+      cell.w = clamp(cell.w + st.therm_kind.z * exp(-rn * rn * 0.65), 0.0, 1.0);
+    }
+  }
+  deform_field[idx] = cell;
+}
+`;
+
+const BOULDER_SKIN_WGSL = /* wgsl */ `
+struct SkinParams {
+  boulder_count: u32,
+  tri_count: u32,
+  pad0: u32,
+  pad1: u32,
+  ref_x: f32,
+  ref_z: f32,
+  curv_inv_2r: f32,
+  pad2: f32,
+};
+
+struct BoulderPose {
+  pos_r: vec4<f32>,         // x, y, z, radius (<= 0 => dead/culled!)
+  quat: vec4<f32>,          // unit SE(3) DLM quaternion (qx, qy, qz, qw)
+  stretch_temp: vec4<f32>,  // sx, sy, sz, tempK
+  col_emiss: vec4<f32>,     // r, g, b, emiss
+};
+
+struct SurfaceVert {
+  pos_h: vec4<f32>,
+  norm_tag: vec4<f32>,
+  col_emiss: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> sp: SkinParams;
+@group(0) @binding(1) var<storage, read> poses: array<BoulderPose>;
+@group(0) @binding(2) var<storage, read> tmpl_verts: array<vec4<f32>>; // 60 verts: xyz = unit ico vert, w = vertIdx
+@group(0) @binding(3) var<storage, read_write> out_verts: array<SurfaceVert>;
+
+fn q_rot(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+  let t = 2.0 * cross(q.xyz, v);
+  return v + q.w * t + cross(q.xyz, t);
+}
+
+fn jitter_for(bid: u32, vid: u32) -> f32 {
+  var h = (bid * 1009u + vid * 37u + 17u) * 2654435761u;
+  h = h ^ (h >> 15u);
+  return 0.78 + f32(h & 0xFFFFu) * (0.44 / 65536.0);
+}
+
+@compute @workgroup_size(64)
+fn skin_boulder_meshes(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let total_tris = sp.boulder_count * sp.tri_count;
+  let ti = gid.x;
+  if (ti >= total_tris) { return; }
+  let bid = ti / sp.tri_count;
+  let local_tri = ti % sp.tri_count;
+  let v_base = ti * 3u;
+  let b = poses[bid];
+
+  if (b.pos_r.w <= 0.01) {
+    let zero_v = SurfaceVert(vec4<f32>(0.0, -9999.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0));
+    out_verts[v_base + 0u] = zero_v;
+    out_verts[v_base + 1u] = zero_v;
+    out_verts[v_base + 2u] = zero_v;
+    return;
+  }
+
+  let dx = b.pos_r.x - sp.ref_x;
+  let dz = b.pos_r.z - sp.ref_z;
+  if (dx * dx + dz * dz > 360.0 * 360.0) {
+    let zero_v = SurfaceVert(vec4<f32>(0.0, -9999.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0));
+    out_verts[v_base + 0u] = zero_v;
+    out_verts[v_base + 1u] = zero_v;
+    out_verts[v_base + 2u] = zero_v;
+    return;
+  }
+
+  let base_curv_y = b.pos_r.y - (dx * dx + dz * dz) * sp.curv_inv_2r;
+  let center = vec3<f32>(b.pos_r.x, base_curv_y, b.pos_r.z);
+  let t0 = tmpl_verts[local_tri * 3u + 0u];
+  let t1 = tmpl_verts[local_tri * 3u + 1u];
+  let t2 = tmpl_verts[local_tri * 3u + 2u];
+  let p0 = center + q_rot(b.quat, t0.xyz * (b.pos_r.w * jitter_for(bid, u32(t0.w))) * b.stretch_temp.xyz);
+  let p1 = center + q_rot(b.quat, t1.xyz * (b.pos_r.w * jitter_for(bid, u32(t1.w))) * b.stretch_temp.xyz);
+  let p2 = center + q_rot(b.quat, t2.xyz * (b.pos_r.w * jitter_for(bid, u32(t2.w))) * b.stretch_temp.xyz);
+
+  var nrm = normalize(cross(p1 - p0, p2 - p0) + vec3<f32>(1e-6, 0.0, 0.0));
+  let face_c = (p0 + p1 + p2) * (1.0 / 3.0) - center;
+  if (dot(nrm, face_c) < 0.0) { nrm = -nrm; }
+
+  let hot = clamp((b.stretch_temp.w - 750.0) / 1600.0, 0.0, 1.0);
+  let rgb = mix(b.col_emiss.rgb, vec3<f32>(1.0, 0.36 + 0.52 * hot, 0.14 * hot), hot);
+  let emiss = select(b.col_emiss.w, hot * 1.65, hot > 0.02);
+
+  out_verts[v_base + 0u] = SurfaceVert(vec4<f32>(p0, b.pos_r.y), vec4<f32>(nrm, 0.0), vec4<f32>(rgb, emiss));
+  out_verts[v_base + 1u] = SurfaceVert(vec4<f32>(p1, b.pos_r.y), vec4<f32>(nrm, 0.0), vec4<f32>(rgb, emiss));
+  out_verts[v_base + 2u] = SurfaceVert(vec4<f32>(p2, b.pos_r.y), vec4<f32>(nrm, 0.0), vec4<f32>(rgb, emiss));
+}
+`;
+
+// Exact 5-stage Dullweber-Leimkuhler-McLachlan (1997) symplectic SE(3) quaternion free-rotation
+// matching ULG's canonical `particleRigidDynamicsGpu.js` (zero Euler gimbal lock, exact |L| conservation!).
+function quatMul(a, b) {
+  return [
+    a[3] * b[0] + b[3] * a[0] + (a[1] * b[2] - a[2] * b[1]),
+    a[3] * b[1] + b[3] * a[1] + (a[2] * b[0] - a[0] * b[2]),
+    a[3] * b[2] + b[3] * a[2] + (a[0] * b[1] - a[1] * b[0]),
+    a[3] * b[3] - (a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
+  ];
+}
+function quatNorm(q) {
+  const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
+}
+function quatRotate(q, v) {
+  const tx = 2 * (q[1] * v[2] - q[2] * v[1]);
+  const ty = 2 * (q[2] * v[0] - q[0] * v[2]);
+  const tz = 2 * (q[0] * v[1] - q[1] * v[0]);
+  return [
+    v[0] + q[3] * tx + (q[1] * tz - q[2] * ty),
+    v[1] + q[3] * ty + (q[2] * tx - q[0] * tz),
+    v[2] + q[3] * tz + (q[0] * ty - q[1] * tx)
+  ];
+}
+function quatInvRotate(q, v) {
+  return quatRotate([-q[0], -q[1], -q[2], q[3]], v);
+}
+function dlmFreeRotateBody(b, dt) {
+  const stepAxis = (axisIdx, subDt) => {
+    const Lbody = quatInvRotate(b.quat, b.angMom);
+    const omegaA = Lbody[axisIdx] / Math.max(1e-4, b.inertia[axisIdx]);
+    const half = 0.5 * omegaA * subDt;
+    const s = Math.sin(half);
+    const c = Math.cos(half);
+    const dq = axisIdx === 0 ? [s, 0, 0, c] : (axisIdx === 1 ? [0, s, 0, c] : [0, 0, s, c]);
+    b.quat = quatNorm(quatMul(b.quat, dq));
+  };
+  stepAxis(0, dt * 0.5);
+  stepAxis(1, dt * 0.5);
+  stepAxis(2, dt);
+  stepAxis(1, dt * 0.5);
+  stepAxis(0, dt * 0.5);
+}
+
+// =========================================================================
 // 2. Faceted 3D Rigid-Body Boulder Polyhedron Mesh Generator (48-byte verts)
 // =========================================================================
 const ICO_VERTS = (() => {
@@ -356,24 +560,14 @@ const ICO_FACES = [
   [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
 ];
 
-function rotateByEuler(v, rx, ry, rz) {
-  const cx = Math.cos(rx); const sx = Math.sin(rx);
-  const cy = Math.cos(ry); const sy = Math.sin(ry);
-  const cz = Math.cos(rz); const sz = Math.sin(rz);
-  // Rx -> Ry -> Rz
-  const y1 = v[1] * cx - v[2] * sx;
-  const z1 = v[1] * sx + v[2] * cx;
-  const x2 = v[0] * cy + z1 * sy;
-  const z2 = -v[0] * sy + z1 * cy;
-  return [x2 * cz - y1 * sz, x2 * sz + y1 * cz, z2];
-}
-
 // =========================================================================
 // 3. Create Active-Zone Deformable Surface + MLS-MPM + 64 Rigid Boulders Session
 // =========================================================================
 export function createSurfaceDeformationAndBouldersGpu(device, {
   env,
   baseHeightFn,
+  initialCraterStamps = [],
+  onCraterStamp = null,
   seed = 20261125,
   label = 'ulg-surface-mpm'
 } = {}) {
@@ -407,10 +601,94 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   });
   const maxBoulderVerts = MAX_BOULDERS * ICO_FACES.length * 3;
+  // GPU-skinned boulder vertex buffer (`STORAGE | VERTEX` — 0 CPU vertex rebuilds!)
   const boulderVertBuf = device.createBuffer({
     label: `${label}-boulders`,
     size: maxBoulderVerts * 48,
-    usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST
+    usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST
+  });
+  const boulderPosesBuf = device.createBuffer({
+    label: `${label}-boulder-poses`,
+    size: MAX_BOULDERS * 64,
+    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
+  });
+  const boulderPoseStaging = new Float32Array(MAX_BOULDERS * 16);
+  const skinParamsBuf = device.createBuffer({
+    label: `${label}-skin-params`,
+    size: 32,
+    usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
+  });
+  // Static 60-vertex icosahedron template uploaded ONCE at init!
+  const tmplData = new Float32Array(ICO_FACES.length * 3 * 4);
+  for (let fi = 0; fi < ICO_FACES.length; fi += 1) {
+    const f = ICO_FACES[fi];
+    for (let k = 0; k < 3; k += 1) {
+      const vi = f[k];
+      const v = ICO_VERTS[vi];
+      const o = (fi * 3 + k) * 4;
+      tmplData[o + 0] = v[0]; tmplData[o + 1] = v[1]; tmplData[o + 2] = v[2]; tmplData[o + 3] = vi;
+    }
+  }
+  const boulderTemplateBuf = device.createBuffer({
+    label: `${label}-boulder-tmpl`,
+    size: tmplData.byteLength,
+    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
+  });
+  device.queue.writeBuffer(boulderTemplateBuf, 0, tmplData);
+
+  const skinPipe = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-surface-boulder-skin-dlm.v1',
+    label: `${label}-skin`,
+    code: BOULDER_SKIN_WGSL,
+    entryPoint: 'skin_boulder_meshes',
+    bindings: [
+      computeBufferBinding(0, 'uniform'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'storage')
+    ]
+  });
+  const skinBg = createCachedExplicitBindGroup(device, {
+    layout: skinPipe.bindGroupLayout,
+    label: `${label}-skin-bg`,
+    entries: [
+      { binding: 0, resource: { buffer: skinParamsBuf } },
+      { binding: 1, resource: { buffer: boulderPosesBuf } },
+      { binding: 2, resource: { buffer: boulderTemplateBuf } },
+      { binding: 3, resource: { buffer: boulderVertBuf } }
+    ]
+  });
+
+  // 1-Submit Parallel GPU Crater Stamp Replay (`replay_crater_stamps`) for persisted OPFS/IDB tiles!
+  const replayPipe = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-surface-crater-replay.v1',
+    label: `${label}-replay`,
+    code: CRATER_REPLAY_WGSL,
+    entryPoint: 'replay_crater_stamps',
+    bindings: [
+      computeBufferBinding(0, 'uniform'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage')
+    ]
+  });
+  const replayParamsBuf = device.createBuffer({
+    label: `${label}-replay-params`,
+    size: 32,
+    usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
+  });
+  const replayStampsBuf = device.createBuffer({
+    label: `${label}-replay-stamps`,
+    size: MAX_CRATER_STAMPS * 32,
+    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
+  });
+  const replayBg = createCachedExplicitBindGroup(device, {
+    layout: replayPipe.bindGroupLayout,
+    label: `${label}-replay-bg`,
+    entries: [
+      { binding: 0, resource: { buffer: replayParamsBuf } },
+      { binding: 1, resource: { buffer: replayStampsBuf } },
+      { binding: 2, resource: { buffer: deformBuf } }
+    ]
   });
 
   const bindings = [
@@ -443,7 +721,7 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
     ]
   });
 
-  // Sparse host crater stamp table for O(1) zero-readback Rover & Rigid-Boulder ground collision!
+  // Sparse host crater stamp table (up to 512 stamps) for O(1) Rover/Boulder collision + OPFS persistence!
   const craterStamps = [];
   let pendingStamp = null;
   let deformDirtyTimerS = 0;
@@ -454,8 +732,61 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
   let totalMpmDispatches = 0;
   let totalCratersCarved = 0;
   let totalBouldersShattered = 0;
+  let craterReplayCount = 0;
   let stepIdx = 0;
   let disposed = false;
+  let lastSkinRefX = 0;
+  let lastSkinRefZ = 0;
+  let lastSkinCurvInv2R = 0;
+
+  // 1-Submit GPU Crater Replay on landing when persisted OPFS/IDB stamps exist!
+  function replayInitialCraterStamps(stampsList = []) {
+    if (!Array.isArray(stampsList) || stampsList.length === 0) return 0;
+    const count = Math.min(MAX_CRATER_STAMPS, stampsList.length);
+    const packed = new Float32Array(count * 8);
+    for (let i = 0; i < count; i += 1) {
+      const s = stampsList[i];
+      const rec = {
+        kind: Math.max(1, Math.min(3, Math.trunc(Number(s.kind) || 1))),
+        x: Number(s.x) || 0,
+        z: Number(s.z) || 0,
+        radiusM: Math.max(0.5, Number(s.radiusM) || 10),
+        depthM: Math.max(0.02, Number(s.depthM) || 3),
+        rimM: Number.isFinite(Number(s.rimM)) ? Number(s.rimM) : 0.24,
+        tempK: Number(s.tempK) || ambT,
+        melt: Number(s.melt) || 0.6,
+        char: Number(s.char) || 0.7
+      };
+      craterStamps.push(rec);
+      if (rec.kind === 1 || rec.kind === 3) totalCratersCarved += 1;
+      const o = i * 8;
+      packed[o + 0] = rec.x;
+      packed[o + 1] = rec.z;
+      packed[o + 2] = rec.radiusM;
+      packed[o + 3] = rec.depthM;
+      packed[o + 4] = rec.tempK;
+      packed[o + 5] = rec.melt;
+      packed[o + 6] = rec.char;
+      packed[o + 7] = rec.kind;
+    }
+    device.queue.writeBuffer(replayStampsBuf, 0, packed);
+    const rAb = new ArrayBuffer(32);
+    new Uint32Array(rAb, 0, 4).set([DEFORM_GRID_N, count, 0, 0]);
+    new Float32Array(rAb, 16, 4).set([DEFORM_PATCH_HALF_M, ambT, 0, 0]);
+    device.queue.writeBuffer(replayParamsBuf, 0, rAb);
+    const enc = device.createCommandEncoder({ label: `${label}-replay-enc` });
+    const pass = enc.beginComputePass({ label: `${label}-replay-pass` });
+    pass.setPipeline(replayPipe.pipeline);
+    pass.setBindGroup(0, replayBg);
+    pass.dispatchWorkgroups(Math.ceil(DEFORM_GRID_N / 8), Math.ceil(DEFORM_GRID_N / 8));
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    craterReplayCount = count;
+    return count;
+  }
+  if (Array.isArray(initialCraterStamps) && initialCraterStamps.length > 0) {
+    replayInitialCraterStamps(initialCraterStamps);
+  }
 
   function evaluateDeformationOffset(x, z) {
     let dh = 0;
@@ -522,13 +853,25 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
         clamp((primaryCol[1] * 0.58 + secondaryCol[1] * 0.42) * tint, 0.20, 0.96),
         clamp((primaryCol[2] * 0.58 + secondaryCol[2] * 0.42) * tint, 0.18, 0.96)
       ];
+      const sx = radius * stretch[0];
+      const sy = radius * stretch[1];
+      const sz = radius * stretch[2];
+      // Exact principal ellipsoid moments of inertia `(I1, I2, I3) = (M/5)*(sy^2+sz^2, sx^2+sz^2, sx^2+sy^2)`!
+      const inertia = [
+        Math.max(10, 0.2 * mass * (sy * sy + sz * sz)),
+        Math.max(10, 0.2 * mass * (sx * sx + sz * sz)),
+        Math.max(10, 0.2 * mass * (sx * sx + sy * sy))
+      ];
+      // Deterministic initial SE(3) unit quaternion
+      const initQ = quatNorm([h1 - 0.5, h2 - 0.5, h3 - 0.5, 0.75 + h4 * 0.5]);
       boulders.push({
         id: i,
         alive: true,
         pos: [bx, gy + radius * stretch[1] * 0.72, bz],
         vel: [0, 0, 0],
-        rot: [h1 * 6.28, h2 * 6.28, h3 * 6.28],
-        angVel: [0, 0, 0],
+        quat: initQ,
+        angMom: [0, 0, 0],
+        inertia,
         radius,
         stretch,
         vJitters,
@@ -615,9 +958,23 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
     };
     deformDirtyTimerS = Math.max(deformDirtyTimerS, 14.0);
     if (kind === 1 || kind === 3 || depthM > 0.08) {
-      craterStamps.push({ kind, x: pos[0], z: pos[2], radiusM, depthM });
+      const rec = {
+        kind,
+        x: pos[0],
+        z: pos[2],
+        radiusM,
+        depthM,
+        rimM: 0.24,
+        tempK,
+        melt,
+        char
+      };
+      craterStamps.push(rec);
       if (craterStamps.length > MAX_CRATER_STAMPS) craterStamps.shift();
       if (kind === 1 || kind === 3) totalCratersCarved += 1;
+      if (typeof onCraterStamp === 'function') {
+        try { onCraterStamp({ ...rec }); } catch {}
+      }
     }
 
     // Apply physical shockwave impulse & heat to every rigid-body boulder in blast radius!
@@ -638,8 +995,10 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
           b.vel[0] += dir[0] * dv;
           b.vel[1] += Math.abs(dir[1]) * dv + 6.5 * falloff;
           b.vel[2] += dir[2] * dv;
-          b.angVel[0] += (hashU32(b.id + stepIdx) - 0.5) * dv * 0.4;
-          b.angVel[2] += (hashU32(b.id + stepIdx + 7) - 0.5) * dv * 0.4;
+          // Exact SE(3) rotational angular-momentum shock impulse!
+          b.angMom[0] += (hashU32(b.id + stepIdx) - 0.5) * dv * 0.42 * b.inertia[0];
+          b.angMom[1] += (hashU32(b.id + stepIdx + 3) - 0.5) * dv * 0.22 * b.inertia[1];
+          b.angMom[2] += (hashU32(b.id + stepIdx + 7) - 0.5) * dv * 0.42 * b.inertia[2];
         }
         b.tempK = Math.min(9000, b.tempK + (tempK - ambT) * falloff * (kind === 2 ? 0.16 : 0.75));
         const dmg = kind === 3 ? falloff * 1.4 : (kind === 1 ? falloff * 0.65 : falloff * 0.08);
@@ -705,7 +1064,7 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
           b.vel[0] += (dx * 1.8 - b.vel[0] * 2.2) * dt;
           b.vel[1] += ((targetY - b.pos[1]) * 3.0 - b.vel[1] * 2.4 + g) * dt;
           b.vel[2] += (dz * 1.8 - b.vel[2] * 2.2) * dt;
-          b.angVel[1] += 1.4 * dt;
+          b.angMom[1] += 1.4 * b.inertia[1] * dt;
           // Continuous tractor-beam mineral extraction!
           harvested.silicates += dt * 4.5;
           harvested.metals += dt * 3.0;
@@ -719,9 +1078,8 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
       b.pos[0] += b.vel[0] * dt;
       b.pos[1] += b.vel[1] * dt;
       b.pos[2] += b.vel[2] * dt;
-      b.rot[0] += b.angVel[0] * dt;
-      b.rot[1] += b.angVel[1] * dt;
-      b.rot[2] += b.angVel[2] * dt;
+      // 5-Stage Dullweber-Leimkuhler-McLachlan Symplectic SE(3) Quaternion Free-Rotation!
+      dlmFreeRotateBody(b, dt);
 
       // Deformed terrain surface collision + slope rolling + damping
       const gy = evaluateGroundHeight(b.pos[0], b.pos[2]);
@@ -736,19 +1094,22 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
           b.vel[1] -= (1 + rest) * vn * nrm[1];
           b.vel[2] -= (1 + rest) * vn * nrm[2];
         }
-        // Slope gravity tangent pull + rolling friction
+        // Slope gravity tangent pull + rolling friction + rolling angular momentum coupling
         b.vel[0] += nrm[0] * g * 0.45 * dt;
         b.vel[2] += nrm[2] * g * 0.45 * dt;
         const fric = Math.max(0, 1.0 - 2.4 * dt);
         b.vel[0] *= fric;
         b.vel[2] *= fric;
-        b.angVel[0] = b.vel[2] / Math.max(0.5, effR);
-        b.angVel[2] = -b.vel[0] / Math.max(0.5, effR);
-        b.angVel[1] *= Math.max(0, 1.0 - 2.0 * dt);
+        const rollWx = b.vel[2] / Math.max(0.5, effR);
+        const rollWz = -b.vel[0] / Math.max(0.5, effR);
+        b.angMom[0] = rollWx * b.inertia[0];
+        b.angMom[2] = rollWz * b.inertia[2];
+        b.angMom[1] *= Math.max(0, 1.0 - 2.0 * dt);
       } else {
-        b.angVel[0] *= Math.max(0, 1.0 - 0.25 * dt);
-        b.angVel[1] *= Math.max(0, 1.0 - 0.25 * dt);
-        b.angVel[2] *= Math.max(0, 1.0 - 0.25 * dt);
+        const airSpinDamp = Math.max(0, 1.0 - 0.18 * dt);
+        b.angMom[0] *= airSpinDamp;
+        b.angMom[1] *= airSpinDamp;
+        b.angMom[2] *= airSpinDamp;
       }
 
       // Cool thermally heated boulders back toward ambient
@@ -793,55 +1154,81 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
       }
     }
 
-    // Build faceted 3D boulder vertices (48-byte SURFACE_MESH_WGSL format!)
-    const out = [];
-    for (const b of boulders) {
-      if (!b.alive) continue;
-      const dx = b.pos[0] - refX;
-      const dz = b.pos[2] - refZ;
-      if (dx * dx + dz * dz > 340 * 340) continue;
-      const baseCurvY = b.pos[1] - (dx * dx + dz * dz) * curvInv2R;
-      const hot = clamp((b.tempK - 750) / 1600, 0, 1);
-      const rgb = [
-        b.baseCol[0] * (1 - hot) + 1.0 * hot,
-        b.baseCol[1] * (1 - hot) + (0.36 + 0.52 * hot) * hot,
-        b.baseCol[2] * (1 - hot) + 0.14 * hot * hot
-      ];
-      const emiss = hot > 0.02 ? hot * 1.65 : (b.captured ? 0.25 : 0.0);
-      const pts = ICO_VERTS.map((v, vi) => {
-        const s = b.radius * b.vJitters[vi];
-        const r = rotateByEuler([v[0] * s * b.stretch[0], v[1] * s * b.stretch[1], v[2] * s * b.stretch[2]], b.rot[0], b.rot[1], b.rot[2]);
-        return [b.pos[0] + r[0], baseCurvY + r[1], b.pos[2] + r[2]];
-      });
-      for (const f of ICO_FACES) {
-        const p0 = pts[f[0]]; const p1 = pts[f[1]]; const p2 = pts[f[2]];
-        const e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-        const e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-        let nrm = normalize3(cross3(e1, e2));
-        // Guarantee strictly outward-pointing sunlit rock face normals!
-        const cx = (p0[0] + p1[0] + p2[0]) / 3 - b.pos[0];
-        const cy = (p0[1] + p1[1] + p2[1]) / 3 - baseCurvY;
-        const cz = (p0[2] + p1[2] + p2[2]) / 3 - b.pos[2];
-        if (nrm[0] * cx + nrm[1] * cy + nrm[2] * cz < 0) {
-          nrm = [-nrm[0], -nrm[1], -nrm[2]];
-        }
-        out.push(
-          p0[0], p0[1], p0[2], b.pos[1], nrm[0], nrm[1], nrm[2], 0.0, rgb[0], rgb[1], rgb[2], emiss,
-          p1[0], p1[1], p1[2], b.pos[1], nrm[0], nrm[1], nrm[2], 0.0, rgb[0], rgb[1], rgb[2], emiss,
-          p2[0], p2[1], p2[2], b.pos[1], nrm[0], nrm[1], nrm[2], 0.0, rgb[0], rgb[1], rgb[2], emiss
-        );
+    // Upload compact 64-byte SE(3) DLM Quaternion Pose per Boulder (4 KB total) -> GPU `skin_boulder_meshes`!
+    // Zero CPU per-vertex mesh rebuilding!
+    lastSkinRefX = refX;
+    lastSkinRefZ = refZ;
+    lastSkinCurvInv2R = curvInv2R;
+    boulderPoseStaging.fill(0);
+    for (let i = 0; i < boulders.length; i += 1) {
+      const b = boulders[i];
+      const o = i * 16;
+      if (!b.alive) {
+        boulderPoseStaging[o + 3] = 0.0; // radius <= 0 => culled on GPU!
+        continue;
       }
+      boulderPoseStaging[o + 0] = b.pos[0];
+      boulderPoseStaging[o + 1] = b.pos[1];
+      boulderPoseStaging[o + 2] = b.pos[2];
+      boulderPoseStaging[o + 3] = b.radius;
+      boulderPoseStaging[o + 4] = b.quat[0];
+      boulderPoseStaging[o + 5] = b.quat[1];
+      boulderPoseStaging[o + 6] = b.quat[2];
+      boulderPoseStaging[o + 7] = b.quat[3];
+      boulderPoseStaging[o + 8] = b.stretch[0];
+      boulderPoseStaging[o + 9] = b.stretch[1];
+      boulderPoseStaging[o + 10] = b.stretch[2];
+      boulderPoseStaging[o + 11] = b.tempK;
+      boulderPoseStaging[o + 12] = b.baseCol[0];
+      boulderPoseStaging[o + 13] = b.baseCol[1];
+      boulderPoseStaging[o + 14] = b.baseCol[2];
+      boulderPoseStaging[o + 15] = b.captured ? 0.28 : 0.0;
     }
-    boulderVertCount = Math.min(maxBoulderVerts, Math.floor(out.length / 12));
-    if (boulderVertCount > 0) {
-      device.queue.writeBuffer(boulderVertBuf, 0, new Float32Array(out.slice(0, boulderVertCount * 12)));
+    boulderVertCount = Math.min(maxBoulderVerts, boulders.length * ICO_FACES.length * 3);
+    if (boulders.length > 0) {
+      device.queue.writeBuffer(boulderPosesBuf, 0, boulderPoseStaging.subarray(0, boulders.length * 16));
     }
     return { capturedCount, harvested };
+  }
+
+  function applyRemoteCraterStamp(stamp) {
+    if (!stamp || typeof stamp !== 'object') return false;
+    const rec = {
+      kind: Math.max(1, Math.min(3, Math.trunc(Number(stamp.kind) || 1))),
+      x: Number(stamp.x) || 0,
+      z: Number(stamp.z) || 0,
+      radiusM: Math.max(0.5, Math.min(120, Number(stamp.radiusM) || 10)),
+      depthM: Math.max(0.02, Math.min(48, Number(stamp.depthM) || 3)),
+      rimM: Number.isFinite(Number(stamp.rimM)) ? Number(stamp.rimM) : 0.24,
+      tempK: Number(stamp.tempK) || ambT,
+      melt: Math.max(0, Math.min(1, Number(stamp.melt) || 0.6)),
+      char: Math.max(0, Math.min(1, Number(stamp.char) || 0.7))
+    };
+    craterStamps.push(rec);
+    if (craterStamps.length > MAX_CRATER_STAMPS) craterStamps.shift();
+    if (rec.kind === 1 || rec.kind === 3) totalCratersCarved += 1;
+    pendingStamp = { ...rec };
+    deformDirtyTimerS = Math.max(deformDirtyTimerS, 6.0);
+    return true;
   }
 
   function encodeGpuStep(enc, dt) {
     if (disposed) return;
     stepIdx += 1;
+
+    // 1. GPU Quaternion Boulder Mesh Skinning (runs directly on GPU from 4 KB pose buffer; 0 CPU vertices!)
+    if (boulders.length > 0) {
+      const sAb = new ArrayBuffer(32);
+      new Uint32Array(sAb, 0, 4).set([boulders.length, ICO_FACES.length, 0, 0]);
+      new Float32Array(sAb, 16, 4).set([lastSkinRefX, lastSkinRefZ, lastSkinCurvInv2R, 0]);
+      device.queue.writeBuffer(skinParamsBuf, 0, sAb);
+      const spPass = enc.beginComputePass({ label: `${label}-boulder-skin-pass` });
+      spPass.setPipeline(skinPipe.pipeline);
+      spPass.setBindGroup(0, skinBg);
+      spPass.dispatchWorkgroups(Math.ceil((boulders.length * ICO_FACES.length) / 64));
+      spPass.end();
+    }
+
     const runDeform = Boolean(pendingStamp) || deformDirtyTimerS > 0;
     const runMpm = mpmActiveTimerS > 0;
     if (!runDeform && !runMpm) return;
@@ -904,7 +1291,11 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
   function dispose() {
     if (disposed) return;
     disposed = true;
-    for (const b of [deformBuf, mpmPointsBuf, mpmGridBuf, paramsBuf, boulderVertBuf]) {
+    for (const b of [
+      deformBuf, mpmPointsBuf, mpmGridBuf, paramsBuf,
+      boulderVertBuf, boulderPosesBuf, boulderTemplateBuf, skinParamsBuf,
+      replayParamsBuf, replayStampsBuf
+    ]) {
       try { b.destroy(); } catch {}
     }
   }
@@ -916,11 +1307,15 @@ export function createSurfaceDeformationAndBouldersGpu(device, {
     get mpmPointCount() { return MPM_MAX_POINTS; },
     get mpmActive() { return mpmActiveTimerS > 0; },
     get boulderVertCount() { return boulderVertCount; },
+    get boulderSkinGpuActive() { return true; },
     get aliveBoulderCount() { return boulders.filter((b) => b.alive).length; },
     get totalCratersCarved() { return totalCratersCarved; },
+    get craterReplayCount() { return craterReplayCount; },
     get totalBouldersShattered() { return totalBouldersShattered; },
     get totalMpmDispatches() { return totalMpmDispatches; },
     get boulders() { return boulders; },
+    getCraterStamps: () => craterStamps.map((s) => ({ ...s })),
+    applyRemoteCraterStamp,
     evaluateDeformationOffset,
     evaluateGroundHeight,
     evaluateGroundNormal,

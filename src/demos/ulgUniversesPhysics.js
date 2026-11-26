@@ -74,6 +74,10 @@ import {
   createPlanetarySurfaceSessionWebGpu
 } from '../runtime/astrophysics/planetarySurfaceVehiclesGpu.js';
 import {
+  buildCraterTileKey,
+  createSurfaceCraterTileStore
+} from '../runtime/astrophysics/surfaceCraterTileStore.js';
+import {
   deriveGate1IsmCoolingAnchorsWebGpu,
   evaluateIsmRadiativeCoolingErgCm3PerS
 } from '../runtime/astrophysics/galacticIsmCoolingGpu.js';
@@ -96,6 +100,7 @@ import {
 } from '../runtime/astrophysics/hydrogenStellarClosure.js';
 import { createHydrogenNebulaInitialBodies } from '../runtime/astrophysics/nebulaInitialConditions.js';
 import { createSelfGravitatingHydroEngine } from '../runtime/sph/selfGravitatingHydroGpu.js';
+import { createStellarMlsMpmFusionSessionWebGpu } from '../runtime/astrophysics/stellarMlsMpmFusionGpu.js';
 import {
   createGalacticParticleMeshEngineWebGpu
 } from '../runtime/astrophysics/galacticParticleMeshGpu.js';
@@ -781,6 +786,7 @@ export function createUlgUniversesPhysics(device, {
   let cosmoTelemetry = null;
   let cosmoFirstPk = null;
   let cosmoTargets = [];
+  let cosmoBigBangMode = false;
   let cosmoBaryonSession = null;
   let cosmoBaryonTelemetry = null;
 
@@ -796,7 +802,7 @@ export function createUlgUniversesPhysics(device, {
   let galaxyTargets = [];
   let galaxyFocusPos = [4.8, 0.04, 2.1];
   let galaxyBranch = 'solar-system'; // 'solar-system' | 'smbh-core'
-  let showGalacticBField = true;
+  let showGalacticBField = false;
 
   // Optional Galactic Core SMBH hypervelocity S-star N-body engine
   let smbhEngine = null;
@@ -863,10 +869,21 @@ export function createUlgUniversesPhysics(device, {
   let cryoPlumeSession = null;
   let cryoPlumeTelemetry = null;
 
-  // Planetary Surface View (TinyPlanetControls + 6-Wheel Jump-Rocket Mars Rover + Atmospheric Drone!)
+  // Planetary Surface View (TinyPlanetControls + 6-Wheel Jump-Rocket Mars Rover + Atmospheric Drone + OPFS Crater Persistence!)
+  const craterTileStore = createSurfaceCraterTileStore();
   let surfaceActive = false;
+  let surfaceLandingSite = null;
   let surfaceSession = null;
   let surfaceTelemetry = null;
+  let surfaceTimeWarp = 1.0;
+  let surfaceSimSec = 0.0;
+  let surfaceClimate = null;
+  let surfaceCraterTileKey = null;
+  let surfaceCraterDirty = false;
+  let surfaceCraterFlushTimer = null;
+  let customSurfaceBodySpec = null;
+  const shatteredBodyIds = new Set();
+  let shatterOriginBodyName = null;
   let surfaceControls = {
     forward: false,
     backward: false,
@@ -951,32 +968,37 @@ export function createUlgUniversesPhysics(device, {
   }
 
   // ---- L0: 2LPT IllustrisTNG / Millennium-Style Supergalactic Cosmic Web ----
-  async function initCosmicWeb({ seedOverride = null } = {}) {
+  async function initCosmicWeb({ seedOverride = null, bigBang = false } = {}) {
     if (cosmoSession) {
       cosmoSession.destroy();
       cosmoSession = null;
     }
+    cosmoBigBangMode = Boolean(bigBang);
     const activeSeed = (seedOverride ?? universeSeed) >>> 0;
+    const aStart = cosmoBigBangMode ? 0.045 : 0.16;
+    const daStep = cosmoBigBangMode ? 0.011 : 0.0085;
+    // Extend the FLRW 2LPT + TreePM Cosmic Web across the full 28,500 Mpc (93.0 Gly = 8.8e26 m) Observable Universe!
+    const OBSERVABLE_UNIVERSE_MPC = 28500.0;
     const gpuIc = await build2LptCosmologyICsWebGpu(device, {
       gridPerSide: quality.cosmoGridPerSide,
       fftGridN: quality.cosmoFftN,
-      boxLengthMpc: 200,
-      aInit: 0.16,
-      amplitude: 0.44,
+      boxLengthMpc: OBSERVABLE_UNIVERSE_MPC,
+      aInit: aStart,
+      amplitude: cosmoBigBangMode ? 0.28 : 0.44,
       seed: activeSeed
     });
-    cosmoSession = createSupergalacticTreePmSessionWebGpu(device, {
+    const nextCosmo = createSupergalacticTreePmSessionWebGpu(device, {
       gridPerSide: quality.cosmoGridPerSide,
       pmGridN: quality.cosmoFftN,
-      boxLengthMpc: 200,
-      aInit: 0.16,
-      da: 0.0085,
+      boxLengthMpc: OBSERVABLE_UNIVERSE_MPC,
+      aInit: aStart,
+      da: daStep,
       initialConditions: gpuIc
     });
     cosmoFirstPk = null;
-    // Pre-evolve 6 FLRW TreePM steps so sharp 2LPT cosmic filaments & amber cluster nodes shine immediately!
-    for (let w = 0; w < 6; w += 1) {
-      cosmoTelemetry = await cosmoSession.step({ readTelemetry: w === 0 || w === 5 });
+    const warmSteps = cosmoBigBangMode ? 1 : 6;
+    for (let w = 0; w < warmSteps; w += 1) {
+      cosmoTelemetry = await nextCosmo.step({ readTelemetry: w === 0 || w === warmSteps - 1 });
       if (w === 0 && cosmoTelemetry?.powerSpectrumPk?.kBins?.length) {
         cosmoFirstPk = {
           kBins: [...cosmoTelemetry.powerSpectrumPk.kBins],
@@ -984,31 +1006,43 @@ export function createUlgUniversesPhysics(device, {
         };
       }
     }
+    cosmoSession = nextCosmo;
 
+    const MORPH_LABELS = {
+      disk: 'Grand-Design Spiral (Sc/Sb)',
+      barred: 'Barred Spiral (SBb)',
+      binary: 'Interacting Major Merger Pair',
+      sphere: 'Cluster-Core Giant Elliptical (E2)',
+      proto: 'High-z Clumpy Starburst Protogalaxy',
+      'dwarf-stream': 'Void Dwarf & Tidal Stream',
+      globular: 'Core-Collapsed Globular Cluster (GC)'
+    };
     const rand = mulberry32(activeSeed ^ 0x51f15e);
-    cosmoTargets = Array.from({ length: 5 }, (_, i) => {
+    cosmoTargets = Array.from({ length: 7 }, (_, i) => {
       const morph = GALAXY_MORPHOLOGIES[i % GALAXY_MORPHOLOGIES.length];
       const prefix = GALAXY_PREFIXES[Math.floor(rand() * GALAXY_PREFIXES.length)];
       const num = 1000 + Math.floor(rand() * 8900);
-      // Place cluster 0 near center for smooth continuous zoom directly into L1
-      const spread = i === 0 ? 18.0 : 72.0;
+      // Span cluster 0 near local Laniakea hub and clusters 1..6 across the 93 Gly Observable Universe!
+      const spread = i === 0 ? 2200.0 : 9600.0;
       const xMpc = (rand() - 0.5) * 2 * spread;
       const yMpc = (rand() - 0.5) * 1.4 * spread;
       const zMpc = (rand() - 0.5) * 2 * spread;
-      const zMet = Number((0.6 + rand() * 1.1).toFixed(2));
+      const zMet = Number((morph === 'globular' ? 0.08 + rand() * 0.14 : (0.55 + rand() * 1.15)).toFixed(2));
       return {
         id: `cluster-${i}`,
         level: 0,
-        name: `${prefix}-${num} Supercluster`,
-        subtitle: `${morph === 'disk' ? 'Grand-Design Spiral' : morph === 'binary' ? 'Interacting Merger Pair' : 'Giant Elliptical'} · Z=${zMet} Z☉`,
+        name: `${prefix}-${num} ${morph === 'globular' ? 'Halo Cluster' : 'Supercluster'}`,
+        subtitle: `${MORPH_LABELS[morph] || 'Spiral Galaxy'} · Z=${zMet} Z☉`,
         posMpc: [xMpc, yMpc, zMpc],
-        pos: [xMpc * 0.1, yMpc * 0.1, zMpc * 0.1],
+        pos: [xMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC), yMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC), zMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC)],
         radius: 1.0,
         morphology: morph,
         metallicity: zMet,
-        massLabel: `${(1.2 + rand() * 4.5).toFixed(2)}×10¹² M☉`,
-        tempK: 6500 + Math.round(rand() * 4500),
-        composition: `DM 84% · H 12% · He 3.8% · Met ${(0.2 * zMet).toFixed(2)}%`,
+        massLabel: morph === 'globular' ? `${(2.0 + rand() * 6.5).toFixed(1)}×10⁵ M☉` : `${(1.2 + rand() * 6.5).toFixed(2)}×10¹² M☉`,
+        tempK: morph === 'sphere' || morph === 'globular' ? 4200 + Math.round(rand() * 1200) : 6500 + Math.round(rand() * 4500),
+        composition: morph === 'globular'
+          ? `Ancient Pop II Stars · H 74.8% · He 25.1% · [Fe/H] ≈ -1.6`
+          : `DM 84% · H 12% · He 3.8% · Met ${(0.2 * zMet).toFixed(2)}%`,
         nextLevel: 1
       };
     });
@@ -1082,103 +1116,22 @@ export function createUlgUniversesPhysics(device, {
     });
     galacticDynamoStreamlines = galacticDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.30 });
 
-    const rand = mulberry32(activeSeed ^ 0x229a1);
-    const armPos = [4.8, 0.04, 2.1];
-    const h2Pos = [-4.4, -0.05, 3.6];
-    const outerPos = [Math.cos(rand() * 6.28) * 6.8, 0.08, Math.sin(rand() * 6.28) * 6.8];
-    const bulgePos = [1.05, 0.14, -0.85];
-    galaxyFocusPos = [...armPos];
-    const previewSys = (posGal, popTag, starIndex) => {
-      const stSys = deriveStarSystemFromGalacticLocation({
-        cosmicEpoch,
-        galaxyEnv: activeGalaxyEnv,
-        starPosGal: posGal,
-        popTag,
-        starIndex,
-        seed: activeSeed
-      });
-      const plSys = synthesizeNebularPlanetarySystem(stSys);
-      const multLbl = stSys.multiplicity === 3 ? 'Trinary' : (stSys.multiplicity === 2 ? 'Binary' : 'Single');
-      return {
-        stSys,
-        plSys,
-        title: `${stSys.systemName} · ${multLbl} (${stSys.stars.map((s) => s.spectralCode).join(' + ')})`,
-        sub: `${stSys.galacticRegion} · R=${stSys.rKpc} kpc · ${plSys.planetCount} worlds · ${stSys.nebulaEnv.nebulaSummary}`
-      };
-    };
-    const pArm = previewSys(armPos, 0.52, 0);
-    const pH2 = previewSys(h2Pos, 0.88, 1);
-    const pOut = previewSys(outerPos, 0.36, 2);
-    const pBulge = previewSys(bulgePos, 0.14, 3);
+    galaxyFocusPos = [4.8, 0.04, 2.1];
+    // Only the central SMBH (`Sgr-ULG*` at [0,0,0]) is a stationary galactic landmark;
+    // every star in the galaxy is a live, orbiting, GPU-clickable particle (zero fake frozen placeholder stars!).
     galaxyTargets = [
-      {
-        id: 'star-disk-causal',
-        level: 1,
-        branch: 'solar-system',
-        starSite: { posGal: armPos, popTag: 0.52, starIndex: 0 },
-        name: pArm.title,
-        subtitle: pArm.sub,
-        pos: armPos,
-        radius: 0.8,
-        tempK: pArm.stSys.stars[0].effectiveTempK,
-        massLabel: `${pArm.stSys.stars[0].massSolar.toFixed(2)} M☉`,
-        composition: pArm.stSys.stars[0].composition,
-        nextLevel: 2
-      },
       {
         id: 'smbh-core',
         level: 1,
         branch: 'smbh-core',
         name: 'Galactic Core SMBH (Sgr-ULG*)',
-        subtitle: '4.3×10⁶ M☉ Supermassive Black Hole · Zoom In for Schwarzschild Lensing',
+        subtitle: '4.3×10⁶ M☉ Supermassive Black Hole · Click any orbiting star or zoom into Sgr-ULG*',
         pos: [0, 0, 0],
         radius: 1.0,
         isSmbh: true,
         tempK: 28000,
         massLabel: '4.3×10⁶ M☉',
         composition: 'Relativistic Plasma · Hypervelocity S-Stars',
-        nextLevel: 2
-      },
-      {
-        id: 'star-h2',
-        level: 1,
-        branch: 'solar-system',
-        starSite: { posGal: h2Pos, popTag: 0.88, starIndex: 1 },
-        name: pH2.title,
-        subtitle: pH2.sub,
-        pos: h2Pos,
-        radius: 0.8,
-        tempK: pH2.stSys.stars[0].effectiveTempK,
-        massLabel: `${pH2.stSys.stars[0].massSolar.toFixed(2)} M☉`,
-        composition: pH2.stSys.stars[0].composition,
-        nextLevel: 2
-      },
-      {
-        id: 'star-outer',
-        level: 1,
-        branch: 'solar-system',
-        starSite: { posGal: outerPos, popTag: 0.36, starIndex: 2 },
-        name: pOut.title,
-        subtitle: pOut.sub,
-        pos: outerPos,
-        radius: 0.75,
-        tempK: pOut.stSys.stars[0].effectiveTempK,
-        massLabel: `${pOut.stSys.stars[0].massSolar.toFixed(2)} M☉`,
-        composition: pOut.stSys.stars[0].composition,
-        nextLevel: 2
-      },
-      {
-        id: 'star-bulge',
-        level: 1,
-        branch: 'solar-system',
-        starSite: { posGal: bulgePos, popTag: 0.14, starIndex: 3 },
-        name: pBulge.title,
-        subtitle: pBulge.sub,
-        pos: bulgePos,
-        radius: 0.75,
-        tempK: pBulge.stSys.stars[0].effectiveTempK,
-        massLabel: `${pBulge.stSys.stars[0].massSolar.toFixed(2)} M☉`,
-        composition: pBulge.stSys.stars[0].composition,
         nextLevel: 2
       }
     ];
@@ -1250,8 +1203,11 @@ export function createUlgUniversesPhysics(device, {
       activeCausalSystem = synthesizeNebularPlanetarySystem(starSys, { seedOverride: activeSeed });
     }
     const cat = getActiveSystemCatalog();
-    focusedSolarBodyIndex = useSolReference ? 3 : getDefaultPlanetIndex(cat);
-    planetaryBodyIndex = focusedSolarBodyIndex;
+    // Preserve explicit star focus (`focusedSolarBodyIndex === 0`, e.g., flying directly from L0/L1 into L3 Star/MHD!)
+    // unless explicitly switching to a brand-new star site or toggling Sol reference.
+    const keepStarFocus = focusedSolarBodyIndex === 0 && !starSite && typeof solReference !== 'boolean';
+    focusedSolarBodyIndex = keepStarFocus ? 0 : (useSolReference ? 3 : getDefaultPlanetIndex(cat));
+    planetaryBodyIndex = keepStarFocus ? getDefaultPlanetIndex(cat) : focusedSolarBodyIndex;
     solarEngine = createSolarSystemNBodyEngineWebGpu(device, {
       catalog: cat,
       beltZoneAu: useSolReference ? null : activeCausalSystem?.beltZoneAu,
@@ -1477,11 +1433,40 @@ export function createUlgUniversesPhysics(device, {
       seed: (universeSeed ^ (mode.length * 4099)) >>> 0,
       label: `ulg-universes-tidal-${mode}`
     });
-    const warm = mode === 'roche-rings' ? 12 : 6;
+    const warm = mode === 'roche-rings' ? 12 : (mode === 'catastrophic-shatter' ? 4 : 6);
     for (let w = 0; w < warm; w += 1) {
       tidalRocheTelemetry = await next.step({ dt: 0.028, substeps: 3, readTelemetry: w === warm - 1 });
     }
     tidalRocheSession = next;
+  }
+
+  async function triggerCatastrophicShatter(bodySpec = null, { excessRatio = 1.6 } = {}) {
+    const prev = tidalRocheSession;
+    tidalRocheSession = null;
+    if (prev) prev.dispose();
+    const bid = bodySpec?.id || getActiveSystemCatalog()[focusedSolarBodyIndex]?.id || 'asteroid';
+    shatteredBodyIds.add(bid);
+    shatterOriginBodyName = bodySpec?.name || getActiveSystemCatalog()[focusedSolarBodyIndex]?.name || 'Target Body';
+    solarMode = 'catastrophic-shatter';
+    tidalRocheMode = 'catastrophic-shatter';
+    const next = createTidalRocheDisruptionSessionWebGpu(device, {
+      mode: 'catastrophic-shatter',
+      orbitRadiusSim: 2.2,
+      rHostSim: 1.0,
+      rRocheSim: 2.2,
+      gmHost: 6.0,
+      cohesionStrength: 0.25,
+      tidalHeatDrive: Math.max(1.2, Math.min(3.0, 1.55 * excessRatio)),
+      shepherdGm: 0.0,
+      particleCount: quality.id === 'low' ? 3072 : 5120,
+      seed: (universeSeed ^ (bid.length * 8191 + 0x54a77e)) >>> 0,
+      label: `ulg-universes-shatter-${bid}`
+    });
+    for (let w = 0; w < 4; w += 1) {
+      tidalRocheTelemetry = await next.step({ dt: 0.026, substeps: 3, readTelemetry: w === 3 });
+    }
+    tidalRocheSession = next;
+    return tidalRocheTelemetry;
   }
 
   // ---- L3 Wave-2 Photoionized Nebulae: H II Pillars, Planetary Nebula, SNR / Crab PWN ----
@@ -1581,30 +1566,51 @@ export function createUlgUniversesPhysics(device, {
       stellarClosureRef = reg.ref;
     }
     const activeSeed = ((seedOverride ?? universeSeed) + 1939) >>> 0;
-    const bodies0 = createHydrogenNebulaInitialBodies({
-      count: quality.stellarParticles,
-      preset: stellarPreset,
-      seed: activeSeed
-    });
     const isHydrostaticStar = stellarPreset === 'main-sequence-star';
-    stellarEngine = createSelfGravitatingHydroEngine({
-      device,
-      initialBodies: bodies0,
-      closureRegistry,
-      closureRef: stellarClosureRef,
-      boxHalf: isHydrostaticStar ? 7.5 : 14.0,
-      rCellFactor: isHydrostaticStar ? 0.385 : 0.075,
-      softening: isHydrostaticStar ? 0.45 : 0.25,
-      baseLogRho: isHydrostaticStar ? -1.6 : -16.2,
-      refRhoSim: isHydrostaticStar ? 0.095 : 0.08,
-      tScaleK: isHydrostaticStar ? 1.85e6 : 7.8e5,
-      label: `ulg-universes-stellar-${stellarPreset}`
-    });
-    stellarTelemetry = await stellarEngine.step({
-      dt: 0.015,
-      timeAccel: stellarTimeAccel,
-      readTelemetry: true
-    });
+    if (isHydrostaticStar) {
+      // Pass 2 Deep LOD Exemplar: True 3D GPU MLS-MPM Compressible Self-Gravitating Stellar Fusion & Convection!
+      stellarEngine = createStellarMlsMpmFusionSessionWebGpu(device, {
+        count: Math.min(8192, Math.max(2048, quality.stellarParticles)),
+        starMassSolar: 1.0,
+        rStar: 5.2,
+        boxHalf: 7.5,
+        coreTempK: 1.56e7,
+        surfaceTempK: 5778,
+        seed: activeSeed,
+        label: `ulg-universes-stellar-mpm-${stellarPreset}`
+      });
+      for (let w = 0; w < 4; w += 1) {
+        stellarTelemetry = await stellarEngine.step({
+          dt: 0.015,
+          timeAccel: stellarTimeAccel,
+          readTelemetry: w === 3
+        });
+      }
+    } else {
+      const bodies0 = createHydrogenNebulaInitialBodies({
+        count: quality.stellarParticles,
+        preset: stellarPreset,
+        seed: activeSeed
+      });
+      stellarEngine = createSelfGravitatingHydroEngine({
+        device,
+        initialBodies: bodies0,
+        closureRegistry,
+        closureRef: stellarClosureRef,
+        boxHalf: 14.0,
+        rCellFactor: 0.075,
+        softening: 0.25,
+        baseLogRho: -16.2,
+        refRhoSim: 0.08,
+        tScaleK: 7.8e5,
+        label: `ulg-universes-stellar-${stellarPreset}`
+      });
+      stellarTelemetry = await stellarEngine.step({
+        dt: 0.015,
+        timeAccel: stellarTimeAccel,
+        readTelemetry: true
+      });
+    }
     // Live GPU 24^3 3D Stellar Convective Dynamo driven strictly by live stellar plasma velocities!
     stellarDynamoSession = createEmergent3dDynamoFieldWebGpu(device, {
       gridN: 24,
@@ -1967,14 +1973,15 @@ export function createUlgUniversesPhysics(device, {
           }
         }
       } else if (activeLevel === 1 && galaxyEngine) {
-        const dt = 0.009 * Math.max(0.08, Math.min(3.0, effScale));
-        await galaxyEngine.step({ dt, substeps: 2, gravity: 1.0, softening: 0.35, readback: false });
+        // Calm, dynamically stable galactic orbital evolution (prevents rapid artificial spiral winding!)
+        const dt = 0.0018 * Math.max(0.08, Math.min(3.0, effScale));
+        await galaxyEngine.step({ dt, substeps: 1, gravity: 1.0, softening: 0.35, readback: false });
         if (galacticDynamoSession) {
           const readB = (galaxyEngine.stepIndex % 4) === 0;
           galacticDynamoTelemetry = await galacticDynamoSession.step({
             particleBuffer: galaxyEngine.getResidentBuffer(),
             particleCount: galaxyEngine.count,
-            dt: 0.040 * Math.max(0.12, Math.min(2.2, effScale)),
+            dt: 0.014 * Math.max(0.12, Math.min(2.2, effScale)),
             substeps: 1,
             readTelemetry: readB,
             readBField: readB
@@ -2010,7 +2017,7 @@ export function createUlgUniversesPhysics(device, {
             substeps: 2,
             readTelemetry: true
           });
-        } else if ((solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant') && tidalRocheSession) {
+        } else if ((solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant' || solarMode === 'catastrophic-shatter') && tidalRocheSession) {
           tidalRocheTelemetry = await tidalRocheSession.step({
             dt: 0.024 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
@@ -2078,11 +2085,26 @@ export function createUlgUniversesPhysics(device, {
         }
       } else if (activeLevel === 4) {
         if (surfaceActive && surfaceSession) {
-          surfaceTelemetry = await surfaceSession.step({
-            dt: 0.020 * Math.max(0.25, Math.min(2.5, timeScale)),
-            controls: surfaceControls,
-            readTelemetry: (surfaceSession.stepIndex % 4) === 0
-          });
+          const activeSurf = surfaceSession;
+          const dtSurf = 0.020 * Math.max(0.25, Math.min(2.5, timeScale));
+          const warpEff = Math.max(1.0, Math.min(1e7, surfaceTimeWarp));
+          surfaceSimSec += dtSurf * warpEff;
+          // Step live N-body solar system while standing on the surface so sunrises, moons, eclipses & seasons evolve!
+          if (solarEngine && planetaryMode !== 'eyeball-locked' && planetaryMode !== 'rogue') {
+            const dtYrTotal = (dtSurf * warpEff) / 31557600.0;
+            const nSub = Math.max(1, Math.min(8, Math.ceil(dtYrTotal / 0.0004)));
+            const dtSubYr = Math.min(0.0006, Math.max(1e-8, dtYrTotal / nSub));
+            await solarEngine.step({ dtSubYr, substeps: nSub, readMassive: true });
+          }
+          // Re-check after awaiting solarEngine in case exitSurfaceView() ran concurrently!
+          if (surfaceActive && surfaceSession === activeSurf) {
+            surfaceTelemetry = await activeSurf.step({
+              dt: dtSurf,
+              controls: surfaceControls,
+              climate: surfaceClimate,
+              readTelemetry: (activeSurf.stepIndex % 4) === 0
+            });
+          }
         } else {
           let sunDir = planetaryMode === 'eyeball-locked' ? [1.0, 0.0, 0.0] : [0.65, 0.25, 0.70];
           if (planetaryMode === 'cryo-plumes' && cryoPlumeSession) {
@@ -2407,7 +2429,7 @@ export function createUlgUniversesPhysics(device, {
 
   async function setSolarMode(mode) {
     const valid = [
-      'nbody', 'formation', 'roche-rings', 'giant-impact', 'red-giant',
+      'nbody', 'formation', 'roche-rings', 'giant-impact', 'red-giant', 'catastrophic-shatter',
       'comet-tails', 'hot-jupiter', 'quasar-jet', 'xray-binary', 'bns-kilonova', 'type-ia', 'bbh-merger'
     ];
     solarMode = valid.includes(mode) ? mode : 'nbody';
@@ -2419,7 +2441,7 @@ export function createUlgUniversesPhysics(device, {
       if (!relBinarySession || relBinaryMode !== solarMode) await initRelativisticBinary(solarMode);
     } else if (solarMode === 'comet-tails' || solarMode === 'hot-jupiter') {
       if (!radWindL2Session || radWindL2Mode !== solarMode) await initRadiativeWindL2(solarMode);
-    } else if (solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant') {
+    } else if (solarMode === 'roche-rings' || solarMode === 'giant-impact' || solarMode === 'red-giant' || solarMode === 'catastrophic-shatter') {
       if (!tidalRocheSession || tidalRocheMode !== solarMode) await initTidalRocheL2(solarMode);
     } else if (!solarEngine) {
       await initSolarSystem();
@@ -2540,54 +2562,114 @@ export function createUlgUniversesPhysics(device, {
     planetaryAtmoSession?.setEnableTriboelectric?.(planetaryTriboelectric);
   }
 
+  async function flushSurfaceCraters() {
+    if (surfaceCraterFlushTimer) {
+      clearTimeout(surfaceCraterFlushTimer);
+      surfaceCraterFlushTimer = null;
+    }
+    if (!surfaceSession || !surfaceCraterTileKey || !surfaceCraterDirty) return false;
+    const stamps = surfaceSession.getCraterStamps?.() || [];
+    surfaceCraterDirty = false;
+    try {
+      await craterTileStore.saveTile(surfaceCraterTileKey, stamps);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function scheduleCraterFlush() {
+    if (surfaceCraterFlushTimer) return;
+    surfaceCraterFlushTimer = setTimeout(() => {
+      surfaceCraterFlushTimer = null;
+      void flushSurfaceCraters();
+    }, 1200);
+  }
+
   async function enterSurfaceView({
     bodyIndex = planetaryBodyIndex,
+    customBodySpec = null,
     planetaryModeOverride = null,
+    landingSite = null,
     restoreCheckpoint = null,
-    initialVehicle = 'ufo'
+    initialVehicle = 'ufo',
+    onCraterStamp = null
   } = {}) {
+    await flushSurfaceCraters();
+    let spec = null;
     let idx = bodyIndex;
-    let cat = getActiveSystemCatalog();
-    if (typeof idx === 'string') {
-      const foundActive = cat.findIndex((b) => b.id === idx);
-      if (foundActive >= 0 && !cat[foundActive].isStar) {
-        idx = foundActive;
-      } else {
-        const foundSol = REAL_SOLAR_SYSTEM_CATALOG.findIndex((b) => b.id === idx);
-        if (foundSol > 0) {
-          useSolReference = true;
-          await initSolarSystem({ solReference: true });
-          cat = getActiveSystemCatalog();
-          idx = foundSol;
+    let surfAtmoState = planetaryAtmoState;
+    if (customBodySpec && typeof customBodySpec === 'object') {
+      spec = { isMinorBody: true, ...customBodySpec };
+      customSurfaceBodySpec = spec;
+      surfAtmoState = { surfacePressurePa: spec.surfacePressurePa || 0, volatileMassFrac: spec.isComet ? 0.55 : 0.02, particulateMassFrac: 0.0 };
+    } else {
+      customSurfaceBodySpec = null;
+      let cat = getActiveSystemCatalog();
+      if (typeof idx === 'string') {
+        const foundActive = cat.findIndex((b) => b.id === idx);
+        if (foundActive >= 0 && !cat[foundActive].isStar) {
+          idx = foundActive;
         } else {
-          idx = planetaryBodyIndex;
+          const foundSol = REAL_SOLAR_SYSTEM_CATALOG.findIndex((b) => b.id === idx);
+          if (foundSol > 0) {
+            useSolReference = true;
+            await initSolarSystem({ solReference: true });
+            cat = getActiveSystemCatalog();
+            idx = foundSol;
+          } else {
+            idx = planetaryBodyIndex;
+          }
         }
       }
+      idx = Math.max(0, Math.min(cat.length - 1, Math.trunc(Number(idx) ?? planetaryBodyIndex)));
+      if (cat[idx]?.isStar || idx === 0) {
+        const alt = getDefaultPlanetIndex(cat);
+        if (alt > 0) idx = alt;
+      }
+      focusedSolarBodyIndex = idx;
+      if (planetaryModeOverride) {
+        planetaryMode = planetaryModeOverride;
+      }
+      if (!planetaryResult || planetaryBodyIndex !== idx) {
+        await initPlanetaryInterior({ bodyIndex: idx });
+      }
+      spec = cat[idx] || REAL_SOLAR_SYSTEM_CATALOG[3];
+      surfAtmoState = planetaryAtmoState;
     }
-    idx = Math.max(0, Math.min(cat.length - 1, Math.trunc(Number(idx) ?? planetaryBodyIndex)));
-    if (cat[idx]?.isStar || idx === 0) {
-      const alt = getDefaultPlanetIndex(cat);
-      if (alt > 0) idx = alt;
-    }
-    focusedSolarBodyIndex = idx;
-    if (planetaryModeOverride) {
-      planetaryMode = planetaryModeOverride;
-    }
-    if (!planetaryResult || planetaryBodyIndex !== idx) {
-      await initPlanetaryInterior({ bodyIndex: idx });
-    }
-    const spec = cat[idx] || REAL_SOLAR_SYSTEM_CATALOG[3];
+
+    // Load OPFS / IndexedDB persisted sparse crater stamps for 1-submit GPU replay!
+    const tileKey = buildCraterTileKey({
+      universeSeed,
+      systemId: useSolReference ? 'sol' : (activeCausalSystem?.systemName || cosmicEpoch?.id || 'proc'),
+      bodyId: spec.id || `body-${idx}`
+    });
+    const persisted = await craterTileStore.loadTile(tileKey);
+    const initialCraterStamps = Array.isArray(persisted)
+      ? persisted
+      : (Array.isArray(persisted?.stamps) ? persisted.stamps : []);
+    surfaceCraterTileKey = tileKey;
+    surfaceCraterDirty = false;
+
+    surfaceLandingSite = landingSite || null;
     const nextSurf = createPlanetarySurfaceSessionWebGpu(device, {
       bodySpec: spec,
       planetaryResult,
-      planetaryAtmoState,
-      planetaryMode,
+      planetaryAtmoState: surfAtmoState,
+      planetaryMode: customSurfaceBodySpec ? 'standard' : planetaryMode,
+      landingSite: surfaceLandingSite,
       gridN: quality.id === 'low' ? 81 : 129,
       cellSizeM: 9.5,
       particleCount: quality.id === 'low' ? 1024 : 2048,
-      seed: (universeSeed ^ (idx * 7919 + 0x504face)) >>> 0,
+      seed: (universeSeed ^ ((Number(idx) || 13) * 7919 + (spec.id?.length || 5) * 997 + 0x504face)) >>> 0,
       initialVehicle,
       initialCheckpoint: restoreCheckpoint,
+      initialCraterStamps,
+      onCraterStamp: (st) => {
+        surfaceCraterDirty = true;
+        scheduleCraterFlush();
+        if (typeof onCraterStamp === 'function') onCraterStamp(st, tileKey);
+      },
       label: `ulg-universes-surface-${spec.id}`
     });
     // Reset controls cleanly on landing
@@ -2607,7 +2689,9 @@ export function createUlgUniversesPhysics(device, {
   }
 
   function exitSurfaceView() {
+    void flushSurfaceCraters();
     surfaceActive = false;
+    customSurfaceBodySpec = null;
     surfaceControls = {
       forward: false, backward: false, left: false, right: false,
       jump: false, down: false, turbo: false, yawLeft: false, yawRight: false,
@@ -2725,6 +2809,71 @@ export function createUlgUniversesPhysics(device, {
       || bundleCache.get(`${zSafe}:std:1:1`)
       || bundleCache.get(`${zSafe}:std:1:0`)
       || null;
+  }
+
+  function computeSolarBarycenterAu() {
+    if (!solarEngine) return [0, 0, 0];
+    const cat = solarEngine.catalog || getActiveSystemCatalog();
+    const mCount = Math.min(solarEngine.massiveCount || 0, cat.length);
+    let mx = 0;
+    let my = 0;
+    let mz = 0;
+    let mSum = 0;
+    for (let i = 0; i < mCount; i += 1) {
+      const m = Math.max(0, Number(cat[i]?.massSolar) || 0);
+      if (m <= 0) continue;
+      const st = solarEngine.getMassiveBodyState64(i);
+      mx += st.posAu[0] * m;
+      my += st.posAu[1] * m;
+      mz += st.posAu[2] * m;
+      mSum += m;
+    }
+    if (mSum <= 0) return [0, 0, 0];
+    return [mx / mSum, my / mSum, mz / mSum];
+  }
+
+  /**
+   * Canonical Solar System reference-frame origin:
+   * - Overall solar system view (`L2`, span >= hiSpan): exact Center of Mass (Barycenter) of the system
+   *   so clicking fast-orbiting planets/moons/comets NEVER yanks or rotates the reference frame!
+   * - Entering orbit around the selected body (`L4` planet / `L3` star) or landing on it (`surfaceActive`):
+   *   smoothly transitions to the selected body's exact double-float co-moving orbital frame.
+   */
+  function getSolarReferenceOriginAu(spanLog10M = 12.6, focusIdxOverride = null) {
+    if (!solarEngine) {
+      return { originAu: [0, 0, 0], barycenterAu: [0, 0, 0], focusPosAu: [0, 0, 0], orbitBlend: 0, frameMode: 'barycenter' };
+    }
+    const cat = solarEngine.catalog || getActiveSystemCatalog();
+    const rawIdx = focusIdxOverride != null ? focusIdxOverride : focusedSolarBodyIndex;
+    const safeIdx = Math.max(0, Math.min(cat.length - 1, rawIdx));
+    const focusSpec = cat[safeIdx];
+    const isStar = Boolean(focusSpec?.isStar) || safeIdx === 0;
+    const focusSt = solarEngine.getMassiveBodyState64(safeIdx);
+    const barycenterAu = computeSolarBarycenterAu();
+
+    // Blend window: stays 100% barycentric across the entire L2 solar-system overview,
+    // and smoothly locks into the selected body's co-moving frame only when zooming into orbit (L4/L3) or landing!
+    const hiSpan = isStar ? 10.1 : 9.45;
+    const loSpan = isStar ? 9.4 : 8.65;
+    let orbitBlend = 0.0;
+    if (surfaceActive || spanLog10M <= loSpan) {
+      orbitBlend = 1.0;
+    } else if (spanLog10M < hiSpan) {
+      const t = (hiSpan - spanLog10M) / (hiSpan - loSpan);
+      orbitBlend = t * t * (3.0 - 2.0 * t);
+    }
+
+    const originAu = orbitBlend <= 0
+      ? barycenterAu
+      : (orbitBlend >= 1
+        ? focusSt.posAu
+        : [
+          barycenterAu[0] + (focusSt.posAu[0] - barycenterAu[0]) * orbitBlend,
+          barycenterAu[1] + (focusSt.posAu[1] - barycenterAu[1]) * orbitBlend,
+          barycenterAu[2] + (focusSt.posAu[2] - barycenterAu[2]) * orbitBlend
+        ]);
+    const frameMode = orbitBlend <= 0 ? 'barycenter' : (orbitBlend >= 1 ? 'body-orbit' : 'orbit-transition');
+    return { originAu, barycenterAu, focusPosAu: focusSt.posAu, orbitBlend, frameMode };
   }
 
   function getTargetsForLevel(level, worldScaleInfo = {}) {
@@ -2873,6 +3022,12 @@ export function createUlgUniversesPhysics(device, {
             subtitle: 'Bloated Convective RGB Envelope · Aerodynamic Common-Envelope Drag on Inner Worlds',
             tempK: 3400,
             composition: 'Convective H/He Envelope · Vaporizing Inner Rocky Orbits'
+          },
+          'catastrophic-shatter': {
+            name: `Catastrophic Shatter — ${shatterOriginBodyName || 'Disrupted Body'}`,
+            subtitle: `Binding Energy Exceeded (E > 0.85 U_bind) · Incandescent Molten-Core & Crustal Debris Field`,
+            tempK: 3800,
+            composition: 'Vaporized Fe-Ni Core Plasma · Ballistic Silicate & Volatile Fragments'
           }
         };
         const m = metaMap[solarMode] || metaMap['quasar-jet'];
@@ -2890,14 +3045,14 @@ export function createUlgUniversesPhysics(device, {
       }
       if (!solarEngine) return [];
       const cat = getActiveSystemCatalog();
-      const safeFocus = Math.max(0, Math.min(cat.length - 1, focusedSolarBodyIndex));
-      const focusState = solarEngine.getMassiveBodyState64(safeFocus);
+      const spanM = worldScaleInfo.solarSpanLog10M ?? 12.6;
+      const refOrigin = getSolarReferenceOriginAu(spanM);
       const scaleAuToWorld = worldScaleInfo.solarScaleAuToWorld ?? 1.0;
       return cat.map((spec, idx) => {
         const st = solarEngine.getMassiveBodyState64(idx);
-        const relX = (st.posAu[0] - focusState.posAu[0]) * scaleAuToWorld;
-        const relY = (st.posAu[1] - focusState.posAu[1]) * scaleAuToWorld;
-        const relZ = (st.posAu[2] - focusState.posAu[2]) * scaleAuToWorld;
+        const relX = (st.posAu[0] - refOrigin.originAu[0]) * scaleAuToWorld;
+        const relY = (st.posAu[1] - refOrigin.originAu[1]) * scaleAuToWorld;
+        const relZ = (st.posAu[2] - refOrigin.originAu[2]) * scaleAuToWorld;
         const isStarBody = Boolean(spec.isStar) || idx === 0;
         return {
           id: spec.id,
@@ -2976,11 +3131,15 @@ export function createUlgUniversesPhysics(device, {
         }];
       }
       const burn = getGate1StellarBurnConstants();
+      const isMpm = stellarEngine?.solver === 'webgpu-3d-mls-mpm-nuclear-fusion';
+      const vConv = Number(stellarTelemetry?.convectiveRmsVel || 0);
       return [{
         id: 'stellar-fusion-core',
         level: 3,
-        name: 'Thermonuclear Fusion Core',
-        subtitle: `Gate 1 pp/CNO/3α Burn · Q_pp = ${burn.ppThermalMeV.toFixed(2)} MeV`,
+        name: isMpm ? '3D GPU MLS-MPM Fusion Star' : 'Thermonuclear Fusion Core',
+        subtitle: isMpm
+          ? `24³ MLS-MPM Plasma + Gate 1 pp/CNO/3α · Q_pp = ${burn.ppThermalMeV.toFixed(2)} MeV · v_conv = ${vConv.toFixed(2)}`
+          : `Gate 1 pp/CNO/3α Burn · Q_pp = ${burn.ppThermalMeV.toFixed(2)} MeV`,
         pos: [0, 0, 0],
         radius: 1.8,
         tempK: stellarTelemetry?.coreTempK || 1.5e7,
@@ -3154,6 +3313,8 @@ export function createUlgUniversesPhysics(device, {
     get cosmoMode() { return cosmoMode; },
     get cosmoSession() { return cosmoSession; },
     get cosmoTelemetry() { return cosmoTelemetry; },
+    get cosmoBigBangMode() { return cosmoBigBangMode; },
+    get cosmoScaleFactorA() { return cosmoSession?.getState?.()?.aScale ?? 1.0; },
     get cosmoFirstPk() { return cosmoFirstPk; },
     get cosmoTargets() { return cosmoTargets; },
     get cosmoBaryonSession() { return cosmoBaryonSession; },
@@ -3221,9 +3382,15 @@ export function createUlgUniversesPhysics(device, {
     get cryoPlumeSession() { return cryoPlumeSession; },
     get cryoPlumeTelemetry() { return cryoPlumeTelemetry; },
     get surfaceActive() { return surfaceActive; },
+    get surfaceLandingSite() { return surfaceLandingSite; },
     get surfaceSession() { return surfaceSession; },
     get surfaceTelemetry() { return surfaceTelemetry; },
+    get surfaceBodySpec() { return customSurfaceBodySpec || getActiveSystemCatalog()[planetaryBodyIndex] || null; },
+    get surfaceCraterTileKey() { return surfaceCraterTileKey; },
     get surfaceControls() { return surfaceControls; },
+    get surfaceTimeWarp() { return surfaceTimeWarp; },
+    get surfaceSimSec() { return surfaceSimSec; },
+    get surfaceClimate() { return surfaceClimate; },
     get mdSession() { return mdSession; },
     get mdTelemetry() { return mdTelemetry; },
     get mdElementZ() { return mdElementZ; },
@@ -3286,10 +3453,18 @@ export function createUlgUniversesPhysics(device, {
     setPlanetaryMode,
     enterSurfaceView,
     exitSurfaceView,
+    flushSurfaceCraters,
+    applyRemoteCraterStamp: (st) => surfaceSession?.applyRemoteCraterStamp?.(st) ?? false,
+    triggerCatastrophicShatter,
+    getShatteredBodyIds: () => [...shatteredBodyIds],
+    craterTileStore,
     setSurfaceVehicle,
     setSurfaceUfoAltitudeKm,
     setSurfaceCameraMode,
     setSurfaceControls,
+    setSurfaceTimeWarp(w) { surfaceTimeWarp = Math.max(1.0, Math.min(1e7, Number(w) || 1.0)); return surfaceTimeWarp; },
+    advanceSurfaceSimSec(deltaSec) { surfaceSimSec += Number(deltaSec) || 0; return surfaceSimSec; },
+    setSurfaceClimate(c) { surfaceClimate = c || null; },
     addSurfaceLookDelta,
     adjustSurfaceChaseDistance,
     triggerSurfaceTractorPulse: (dur) => surfaceSession?.triggerTractorPulse?.(dur),
@@ -3298,7 +3473,7 @@ export function createUlgUniversesPhysics(device, {
     setSurfaceWeaponFire: (opts) => surfaceSession?.setWeaponFire?.(opts),
     launchSurfaceMissile: (opts) => surfaceSession?.launchMissile?.(opts),
     setSurfaceExternalEntities: (ext) => surfaceSession?.setExternalEntities?.(ext),
-    drainSurfaceEvents: () => surfaceSession?.drainPendingEvents?.() || { harvested: { silicates: 0, volatiles: 0, metals: 0, exotics: 0 }, peerHits: [] },
+    drainSurfaceEvents: () => surfaceSession?.drainPendingEvents?.() || { harvested: { silicates: 0, volatiles: 0, metals: 0, exotics: 0 }, peerHits: [], abductions: [] },
     setStellarTimeAccel,
     setSolarMode,
     setKerrSpinA,
@@ -3311,6 +3486,8 @@ export function createUlgUniversesPhysics(device, {
     setShowGalacticBField,
     setGalaxyBranch,
     setFocusedSolarBody,
+    computeSolarBarycenterAu,
+    getSolarReferenceOriginAu,
     getActiveUniversalLaws,
     getTargetsForLevel,
     connectPeerMesh,

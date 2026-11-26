@@ -45,7 +45,7 @@ export const AMPHIPHILE_MEMBRANE_LAW_ADAPTER = Object.freeze({
   accumulates: Object.freeze(['membrane-assembly-telemetry']),
   pairedVolumeState: 'not-applicable',
   conservedQuantities: Object.freeze(['lipid-count', 'covalent-backbone-connectivity']),
-  validityDomain: Object.freeze({ minLipids: 32, minTempK: 100, maxTempK: 900 }),
+  validityDomain: Object.freeze({ minLipids: 32, minTempK: 75, maxTempK: 900 }),
   fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
   scaleRangeM: Object.freeze([1e-9, 1e-6]),
   fundamentalLaws: Object.freeze([

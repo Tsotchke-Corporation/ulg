@@ -14070,7 +14070,7 @@ export function resolveRenderFieldParticleRadiusPolicy({
   const source = String(batch?.source || '').trim().toLowerCase();
   const representativeParticleRadiusM = Number(batch?.representativeParticleRadiusM);
   const smoothingLengthM = Number(batch?.smoothingLengthM);
-  const h2oLiquidContinuityEligible = material === 'h2o' && phase === 'liquid';
+  const h2oLiquidContinuityEligible = phase === 'liquid';
   const gasContinuityEligible = phase === 'gas' || phase === 'vapor';
   const reactionProductLiquidContinuityEligible = phase === 'liquid'
     && batch?.reactionProductMaterial === true;

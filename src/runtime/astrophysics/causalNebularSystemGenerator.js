@@ -116,28 +116,37 @@ export function deriveGalaxyEnvironmentFromCosmicContext({
   const h = hashCoords(regionPosMpc[0] || 0, regionPosMpc[1] || 0, regionPosMpc[2] || 0, seed ^ 0x101);
   const rand = mulberry32(h);
 
-  // Morphology emerges from redshift + cosmic-web density (morphology-density relation!)
+  // Realistic Dressler (1980) Morphology–Density Relation across Cosmic-Web overdensity & epoch z:
+  // Cluster cores -> Giant Ellipticals & Mergers; Groups -> Barred Spirals & Ellipticals;
+  // Filaments -> Grand-Design & Barred Spirals; Voids & Halos -> Globular Clusters & Dwarf Tidal Streams!
   let morphology = 'disk';
   let morphologyLabel = 'Grand-Design Spiral';
   if (z >= 4.5) {
     morphology = 'proto';
     morphologyLabel = 'Primordial High-z Protogalaxy';
   } else if (z >= 1.4) {
-    morphology = delta > 2.4 ? 'binary' : 'proto';
+    morphology = delta > 2.2 ? 'binary' : 'proto';
     morphologyLabel = morphology === 'binary' ? 'Cosmic-Noon Starburst Merger' : 'High-z Clumpy Starburst Disk';
   } else if (z < -0.15) {
-    // Far-future accelerated Λ-era: depleted gas, mostly red ellipticals & aging spirals
-    morphology = delta > 1.3 ? 'sphere' : 'barred';
-    morphologyLabel = morphology === 'sphere' ? 'Evolved Giant Elliptical' : 'Aging Barred Spiral';
-  } else if (delta > 2.8) {
-    morphology = rand() < 0.72 ? 'sphere' : 'binary';
-    morphologyLabel = morphology === 'sphere' ? 'Cluster-Core Giant Elliptical' : 'Interacting Major Merger Pair';
-  } else if (delta < 0.48) {
-    morphology = rand() < 0.55 ? 'dwarf-stream' : 'globular';
-    morphologyLabel = morphology === 'dwarf-stream' ? 'Void-Edge Dwarf & Tidal Stream' : 'Metal-Poor Globular Cluster';
+    // Far-future accelerated Λ-era: depleted gas, mostly red ellipticals, globulars & aging barred spirals
+    const rF = rand();
+    morphology = delta > 1.25 ? 'sphere' : (rF < 0.35 ? 'globular' : 'barred');
+    morphologyLabel = morphology === 'sphere' ? 'Evolved Giant Elliptical (E2)' : (morphology === 'globular' ? 'Ancient Halo Globular Cluster' : 'Aging Barred Spiral');
+  } else if (delta > 2.15) {
+    morphology = rand() < 0.68 ? 'sphere' : 'binary';
+    morphologyLabel = morphology === 'sphere' ? 'Cluster-Core Giant Elliptical (E2)' : 'Interacting Major Merger Pair';
+  } else if (delta < 0.68) {
+    morphology = rand() < 0.52 ? 'globular' : 'dwarf-stream';
+    morphologyLabel = morphology === 'globular' ? 'Metal-Poor Globular Cluster (GC)' : 'Void-Edge Dwarf & Tidal Stream';
+  } else if (delta > 1.42) {
+    const rG = rand();
+    if (rG < 0.34) { morphology = 'sphere'; morphologyLabel = 'Group Elliptical / Lenticular (E4/S0)'; }
+    else if (rG < 0.72) { morphology = 'barred'; morphologyLabel = 'Barred Spiral (SBb)'; }
+    else { morphology = 'disk'; morphologyLabel = 'Grand-Design Spiral (Sa/Sb)'; }
   } else {
-    morphology = rand() < 0.42 ? 'barred' : 'disk';
-    morphologyLabel = morphology === 'barred' ? 'Barred Spiral (SBb)' : 'Grand-Design Spiral (Sc/Sb)';
+    const rS = rand();
+    if (rS < 0.54) { morphology = 'disk'; morphologyLabel = 'Grand-Design Spiral (Sc/Sb)'; }
+    else { morphology = 'barred'; morphologyLabel = 'Barred Spiral (SBb)'; }
   }
 
   // Mass-metallicity & redshift chemical enrichment relation (Maiolino+ 2008 / Zahid+ 2014)
@@ -227,7 +236,18 @@ export function deriveStarSystemFromGalacticLocation({
   // Galactic coordinate mapping: 1 sim unit ~ 1.65 kpc (Orion Spur at rSim ~ 5.2 -> ~8.5 kpc!)
   const rKpc = Math.max(0.2, rSim * 1.65);
   const zKpc = zAbsSim * 1.65;
-  const h = hashCoords(starPosGal[0] || 0, starPosGal[1] || 0, starPosGal[2] || 0, (seed ^ ((starIndex + 1) * 2654435761)) >>> 0);
+  // Immutable star identity hash: when `starIndex > 0` (a real orbiting GPU star!), hash strictly
+  // from `(seed, starIndex)` with full 32-bit Murmur3 avalanche so orbiting stars NEVER change their
+  // name, spectral class, or planets as they move, while preserving uniform statistical distributions!
+  let h;
+  if (starIndex > 0) {
+    let x = ((seed >>> 0) ^ Math.imul((starIndex >>> 0) + 0x9e3779b9, 0x85ebca6b)) >>> 0;
+    x = Math.imul(x ^ (x >>> 16), 0x7feb352d) >>> 0;
+    x = Math.imul(x ^ (x >>> 15), 0x846ca68b) >>> 0;
+    h = (x ^ (x >>> 16)) >>> 0;
+  } else {
+    h = hashCoords(starPosGal[0] || 0, starPosGal[1] || 0, starPosGal[2] || 0, (seed ^ 2654435761) >>> 0);
+  }
   const rand = mulberry32(h);
 
   // Radial & vertical galactic metallicity gradient:
@@ -408,11 +428,45 @@ export function deriveStarSystemFromGalacticLocation({
     ? 'Galactic Bulge'
     : (isHalo ? 'Stellar Halo' : (isYoungArm ? 'Spiral-Arm H II Nursery' : 'Galactic Disk'));
 
+  // Astrophysics-grounded L3 regime & nebula coupling (zero hardcoded look-ups):
+  //   - Core-collapse NS / BH remnants -> Pulsar or SNR/PWN (if young)
+  //   - White dwarfs -> ~28% young Bipolar Planetary Nebula, otherwise TOV degenerate WD
+  //   - Young gas-rich spiral-arm nurseries (f_gas > 0.14) -> O/B photoionizing H II Pillars or MHD protostellar jets
+  //   - Quenched ellipticals / globular clusters (f_gas < 0.14) -> zero H II nebulae (old stellar fusion / remnants)
+  const primary = stars[0];
+  let recommendedL3Regime = 'fusion';
+  let nebulaBadge = 'MLS-MPM Nuclear Fusion Star';
+  if (primary.stage === 'neutron-star') {
+    recommendedL3Regime = systemAgeGyr < 0.08 ? 'snr-pwn' : 'pulsar';
+    nebulaBadge = recommendedL3Regime === 'snr-pwn' ? 'Core-Collapse SNR / PWN' : 'Relativistic Magnetized Pulsar';
+  } else if (primary.stage === 'stellar-black-hole') {
+    recommendedL3Regime = 'snr-pwn';
+    nebulaBadge = 'Hypernova Remnant / Black Hole';
+  } else if (primary.stage === 'white-dwarf') {
+    if (rand() < 0.28) {
+      recommendedL3Regime = 'planetary-nebula';
+      nebulaBadge = 'Bipolar Planetary Nebula';
+    } else {
+      recommendedL3Regime = 'white-dwarf-tov';
+      nebulaBadge = 'Degenerate White Dwarf (TOV)';
+    }
+  } else if (isYoungArm && gEnv.gasFraction > 0.14) {
+    if (mPrimary0 >= 2.8 && systemAgeGyr < 0.15) {
+      recommendedL3Regime = 'h2-pillars';
+      nebulaBadge = 'Strömgren H II Pillars';
+    } else if (systemAgeGyr < 0.08) {
+      recommendedL3Regime = 'nebular-mhd';
+      nebulaBadge = 'MHD Protostellar Nebula & Jets';
+    }
+  }
+
   return Object.freeze({
     schema: ULG_CAUSAL_NEBULAR_CASCADE_SCHEMA,
     systemId: `${prefix.toLowerCase()}-${catNum}`,
     systemName,
     galacticRegion,
+    recommendedL3Regime,
+    nebulaBadge,
     rKpc: Number(rKpc.toFixed(2)),
     zKpc: Number(zKpc.toFixed(2)),
     systemAgeGyr: Number(systemAgeGyr.toFixed(2)),
@@ -833,6 +887,25 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     }
 
     const bodyIdx = catalog.length;
+    // Causal spin obliquity (stochastic giant-impact scatter) & tidal-locking timescale (tau ~ a^6 / M_*^2)!
+    const mHost = Math.max(0.08, stars[0]?.massSolar || 1.0);
+    const tidalRatio = Math.pow(aAu / 0.22, 6.0) / (mHost * mHost * Math.max(0.1, sys.systemAgeGyr));
+    const tidallyLocked = tidalRatio < 1.0 || archetype === 'hot-jupiter' || archetype === 'lava-world';
+    const axialObliquityDeg = tidallyLocked
+      ? Number((rand() * 3.5).toFixed(2))
+      : Number((archetype === 'ice-giant' && rand() < 0.35 ? (65 + rand() * 55) : (4 + rand() * 38)).toFixed(2));
+    const spinAxisLonDeg = Number((rand() * 360).toFixed(1));
+    const orbitPeriodHr = 8766.0 * Math.sqrt(Math.pow(aAu, 3.0) / mHost);
+    const rotationPeriodHr = tidallyLocked
+      ? Number(orbitPeriodHr.toFixed(2))
+      : Number(((archetype === 'gas-giant' || archetype === 'ice-giant') ? (8.5 + rand() * 11.0) : (12.0 + rand() * 36.0)).toFixed(2));
+    // Emergent indigenous civilization sub-Kardashev index (rare, non-zero only on mature habitable/exotic worlds!)
+    const civRoll = rand();
+    const isMature = sys.systemAgeGyr >= 2.2;
+    const isHabLike = archetype === 'earth-like' || archetype === 'ocean-super-earth';
+    const civTechK = (isHabLike && isMature && civRoll < 0.55)
+      ? Number((0.38 + rand() * 0.52).toFixed(2))
+      : 0.0;
     catalog.push({
       id: `planet-${p}`,
       parent: planetParentIdx,
@@ -842,6 +915,12 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       omDeg: Number((rand() * 360).toFixed(1)),
       wDeg: Number((rand() * 360).toFixed(1)),
       m0Deg: Number((rand() * 360).toFixed(1)),
+      axialObliquityDeg,
+      spinAxisLonDeg,
+      rotationPeriodHr,
+      tidallyLocked,
+      civTechK,
+      hostStarTeffK: stars[0]?.effectiveTempK || 5778,
       ...spec
     });
     planetIndices.push(bodyIdx);
@@ -870,6 +949,11 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         omDeg: Number((rand() * 360).toFixed(1)),
         wDeg: Number((rand() * 360).toFixed(1)),
         m0Deg: Number((rand() * 360).toFixed(1)),
+        axialObliquityDeg: Number((axialObliquityDeg * 0.85).toFixed(2)),
+        spinAxisLonDeg,
+        rotationPeriodHr: Number((8766.0 * Math.sqrt(Math.pow(aMoonAu, 3.0) / Math.max(1e-9, spec.massSolar))).toFixed(2)),
+        tidallyLocked: true,
+        hostStarTeffK: stars[0]?.effectiveTempK || 5778,
         color0: isHazyMoon ? [0.86, 0.68, 0.34] : (isVolcanicMoon ? [0.92, 0.80, 0.30] : (beyondSnow ? [0.84, 0.86, 0.90] : [0.66, 0.65, 0.63])),
         color1: isHazyMoon ? [0.62, 0.44, 0.20] : (isVolcanicMoon ? [0.68, 0.44, 0.14] : (beyondSnow ? [0.54, 0.66, 0.78] : [0.40, 0.39, 0.38])),
         atm: isHazyMoon ? 0.78 : 0.0,
@@ -886,9 +970,81 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     }
   }
 
+  // Synthesize visitable, landable, mineable named Minor Bodies (Metallic Asteroid + Active Outgassing Comet) for EVERY star system!
+  const astAu = Number(Math.max(rMinStableAu * 1.35, Math.min(rMaxStableAu * 0.9, rSnowLineAu * 0.92)).toFixed(4));
+  const lHostSol = Math.max(0.01, stars.reduce((acc, s) => acc + (Number(s.luminositySolar) || 0), 0) || 1.0);
+  const astTeq = Math.max(45, Math.round(278 * Math.pow(lHostSol, 0.25) / Math.sqrt(Math.max(0.1, astAu))));
+  catalog.push({
+    id: 'belt-asteroid-1',
+    name: `${sys.systemName} Belt Asteroid α`,
+    planetClass: 'metallic-asteroid',
+    subtitle: `Mineable Fe-Ni / Silicate Main-Belt Asteroid · ${astAu.toFixed(2)} AU`,
+    parent: planetParentIdx,
+    kind: 1,
+    massSolar: (2e-12 + rand() * 3e-11),
+    radiusKm: Math.round(45 + rand() * 145),
+    aAu: astAu,
+    e: Number((0.06 + rand() * 0.14).toFixed(4)),
+    incDeg: Number((3.0 + rand() * 9.0).toFixed(2)),
+    omDeg: Number((rand() * 360).toFixed(1)),
+    wDeg: Number((rand() * 360).toFixed(1)),
+    m0Deg: Number((rand() * 360).toFixed(1)),
+    axialObliquityDeg: Number((rand() * 140).toFixed(1)),
+    spinAxisLonDeg: Number((rand() * 360).toFixed(1)),
+    rotationPeriodHr: Number((3.8 + rand() * 9.5).toFixed(2)),
+    tidallyLocked: false,
+    isMinorBody: true,
+    isMetallicAsteroid: true,
+    civTechK: 0,
+    hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+    color0: [0.64, 0.62, 0.58],
+    color1: [0.36, 0.38, 0.42],
+    atm: 0.0,
+    surfacePressurePa: 0,
+    volatileMassFrac: 0.04,
+    tempK: astTeq,
+    centralP: 1.4e7,
+    coreZ: 26, mantleZ: 28, surfZ: 26,
+    composition: 'Fe-Ni Metallic Ore · Olivine/Pyroxene Chondrite'
+  });
+  const comAu = Number(Math.max(rSnowLineAu * 1.4, Math.min(18.0, rSnowLineAu * 2.8)).toFixed(4));
+  catalog.push({
+    id: 'periodic-comet-1',
+    name: `${sys.systemName} Comet 1P`,
+    planetClass: 'periodic-comet',
+    subtitle: `Active Outgassing Volatile Comet · e = 0.84`,
+    parent: planetParentIdx,
+    kind: 3,
+    massSolar: 8.5e-17,
+    radiusKm: Number((4.5 + rand() * 9.0).toFixed(1)),
+    aAu: comAu,
+    e: Number((0.76 + rand() * 0.16).toFixed(4)),
+    incDeg: Number((18.0 + rand() * 115.0).toFixed(2)),
+    omDeg: Number((rand() * 360).toFixed(1)),
+    wDeg: Number((rand() * 360).toFixed(1)),
+    m0Deg: Number((12 + rand() * 26).toFixed(1)),
+    axialObliquityDeg: 28.0,
+    spinAxisLonDeg: 110.0,
+    rotationPeriodHr: Number((14.0 + rand() * 36.0).toFixed(1)),
+    tidallyLocked: false,
+    isMinorBody: true,
+    isComet: true,
+    civTechK: 0,
+    hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+    color0: [0.74, 0.90, 1.0],
+    color1: [0.38, 0.62, 0.88],
+    atm: 0.18,
+    surfacePressurePa: 0,
+    volatileMassFrac: 0.76,
+    tempK: 175,
+    centralP: 1e5,
+    coreZ: 8, mantleZ: 6, surfZ: 8,
+    composition: 'H₂O Ice 75% · CO/CO₂/CH₄ Volatiles · Silicate Dust'
+  });
+
   // Pick a compelling default focus body (Earth-like if present, else first rocky/ocean planet, else first planet, else primary star!)
   const earthLikeIdx = catalog.findIndex((b) => b.planetClass === 'earth-like');
-  const firstPlanetIdx = catalog.findIndex((b) => !b.isStar);
+  const firstPlanetIdx = catalog.findIndex((b) => !b.isStar && !b.isMinorBody);
   const defaultFocusIndex = earthLikeIdx >= 0 ? earthLikeIdx : (firstPlanetIdx >= 0 ? firstPlanetIdx : 0);
 
   return Object.freeze({

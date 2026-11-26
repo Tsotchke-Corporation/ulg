@@ -83,7 +83,7 @@ export {
 
 // PBD-style relaxation for the excluded-volume pair separation projection in
 // G2P post-processing; 0 disables the pass.
-export const MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT = 0.5;
+export const MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT = 0.22;
 // Excluded-volume projection preserves represented volume. Pair-normal
 // velocity damping is a separate, optional collision response; physical
 // viscosity and the constitutive laws own ordinary liquid dissipation.

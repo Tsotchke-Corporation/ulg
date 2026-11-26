@@ -5569,6 +5569,7 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`
           continue;
         }
         sampled_weight = sampled_weight + weight;
+        sampled_grid_mass = sampled_grid_mass + weight * grid_row.x;
         let grid_velocity = grid_row.yzw;`,
         code: `        let idx = g2p_grid_index(node_i, node_j, node_k);
         let field_index = g2p_field_find(
@@ -5604,6 +5605,7 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`
           sampled_absolute_pressure + weight * field_pressure.x;
         sampled_pressure_weight = sampled_pressure_weight + weight;
         sampled_weight = sampled_weight + weight;
+        sampled_grid_mass = sampled_grid_mass + weight * field_mass;
         let grid_velocity = vec3<f32>(
           bitcast<f32>(g2p_field_load(state_base + 1u)),
           bitcast<f32>(g2p_field_load(state_base + 2u)),

@@ -3163,8 +3163,22 @@ test('H2O liquid render fields derive a bounded J-aware continuity radius from S
   assert.equal(alreadyLarge.floorApplied, false);
   assert.equal(alreadyLarge.resolvedScale, 1.6);
 
+  // Star Spec v0.4 Rule 1: universal liquid continuity applies identically to any liquid material (not H2O-only).
+  const naohLiquid = resolveRenderFieldParticleRadiusPolicy({
+    batch: { ...batch, material: 'naoh' },
+    requestedScale: 1,
+    isolation: 80,
+    subtract: 24,
+    resolution: 96,
+    fieldPadding: 0.22,
+    refEdgeM: 3
+  });
+  assert.equal(naohLiquid.eligible, true);
+  assert.equal(naohLiquid.floorApplied, true);
+  assert.ok(Math.abs(naohLiquid.resolvedScale - expectedScale) < 1e-12);
+
   for (const ineligibleBatch of [
-    { ...batch, material: 'naoh' },
+    { ...batch, phase: 'solid' },
     { ...batch, source: 'reaction-product-event-buffer' },
     { ...batch, representativeParticleRadiusM: null }
   ]) {

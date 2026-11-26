@@ -306,18 +306,19 @@ export async function mountOrganicLabDemo() {
 
   function refreshAcidBaseAndPlots() {
     const isSpatial = SPATIAL_MODES.has(currentMode);
-    if (!isSpatial && currentGraph) {
-      currentQeq = solveQeqCharges(currentGraph, { dielectricEr });
-      currentAcidBase = evaluateAcidBaseEquilibrium(currentGraph, { pH, dielectricEr });
+    const graph = currentGraph;
+    if (!isSpatial && graph) {
+      currentQeq = solveQeqCharges(graph, { dielectricEr });
+      currentAcidBase = evaluateAcidBaseEquilibrium(graph, { pH, dielectricEr });
 
       el('p1-title').textContent = 'GPU π-MO Energy Levels';
       el('p1-sub').textContent = currentPiRes?.piAtomCount ? `${currentPiRes.totalPiElectrons}π e⁻` : 'sp³ σ';
       drawMoLevelPlot(plot1, currentPiRes, selectedMoIdx);
 
       // Plot 2: Bearing Superlubricity V(theta) OR Reaction Barrier Profile OR Dihedral Torsion Profile OR Born Solvation curve
-      if (currentGraph.rotorMeta?.kind === 'molecular-bearing') {
-        const nRot = currentGraph.rotorMeta.rotorSymmetry || 8;
-        const nStat = currentGraph.rotorMeta.statorSymmetry || 11;
+      if (graph.rotorMeta?.kind === 'molecular-bearing') {
+        const nRot = graph.rotorMeta.rotorSymmetry || 8;
+        const nStat = graph.rotorMeta.statorSymmetry || 11;
         const tel = mdSession?.getTelemetry?.();
         const thetaDeg = (((tel?.rotorThetaRad || 0) * 180) / Math.PI) % 45;
         const thetaWrap = thetaDeg < 0 ? thetaDeg + 45 : thetaDeg;
@@ -456,9 +457,9 @@ export async function mountOrganicLabDemo() {
     });
     el('prov-laws').textContent = `${laws.active.length} active (${laws.active.map((l) => l.id.split('-')[0]).join(', ')})`;
 
-    if (!isSpatial && mdSession) {
+    if (!isSpatial && mdSession && currentGraph) {
       const tel = mdSession.getTelemetry();
-      const isBearing = currentGraph?.rotorMeta?.kind === 'molecular-bearing';
+      const isBearing = currentGraph.rotorMeta?.kind === 'molecular-bearing';
       el('st-step').textContent = String(tel.stepIndex);
       if (isBearing) {
         el('st-m1-lbl').textContent = 'Rotor ω';
@@ -486,8 +487,10 @@ export async function mountOrganicLabDemo() {
       const chiralBadge = currentGraph.chiralCenters.length > 0
         ? `Chiral ${currentGraph.chiralCenters.map((c) => `(${c.configuration})`).join(',')}`
         : null;
-      el('prov-dipole').textContent = `${currentQeq.dipoleDebye.toFixed(2)} D · Q=${currentAcidBase.netChargeAtPh.toFixed(2)}`;
-      el('prov-born').textContent = `${currentQeq.bornSolvationKjMol.toFixed(1)} kJ/mol (ε=${dielectricEr.toFixed(1)})`;
+      if (currentQeq && currentAcidBase) {
+        el('prov-dipole').textContent = `${currentQeq.dipoleDebye.toFixed(2)} D · Q=${currentAcidBase.netChargeAtPh.toFixed(2)}`;
+        el('prov-born').textContent = `${currentQeq.bornSolvationKjMol.toFixed(1)} kJ/mol (ε=${dielectricEr.toFixed(1)})`;
+      }
       el('prov-bonds').textContent = `${tel.hBondCount} H-bonds / ${tel.activeBondCount} cov`;
       el('pill-name').textContent = `${ORGANIC_MOLECULE_INITIAL_CONDITIONS[currentMode]?.name || currentMode}`;
       el('pill-tag').textContent = isBearing
@@ -510,74 +513,88 @@ export async function mountOrganicLabDemo() {
     }
   }
 
+  let modeSwitchToken = 0;
   async function selectMode(modeId, customGraph = null) {
-    currentMode = modeId;
-    const isSpatial = SPATIAL_MODES.has(modeId);
-    if (mdSession) { mdSession.dispose(); mdSession = null; }
-    if (rdSession) { rdSession.dispose(); rdSession = null; }
-    pickedEntity = null;
-    measureAtoms = [];
-    labelHostSnapshot = null;
-    el('pick-card')?.classList.remove('open');
-    if (el('pick-reticle')) el('pick-reticle').style.display = 'none';
-    updateMeasureBanner();
-    eeHistory = [];
-    purityHistory = [];
+    const myToken = ++modeSwitchToken;
+    while (busy) await new Promise((r) => setTimeout(r, 4));
+    if (myToken !== modeSwitchToken || disposed) return;
+    busy = true;
+    try {
+      currentMode = modeId;
+      const isSpatial = SPATIAL_MODES.has(modeId);
+      if (mdSession) { mdSession.dispose(); mdSession = null; }
+      if (rdSession) { rdSession.dispose(); rdSession = null; }
+      pickedEntity = null;
+      measureAtoms = [];
+      labelHostSnapshot = null;
+      el('pick-card')?.classList.remove('open');
+      if (el('pick-reticle')) el('pick-reticle').style.display = 'none';
+      updateMeasureBanner();
+      eeHistory = [];
+      purityHistory = [];
 
-    document.querySelectorAll('.mode-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.mode === modeId);
-    });
-    el('mol-controls-card').style.display = isSpatial ? 'none' : 'flex';
-    el('rd-controls-card').style.display = isSpatial ? 'flex' : 'none';
-    el('reaction-ctrl-box').style.display = (modeId === 'sn2-walden' || modeId === 'diels-alder') ? 'flex' : 'none';
-    if (el('bearing-ctrl-box')) el('bearing-ctrl-box').style.display = (modeId === 'sulflower-bearing') ? 'flex' : 'none';
-
-    const doc = ORGANIC_MODE_DOCS[modeId];
-    el('hud-title').textContent = doc?.title || modeId;
-    el('hud-sub').textContent = doc?.whatYouSee?.slice(0, 145) + '…' || '';
-
-    if (!isSpatial) {
-      currentGraph = customGraph || buildOrganicMolecularGraph(modeId);
-      currentPiRes = await solvePiMolecularOrbitalsWebGpu(device, currentGraph);
-      selectedMoIdx = currentPiRes.piAtomCount > 0 ? currentPiRes.homoIndex : 0;
-      el('mo-ctrl-box').style.display = currentPiRes.piAtomCount > 0 ? 'flex' : 'none';
-      showPiMo = (modeId !== 'sulflower-bearing') && currentPiRes.piAtomCount > 0;
-      if (el('chk-pi')) el('chk-pi').checked = showPiMo;
-      await rebuildPiCloud();
-      reactProgress = 0.0;
-      reactDir = 1;
-      el('sl-xi').value = '0';
-      el('val-xi').textContent = '0.00';
-      mdSession = createReactiveBondOrderMdSessionWebGpu(device, {
-        graph: currentGraph,
-        temperatureK,
-        dielectricEr
+      document.querySelectorAll('.mode-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.mode === modeId);
       });
-      if (currentGraph.rotorMeta?.kind === 'molecular-bearing') {
-        mdSession.setReactionProgress(bearingTorque);
-        if (el('sl-torque')) el('sl-torque').value = bearingTorque.toFixed(2);
-        if (el('val-torque')) el('val-torque').textContent = bearingTorque.toFixed(2);
+      el('mol-controls-card').style.display = isSpatial ? 'none' : 'flex';
+      el('rd-controls-card').style.display = isSpatial ? 'flex' : 'none';
+      el('reaction-ctrl-box').style.display = (modeId === 'sn2-walden' || modeId === 'diels-alder') ? 'flex' : 'none';
+      if (el('bearing-ctrl-box')) el('bearing-ctrl-box').style.display = (modeId === 'sulflower-bearing') ? 'flex' : 'none';
+
+      const doc = ORGANIC_MODE_DOCS[modeId];
+      el('hud-title').textContent = doc?.title || modeId;
+      el('hud-sub').textContent = doc?.whatYouSee?.slice(0, 145) + '…' || '';
+
+      if (!isSpatial) {
+        const nextGraph = customGraph || buildOrganicMolecularGraph(modeId);
+        currentGraph = nextGraph;
+        currentPiRes = await solvePiMolecularOrbitalsWebGpu(device, nextGraph);
+        if (myToken !== modeSwitchToken || disposed) return;
+        selectedMoIdx = currentPiRes.piAtomCount > 0 ? currentPiRes.homoIndex : 0;
+        el('mo-ctrl-box').style.display = currentPiRes.piAtomCount > 0 ? 'flex' : 'none';
+        showPiMo = (modeId !== 'sulflower-bearing') && currentPiRes.piAtomCount > 0;
+        if (el('chk-pi')) el('chk-pi').checked = showPiMo;
+        await rebuildPiCloud();
+        if (myToken !== modeSwitchToken || disposed) return;
+        reactProgress = 0.0;
+        reactDir = 1;
+        el('sl-xi').value = '0';
+        el('val-xi').textContent = '0.00';
+        mdSession = createReactiveBondOrderMdSessionWebGpu(device, {
+          graph: nextGraph,
+          temperatureK,
+          dielectricEr
+        });
+        if (nextGraph.rotorMeta?.kind === 'molecular-bearing') {
+          mdSession.setReactionProgress(bearingTorque);
+          if (el('sl-torque')) el('sl-torque').value = bearingTorque.toFixed(2);
+          if (el('val-torque')) el('val-torque').textContent = bearingTorque.toFixed(2);
+        }
+        // Advance a few initial equilibration substeps so telemetry & H-bonds populate immediately
+        await mdSession.step({ dt: 0.012, substeps: 6, readTelemetry: true });
+        if (myToken !== modeSwitchToken || disposed) return;
+      } else {
+        currentGraph = null;
+        currentPiRes = null;
+        piCloudCount = 0;
+        rdSession = createAutocatalyticNetworkSessionWebGpu(device, {
+          width: 128,
+          height: 128,
+          mode: modeId,
+          kInhib,
+          feedRate
+        });
+        await rdSession.step({ dt: 0.16, substeps: 24, readTelemetry: true });
+        if (myToken !== modeSwitchToken || disposed) return;
       }
-      // Advance a few initial equilibration substeps so telemetry & H-bonds populate immediately
-      await mdSession.step({ dt: 0.012, substeps: 6, readTelemetry: true });
-    } else {
-      currentGraph = null;
-      currentPiRes = null;
-      piCloudCount = 0;
-      rdSession = createAutocatalyticNetworkSessionWebGpu(device, {
-        width: 128,
-        height: 128,
-        mode: modeId,
-        kInhib,
-        feedRate
-      });
-      await rdSession.step({ dt: 0.16, substeps: 24, readTelemetry: true });
-    }
 
-    refreshCameraForMode(modeId);
-    refreshAcidBaseAndPlots();
-    updateHudAndProvenance();
-    renderCurrentScene();
+      refreshCameraForMode(modeId);
+      refreshAcidBaseAndPlots();
+      updateHudAndProvenance();
+      renderCurrentScene();
+    } finally {
+      busy = false;
+    }
   }
 
   function renderCurrentScene() {
@@ -1154,7 +1171,19 @@ export async function mountOrganicLabDemo() {
   el('menu-about-lab').addEventListener('click', () => { el('help-popover').classList.remove('open'); openAboutModal(true); });
   el('modal-close').addEventListener('click', () => el('about-modal').classList.remove('open'));
   el('about-modal').addEventListener('click', (e) => { if (e.target === el('about-modal')) el('about-modal').classList.remove('open'); });
-  el('help-btn').addEventListener('click', () => el('help-popover').classList.toggle('open'));
+  el('help-btn').addEventListener('click', (e) => { e.stopPropagation(); el('help-popover').classList.toggle('open'); });
+  document.addEventListener('click', (e) => {
+    const pop = el('help-popover');
+    if (pop?.classList.contains('open') && !pop.contains(e.target) && e.target !== el('help-btn')) {
+      pop.classList.remove('open');
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      el('help-popover')?.classList.remove('open');
+      el('about-modal')?.classList.remove('open');
+    }
+  });
   el('toggle-plots-btn').addEventListener('click', () => {
     el('org-shell').classList.toggle('plots-collapsed');
     el('org-dock').classList.toggle('mobile-open');

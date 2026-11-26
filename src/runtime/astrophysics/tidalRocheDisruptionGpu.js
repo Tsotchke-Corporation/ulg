@@ -163,6 +163,24 @@ fn step_tidal_roche(@builtin(global_invocation_id) gid: vec3<u32>) {
   let dt = params.dt;
   let mode = params.mode_code;
 
+  if (mode == 4u) {
+    // Catastrophic Antimatter / Kinetic Shatter: incandescent rocky/molten/icy fragments
+    // expanding ballistically under residual self-gravity + weak orbital shear into a glowing debris cloud!
+    let r_frag = max(0.25, length(loc));
+    let n_r = loc / r_frag;
+    // Residual core self-gravity decelerates slow inner fragments while fast ejecta escapes!
+    let acc_sg = -n_r * (params.gm_host * 0.14 / (r_frag * r_frag + 0.35));
+    vel = vel + acc_sg * dt;
+    loc = loc + vel * dt;
+    let t_cool = clamp(p.therm_id.x * exp(-0.14 * dt), 0.16, 2.2);
+    p.pos_m = vec4<f32>(loc + params.center_offset.xyz, p.pos_m.w);
+    p.vel_bond = vec4<f32>(vel, 0.0);
+    p.therm_id = vec4<f32>(t_cool, 2.5, 1.0, p.therm_id.w + dt);
+    p.meta0.w = 1.0;
+    parts[i] = p;
+    return;
+  }
+
   if (mode == 2u) {
     // Cryovolcanic Icy Moon Supersonic Water-Vapor / Ice-Crystal Plumes (driven by tidal_heat_drive!)
     if (params.tidal_heat_drive <= 1e-6) {
@@ -338,7 +356,7 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createTidalRocheDisruptionSessionWebGpu requires a live WebGPU GPUDevice');
   }
-  const modeMap = { 'roche-rings': 0, 'giant-impact': 1, 'cryo-plumes': 2, 'red-giant-engulf': 3 };
+  const modeMap = { 'roche-rings': 0, 'giant-impact': 1, 'cryo-plumes': 2, 'red-giant-engulf': 3, 'catastrophic-shatter': 4 };
   const modeCode = modeMap[mode] ?? 0;
   const n = Math.max(256, Math.min(32768, Math.trunc(particleCount)));
   const rand = mulberry32(seed);
@@ -412,6 +430,27 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
       intact = 0.0;
       role = 2.0;
       tempN = 0.6;
+    } else if (modeCode === 4) {
+      // Catastrophic Antimatter Shatter: spherical shell + molten core exploding outward at v_ej!
+      const u_r = Math.cbrt(rand());
+      const rr = (0.12 + 0.88 * u_r) * Math.max(0.35, rHostSim * 0.85);
+      const cy = 2 * rand() - 1;
+      const sy = Math.sqrt(Math.max(0, 1 - cy * cy));
+      const th = rand() * Math.PI * 2;
+      const nx = sy * Math.cos(th);
+      const ny = cy;
+      const nz = sy * Math.sin(th);
+      lx = nx * rr;
+      ly = ny * rr;
+      lz = nz * rr;
+      const vEj = (1.15 + 2.85 * u_r * (0.6 + 0.8 * rand())) * Math.max(0.5, tidalHeatDrive);
+      // Slight prograde swirl + radial expansion
+      vx = nx * vEj - nz * 0.35;
+      vy = ny * vEj;
+      vz = nz * vEj + nx * 0.35;
+      intact = 0.0;
+      role = 1.0;
+      tempN = 1.25 + (1.0 - u_r) * 0.95; // Blazing incandescent molten core fragments + hot rocky outer shards!
     } else {
       // Red-Giant Engulfment: inner rocky debris spiraling into expanding convective red-giant envelope!
       const th = rand() * Math.PI * 2;
@@ -436,7 +475,7 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
     computeBufferBinding(2, 'storage')
   ];
   const stepPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-tidal-roche-step.v1',
+    cacheKey: 'ulg-tidal-roche-step.v2-shatter',
     label: `${label}-step`,
     code: tidalRocheWgsl,
     entryPoint: 'step_tidal_roche',
@@ -597,6 +636,9 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
         kind: 3,
         atm: 0.14
       });
+    } else if (modeCode === 4) {
+      // Catastrophic Shatter leaves NO intact parent sphere (only a tiny molten remnant core if desired, or pure fragments!)
+      return out;
     } else {
       // Bloated Convective Red Giant engulfing inner orbits!
       out.push({

@@ -47,6 +47,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'sun', name: 'Sun (G2V)', subtitle: 'Main-Sequence Hydrogen Fusion Star',
     parent: -1, kind: 0, massSolar: 1.0, radiusKm: 695700,
     aAu: 0, e: 0, incDeg: 0, omDeg: 0, wDeg: 0, m0Deg: 0,
+    axialObliquityDeg: 7.25, spinAxisLonDeg: 75.7, rotationPeriodHr: 609.12, tidallyLocked: false,
     color0: [1.0, 0.94, 0.76], color1: [1.0, 0.56, 0.18], atm: 0.0, tempK: 5778,
     centralP: 2.5e16, coreZ: 1, mantleZ: 2, surfZ: 1,
     composition: 'H 73.5% · He 24.8% · O/C/Fe 1.7%'
@@ -55,6 +56,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'mercury', name: 'Mercury', subtitle: 'Iron-Core Terrestrial Planet · 0.387 AU',
     parent: 0, kind: 1, massSolar: 1.6601e-7, radiusKm: 2439.7,
     aAu: 0.387098, e: 0.20563, incDeg: 7.005, omDeg: 48.33, wDeg: 29.12, m0Deg: 174.8,
+    axialObliquityDeg: 0.03, spinAxisLonDeg: 18.0, rotationPeriodHr: 1407.6, tidallyLocked: false,
     color0: [0.58, 0.54, 0.50], color1: [0.36, 0.33, 0.31], atm: 0.0, surfacePressurePa: 0, tempK: 440,
     centralP: 40e9, coreZ: 26, mantleZ: 14, surfZ: 14,
     composition: 'Fe Core 70% · Silicate Mantle 30%'
@@ -63,6 +65,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'venus', name: 'Venus', subtitle: 'Super-Greenhouse Terrestrial Planet · 0.723 AU',
     parent: 0, kind: 2, massSolar: 2.4478e-6, radiusKm: 6051.8,
     aAu: 0.723332, e: 0.00677, incDeg: 3.395, omDeg: 76.68, wDeg: 54.88, m0Deg: 50.1,
+    axialObliquityDeg: 177.36, spinAxisLonDeg: 300.0, rotationPeriodHr: -5832.5, tidallyLocked: false,
     color0: [0.90, 0.78, 0.52], color1: [0.76, 0.58, 0.34], atm: 0.85, surfacePressurePa: 9.2e6, tempK: 737,
     centralP: 290e9, coreZ: 26, mantleZ: 14, surfZ: 6,
     composition: 'Fe/Ni Core · SiO₂ Mantle · CO₂ 96.5% Atm'
@@ -71,6 +74,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'earth', name: 'Earth', subtitle: 'Oceanic Silicate-Iron Biosphere · 1.000 AU',
     parent: 0, kind: 1, massSolar: EARTH_MASS_SOLAR, radiusKm: 6371.0,
     aAu: 1.000001, e: 0.01671, incDeg: 0.000, omDeg: 0.0, wDeg: 102.94, m0Deg: 357.5,
+    axialObliquityDeg: 23.44, spinAxisLonDeg: 90.0, rotationPeriodHr: 23.934, tidallyLocked: false, civTechK: 0.73,
     color0: [0.24, 0.48, 0.24], color1: [0.06, 0.26, 0.58], atm: 0.72, surfacePressurePa: 101325, tempK: 288,
     centralP: 364e9, coreZ: 26, mantleZ: 14, surfZ: 29,
     composition: 'Fe 32.1% · O 30.1% · Si 15.1% · Mg 13.9%'
@@ -79,6 +83,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'moon', name: 'Moon (Luna)', subtitle: 'Earth Natural Satellite · 384,400 km',
     parent: 3, kind: 3, massSolar: 3.6943e-8, radiusKm: 1737.4,
     aAu: 0.0025695, e: 0.0549, incDeg: 5.145, omDeg: 125.08, wDeg: 318.15, m0Deg: 135.2,
+    axialObliquityDeg: 6.68, spinAxisLonDeg: 125.0, rotationPeriodHr: 655.72, tidallyLocked: true,
     color0: [0.68, 0.67, 0.65], color1: [0.42, 0.41, 0.40], atm: 0.0, surfacePressurePa: 0, tempK: 220,
     centralP: 4.8e9, coreZ: 26, mantleZ: 14, surfZ: 14,
     composition: 'O 43% · Si 20% · Mg 19% · Fe 10% · Ca/Al 8%'
@@ -87,6 +92,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'mars', name: 'Mars', subtitle: 'Iron-Oxide Terrestrial World · 1.524 AU',
     parent: 0, kind: 1, massSolar: 3.22715e-7, radiusKm: 3389.5,
     aAu: 1.523679, e: 0.0934, incDeg: 1.850, omDeg: 49.56, wDeg: 286.50, m0Deg: 19.4,
+    axialObliquityDeg: 25.19, spinAxisLonDeg: 85.0, rotationPeriodHr: 24.623, tidallyLocked: false,
     color0: [0.74, 0.34, 0.20], color1: [0.52, 0.24, 0.14], atm: 0.18, surfacePressurePa: 610, tempK: 210,
     centralP: 40e9, coreZ: 26, mantleZ: 14, surfZ: 26,
     composition: 'Fe-S Core · Basalt/Fe₂O₃ Crust · CO₂ Atm'
@@ -95,6 +101,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'jupiter', name: 'Jupiter', subtitle: 'Metallic-Hydrogen Gas Giant · 5.204 AU',
     parent: 0, kind: 2, massSolar: 9.54588e-4, radiusKm: 69911.0,
     aAu: 5.2044, e: 0.0489, incDeg: 1.303, omDeg: 100.46, wDeg: 273.87, m0Deg: 20.0,
+    axialObliquityDeg: 3.13, spinAxisLonDeg: 247.0, rotationPeriodHr: 9.925, tidallyLocked: false,
     color0: [0.85, 0.72, 0.56], color1: [0.62, 0.42, 0.28], atm: 0.45, surfacePressurePa: 1.0e5, tempK: 125,
     centralP: 450e9, coreZ: 26, mantleZ: 1, surfZ: 2,
     composition: 'H₂ 89.8% · He 10.2% · Metallic H Mantle'
@@ -103,6 +110,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'io', name: 'Io', subtitle: 'Tidally Heated Volcanic Galilean Moon · 421,700 km',
     parent: 6, kind: 1, massSolar: 4.491e-8, radiusKm: 1821.6,
     aAu: 0.002819, e: 0.0041, incDeg: 1.34, omDeg: 43.9, wDeg: 84.1, m0Deg: 35.0,
+    axialObliquityDeg: 0.05, spinAxisLonDeg: 247.0, rotationPeriodHr: 42.456, tidallyLocked: true,
     color0: [0.92, 0.82, 0.34], color1: [0.68, 0.46, 0.14], atm: 0.0, surfacePressurePa: 0, tempK: 110,
     centralP: 8e9, coreZ: 26, mantleZ: 14, surfZ: 16,
     composition: 'Fe-FeS Core · Silicate Mantle · Sulfur Crust'
@@ -111,6 +119,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'europa', name: 'Europa', subtitle: 'Subsurface-Ocean Icy Galilean Moon · 671,100 km',
     parent: 6, kind: 3, massSolar: 2.414e-8, radiusKm: 1560.8,
     aAu: 0.004486, e: 0.009, incDeg: 1.77, omDeg: 219.1, wDeg: 88.9, m0Deg: 145.0,
+    axialObliquityDeg: 0.1, spinAxisLonDeg: 247.0, rotationPeriodHr: 85.228, tidallyLocked: true,
     color0: [0.84, 0.80, 0.74], color1: [0.58, 0.68, 0.78], atm: 0.0, surfacePressurePa: 0, tempK: 102,
     centralP: 5e9, coreZ: 26, mantleZ: 14, surfZ: 8,
     composition: 'H₂O Ice/Ocean Shell · Silicate Mantle · Fe Core'
@@ -119,6 +128,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'ganymede', name: 'Ganymede', subtitle: 'Magnetized Giant Galilean Moon · 1,070,400 km',
     parent: 6, kind: 3, massSolar: 7.452e-8, radiusKm: 2634.1,
     aAu: 0.007155, e: 0.0013, incDeg: 1.50, omDeg: 63.5, wDeg: 192.4, m0Deg: 260.0,
+    axialObliquityDeg: 0.2, spinAxisLonDeg: 247.0, rotationPeriodHr: 171.71, tidallyLocked: true,
     color0: [0.64, 0.60, 0.56], color1: [0.46, 0.48, 0.52], atm: 0.0, surfacePressurePa: 0, tempK: 110,
     centralP: 10e9, coreZ: 26, mantleZ: 14, surfZ: 8,
     composition: 'H₂O Ice/Liquid Layers · Silicate · Fe Core'
@@ -127,6 +137,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'saturn', name: 'Saturn', subtitle: 'Ringed Gas Giant · 9.582 AU',
     parent: 0, kind: 2, massSolar: 2.85815e-4, radiusKm: 58232.0,
     aAu: 9.5826, e: 0.0565, incDeg: 2.485, omDeg: 113.67, wDeg: 339.39, m0Deg: 317.0,
+    axialObliquityDeg: 26.73, spinAxisLonDeg: 80.0, rotationPeriodHr: 10.656, tidallyLocked: false,
     color0: [0.88, 0.79, 0.58], color1: [0.70, 0.60, 0.42], atm: 0.42, surfacePressurePa: 1.0e5, ringed: true,
     ringInnerKm: 74500, ringOuterKm: 136775, tempK: 95,
     centralP: 340e9, coreZ: 26, mantleZ: 1, surfZ: 2,
@@ -136,6 +147,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'titan', name: 'Titan', subtitle: 'Dense-Atmosphere Methane Moon · 1,221,870 km',
     parent: 10, kind: 2, massSolar: 6.766e-8, radiusKm: 2574.7,
     aAu: 0.008168, e: 0.0288, incDeg: 2.8, omDeg: 28.0, wDeg: 180.5, m0Deg: 65.0,
+    axialObliquityDeg: 26.73, spinAxisLonDeg: 80.0, rotationPeriodHr: 382.68, tidallyLocked: true,
     color0: [0.86, 0.68, 0.34], color1: [0.64, 0.46, 0.22], atm: 0.78, surfacePressurePa: 146700, tempK: 94,
     centralP: 6e9, coreZ: 14, mantleZ: 8, surfZ: 6,
     composition: 'N₂ 94.2% · CH₄ 5.6% Atm · H₂O/Silicate Interior'
@@ -144,6 +156,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'uranus', name: 'Uranus', subtitle: 'Tilted Ice Giant · 19.20 AU',
     parent: 0, kind: 3, massSolar: 4.3658e-5, radiusKm: 25362.0,
     aAu: 19.2184, e: 0.0463, incDeg: 0.773, omDeg: 74.01, wDeg: 96.99, m0Deg: 142.2,
+    axialObliquityDeg: 97.77, spinAxisLonDeg: 168.0, rotationPeriodHr: -17.24, tidallyLocked: false,
     color0: [0.56, 0.84, 0.90], color1: [0.42, 0.72, 0.82], atm: 0.58, surfacePressurePa: 1.0e5, tempK: 59,
     centralP: 260e9, coreZ: 14, mantleZ: 8, surfZ: 6,
     composition: 'H₂O/NH₃/CH₄ Superionic Mantle · H₂/He Atm'
@@ -152,17 +165,55 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     id: 'neptune', name: 'Neptune', subtitle: 'Supersonic-Wind Ice Giant · 30.07 AU',
     parent: 0, kind: 3, massSolar: 5.1503e-5, radiusKm: 24622.0,
     aAu: 30.1104, e: 0.0095, incDeg: 1.770, omDeg: 131.78, wDeg: 276.34, m0Deg: 256.2,
+    axialObliquityDeg: 28.32, spinAxisLonDeg: 44.0, rotationPeriodHr: 16.11, tidallyLocked: false,
     color0: [0.24, 0.46, 0.94], color1: [0.16, 0.30, 0.78], atm: 0.65, surfacePressurePa: 1.0e5, tempK: 55,
     centralP: 290e9, coreZ: 14, mantleZ: 8, surfZ: 6,
     composition: 'H₂O/CH₄/NH₃ Mantle · H₂ 80% · He 19%'
   },
   {
-    id: 'halley', name: '1P/Halley Comet', subtitle: 'Eccentric Periodic Comet · e = 0.967',
+    id: 'halley', name: '1P/Halley Comet', subtitle: 'Active Outgassing Periodic Comet · e = 0.967',
     parent: 0, kind: 3, massSolar: 1.1e-16, radiusKm: 5.5,
     aAu: 17.834, e: 0.9671, incDeg: 162.26, omDeg: 58.42, wDeg: 111.33, m0Deg: 38.4,
-    color0: [0.74, 0.90, 1.0], color1: [0.42, 0.68, 0.92], atm: 0.2, tempK: 170,
+    axialObliquityDeg: 30.0, spinAxisLonDeg: 140.0, rotationPeriodHr: 52.8, tidallyLocked: false, isComet: true, isMinorBody: true,
+    color0: [0.74, 0.90, 1.0], color1: [0.42, 0.68, 0.92], atm: 0.2, surfacePressurePa: 0, volatileMassFrac: 0.72, tempK: 170,
     centralP: 1e5, coreZ: 8, mantleZ: 6, surfZ: 14,
     composition: 'H₂O 80% · CO 10% · CO₂/CH₄/Silicate Dust'
+  },
+  {
+    id: 'ceres', name: '1 Ceres', subtitle: 'Main-Belt Cryo-Silicate Dwarf Planet · 2.767 AU',
+    parent: 0, kind: 3, massSolar: 4.72e-10, radiusKm: 469.7,
+    aAu: 2.7675, e: 0.0758, incDeg: 10.59, omDeg: 80.33, wDeg: 73.60, m0Deg: 95.9,
+    axialObliquityDeg: 4.0, spinAxisLonDeg: 291.0, rotationPeriodHr: 9.074, tidallyLocked: false, isMinorBody: true,
+    color0: [0.56, 0.55, 0.54], color1: [0.34, 0.36, 0.40], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.25, tempK: 168,
+    centralP: 1.2e8, coreZ: 14, mantleZ: 8, surfZ: 14,
+    composition: 'Hydrated Phyllosilicates · H₂O Ice Mantle · Na₂CO₃ Evaporites'
+  },
+  {
+    id: 'vesta', name: '4 Vesta', subtitle: 'Differentiated Basaltic Asteroid · 2.362 AU',
+    parent: 0, kind: 1, massSolar: 1.30e-10, radiusKm: 262.7,
+    aAu: 2.3615, e: 0.0887, incDeg: 7.14, omDeg: 103.85, wDeg: 151.20, m0Deg: 205.5,
+    axialObliquityDeg: 29.0, spinAxisLonDeg: 309.0, rotationPeriodHr: 5.342, tidallyLocked: false, isMinorBody: true,
+    color0: [0.64, 0.60, 0.56], color1: [0.40, 0.36, 0.32], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.01, tempK: 185,
+    centralP: 4.5e7, coreZ: 26, mantleZ: 14, surfZ: 14,
+    composition: 'Fe-Ni Core · Eucrite/Diogenite Basalt Crust'
+  },
+  {
+    id: 'psyche', name: '16 Psyche', subtitle: 'Metallic Fe-Ni Asteroid Core · 2.923 AU',
+    parent: 0, kind: 1, massSolar: 1.15e-11, radiusKm: 111.0,
+    aAu: 2.923, e: 0.134, incDeg: 3.10, omDeg: 150.2, wDeg: 228.0, m0Deg: 312.0,
+    axialObliquityDeg: 95.0, spinAxisLonDeg: 34.0, rotationPeriodHr: 4.196, tidallyLocked: false, isMinorBody: true, isMetallicAsteroid: true,
+    color0: [0.70, 0.68, 0.66], color1: [0.42, 0.44, 0.48], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.0, tempK: 162,
+    centralP: 1.8e7, coreZ: 26, mantleZ: 28, surfZ: 26,
+    composition: 'Fe 82% · Ni 10% · Orthopyroxene Silicate 8%'
+  },
+  {
+    id: 'bennu', name: '101955 Bennu', subtitle: 'Near-Earth Carbonaceous Rubble-Pile Asteroid · 1.126 AU',
+    parent: 0, kind: 1, massSolar: 3.69e-20, radiusKm: 0.245,
+    aAu: 1.1264, e: 0.2037, incDeg: 6.035, omDeg: 2.06, wDeg: 66.22, m0Deg: 101.7,
+    axialObliquityDeg: 177.6, spinAxisLonDeg: 85.0, rotationPeriodHr: 4.296, tidallyLocked: false, isMinorBody: true,
+    color0: [0.30, 0.28, 0.27], color1: [0.16, 0.15, 0.15], atm: 0.0, surfacePressurePa: 0, volatileMassFrac: 0.12, tempK: 268,
+    centralP: 8.0, coreZ: 6, mantleZ: 14, surfZ: 6,
+    composition: 'C-Type Chondrite · Magnetite · Hydrated Clay & Organics'
   }
 ]);
 

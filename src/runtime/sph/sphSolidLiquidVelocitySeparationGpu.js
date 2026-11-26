@@ -86,7 +86,7 @@ struct SlipParams {
   grid_nz: u32,
   shift: u32,
   node_count: u32,
-  pad0: u32,
+  restore_pre_lock_flag: u32,
   pad1: u32,
   inv_dx: f32,
   fixed_scale: f32,
@@ -107,6 +107,10 @@ struct SlipParams {
 @group(0) @binding(4) var<storage, read_write> split_vel: array<vec4<f32>>;
 // Compact diagnostic receipt: [mixed_nodes, unilateral_contacts, separated_nodes, 0]
 @group(0) @binding(5) var<storage, read_write> slip_receipt: array<atomic<u32>>;
+// Optional pre-G2P particle state buffer (read-only, distinct from sph_state when
+// restore_pre_lock_flag == 1u) so tangential & separating phase relative velocities
+// wiped out by single-field MPM locking are restored with exact momentum conservation.
+@group(0) @binding(6) var<storage, read> pre_state: array<vec4<f32>>;
 
 ${ACCESSORS_WGSL}
 
@@ -164,7 +168,8 @@ fn p2g_split_phase_fields(@builtin(global_invocation_id) id: vec3<u32>) {
   if (!is_solid && !is_liquid) { return; }
 
   let pos = sph_state[p * 2u].xyz;
-  let vel = sph_state[p * 2u + 1u].xyz;
+  let use_pre = params.restore_pre_lock_flag != 0u && (p * 2u + 1u) < arrayLength(&pre_state);
+  let vel = select(sph_state[p * 2u + 1u].xyz, pre_state[p * 2u + 1u].xyz, use_pre);
   let pg = pos * params.inv_dx;
   let bx = i32(floor(pg.x - 0.5));
   let by = i32(floor(pg.y - 0.5));
@@ -244,10 +249,27 @@ fn resolve_mixed_node_unilateral_slip(@builtin(global_invocation_id) id: vec3<u3
     if (g_len > 1.0e-12) {
       let n = grad_s / g_len;
       let v_rel_n = dot(vl - vs, n);
-      if (v_rel_n < 0.0) {
-        // Unilateral normal impenetrability via exact momentum-conserving FLIP
-        // impulse delta: sum_p m_p (alpha * sum_i w_pi dv_i) = alpha * sum_i (-J_i + J_i) n_i = 0.
-        // Tangential velocities (v - dot(v, n) * n) remain 100% frictionless!
+      if (params.restore_pre_lock_flag != 0u) {
+        // Exact pre-lock relative velocity restoration: single-field MPM locked
+        // mixed nodes to v_cm_post = v_cm_pre + delta_grid (gravity + pressure).
+        // Restore momentum-conserving relative velocities (ms*rel_s + ml*rel_l = 0):
+        // - If approaching (v_rel_n < 0): restore ONLY tangential slip (leave MPM
+        //   shared normal velocity intact for unilateral impenetrability).
+        // - If separating/tangential (v_rel_n >= 0): restore full relative slip
+        //   (zero artificial mixed-cell suction/glue when dense solid sinks through liquid!).
+        let m_tot = ms + ml;
+        let v_rel = vl - vs;
+        let v_rel_allowed = select(v_rel, v_rel - v_rel_n * n, v_rel_n < 0.0);
+        dv_l = (ms / m_tot) * v_rel_allowed;
+        dv_s = -(ml / m_tot) * v_rel_allowed;
+        if (v_rel_n < 0.0) {
+          atomicAdd(&slip_receipt[1], 1u);
+        } else {
+          atomicAdd(&slip_receipt[2], 1u);
+        }
+      } else if (v_rel_n < 0.0) {
+        // Standalone unilateral normal impenetrability via exact momentum-conserving
+        // FLIP impulse delta: sum_p m_p (alpha * sum_i w_pi dv_i) = 0.
         let m_tot = ms + ml;
         let impulse_n = (ms * ml / m_tot) * (-v_rel_n);
         dv_l = (impulse_n / ml) * n;
@@ -392,14 +414,15 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
     computeBufferBinding(2, 'read-only-storage'),
     computeBufferBinding(3, 'storage'),
     computeBufferBinding(4, 'storage'),
-    computeBufferBinding(5, 'storage')
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage')
   ];
   const pipelines = Object.fromEntries(
     ['clear_split_grid', 'p2g_split_phase_fields', 'resolve_mixed_node_unilateral_slip', 'g2p_apply_separated_velocities'].map(
       (entryPoint) => [
         entryPoint,
         createCachedExplicitComputePipeline(device, {
-          cacheKey: `ulg-solid-liquid-slip-v2-flip-${entryPoint}`,
+          cacheKey: `ulg-solid-liquid-slip-v3-prelock-${entryPoint}`,
           label: `ulg-solid-liquid-slip-${entryPoint}`,
           code: sphSolidLiquidVelocitySeparationWgsl,
           entryPoint,
@@ -414,7 +437,8 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
   const splitVel = device.createBuffer({ label: 'ulg-sl-split-vel', size: Math.max(32, nodeCount * 32), usage: U.STORAGE });
   const receiptBuffer = device.createBuffer({ label: 'ulg-sl-receipt', size: 16, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
   const paramsBuffer = device.createBuffer({ label: 'ulg-sl-params', size: 48, usage: U.UNIFORM | U.COPY_DST });
-  const leases = [splitAcc, splitVel, receiptBuffer, paramsBuffer].map((buf, idx) =>
+  const preStatePlaceholder = device.createBuffer({ label: 'ulg-sl-pre-state-placeholder', size: 32, usage: U.STORAGE });
+  const leases = [splitAcc, splitVel, receiptBuffer, paramsBuffer, preStatePlaceholder].map((buf, idx) =>
     leaseScope.issue(buf, { label: `sl-buf-${idx}`, producer: 'solid-liquid-unilateral-slip', onRelease: (b) => b.destroy() })
   );
   const paramsBytes = new ArrayBuffer(48);
@@ -428,6 +452,7 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
     receiptBuffer,
     encode(encoder, {
       stateBuffer,
+      preStateBuffer = null,
       mechanicsBuffer,
       particleCount,
       gridSpacingM: stepGridSpacingM = gridSpacingM,
@@ -436,13 +461,16 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
       blendAlpha: stepBlendAlpha = blendAlpha
     }) {
       if (!(particleCount > 0) || !(stepGridSpacingM > 0)) return 0;
-      pu.set([particleCount, nx, ny, nz, stepShift, nodeCount, 0, 0], 0);
-      pf.set([1 / stepGridSpacingM, stepFixedScale, 1 / stepFixedScale, stepBlendAlpha], 8);
+      const usePreLock = Boolean(preStateBuffer && preStateBuffer !== stateBuffer);
+      const boundPreState = usePreLock ? preStateBuffer : preStatePlaceholder;
+      const effectiveBlendAlpha = usePreLock ? Math.min(stepBlendAlpha, 0.85) : stepBlendAlpha;
+      pu.set([particleCount, nx, ny, nz, stepShift, nodeCount, usePreLock ? 1 : 0, 0], 0);
+      pf.set([1 / stepGridSpacingM, stepFixedScale, 1 / stepFixedScale, effectiveBlendAlpha], 8);
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
       const bg = createCachedExplicitBindGroup(device, {
         label: 'ulg-sl-slip-bg',
         layout: pipelines.clear_split_grid.bindGroupLayout,
-        entries: [paramsBuffer, stateBuffer, mechanicsBuffer, splitAcc, splitVel, receiptBuffer].map((buffer, binding) => ({
+        entries: [paramsBuffer, stateBuffer, mechanicsBuffer, splitAcc, splitVel, receiptBuffer, boundPreState].map((buffer, binding) => ({
           binding,
           resource: { buffer }
         }))
@@ -478,6 +506,7 @@ export function createSphSolidLiquidVelocitySeparationStage(device, {
 export function runCachedSphSolidLiquidVelocitySeparationStep({
   device,
   stateBuffer,
+  preStateBuffer = null,
   mechanicsBuffer,
   particleCount,
   gridDims,
@@ -525,6 +554,7 @@ export function runCachedSphSolidLiquidVelocitySeparationStep({
   const activeEncoder = encoder || device.createCommandEncoder({ label: 'ulg-solid-liquid-slip-step' });
   const dispatches = stage.encode(activeEncoder, {
     stateBuffer,
+    preStateBuffer,
     mechanicsBuffer,
     particleCount,
     gridSpacingM,

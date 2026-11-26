@@ -41,6 +41,8 @@ import {
   appendIconicUfoGeometry,
   appendMissileGeometry,
   appendVonNeumannProbeGeometry,
+  computeAntimatterMassRateKgS,
+  computeBodyBindingEnergyJ,
   computeUfoRimEmitPoint,
   evaluateAntimatterAnnihilation,
   evaluateEmWavelengthInfo,
@@ -51,6 +53,24 @@ import {
   DEFORM_PATCH_HALF_M,
   createSurfaceDeformationAndBouldersGpu
 } from './surfaceDeformationMpmGpu.js';
+import {
+  TECTONIC_GRID_N,
+  TECTONIC_WORLD_SPAN_M,
+  createSurfaceTectonicsErosionGpu
+} from './surfaceTectonicsErosionGpu.js';
+import {
+  OCEAN_GRID_N,
+  OCEAN_PATCH_HALF_M,
+  createSurfaceOceanWaveGpu
+} from './surfaceOceanWaveGpu.js';
+import {
+  createSurfaceFloraPlacementGpu
+} from './surfaceFloraPlacementGpu.js';
+import {
+  buildLifeLabXenobiologyUrl,
+  deriveXenobiologyProfile,
+  synthesizeAbductedSpecimenRecord
+} from '../biology/xenobiologySynthesizer.js';
 
 export const ULG_PLANETARY_SURFACE_SCHEMA = 'ulg.astrophysics.planetary-surface-vehicles-webgpu.v1';
 
@@ -107,14 +127,15 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
   planetaryResult = null,
   planetaryAtmoState = null,
   planetaryMode = 'standard',
+  landingSite = null,
   seed = 20261125
 } = {}) {
   const G = 6.67430e-11;
   const M_SUN = 1.98847e30;
-  const massKg = Math.max(1e18, (Number(bodySpec.massSolar) || 3.00349e-6) * M_SUN);
-  const radiusM = Math.max(1e5, (Number(bodySpec.radiusKm) || 6371) * 1000);
+  const massKg = Math.max(1e9, (Number(bodySpec.massSolar) || 3.00349e-6) * M_SUN);
+  const radiusM = Math.max(100, (Number(bodySpec.radiusKm) || 6371) * 1000);
   const computedG = (G * massKg) / (radiusM * radiusM);
-  const gravityMS2 = Math.max(0.15, Math.min(35.0, Number(bodySpec.surfaceGravityMS2) || computedG));
+  const gravityMS2 = Math.max(0.002, Math.min(35.0, Number(bodySpec.surfaceGravityMS2) || computedG));
 
   const atmo = planetaryAtmoState || deriveFluidElectrodynamicsState(bodySpec, planetaryResult);
   // Physical Fulton/Rogers rocky-to-gaseous envelope cliff (R > 16,000 km => deep fluid/gas giant, no solid landing crust!)
@@ -127,10 +148,12 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
   let pressurePa = Math.max(0, Number(atmo?.surfacePressurePa ?? bodySpec.surfacePressurePa) || 0);
   if (isMagmaOcean && pressurePa < 5e4) pressurePa = 1.8e5; // Outgassed steam/CO2 Hadean atmosphere
   if (isCryoMoon) pressurePa = 0.0; // Vacuum icy exosphere over cryovolcanic crust
-  const tempK = Math.max(
+  const baseTempK = Math.max(
     35,
     isMagmaOcean ? 1850 : (isRogue ? 75 : (Number(bodySpec.tempK) || 288))
   );
+  // Apply chosen orbital landing-site latitude/biome temperature offset (polar ice cap vs arid plateau!)
+  const tempK = Math.max(35, baseTempK + (Number(landingSite?.tempOffsetK) || 0));
   // Effective molar mass (kg/mol): H2/He gas giants (~0.0024), CO2 thin/super-greenhouse (~0.044), N2/O2 (~0.029)
   const molarMassKgPerMol = !hasSolidCrust
     ? 0.0024
@@ -141,8 +164,29 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
 
   const volatileFrac = Math.max(0, Number(atmo?.volatileMassFrac ?? bodySpec.volatileMassFrac) || 0);
   const dustFrac = Math.max(0, Number(atmo?.particulateMassFrac ?? bodySpec.particulateMassFrac) || 0);
-  const hasLiquidOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !isRogue
+  // First-principles surface solvent & xenobiology classification (H2O, CH4, NH3, H2SO4, or dry/subsurface!)
+  const xenobiology = deriveXenobiologyProfile({
+    worldName: bodySpec.name || 'World',
+    tempK,
+    pressurePa,
+    gravityMS2,
+    stellarTeffK: Number(bodySpec.hostStarTeffK) || 5778,
+    volatileFrac,
+    hasSolidCrust,
+    isCryoMoon,
+    isMagmaOcean,
+    seed,
+    civTechK: Number.isFinite(Number(bodySpec.civTechK)) ? Number(bodySpec.civTechK) : undefined
+  });
+  const hasLiquidWaterOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !isRogue
     && pressurePa >= 611 && tempK >= 265 && tempK <= 365 && volatileFrac >= 0.015;
+  const hasExoticOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !hasLiquidWaterOcean
+    && (xenobiology.solvent === 'CH4' || xenobiology.solvent === 'NH3' || xenobiology.solvent === 'H2SO4');
+  const hasLiquidOcean = hasLiquidWaterOcean || hasExoticOcean;
+  const oceanRgb = xenobiology.oceanRgb || [0.04, 0.24, 0.46];
+  const solventMeltTempK = xenobiology.solvent === 'CH4'
+    ? 90.7
+    : (xenobiology.solvent === 'NH3' ? 195.4 : (xenobiology.solvent === 'H2SO4' ? 283.5 : 273.15));
 
   // Coaxial rotorcraft drone (Ingenuity/Dragonfly class: m = 1.8 kg, dual 1.2m rotors, A_disk = 1.13 m^2)
   // Exact actuator-disk lift: T_max = 0.5 * rho_atm * A_disk * (C_T_eff * v_tip^2)
@@ -206,27 +250,50 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
   const craterStrength = hasSolidCrust
     ? Math.max(0.08, Math.min(1.0, 1.0 - skyOpticalDepth * 0.78 - (hasLiquidOcean ? 0.20 : 0)))
     : 0.0;
-  // Mountain/canyon-scale relief inversely proportional to gravity (40–84 m tall ridges so a 60 ft / 18.3 m UFO & 2.8 m Rover feel authentically scaled!)
+  // Mountain/canyon-scale relief inversely proportional to gravity, modulated by chosen orbital landing biome!
+  const ampScaleSite = Math.max(0.65, Math.min(1.6, Number(landingSite?.ampScale) || 1.0));
   const terrainAmpM = hasSolidCrust
-    ? Math.max(24.0, Math.min(82.0, 42.0 * Math.pow(9.81 / gravityMS2, 0.32)))
+    ? Math.max(24.0, Math.min(96.0, 42.0 * Math.pow(9.81 / gravityMS2, 0.32) * ampScaleSite))
     : 14.0;
-  const seaLevelM = hasLiquidOcean ? -6.0 : -999.0;
+  // Orbital-to-surface correspondence: landing on a blue ocean from space raises seaLevelM so you float over
+  // rolling waves; landing on a continental mountain drops seaLevelM cleanly below local valleys!
+  const seaLevelM = hasLiquidOcean
+    ? (-6.0 + (Number(landingSite?.seaLevelOffsetM) || 0))
+    : -999.0;
   // Wind speed derived from atmospheric pressure & insolation (zero in vacuum!)
   const baseWindMS = rhoAtmKgM3 > 1e-4
     ? Math.min(18.0, (2.2 + 9.5 * dustTint + 3.5 * skyOpticalDepth) * (isEyeball ? 1.4 : 1.0))
     : 0.0;
 
+  const isMinorBody = Boolean(bodySpec.isMinorBody) || radiusM < 600e3;
+  const isComet = Boolean(bodySpec.isComet);
+  const isMetallicAsteroid = Boolean(bodySpec.isMetallicAsteroid);
+  // Real micro-gravity for minor bodies clamped gently to >= 0.14 m/s^2 so Rover/boulders stay crisp & playable!
+  const effectiveGravityMS2 = isMinorBody ? Math.max(0.14, Math.min(2.2, gravityMS2)) : gravityMS2;
+  const tinyPlanetCurvatureRadiusM = isMinorBody
+    ? Math.max(460.0, Math.min(1450.0, 460.0 + (radiusM / 500e3) * 990.0))
+    : 2800.0;
+
   return Object.freeze({
     schema: ULG_PLANETARY_SURFACE_SCHEMA,
-    gravityMS2,
+    gravityMS2: effectiveGravityMS2,
+    rawGravityMS2: gravityMS2,
     radiusM,
     massKg,
     hasSolidCrust,
+    isMinorBody,
+    isComet,
+    isMetallicAsteroid,
     isMagmaOcean,
     isCryoMoon,
     isRogue,
     isEyeball,
     hasLiquidOcean,
+    hasExoticOcean,
+    oceanRgb: Object.freeze([oceanRgb[0], oceanRgb[1], oceanRgb[2]]),
+    solvent: xenobiology.solvent,
+    solventMeltTempK,
+    xenobiology,
     seaLevelM,
     pressurePa,
     tempK,
@@ -236,19 +303,24 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     skyZenithRgb: Object.freeze(skyZenithRgb),
     skyHorizonRgb: Object.freeze(skyHorizonRgb),
     dustTint,
-    craterStrength,
-    terrainAmpM,
+    craterStrength: isMinorBody ? Math.max(0.75, craterStrength) : craterStrength,
+    terrainAmpM: isMinorBody ? Math.max(26.0, Math.min(54.0, terrainAmpM * 0.62)) : terrainAmpM,
     baseWindMS,
     droneMassKg,
     maxAeroLiftN,
     droneWeightN,
     droneFlightCapable,
     droneThrustToWeight,
-    color0: Object.freeze([c0[0], c0[1], c0[2]]),
+    color0: Object.freeze([
+      landingSite?.isDesert ? Math.min(1, c0[0] * 1.15 + 0.16) : (landingSite?.isPolarIce ? 0.86 : c0[0]),
+      landingSite?.isDesert ? Math.min(1, c0[1] * 0.96 + 0.08) : (landingSite?.isPolarIce ? 0.91 : c0[1]),
+      landingSite?.isDesert ? Math.max(0.12, c0[2] * 0.65) : (landingSite?.isPolarIce ? 0.96 : c0[2])
+    ]),
     color1: Object.freeze([c1[0], c1[1], c1[2]]),
     crustPrimaryRgb: Object.freeze([c0[0], c0[1], c0[2]]),
     crustSecondaryRgb: Object.freeze([c1[0], c1[1], c1[2]]),
-    tinyPlanetCurvatureRadiusM: 2800.0,
+    landingSite: landingSite || null,
+    tinyPlanetCurvatureRadiusM,
     seed: (seed >>> 0) || 1,
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
     scientificValidation: false
@@ -638,6 +710,47 @@ export function sampleLocalPlanetaryMaterial(env, vehiclePos = [0, 0, 0], {
   });
 
   if (env.hasLiquidOcean && crustH <= env.seaLevelM + 0.08) {
+    const solv = env.solvent || 'H2O';
+    if (solv === 'CH4') {
+      return mkSample({
+        id: 'cryogenic-methane-sea',
+        name: 'Cryogenic Liquid Methane Sea (CH₄ · C₂H₆)',
+        shortLabel: 'Methane CH₄ Sea',
+        phasePreset: 'melt',
+        tempK: Math.round(env.tempK),
+        primaryZ: 6,
+        formula: 'CH₄',
+        moleculeKey: 'CH4',
+        xenoProfile: env.xenobiology,
+        xenoUrl: env.xenobiology ? buildLifeLabXenobiologyUrl(env.xenobiology) : null,
+        compounds: [
+          { id: 'CH4', formula: 'CH₄', name: 'Liquid Methane', moleFrac: 0.78, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1] },
+          { id: 'C2H6', formula: 'C₂H₆', name: 'Liquid Ethane', moleFrac: 0.16, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1] },
+          { id: 'N2', formula: 'N₂ / HCN', name: 'Dissolved Azotosome Precursors', moleFrac: 0.06, primaryZ: 7, moleculeKey: 'N2', elements: [7, 6, 1] }
+        ],
+        summary: `Exotic cryogenic hydrocarbon sea (potential azotosome habitat) sampled at ${locStr}`
+      });
+    }
+    if (solv === 'NH3') {
+      return mkSample({
+        id: 'liquid-ammonia-ocean',
+        name: 'Liquid Ammonia-Water Ocean (NH₃ · H₂O)',
+        shortLabel: 'Ammonia NH₃ Sea',
+        phasePreset: 'melt',
+        tempK: Math.round(env.tempK),
+        primaryZ: 7,
+        formula: 'NH₃',
+        moleculeKey: 'NH3',
+        xenoProfile: env.xenobiology,
+        xenoUrl: env.xenobiology ? buildLifeLabXenobiologyUrl(env.xenobiology) : null,
+        compounds: [
+          { id: 'NH3', formula: 'NH₃', name: 'Liquid Ammonia', moleFrac: 0.72, primaryZ: 7, moleculeKey: 'NH3', elements: [7, 1] },
+          { id: 'H2O', formula: 'H₂O', name: 'Eutectic Water-Ammonia', moleFrac: 0.24, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+          { id: 'CH4', formula: 'CH₄', name: 'Dissolved Organics', moleFrac: 0.04, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1] }
+        ],
+        summary: `Cold polar ammonia-eutectic ocean sampled at ${locStr}`
+      });
+    }
     return mkSample({
       id: 'saline-ocean-water',
       name: 'Saline Liquid Ocean (H₂O · NaCl)',
@@ -647,6 +760,8 @@ export function sampleLocalPlanetaryMaterial(env, vehiclePos = [0, 0, 0], {
       primaryZ: 8,
       formula: 'H₂O',
       moleculeKey: 'H2O',
+      xenoProfile: env.xenobiology,
+      xenoUrl: env.xenobiology ? buildLifeLabXenobiologyUrl(env.xenobiology) : null,
       compounds: [
         { id: 'H2O', formula: 'H₂O', name: 'Liquid Water', moleFrac: 0.965, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
         { id: 'NaCl', formula: 'NaCl', name: 'Dissolved Halite Salt', moleFrac: 0.029, primaryZ: 11, moleculeKey: 'H2O', elements: [11, 17] },
@@ -756,22 +871,30 @@ export function sampleLocalPlanetaryMaterial(env, vehiclePos = [0, 0, 0], {
   }
 
   if (env.hasLiquidOcean) {
+    const xeno = env.xenobiology;
+    const isAlien = Boolean(xeno && (xeno.solvent !== 'H2O' || xeno.biosphereViability >= 0.25));
     return mkSample({
-      id: 'verdant-organic-loam',
-      name: 'Organic Humus & Silicate Loam (CH₄ · SiO₂ · H₂O)',
-      shortLabel: 'Organic Loam',
+      id: isAlien ? 'alien-biosphere-flora' : 'verdant-organic-loam',
+      name: xeno?.biosphereViability >= 0.25
+        ? `${xeno.floraMorphology} (${xeno.solventLabel} Biosphere)`
+        : 'Organic Humus & Silicate Loam (CH₄ · SiO₂ · H₂O)',
+      shortLabel: xeno?.biosphereViability >= 0.25 ? `${xeno.solvent} Flora` : 'Organic Loam',
       phasePreset: 'solid',
       tempK: Math.round(env.tempK),
       primaryZ: 6,
-      formula: 'C-H-O',
+      formula: xeno?.solvent === 'CH4' ? 'C-H-N' : 'C-H-O',
       moleculeKey: 'CH4',
+      xenoProfile: xeno,
+      xenoUrl: xeno ? buildLifeLabXenobiologyUrl(xeno) : null,
       compounds: [
-        { id: 'CH4', formula: 'C₆H₁₀O₅', name: 'Organic Biopolymer / Cellulose', moleFrac: 0.42, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1, 8] },
+        { id: 'CH4', formula: xeno?.solvent === 'CH4' ? 'C₂H₃N (Azotosome)' : 'C₆H₁₀O₅', name: xeno?.membraneClass || 'Organic Biopolymer / Cellulose', moleFrac: 0.42, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1, 8] },
         { id: 'SiO2', formula: 'SiO₂', name: 'Clay & Quartz Soil', moleFrac: 0.36, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
-        { id: 'H2O', formula: 'H₂O', name: 'Soil Moisture', moleFrac: 0.14, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+        { id: 'H2O', formula: xeno?.solventLabel || 'H₂O', name: 'Solvent Pore Fluid', moleFrac: 0.14, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
         { id: 'NH3', formula: 'NO₃⁻/NH₃', name: 'Fixed Nitrogen', moleFrac: 0.08, primaryZ: 7, moleculeKey: 'NH3', elements: [7, 1, 8] }
       ],
-      summary: `Temperate organic-bearing lowland soil sampled at ${locStr}`
+      summary: xeno
+        ? `${xeno.floraMorphology} · ${xeno.metabolism} · ${xeno.civStage} sampled at ${locStr}`
+        : `Temperate organic-bearing lowland soil sampled at ${locStr}`
     });
   }
 
@@ -858,14 +981,17 @@ struct SurfaceParams {
   drone_throttle: f32,   // 0..1 drone rotor downwash
   rover_pos_y: vec4<f32>,// xyz = rover pos, w = rover yaw
   drone_pos_a: vec4<f32>,// xyz = drone pos, w = drone aero_lift_norm
-  col0_pad: vec4<f32>,   // rgb = primary crust albedo
-  col1_pad: vec4<f32>,   // rgb = secondary highland/lava albedo
+  col0_pad: vec4<f32>,   // rgb = primary crust albedo, w = focus_x
+  col1_pad: vec4<f32>,   // rgb = secondary highland/lava albedo, w = focus_z
+  ocean_rgb_ice: vec4<f32>, // rgb = active solvent ocean albedo, w = seaIceCoverFrac [0..1]
+  climate_aux: vec4<f32>,   // x = snowlineM, y = outerCellSizeM, z = tectWorldSpanM, w = outerCenterX
+  clip_aux: vec4<f32>,      // x = outerCenterZ, y = tectAmpScale, z = oceanPatchHalfM, w = autumnShift
 };
 
 // 48-byte mesh vertex matching SURFACE_MESH_WGSL:
 //   pos_curv:  vec4(x, y, z, rawHeight)
 //   norm_tag:  vec4(nx, ny, nz, biomeTag)   tag: 0=rock/regolith, 1=highland/ice, 2=liquid_ocean, 3=magma_crack
-//   col_emiss: vec4(r, g, b, emissive)
+//   col_emiss: vec4(r, g, b, emissiveOrFoam)
 struct TerrainVert {
   pos_curv: vec4<f32>,
   norm_tag: vec4<f32>,
@@ -889,6 +1015,8 @@ struct PlumeParticle {
 @group(0) @binding(2) var<storage, read_write> plumes: array<PlumeParticle>;
 @group(0) @binding(3) var<storage, read_write> telemetry: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> deform_field: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> ocean_field: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> tectonic_field: array<vec4<f32>>;
 
 var<workgroup> wg0: array<f32, 64>;
 var<workgroup> wg1: array<f32, 64>;
@@ -982,10 +1110,41 @@ fn sample_deform_field(x: f32, z: f32) -> vec4<f32> {
   return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y) * edge_fade;
 }
 
-fn eval_height(x: f32, z: f32) -> f32 {
+fn sample_tectonic_field(x: f32, z: f32) -> vec4<f32> {
+  let span = max(1000.0, params.climate_aux.z);
+  let u = clamp((x / span) + 0.5, 0.0, 0.9999);
+  let v = clamp((z / span) + 0.5, 0.0, 0.9999);
+  let gf = vec2<f32>(u * 255.0, v * 255.0);
+  let i0 = vec2<u32>(u32(floor(gf.x)), u32(floor(gf.y)));
+  let i1 = vec2<u32>(min(255u, i0.x + 1u), min(255u, i0.y + 1u));
+  let f = fract(gf);
+  let c00 = tectonic_field[i0.y * 256u + i0.x];
+  let c10 = tectonic_field[i0.y * 256u + i1.x];
+  let c01 = tectonic_field[i1.y * 256u + i0.x];
+  let c11 = tectonic_field[i1.y * 256u + i1.x];
+  return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+fn sample_ocean_field(x: f32, z: f32) -> vec4<f32> {
+  let span = max(64.0, params.clip_aux.z * 2.0);
+  let u = fract(x / span);
+  let v = fract(z / span);
+  let gf = vec2<f32>(u * 128.0, v * 128.0);
+  let i0 = vec2<u32>(u32(floor(gf.x)) & 127u, u32(floor(gf.y)) & 127u);
+  let i1 = vec2<u32>((i0.x + 1u) & 127u, (i0.y + 1u) & 127u);
+  let f = fract(gf);
+  let c00 = ocean_field[i0.y * 128u + i0.x];
+  let c10 = ocean_field[i0.y * 128u + i1.x];
+  let c01 = ocean_field[i1.y * 128u + i0.x];
+  let c11 = ocean_field[i1.y * 128u + i1.x];
+  return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+fn eval_crust_height(x: f32, z: f32) -> f32 {
   let is_solid = (params.mode_flags & 1u) != 0u;
   if (!is_solid) {
-    return fbm2(x * 0.0065, z * 0.0065, params.seed_f) * params.terrain_amp - 28.0;
+    // Opaque deep swirling gas-giant ammonia/water cloud deck anchored cleanly beneath the saucer!
+    return fbm2(x * 0.0065, z * 0.0065, params.seed_f) * params.terrain_amp + params.sea_level;
   }
   let r0 = length(vec2<f32>(x, z));
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
@@ -998,8 +1157,16 @@ fn eval_height(x: f32, z: f32) -> f32 {
     craters = (crater_field(x, z, 0.0075, params.seed_f) * params.terrain_amp * 0.72
       + crater_field(x, z, 0.024, params.seed_f + 11.0) * params.terrain_amp * 0.24) * params.crater_str;
   }
+  // Macro Voronoi plate tectonics & hydraulic river valley relief (fades smoothly outside 240 m boulder/rover valley!)
+  let tect_blend = smoothstep(240.0, 560.0, r0);
+  let tect = sample_tectonic_field(x, z);
+  let tect_h = tect.x * (params.terrain_amp * params.clip_aux.y) * tect_blend;
   let def = sample_deform_field(x, z);
-  let raw_h = (rolling + ridge * 0.45 + detail + craters) * (0.10 + 0.90 * apron) + def.x;
+  return (rolling + ridge * 0.45 + detail + craters + tect_h) * (0.10 + 0.90 * apron) + def.x;
+}
+
+fn eval_height(x: f32, z: f32) -> f32 {
+  let raw_h = eval_crust_height(x, z);
   let has_ocean = (params.mode_flags & 8u) != 0u;
   if (has_ocean && raw_h < params.sea_level) {
     return params.sea_level;
@@ -1007,34 +1174,53 @@ fn eval_height(x: f32, z: f32) -> f32 {
   return raw_h;
 }
 
-// Kernel 1: Generate live 129x129 planetary terrain mesh with TinyPlanet spherical horizon curvature!
-@compute @workgroup_size(8, 8)
+// Kernel 1: Generate 2-Ring +-6 km Planetary GPU Clipmap Mesh (gid.z=0 inner +-608m, gid.z=1 outer +-6km!)
+@compute @workgroup_size(8, 8, 1)
 fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) {
   let n = params.grid_n;
-  if (gid.x >= n || gid.y >= n) { return; }
+  if (gid.x >= n || gid.y >= n || gid.z >= 2u) { return; }
+  let is_outer = gid.z == 1u;
   let half = f32(n - 1u) * 0.5;
-  let wx = params.center_x + (f32(gid.x) - half) * params.cell_size;
-  let wz = params.center_z + (f32(gid.y) - half) * params.cell_size;
+  let cs = select(params.cell_size, params.climate_aux.y, is_outer);
+  let cx = select(params.center_x, params.climate_aux.w, is_outer);
+  let cz = select(params.center_z, params.clip_aux.x, is_outer);
+  let wx = cx + (f32(gid.x) - half) * cs;
+  let wz = cz + (f32(gid.y) - half) * cs;
 
-  let h = eval_height(wx, wz);
-  let eps = max(0.5, params.cell_size * 0.45);
+  let crust_h = eval_crust_height(wx, wz);
+  let is_solid = (params.mode_flags & 1u) != 0u;
+  let is_magma = (params.mode_flags & 2u) != 0u;
+  let is_cryo = (params.mode_flags & 4u) != 0u;
+  let has_ocean = (params.mode_flags & 8u) != 0u;
+  let ice_cover = clamp(params.ocean_rgb_ice.w, 0.0, 1.0);
+  let is_ocean = is_solid && has_ocean && crust_h <= params.sea_level + 0.04;
+
+  var h = select(crust_h, params.sea_level, is_ocean);
+  let eps = max(0.5, cs * 0.45);
   let hL = eval_height(wx - eps, wz);
   let hR = eval_height(wx + eps, wz);
   let hD = eval_height(wx, wz - eps);
   let hU = eval_height(wx, wz + eps);
-  let n_vec = normalize(vec3<f32>(hL - hR, 2.0 * eps, hD - hU));
+  var n_vec = normalize(vec3<f32>(hL - hR, 2.0 * eps, hD - hU));
 
-  // TinyPlanet subtle spherical curvature drop relative to active vehicle (Rover or Drone)!
+  var wave_foam = 0.0;
+  if (is_ocean && ice_cover < 0.96) {
+    let ow = sample_ocean_field(wx, wz);
+    let wave_fade = 1.0 - smoothstep(420.0, 1800.0, length(vec2<f32>(wx - params.col0_pad.w, wz - params.col1_pad.w)));
+    let wave_amp = (1.0 - ice_cover) * wave_fade;
+    h = h + ow.x * wave_amp * 0.85;
+    n_vec = normalize(vec3<f32>(-ow.y * wave_amp * 2.2, 1.0, -ow.z * wave_amp * 2.2));
+    wave_foam = ow.w * wave_amp;
+  }
+
+  // Subtle seam drop on outer clipmap overlap collar so inner high-detail ring always wins cleanly!
   let dx = wx - params.col0_pad.w;
   let dz = wz - params.col1_pad.w;
   let r2 = dx * dx + dz * dz;
-  let y_curved = h - r2 * params.curv_inv_2r;
+  let collar_drop = select(0.0, select(0.0, 1.8, max(abs(wx - params.center_x), abs(wz - params.center_z)) < 580.0), is_outer);
+  let y_curved = h - r2 * params.curv_inv_2r - collar_drop;
 
-  let is_magma = (params.mode_flags & 2u) != 0u;
-  let is_cryo = (params.mode_flags & 4u) != 0u;
-  let has_ocean = (params.mode_flags & 8u) != 0u;
-  let is_solid = (params.mode_flags & 1u) != 0u;
-
+  let tect = sample_tectonic_field(wx, wz);
   let slope = 1.0 - clamp(n_vec.y, 0.0, 1.0);
   let h_norm = clamp((h / max(4.0, params.terrain_amp)) * 0.5 + 0.5, 0.0, 1.0);
   let strata = 0.5 + 0.5 * sin(h * 1.4 + fbm2(wx * 0.08, wz * 0.08, params.seed_f + 9.0) * 3.0);
@@ -1048,9 +1234,20 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
     let band = 0.5 + 0.5 * sin(wz * 0.04 + fbm2(wx * 0.02, wz * 0.02, params.seed_f) * 3.5);
     col = mix(params.col0_pad.rgb, params.col1_pad.rgb, band);
     tag = 1.0;
-  } else if (has_ocean && h <= params.sea_level + 0.05) {
-    col = vec3<f32>(0.04, 0.24, 0.46);
-    tag = 2.0;
+  } else if (is_ocean) {
+    if (ice_cover >= 0.72) {
+      // Frozen winter sea ice: bright pale-cyan pressure ridges, Rover-drivable!
+      let ridge_n = fbm2(wx * 0.05, wz * 0.05, params.seed_f + 13.0);
+      col = mix(vec3<f32>(0.76, 0.88, 0.96), vec3<f32>(0.92, 0.96, 1.0), clamp(0.5 + 0.5 * ridge_n, 0.0, 1.0));
+      tag = 1.0;
+    } else {
+      // Active solvent liquid ocean (H2O sapphire, CH4 hydrocarbon amber-teal, NH3 deep indigo, etc.)
+      let shallow = 1.0 - smoothstep(0.0, 4.5, params.sea_level - crust_h);
+      col = mix(params.ocean_rgb_ice.rgb, params.ocean_rgb_ice.rgb * 1.65 + vec3<f32>(0.04, 0.16, 0.14), shallow * 0.55);
+      col = mix(col, vec3<f32>(0.84, 0.93, 0.98), ice_cover * 0.65);
+      emiss = wave_foam;
+      tag = 2.0;
+    }
   } else if (is_magma) {
     let crack = 1.0 - smoothstep(0.12, 0.42, abs(fbm2(wx * 0.075, wz * 0.075, params.seed_f + 3.0)));
     let low_lava = 1.0 - smoothstep(0.08, 0.32, h_norm);
@@ -1064,17 +1261,26 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
     emiss = fissure * 0.25;
     tag = 1.0;
   } else if (has_ocean) {
-    // Coastal sand -> verdant plains -> rocky mountains -> snow peaks
-    let coast = 1.0 - smoothstep(params.sea_level + 0.05, params.sea_level + 0.8, h);
-    let snow = smoothstep(0.76, 0.92, h_norm);
-    col = mix(vec3<f32>(0.16, 0.42, 0.18), vec3<f32>(0.42, 0.38, 0.34), clamp(slope * 2.1 + smoothstep(0.5, 0.8, h_norm) * 0.6, 0.0, 1.0));
+    // Multi-biome tectonic/hydraulic terrain: beaches, arid plateaus, lush valleys, rivers, rocky cliffs, emergent seasonal snowline!
+    let coast = 1.0 - smoothstep(params.sea_level + 0.05, params.sea_level + 1.4, h);
+    let snow = smoothstep(params.climate_aux.x - 4.0, params.climate_aux.x + 12.0, h);
+    let moisture = tect.z;
+    // Rivers appear ONLY in concentrated valley drainage channels (above background rainfall equilibrium ~1.2!)
+    let river = smoothstep(1.48, 2.18, tect.y) * (1.0 - smoothstep(0.05, 0.15, slope)) * (1.0 - snow * 0.85);
+    let autumn = clamp(params.clip_aux.w, 0.0, 1.0);
+    let dry_col = vec3<f32>(0.62, 0.52, 0.34);
+    let lush_col = mix(vec3<f32>(0.14, 0.44, 0.18), vec3<f32>(0.50, 0.36, 0.15), autumn * 0.55);
+    let biome_base = mix(dry_col, lush_col, smoothstep(0.20, 0.68, moisture));
+    let rock_col = mix(vec3<f32>(0.42, 0.38, 0.34), vec3<f32>(0.30, 0.28, 0.26), tect.w);
+    col = mix(biome_base, rock_col, clamp(slope * 2.1 + smoothstep(0.54, 0.86, h_norm) * 0.55, 0.0, 1.0));
     col = mix(col, vec3<f32>(0.78, 0.72, 0.56), coast);
+    col = mix(col, params.ocean_rgb_ice.rgb * 1.35, river * 0.82);
     col = mix(col, vec3<f32>(0.90, 0.94, 0.98), snow);
-    tag = select(0.0, 1.0, snow > 0.4);
+    tag = select(select(0.0, 2.0, river > 0.72 && ice_cover < 0.72), 1.0, snow > 0.42);
   }
 
   // Persistent GPU Laser/Missile/Antimatter Thermal Glow, Vitrified Melt & Scorched Crater Rim!
-  if (is_solid) {
+  if (is_solid && !is_outer) {
     let def_v = sample_deform_field(wx, wz);
     let char_f = clamp(def_v.w, 0.0, 1.0);
     let melt_f = clamp(def_v.z, 0.0, 1.0);
@@ -1092,7 +1298,8 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
     }
   }
 
-  let idx = gid.y * n + gid.x;
+  let ring_off = gid.z * n * n;
+  let idx = ring_off + gid.y * n + gid.x;
   var v: TerrainVert;
   v.pos_curv = vec4<f32>(wx, y_curved, wz, h);
   v.norm_tag = vec4<f32>(n_vec, tag);
@@ -1166,8 +1373,24 @@ fn step_surface_plume_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
         live = 0.0;
       }
     } else {
-      // Role 2: Drone rotor downwash dust ring OR subtle blowing atmospheric dust motes (0 in vacuum!)
-      if (params.rho_atm > 1e-4 && (params.drone_throttle > 0.05 || abs(params.wind_x) + abs(params.wind_z) > 0.5)) {
+      // Role 2: Active Comet Sublimation Outgassing Jets (mode_flags bit4 = 16u!) OR Drone downwash / atmospheric dust!
+      let is_comet_vent = (params.mode_flags & 16u) != 0u;
+      if (is_comet_vent) {
+        // Active solar-driven H2O/CO sublimation geysers erupting vertically from fissured comet vents into vacuum coma!
+        let vent_id = i % 6u;
+        let v_ang = f32(vent_id) * 1.0471975 + params.seed_f;
+        let v_rad = 26.0 + f32(vent_id) * 18.0;
+        let vx_base = params.col0_pad.w + cos(v_ang) * v_rad + (r_rand - 0.5) * 6.0;
+        let vz_base = params.col1_pad.w + sin(v_ang) * v_rad + (cos(ang) - 0.5) * 6.0;
+        let vy_base = eval_height(vx_base, vz_base);
+        pos = vec3<f32>(vx_base, vy_base + 0.4, vz_base);
+        let jet_spd = 18.0 + r_rand * 26.0;
+        vel = vec3<f32>(cos(ang) * (2.5 + r_rand * 4.5), jet_spd, sin(ang) * (2.5 + r_rand * 4.5));
+        p.col_life = vec4<f32>(0.68, 0.90, 1.0, 2.2 + 1.8 * r_rand);
+        p.meta0 = vec4<f32>(0.55 + 0.65 * r_rand, 0.85, seed, 1.0);
+        age = r_rand * 0.35;
+        live = 1.0;
+      } else if (params.rho_atm > 1e-4 && (params.drone_throttle > 0.05 || abs(params.wind_x) + abs(params.wind_z) > 0.5)) {
         let is_downwash = params.drone_throttle > 0.05 && (i & 3u) != 0u;
         if (is_downwash) {
           let rad = 0.35 + r_rand * 1.1;
@@ -1516,6 +1739,66 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo =
     }
   }
 
+  // --- 5. LIVE ROAMING ALIEN / TERRESTRIAL FAUNA & INTERACTIVE ABDUCTABLE TREES (TRACTOR-BEAMABLE!) ---
+  if (Array.isArray(extras.organisms)) {
+    for (const org of extras.organisms) {
+      if (!org || org.abducted) continue;
+      const [ox, oy, oz] = org.pos;
+      const dist2 = (ox - refX) * (ox - refX) + (oz - refZ) * (oz - refZ);
+      if (dist2 > 280 * 280) continue;
+      const yaw = org.yaw || 0;
+      const cy = Math.cos(yaw); const sy = Math.sin(yaw);
+      const oFwd = [sy, 0, cy];
+      const oRight = [cy, 0, -sy];
+      const oUp = [0, 1, 0];
+      const pt = (lx, ly, lz) => applyCurv([
+        ox + oRight[0] * lx + oFwd[0] * lz,
+        oy + ly,
+        oz + oRight[2] * lx + oFwd[2] * lz
+      ]);
+      const sc = org.scale || 1.0;
+      const col = org.rgb || [0.22, 0.56, 0.24];
+      const emiss = org.abducting ? 0.65 : (org.emissive || 0.0);
+      if (org.kind === 'flora') {
+        // Articulated vascular tree / alien frond specimen (trunk + layered canopy crown!)
+        const hT = 5.4 * sc;
+        pushFrustumCylinder(out, pt(0, hT * 0.28, 0), oUp, oRight, oFwd, 0.34 * sc, 0.22 * sc, hT * 0.56, 6, [0.34, 0.24, 0.16], emiss * 0.3, 0.0, false);
+        pushFrustumCylinder(out, pt(0, hT * 0.66, 0), oUp, oRight, oFwd, 1.85 * sc, 0.95 * sc, hT * 0.38, 7, col, emiss, 0.0, true);
+        pushFrustumCylinder(out, pt(0, hT * 0.96, 0), oUp, oRight, oFwd, 1.15 * sc, 0.15 * sc, hT * 0.34, 7, [Math.min(1, col[0] * 1.15), Math.min(1, col[1] * 1.15), Math.min(1, col[2] * 1.15)], emiss, 0.0, true);
+      } else if (org.morph === 'glider') {
+        // Buoyant low-g / dense-air Aero-Glider with translucent gas sac & trailing bio-tentacles!
+        const bob = Math.sin((org.phase || 0) * 2.2) * 0.55;
+        pushFrustumCylinder(out, pt(0, 2.2 + bob, 0), oUp, oRight, oFwd, 1.15 * sc, 0.65 * sc, 1.1 * sc, 8, col, 0.22 + emiss, 0.0, true);
+        pushOrientedBox(out, pt(0, 1.65 + bob, 0), oRight, oUp, oFwd, 3.2 * sc, 0.12 * sc, 1.1 * sc, [Math.min(1, col[0] + 0.18), Math.min(1, col[1] + 0.14), Math.min(1, col[2] + 0.18)], 0.18 + emiss);
+        pushOrientedBox(out, pt(-0.35 * sc, 0.8 + bob, -0.3 * sc), oRight, oUp, oFwd, 0.12 * sc, 1.1 * sc, 0.12 * sc, col, 0.1 + emiss);
+        pushOrientedBox(out, pt(0.35 * sc, 0.8 + bob, -0.3 * sc), oRight, oUp, oFwd, 0.12 * sc, 1.1 * sc, 0.12 * sc, col, 0.1 + emiss);
+      } else {
+        // Articulated roaming Quadruped / Hexapod Fauna with animated striding legs, torso, head, eyes & tail!
+        const legSwing = Math.sin((org.phase || 0) * 5.2) * 0.28 * sc;
+        const bodyY = (org.morph === 'hexapod' ? 0.78 : 1.12) * sc;
+        pushOrientedBox(out, pt(0, bodyY, 0), oRight, oUp, oFwd, 0.92 * sc, 0.66 * sc, 1.75 * sc, col, emiss);
+        // Head + glowing eyes
+        pushOrientedBox(out, pt(0, bodyY + 0.34 * sc, 1.05 * sc), oRight, oUp, oFwd, 0.58 * sc, 0.50 * sc, 0.68 * sc, [Math.min(1, col[0] * 1.15), Math.min(1, col[1] * 1.12), Math.min(1, col[2] * 1.08)], emiss);
+        pushOrientedBox(out, pt(-0.20 * sc, bodyY + 0.44 * sc, 1.38 * sc), oRight, oUp, oFwd, 0.12 * sc, 0.12 * sc, 0.08 * sc, [0.98, 0.92, 0.32], 1.15);
+        pushOrientedBox(out, pt(0.20 * sc, bodyY + 0.44 * sc, 1.38 * sc), oRight, oUp, oFwd, 0.12 * sc, 0.12 * sc, 0.08 * sc, [0.98, 0.92, 0.32], 1.15);
+        // Tail
+        pushOrientedBox(out, pt(0, bodyY + 0.12 * sc, -1.08 * sc), oRight, oUp, oFwd, 0.18 * sc, 0.18 * sc, 0.72 * sc, col, emiss);
+        // 4 (or 6) animated legs!
+        const zPairs = org.morph === 'hexapod' ? [-0.66, 0.0, 0.66] : [-0.62, 0.62];
+        for (let pi = 0; pi < zPairs.length; pi += 1) {
+          const lz = zPairs[pi] * sc;
+          const sw = (pi & 1) === 0 ? legSwing : -legSwing;
+          pushOrientedBox(out, pt(-0.42 * sc, bodyY * 0.46, lz + sw), oRight, oUp, oFwd, 0.18 * sc, bodyY * 0.92, 0.20 * sc, [col[0] * 0.75, col[1] * 0.75, col[2] * 0.75], emiss * 0.5);
+          pushOrientedBox(out, pt(0.42 * sc, bodyY * 0.46, lz - sw), oRight, oUp, oFwd, 0.18 * sc, bodyY * 0.92, 0.20 * sc, [col[0] * 0.75, col[1] * 0.75, col[2] * 0.75], emiss * 0.5);
+        }
+      }
+      // Glowing capture ring halo around any organism currently being tractor-beamed up into the saucer!
+      if (org.abducting) {
+        pushFrustumCylinder(fxOut, pt(0, 1.4 * sc, 0), oUp, oRight, oFwd, 2.2 * sc, 2.2 * sc, 0.28, 12, [0.35, 1.0, 0.72], 1.4, 0.0, false);
+      }
+    }
+  }
+
   return {
     opaque: new Float32Array(out),
     fx: new Float32Array(fxOut)
@@ -1527,37 +1810,52 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   planetaryResult = null,
   planetaryAtmoState = null,
   planetaryMode = 'standard',
+  landingSite = null,
   gridN = 129,
   cellSizeM = 9.5,
   particleCount = 2048,
   seed = 20261125,
   initialVehicle = 'ufo',
   initialCheckpoint = null,
+  initialCraterStamps = [],
+  onCraterStamp = null,
   label = 'ulg-planetary-surface'
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createPlanetarySurfaceSessionWebGpu requires a live WebGPU GPUDevice');
   }
-  const env = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, seed });
+  const env = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, landingSite, seed });
   const n = Math.max(33, Math.min(129, Math.trunc(gridN)));
-  const vertCount = n * n;
-  const quadCount = (n - 1) * (n - 1);
-  const indexCount = quadCount * 6;
+  const ringVertCount = n * n;
+  const totalVertCount = ringVertCount * 2; // 2-ring +-6 km GPU clipmap packed in ONE terrain_verts buffer!
+  const outerCellSizeM = cellSizeM * 10.0;
   const pCount = Math.max(256, Math.min(8192, Math.trunc(particleCount)));
 
-  // Static terrain triangle index buffer (built once!)
-  const indices = new Uint32Array(indexCount);
-  let k = 0;
+  // Static 2-ring GPU clipmap index buffer (built once: inner +-608m high-detail + outer +-6km mountain horizon with center cutout!)
+  const idxList = [];
   for (let z = 0; z < n - 1; z += 1) {
     for (let x = 0; x < n - 1; x += 1) {
       const i0 = z * n + x;
       const i1 = i0 + 1;
       const i2 = i0 + n;
       const i3 = i2 + 1;
-      indices[k++] = i0; indices[k++] = i2; indices[k++] = i1;
-      indices[k++] = i1; indices[k++] = i2; indices[k++] = i3;
+      idxList.push(i0, i2, i1, i1, i2, i3);
     }
   }
+  const halfQ = (n - 1) * 0.5;
+  const holeHalfQuads = Math.max(2, Math.floor((halfQ * cellSizeM) / outerCellSizeM) - 1);
+  for (let z = 0; z < n - 1; z += 1) {
+    for (let x = 0; x < n - 1; x += 1) {
+      if (Math.abs(x + 0.5 - halfQ) < holeHalfQuads && Math.abs(z + 0.5 - halfQ) < holeHalfQuads) continue;
+      const i0 = ringVertCount + z * n + x;
+      const i1 = i0 + 1;
+      const i2 = i0 + n;
+      const i3 = i2 + 1;
+      idxList.push(i0, i2, i1, i1, i2, i3);
+    }
+  }
+  const indices = new Uint32Array(idxList);
+  const indexCount = indices.length;
 
   // Initial plume particles buffer (64 B / particle)
   const initPlumes = new Float32Array(pCount * 16);
@@ -1576,10 +1874,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     computeBufferBinding(1, 'storage'),
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'storage'),
-    computeBufferBinding(4, 'read-only-storage')
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage'),
+    computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-planetary-surface-${entryPoint}.v3-deform-mpm`,
+    cacheKey: `ulg-planetary-surface-${entryPoint}.v5-comet-jets`,
     label: `${label}-${entryPoint}`,
     code: planetarySurfaceWgsl,
     entryPoint,
@@ -1589,8 +1889,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   const plumePipe = mkPipe('step_surface_plume_particles');
   const telPipe = mkPipe('reduce_surface_telemetry');
 
-  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 144, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const terrainVertBuf = device.createBuffer({ label: `${label}-terrain-verts`, size: vertCount * 48, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX });
+  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 192, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const terrainVertBuf = device.createBuffer({ label: `${label}-terrain-verts`, size: totalVertCount * 48, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX });
   const terrainIdxBuf = device.createBuffer({ label: `${label}-terrain-idx`, size: indices.byteLength, usage: GPU_BUF.INDEX | GPU_BUF.COPY_DST });
   const plumesBuf = device.createBuffer({ label: `${label}-plumes`, size: initPlumes.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
@@ -1602,12 +1902,35 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   const vehicleVertBuf = device.createBuffer({ label: `${label}-veh-verts`, size: MAX_VEHICLE_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
   const fxVertBuf = device.createBuffer({ label: `${label}-fx-verts`, size: MAX_FX_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
 
-  // Active-Zone Hybrid GPU MLS-MPM Deformable Terrain + 64 Rigid-Body Boulders!
+  // Active-Zone Hybrid GPU MLS-MPM Deformable Terrain + 64 GPU SE(3) DLM Rigid-Body Boulders + Persistent Crater Replay!
   const deformMpm = createSurfaceDeformationAndBouldersGpu(device, {
     env,
     baseHeightFn: (x, z) => evaluatePlanetaryTerrainHeight(x, z, env),
+    initialCraterStamps,
+    onCraterStamp,
     seed,
     label: `${label}-mpm`
+  });
+
+  // One-Shot GPU Voronoi Plate Tectonics + 48-Pass Hydraulic Erosion (< 2.5 ms once on landing, 0 ms steady-state!)
+  const tectonicsGpu = createSurfaceTectonicsErosionGpu(device, {
+    env,
+    seed,
+    erosionPasses: env.hasSolidCrust ? 48 : 0,
+    label: `${label}-tect`
+  });
+  // Live 128x128 GPU 2D Shallow-Water Ocean Wave PDE + Ekman Currents (dormant-zero on dry/frozen worlds!)
+  const oceanWaveGpu = createSurfaceOceanWaveGpu(device, {
+    gravityMS2: env.gravityMS2,
+    latitudeRad: 0.55,
+    enabled: Boolean(env.hasLiquidOcean),
+    label: `${label}-ocean`
+  });
+  // Hardware-Instanced GPU Flora, Xenobiota & Indigenous Settlement Placement!
+  const floraGpu = createSurfaceFloraPlacementGpu(device, {
+    tectonicFieldBuf: tectonicsGpu.getResidentTectonicBuffer(),
+    deformFieldBuf: deformMpm.getResidentDeformBuffer(),
+    label: `${label}-flora`
   });
 
   device.queue.writeBuffer(terrainIdxBuf, 0, indices);
@@ -1629,13 +1952,15 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
 
   const bg = createCachedExplicitBindGroup(device, {
     layout: terrainPipe.bindGroupLayout,
-    label: `${label}-bg-v3`,
+    label: `${label}-bg-v4`,
     entries: [
       { binding: 0, resource: { buffer: paramsBuf } },
       { binding: 1, resource: { buffer: terrainVertBuf } },
       { binding: 2, resource: { buffer: plumesBuf } },
       { binding: 3, resource: { buffer: telBuf } },
-      { binding: 4, resource: { buffer: deformMpm.getResidentDeformBuffer() } }
+      { binding: 4, resource: { buffer: deformMpm.getResidentDeformBuffer() } },
+      { binding: 5, resource: { buffer: oceanWaveGpu.getResidentOceanBuffer() } },
+      { binding: 6, resource: { buffer: tectonicsGpu.getResidentTectonicBuffer() } }
     ]
   });
 
@@ -1697,18 +2022,65 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   let tractorAutoTimerS = 0.0;
   let weaponMode = 'laser';        // 'laser' | 'missile' | 'antimatter'
   let laserLog10WavelengthM = -6.27; // Default 532 nm emerald visible laser (tunable 10^-13 Gamma -> 10^+1 Radio!)
-  let laserPowerW = 2.5e8;         // 250 MW default (tunable 1 kW -> 100 TW!)
+  let laserPowerW = 2.5e8;         // 250 MW default (dynamically lifts to 10^26 W with Kardashev tier!)
+  let maxWeaponPowerW = 1e12;
   let weaponFiring = false;
   let weaponAimWorldPos = null;
   let laserSpotTempK = env.tempK;
   let lastWeaponReaction = null;
   let antimatterFlash = 0;
+  const bodyBindingEnergyJ = computeBodyBindingEnergyJ(bodySpec);
+  let deliveredWeaponEnergyJ = 0;
+  let shatterTriggered = false;
   let externalRemoteUfos = [];
   let externalProbes = [];
   let externalShieldFlash = 0;
   const activeMissiles = [];       // { pos, vel, age, alive, isRemote, ownerId }
   const pendingHarvest = { silicates: 0, volatiles: 0, metals: 0, exotics: 0 };
   const pendingPeerHits = [];      // { targetPeerId, weapon, damage, wavelengthNm }
+  const pendingAbductions = [];
+  const abductedSpecimens = [];
+
+  // Populate live roaming Fauna (animals) & interactive abductable Flora (trees) on biosphere-viable worlds!
+  const surfaceOrganisms = [];
+  if (env.hasSolidCrust && !env.isMagmaOcean && (env.xenobiology?.biosphereViability ?? 0) >= 0.25 && !landingSite?.isOcean) {
+    const xeno = env.xenobiology;
+    const faunaMorph = (env.gravityMS2 < 4.5 || env.rhoAtmKgM3 > 2.2)
+      ? 'glider'
+      : (env.gravityMS2 > 11.5 ? 'hexapod' : 'quadruped');
+    const pig = xeno.pigmentRgb || [0.18, 0.56, 0.22];
+    const faunaRgb = xeno.solvent === 'CH4'
+      ? [0.68, 0.48, 0.86]
+      : (xeno.solvent === 'NH3' ? [0.34, 0.78, 0.72] : [0.76, 0.58, 0.36]);
+    const buck = Math.max(0.65, Math.min(1.85, xeno.bucklingHeightScale || 1.0));
+    const nFauna = landingSite?.isPolarIce ? 6 : 12;
+    const nFlora = landingSite?.isPolarIce ? 6 : 16;
+    for (let oi = 0; oi < nFauna + nFlora; oi += 1) {
+      const isFauna = oi < nFauna;
+      const ang = ((oi * 2.399963) + (seed % 97) * 0.1) % (Math.PI * 2);
+      const rad = isFauna ? (16.0 + (oi % 6) * 14.5 + (oi >= 6 ? 18 : 0)) : (20.0 + ((oi - nFauna) % 8) * 15.0 + 12.0);
+      const ox = Math.cos(ang) * rad;
+      const oz = Math.sin(ang) * rad;
+      const gh = evaluatePlanetaryCrustElevation(ox, oz, env);
+      if (env.hasLiquidOcean && gh < env.seaLevelM + 0.6 && faunaMorph !== 'glider') continue;
+      const baseH = evaluatePlanetaryTerrainHeight(ox, oz, env);
+      surfaceOrganisms.push({
+        id: `org-${isFauna ? 'fauna' : 'flora'}-${oi}`,
+        kind: isFauna ? 'fauna' : 'flora',
+        morph: isFauna ? faunaMorph : 'tree',
+        pos: [ox, baseH + (faunaMorph === 'glider' && isFauna ? 4.5 : 0.0), oz],
+        yaw: ang + 1.1,
+        speed: isFauna ? (faunaMorph === 'glider' ? 3.8 : 2.6 + (oi % 3) * 0.7) : 0,
+        phase: oi * 1.37,
+        scale: isFauna ? (0.85 + (oi % 4) * 0.16) : (0.85 + (oi % 5) * 0.18) * buck,
+        rgb: isFauna ? faunaRgb : [pig[0], pig[1], pig[2]],
+        emissive: xeno.solvent === 'CH4' ? 0.25 : 0.0,
+        abducting: false,
+        abducted: false,
+        seed: (seed ^ Math.imul(oi + 17, 2654435761)) >>> 0
+      });
+    }
+  }
 
   // Restore saved surface exploration pose cleanly when returning from sampled L5/L6/L7 views!
   if (initialCheckpoint && typeof initialCheckpoint === 'object') {
@@ -1862,11 +2234,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     return tractorManualOn;
   }
 
-  function setWeaponConfig({ mode, log10WavelengthM, powerW } = {}) {
+  function setWeaponConfig({ mode, log10WavelengthM, powerW, maxPowerW } = {}) {
     if (mode === 'laser' || mode === 'missile' || mode === 'antimatter') weaponMode = mode;
+    if (Number.isFinite(Number(maxPowerW))) maxWeaponPowerW = Math.max(1e12, Math.min(1e26, Number(maxPowerW)));
     if (Number.isFinite(Number(log10WavelengthM))) laserLog10WavelengthM = Math.max(-13.0, Math.min(1.0, Number(log10WavelengthM)));
-    if (Number.isFinite(Number(powerW))) laserPowerW = Math.max(1e3, Math.min(1e14, Number(powerW)));
-    return { mode: weaponMode, log10WavelengthM: laserLog10WavelengthM, powerW: laserPowerW };
+    if (Number.isFinite(Number(powerW))) laserPowerW = Math.max(1e3, Math.min(maxWeaponPowerW, Number(powerW)));
+    return { mode: weaponMode, log10WavelengthM: laserLog10WavelengthM, powerW: laserPowerW, maxPowerW: maxWeaponPowerW };
   }
 
   function computeDefaultForwardAimPoint() {
@@ -1945,7 +2318,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     const h = { ...pendingHarvest };
     pendingHarvest.silicates = 0; pendingHarvest.volatiles = 0; pendingHarvest.metals = 0; pendingHarvest.exotics = 0;
     const hits = pendingPeerHits.splice(0, pendingPeerHits.length);
-    return { harvested: h, peerHits: hits };
+    const abductions = pendingAbductions.splice(0, pendingAbductions.length);
+    return { harvested: h, peerHits: hits, abductions };
   }
 
   function setUfoAltitudeKm(altKm) {
@@ -2112,8 +2486,9 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
 
         // 1. Steep Cliff Wall Collision (`normal.y < 0.58` => >54 deg cliff face): block uphill penetration & slide!
         const hitSteepCliff = nextSup.normal[1] < 0.58 && (candY <= nextSup.supportY + 0.45);
-        // 2. Liquid Ocean Shoreline Boundary: prevent terrestrial rover from sinking/driving underwater!
-        const hitOceanShore = env.hasLiquidOcean && nextSup.anyUnderwater && !lastSup.anyUnderwater && (candY <= nextSup.supportY + 0.45);
+        // 2. Liquid Ocean Shoreline Boundary: prevent terrestrial rover from sinking into OPEN liquid sea,
+        //    while allowing driving straight across frozen winter sea ice (`liveSeaIceFrac >= 0.72`)!
+        const hitOceanShore = env.hasLiquidOcean && liveSeaIceFrac < 0.72 && nextSup.anyUnderwater && !lastSup.anyUnderwater && (candY <= nextSup.supportY + 0.45);
 
         if (hitSteepCliff || hitOceanShore) {
           // Compute horizontal wall normal pointing away from cliff/ocean
@@ -2379,36 +2754,61 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     return { eye: [eyeX, eyeY, eyeZ], target, up: [0, 1, 0], focusPos: vehPos };
   }
 
-  async function step({ dt = 0.016, controls = {}, readTelemetry = true } = {}) {
+  let liveSeaIceFrac = landingSite?.isPolarIce ? 0.95 : 0.0;
+  let liveSnowlineM = landingSite?.isPolarIce ? -45.0 : env.terrainAmpM * 0.56;
+  let liveAutumnShift = 0.0;
+
+  async function step({ dt = 0.016, controls = {}, climate = null, readTelemetry = true } = {}) {
     if (disposed) return lastTelemetry;
     const dtSafe = Math.max(0.004, Math.min(0.045, Number(dt) || 0.016));
     simTimeS += dtSafe;
     stepIndex += 1;
 
+    if (climate && typeof climate === 'object') {
+      if (Number.isFinite(Number(climate.iceCoverFrac))) {
+        liveSeaIceFrac = Math.max(landingSite?.isPolarIce ? 0.90 : 0, Math.min(1, Number(climate.iceCoverFrac)));
+      }
+      if (Number.isFinite(Number(climate.snowlineM))) {
+        liveSnowlineM = landingSite?.isPolarIce ? Math.min(-35.0, Number(climate.snowlineM)) : Number(climate.snowlineM);
+      }
+      if (Number.isFinite(Number(climate.autumnShift))) liveAutumnShift = Math.max(0, Math.min(1, Number(climate.autumnShift)));
+    }
+
     const { windX, windZ } = integrateVehicles(dtSafe, controls);
     const focus = activeVehicle === 'ufo' ? ufo.pos : (activeVehicle === 'drone' ? drone.pos : rover.pos);
-    // Snap terrain patch origin to integer cellSizeM so mountain vertices NEVER shimmer as you move!
+    // Snap inner (+-608 m) & outer (+-6 km) clipmap origins to integer cell multiples so mountains NEVER shimmer!
     const snapX = Math.round(focus[0] / cellSizeM) * cellSizeM;
     const snapZ = Math.round(focus[2] / cellSizeM) * cellSizeM;
+    const outerSnapX = Math.round(focus[0] / outerCellSizeM) * outerCellSizeM;
+    const outerSnapZ = Math.round(focus[2] / outerCellSizeM) * outerCellSizeM;
 
     const modeFlags = (env.hasSolidCrust ? 1 : 0)
       | (env.isMagmaOcean ? 2 : 0)
       | (env.isCryoMoon ? 4 : 0)
-      | (env.hasLiquidOcean ? 8 : 0);
+      | (env.hasLiquidOcean ? 8 : 0)
+      | (env.isComet ? 16 : 0);
     const seedF = ((env.seed % 997) * 0.13) + 1.7;
     const curvInv2R = env.hasSolidCrust ? (1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM)) : 0.0;
 
-    const ab = new ArrayBuffer(144);
+    const effectiveSeaLevelM = env.hasSolidCrust ? env.seaLevelM : (ufo.pos[1] - 42.0);
+    const effectiveCurvInv2R = env.hasSolidCrust
+      ? (1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM))
+      : (1.0 / (2.0 * 9500.0));
+
+    const ab = new ArrayBuffer(192);
     new Uint32Array(ab, 0, 4).set([n, pCount, modeFlags, stepIndex]);
-    new Float32Array(ab, 16, 32).set([
+    new Float32Array(ab, 16, 44).set([
       snapX, snapZ, cellSizeM, seedF,
-      env.terrainAmpM, env.craterStrength, env.seaLevelM, curvInv2R,
+      env.terrainAmpM, env.craterStrength, effectiveSeaLevelM, effectiveCurvInv2R,
       env.gravityMS2, env.rhoAtmKgM3, windX, windZ,
       dtSafe, rover.rocketThrottle, rover.speedMS, drone.throttle,
       rover.pos[0], rover.pos[1], rover.pos[2], rover.yaw,
       drone.pos[0], drone.pos[1], drone.pos[2], env.droneThrustToWeight,
       env.color0[0], env.color0[1], env.color0[2], focus[0],
-      env.color1[0], env.color1[1], env.color1[2], focus[2]
+      env.color1[0], env.color1[1], env.color1[2], focus[2],
+      env.oceanRgb[0], env.oceanRgb[1], env.oceanRgb[2], liveSeaIceFrac,
+      liveSnowlineM, outerCellSizeM, TECTONIC_WORLD_SPAN_M, outerSnapX,
+      outerSnapZ, 0.42, OCEAN_PATCH_HALF_M, liveAutumnShift
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
@@ -2431,6 +2831,83 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     pendingHarvest.volatiles += boulderRes.harvested.volatiles;
     pendingHarvest.metals += boulderRes.harvested.metals;
     pendingHarvest.exotics += boulderRes.harvested.exotics;
+
+    // 1B. Step Live Roaming Fauna & Interactive Trees + Tractor-Beam Specimen Abduction into Saucer Bio-Bay!
+    let activeAbductionTarget = null;
+    if (surfaceOrganisms.length > 0) {
+      let bestOrg = null;
+      let bestScore = 1e9;
+      if (tractorActive && ufo.visible) {
+        for (const org of surfaceOrganisms) {
+          if (org.abducted) continue;
+          const dx = org.pos[0] - ufo.pos[0];
+          const dz = org.pos[2] - ufo.pos[2];
+          const hd = Math.hypot(dx, dz);
+          if (hd < 34.0) {
+            // Slightly prefer roaming fauna if both fauna & a tree are under the beam!
+            const sc = hd * (org.kind === 'fauna' ? 0.85 : 1.0);
+            if (sc < bestScore) { bestScore = sc; bestOrg = org; }
+          }
+        }
+      }
+      for (const org of surfaceOrganisms) {
+        if (org.abducted) continue;
+        org.phase += dtSafe;
+        if (org === bestOrg) {
+          org.abducting = true;
+          activeAbductionTarget = org;
+          // Lift & spiral organism smoothly UP the golden tractor beam cone into the saucer's specimen bay!
+          const toUfoX = ufo.pos[0] - org.pos[0];
+          const toUfoY = (ufo.pos[1] - 1.2) - org.pos[1];
+          const toUfoZ = ufo.pos[2] - org.pos[2];
+          const d3 = Math.hypot(toUfoX, toUfoY, toUfoZ);
+          if (d3 <= 3.8) {
+            org.abducted = true;
+            org.abducting = false;
+            const rec = synthesizeAbductedSpecimenRecord({
+              kind: org.kind,
+              worldName: bodySpec?.name || 'Exoplanet',
+              env,
+              xeno: env.xenobiology,
+              latDeg: climate?.observerLatDeg ?? landingSite?.latDeg ?? 32.0,
+              lonDeg: (landingSite?.lonDeg ?? 0.0) + (climate?.observerLonOffsetDeg ?? 0.0),
+              seed: org.seed
+            });
+            abductedSpecimens.push(rec);
+            pendingAbductions.push(rec);
+            continue;
+          }
+          const pullSpd = 15.5;
+          org.pos[0] += (toUfoX / Math.max(0.1, d3)) * pullSpd * dtSafe;
+          org.pos[1] += Math.max(6.5, (toUfoY / Math.max(0.1, d3)) * pullSpd) * dtSafe;
+          org.pos[2] += (toUfoZ / Math.max(0.1, d3)) * pullSpd * dtSafe;
+          org.yaw += 2.6 * dtSafe;
+        } else {
+          org.abducting = false;
+          if (org.kind === 'fauna') {
+            org.yaw += Math.sin(org.phase * 0.45 + org.seed * 0.001) * 0.45 * dtSafe;
+            const nx = org.pos[0] + Math.sin(org.yaw) * org.speed * dtSafe;
+            const nz = org.pos[2] + Math.cos(org.yaw) * org.speed * dtSafe;
+            const gh = deformMpm.evaluateGroundHeight(nx, nz);
+            const isWater = env.hasLiquidOcean && gh <= env.seaLevelM + 0.35 && org.morph !== 'glider';
+            if (isWater || Math.hypot(nx - focus[0], nz - focus[2]) > 260.0) {
+              org.yaw += 1.45;
+            } else {
+              org.pos[0] = nx;
+              org.pos[2] = nz;
+              const targetY = gh + (org.morph === 'glider' ? 5.2 + Math.sin(org.phase * 1.4) * 1.2 : 0.0);
+              org.pos[1] += (targetY - org.pos[1]) * Math.min(1, dtSafe * 7.0);
+            }
+          } else {
+            // Settle released tree softly back onto ground if tractor beam released mid-lift
+            const gh = deformMpm.evaluateGroundHeight(org.pos[0], org.pos[2]);
+            if (org.pos[1] > gh + 0.05) {
+              org.pos[1] = Math.max(gh, org.pos[1] - 12.0 * dtSafe);
+            }
+          }
+        }
+      }
+    }
 
     // 2. Integrate Active Rim-Launched Guided Missiles -> Terrain / Boulder / Remote-UFO Detonation + GPU MLS-MPM Blast!
     for (let mi = activeMissiles.length - 1; mi >= 0; mi -= 1) {
@@ -2488,6 +2965,13 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       }
       if (hitPos) {
         m.alive = false;
+        deliveredWeaponEnergyJ += 4.0e12;
+        if (deliveredWeaponEnergyJ >= 0.85 * bodyBindingEnergyJ) {
+          shatterTriggered = true;
+        }
+        if (env.hasLiquidOcean && evaluatePlanetaryCrustElevation(hitPos[0], hitPos[2], env) <= env.seaLevelM + 1.0) {
+          oceanWaveGpu.queueSplashImpulse(hitPos[0], hitPos[2], -1.8, 22.0);
+        }
         const harv = deformMpm.applyBlastOrHeatStamp({
           kind: 1,
           pos: hitPos,
@@ -2501,13 +2985,14 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           ejectaRgb: [1.0, 0.56, 0.16],
           ejectaRole: 0.0
         });
-        pendingHarvest.silicates += harv.silicates + 10;
-        pendingHarvest.metals += harv.metals + 6;
-        pendingHarvest.volatiles += harv.volatiles + 4;
+        const oreMul = env.isMetallicAsteroid ? 4.0 : (env.isComet ? 2.5 : 1.0);
+        pendingHarvest.silicates += (harv.silicates + 10) * oreMul;
+        pendingHarvest.metals += (harv.metals + 6) * oreMul;
+        pendingHarvest.volatiles += (harv.volatiles + (env.isComet ? 16 : 4)) * oreMul;
         pendingHarvest.exotics += harv.exotics;
         lastWeaponReaction = {
           weapon: 'missile',
-          phaseState: 'Shock Detonation',
+          phaseState: shatterTriggered ? 'BINDING ENERGY EXCEEDED' : 'Shock Detonation',
           reactionOutcome: `Thermobaric impact crater (R=14.5 m · GPU MLS-MPM ejecta + boulder shockwave)`
         };
       }
@@ -2532,12 +3017,17 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       });
 
       if (weaponMode === 'antimatter') {
-        const am = evaluateAntimatterAnnihilation({ massRateKgS: 3e-7, dt: dtSafe });
+        const amRate = computeAntimatterMassRateKgS(Math.max(1e10, laserPowerW));
+        const am = evaluateAntimatterAnnihilation({ massRateKgS: amRate, dt: dtSafe });
+        deliveredWeaponEnergyJ += am.coupledEnergyJ;
+        if (deliveredWeaponEnergyJ >= 0.85 * bodyBindingEnergyJ) {
+          shatterTriggered = true;
+        }
         antimatterFlash = 0.16;
         activeBeam = { targetPos, rgb: [0.84, 0.36, 1.0], isAntimatter: true, thicknessMul: 1.4 };
         lastWeaponReaction = {
           weapon: 'antimatter',
-          phaseState: 'Annihilation Plasma',
+          phaseState: shatterTriggered ? 'BINDING ENERGY EXCEEDED' : 'Annihilation Plasma',
           tempK: am.plasmaTempK,
           reactionOutcome: am.reactionOutcome
         };
@@ -2549,7 +3039,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
             kind: 3,
             pos: targetPos,
             radiusM: am.craterRadiusM * 0.62,
-            depthM: Math.min(4.8, am.craterDepthM * 0.25),
+            depthM: Math.min(8.5, am.craterDepthM * 0.32),
             tempK: 6500,
             melt: 0.95,
             char: 1.0,
@@ -2558,19 +3048,26 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
             ejectaRgb: [0.88, 0.44, 1.0],
             ejectaRole: 0.0
           });
-          pendingHarvest.silicates += harv.silicates + 5;
-          pendingHarvest.metals += harv.metals + 4;
+          const oreMul = env.isMetallicAsteroid ? 4.0 : (env.isComet ? 2.5 : 1.0);
+          pendingHarvest.silicates += (harv.silicates + 5) * oreMul;
+          pendingHarvest.metals += (harv.metals + 4) * oreMul;
+          pendingHarvest.volatiles += (env.isComet ? 12 : 2) * oreMul;
           pendingHarvest.exotics += harv.exotics + 2.5;
         }
       } else {
         const res = evaluateLaserMaterialInteraction({
           log10WavelengthM: laserLog10WavelengthM,
           powerW: laserPowerW,
+          maxPowerW: maxWeaponPowerW,
           spotRadiusM: 1.6,
           sample: tgtSample,
           currentTempK: laserSpotTempK,
           dt: dtSafe
         });
+        deliveredWeaponEnergyJ += Math.max(0, laserPowerW * res.absorptance * dtSafe);
+        if (deliveredWeaponEnergyJ >= 0.85 * bodyBindingEnergyJ) {
+          shatterTriggered = true;
+        }
         laserSpotTempK = res.nextTempK;
         activeBeam = {
           targetPos,
@@ -2623,7 +3120,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       shieldFlash: externalShieldFlash,
       missiles: activeMissiles,
       remoteUfos: externalRemoteUfos,
-      probes: externalProbes
+      probes: externalProbes,
+      organisms: surfaceOrganisms
     });
     vehicleVertCount = Math.min(MAX_VEHICLE_VERTS, Math.floor(meshBundle.opaque.length / 12));
     if (vehicleVertCount > 0) {
@@ -2635,12 +3133,33 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     }
 
     const enc = device.createCommandEncoder({ label: `${label}-enc-${stepIndex}` });
-    // Step Persistent 128x128 Deformation Field + Dormant-Zero 32x24x32 GPU MLS-MPM BEFORE generating terrain mesh!
+    // Step Persistent 128x128 Deformation Field + Dormant-Zero GPU MLS-MPM + GPU Ocean Wave PDE + Flora Placement BEFORE terrain mesh!
     deformMpm.encodeGpuStep(enc, dtSafe);
+    oceanWaveGpu.encodeGpuStep(enc, {
+      dt: dtSafe,
+      windX,
+      windZ,
+      iceCoverFrac: liveSeaIceFrac,
+      latRad: Number(climate?.latitudeRad) || 0.55
+    });
+    floraGpu.encodePlacementIfNeeded(enc, {
+      centerX: snapX,
+      centerZ: snapZ,
+      focusX: focus[0],
+      focusZ: focus[2],
+      env,
+      xeno: env.xenobiology,
+      snowlineM: liveSnowlineM,
+      autumnShift: liveAutumnShift,
+      seaIceFrac: liveSeaIceFrac,
+      tectWorldSpanM: TECTONIC_WORLD_SPAN_M,
+      tectN: TECTONIC_GRID_N,
+      force: stepIndex === 1
+    });
     const pass = enc.beginComputePass({ label: `${label}-pass` });
     pass.setBindGroup(0, bg);
     pass.setPipeline(terrainPipe.pipeline);
-    pass.dispatchWorkgroups(wgGrid, wgGrid);
+    pass.dispatchWorkgroups(wgGrid, wgGrid, 2); // 2-ring +-6 km GPU clipmap!
     pass.setPipeline(plumePipe.pipeline);
     pass.dispatchWorkgroups(wgPlume);
     pass.setPipeline(telPipe.pipeline);
@@ -2751,8 +3270,22 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       activeMissileCount: activeMissiles.length,
       aliveBoulderCount: deformMpm.aliveBoulderCount,
       bouldersCaptured: boulderRes.capturedCount,
+      abductedCount: abductedSpecimens.length,
+      latestAbductedSpecimen: abductedSpecimens.length ? abductedSpecimens[abductedSpecimens.length - 1] : null,
+      abductingOrganismName: activeAbductionTarget ? (activeAbductionTarget.kind === 'fauna' ? 'Fauna Organism' : 'Flora Tree') : null,
+      livingOrganismCount: surfaceOrganisms.reduce((acc, o) => acc + (o.abducted ? 0 : 1), 0),
+      landingSite: env.landingSite || null,
       totalCratersCarved: deformMpm.totalCratersCarved,
+      craterReplayCount: deformMpm.craterReplayCount,
+      boulderSkinGpuActive: Boolean(deformMpm.boulderSkinGpuActive),
       totalBouldersShattered: deformMpm.totalBouldersShattered,
+      deliveredWeaponEnergyJ,
+      bodyBindingEnergyJ,
+      shatterFraction: Math.min(1.0, deliveredWeaponEnergyJ / Math.max(1.0, 0.85 * bodyBindingEnergyJ)),
+      shatterTriggered,
+      isMinorBody: Boolean(env.isMinorBody),
+      isComet: Boolean(env.isComet),
+      isMetallicAsteroid: Boolean(env.isMetallicAsteroid),
       mpmActive: deformMpm.mpmActive,
       mpmDispatches: deformMpm.totalMpmDispatches,
       cfdActive: runCfd,
@@ -2774,6 +3307,9 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     disposed = true;
     try { cfdSession?.dispose(); } catch {}
     try { deformMpm?.dispose(); } catch {}
+    try { tectonicsGpu?.dispose(); } catch {}
+    try { oceanWaveGpu?.dispose(); } catch {}
+    try { floraGpu?.dispose(); } catch {}
     for (const b of [paramsBuf, terrainVertBuf, terrainIdxBuf, plumesBuf, telBuf, telReadBuf, vehicleVertBuf, fxVertBuf]) {
       try { b.destroy(); } catch {}
     }
@@ -2791,7 +3327,10 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   return Object.freeze({
     schema: ULG_PLANETARY_SURFACE_SCHEMA,
     lawAdapter: PLANETARY_SURFACE_LAW_ADAPTER,
+    get bodySpec() { return bodySpec; },
     get env() { return env; },
+    get isMinorBody() { return Boolean(env.isMinorBody); },
+    get xenobiology() { return env.xenobiology; },
     get activeVehicle() { return activeVehicle; },
     get cameraMode() { return cameraMode; },
     get gridN() { return n; },
@@ -2800,16 +3339,26 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     get fxVertCount() { return fxVertCount; },
     get boulderVertCount() { return deformMpm.boulderVertCount; },
     get mpmPointCount() { return deformMpm.mpmActive ? deformMpm.mpmPointCount : 0; },
+    get floraInstanceCount() { return floraGpu.activeInstanceCount; },
+    get floraTemplateVertCount() { return floraGpu.templateVertCount; },
     get particleCount() { return pCount; },
     get cfdMoteCount() { return cfdSession ? cfdSession.moteCount : 0; },
     get cfdProfile() { return cfdSession ? cfdSession.profile : null; },
     get stepIndex() { return stepIndex; },
+    getCraterStamps: () => deformMpm.getCraterStamps(),
+    applyRemoteCraterStamp: (st) => deformMpm.applyRemoteCraterStamp(st),
+    getAbductedSpecimens: () => [...abductedSpecimens],
+    getOrganisms: () => surfaceOrganisms,
     getResidentTerrainVertBuffer: () => terrainVertBuf,
     getResidentTerrainIndexBuffer: () => terrainIdxBuf,
     getResidentVehicleVertBuffer: () => vehicleVertBuf,
     getResidentFxVertBuffer: () => fxVertBuf,
     getResidentBoulderVertBuffer: () => deformMpm.getResidentBoulderVertBuffer(),
     getResidentMpmPointsBuffer: () => deformMpm.getResidentMpmPointsBuffer(),
+    getResidentFloraInstancesBuffer: () => floraGpu.getResidentInstancesBuffer(),
+    getResidentFloraTemplateVertBuffer: () => floraGpu.getResidentTemplateVertBuffer(),
+    getResidentOceanBuffer: () => oceanWaveGpu.getResidentOceanBuffer(),
+    getResidentTectonicBuffer: () => tectonicsGpu.getResidentTectonicBuffer(),
     getResidentPlumesBuffer: () => plumesBuf,
     getResidentCfdMotesBuffer: () => (cfdSession ? cfdSession.getResidentMotesBuffer() : null),
     getActiveSkyEnv,

@@ -13225,11 +13225,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           ) {
             // Interleave at most one canonical physics step per presentation
             // submit so Step k never piles directly onto Step k-1 ahead of the
-            // next render frame (zero extra GPU fences; immediate no-op when
-            // presentation is paused or inactive).
+            // next render frame; tightened timeoutMs (28 ms vs 44 ms) eliminates
+            // excessive stall tail while keeping Gate 4 >= 54 Hz presentation crisp.
             lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
               lastInterleavedRenderSerial,
-              { force: true, timeoutMs: 44 }
+              { force: true, timeoutMs: 28 }
             );
           }
           stepYieldWaitMs = workerResidentScheduleNowMs() - yieldStartedAtMs;
@@ -13241,7 +13241,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         ) {
           lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
             lastInterleavedRenderSerial,
-            { force: true, timeoutMs: 44 }
+            { force: true, timeoutMs: 28 }
           );
         }
         if (
@@ -15580,7 +15580,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             typeof getPresentationSubmitSerial === 'function'
               ? getPresentationSubmitSerial()
               : undefined,
-            { force: true, timeoutMs: 44 }
+            { force: false, timeoutMs: 14 }
           );
         }
         thermalPotential = {
@@ -15657,7 +15657,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           typeof getPresentationSubmitSerial === 'function'
             ? getPresentationSubmitSerial()
             : undefined,
-          { force: true, timeoutMs: 44 }
+          { force: false, timeoutMs: 14 }
         );
       }
       try {

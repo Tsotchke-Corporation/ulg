@@ -29,6 +29,11 @@ import { createTargetOrbitControls } from '../runtime/shared/targetOrbitControls
 import { requestCompatibleWebGpuDevice } from '../runtime/shared/webgpuCompat.js';
 import { createChemBioWebGpuRenderer } from './chemBioWebGpuRenderer.js';
 import { LIFE_LAB_ABOUT_ULG, LIFE_MODE_DOCS } from './lifeLabDocs.js';
+import {
+  XENOBIOLOGY_PLANET_PRESETS,
+  deriveXenobiologyProfile,
+  parseXenobiologyFromSearch
+} from '../runtime/biology/xenobiologySynthesizer.js';
 
 function triggerLifeDownload(filename, text, mime = 'text/plain;charset=utf-8') {
   try {
@@ -243,6 +248,7 @@ export async function mountLifeLabDemo() {
     memEpsHp: 1.85,
     memTempK: 300,
     memOsmotic: 0.0,
+    memClipZ: 8.0,
     foldSeq: POLYMER_SEQUENCE_TEMPLATES['amphipathic-helix-bundle'].sequence,
     foldTempK: 300,
     foldEpsHp: 1.95,
@@ -588,7 +594,11 @@ export async function mountLifeLabDemo() {
     }
   }
 
+  let modeSwitchToken = 0;
   async function selectMode(modeId, customSeq = null) {
+    const myToken = ++modeSwitchToken;
+    while (busy) await new Promise((r) => setTimeout(r, 4));
+    if (myToken !== modeSwitchToken || disposed) return;
     currentMode = modeId;
     currentLayer = layerForMode(modeId);
     if (activeSession) { activeSession.dispose(); activeSession = null; }
@@ -611,7 +621,7 @@ export async function mountLifeLabDemo() {
       activeSession = createAmphiphileMembraneSessionWebGpu(device, {
         lipidCount: initMode === 'vesicle' ? 320 : 280,
         initMode,
-        epsHp: params.memEpsHp,
+        hydrophobicCoupling: params.memEpsHp,
         temperatureK: params.memTempK,
         osmoticPressure: params.memOsmotic
       });
@@ -624,8 +634,8 @@ export async function mountLifeLabDemo() {
       activeSession = createBiopolymerFoldingSessionWebGpu(device, {
         sequence: seq,
         temperatureK: params.foldTempK,
-        epsHp: params.foldEpsHp,
-        epsHBond: params.foldEpsHb
+        hydrophobicCoupling: params.foldEpsHp,
+        hBondStrength: params.foldEpsHb
       });
       await activeSession.step({ dt: 0.014, substeps: 14, readTelemetry: true });
       lastFoldCoordsF32 = await readResidentFloats(activeSession.getResidentResiduesBuffer(), activeSession.residueCount * 12);
@@ -640,7 +650,7 @@ export async function mountLifeLabDemo() {
       activeSession = createExcitableMembraneSessionWebGpu(device, {
         width: 128,
         height: 128,
-        initMode: modeId === 'excitable-pulse' ? 'pulse' : 'spiral',
+        initSpiral: modeId !== 'excitable-pulse',
         gNa: params.hhGNa,
         gK: params.hhGK,
         deltaPsiMv: params.hhDeltaPsi,
@@ -671,12 +681,14 @@ export async function mountLifeLabDemo() {
     if (!activeSession) return;
     const timeSec = (performance.now() - startTimeMs) * 0.001;
     if (currentLayer === 'membrane') {
+      const clipVal = Number.isFinite(Number(params.memClipZ)) && Number(params.memClipZ) < 7.8 ? Number(params.memClipZ) : 999.0;
       renderer.renderFrame({
         bioBeadsBuffer: activeSession.getResidentBeadsBuffer(),
         bioBeadCount: activeSession.beadCount,
         bioLinkMode: 2,
         bioLinkCount: activeSession.lipidCount * 2,
         sphereScale: 1.0,
+        clipZ: clipVal,
         timeSec
       });
     } else if (currentLayer === 'fold') {
@@ -877,6 +889,11 @@ export async function mountLifeLabDemo() {
   }
 
   async function pickAtClientPoint(clientX, clientY) {
+    if (currentLayer === 'hh') {
+      activeSession?.triggerStimulus?.();
+      renderCurrentScene();
+      return null;
+    }
     const info = getActivePickBufferInfo();
     if (!info) return null;
     const rect = canvas.getBoundingClientRect();
@@ -963,8 +980,20 @@ export async function mountLifeLabDemo() {
   el('sl-mem-eps').addEventListener('input', (e) => { params.memEpsHp = Number(e.target.value); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); activeSession?.setHydrophobicCoupling?.(params.memEpsHp); updatePlotsAndHud(); });
   el('sl-mem-temp').addEventListener('input', (e) => { params.memTempK = Number(e.target.value); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; activeSession?.setTemperatureK?.(params.memTempK); });
   el('sl-mem-osm').addEventListener('input', (e) => { params.memOsmotic = Number(e.target.value); el('val-mem-osm').textContent = params.memOsmotic.toFixed(2); activeSession?.setOsmoticPressure?.(params.memOsmotic); });
+  el('sl-mem-clip')?.addEventListener('input', (e) => {
+    params.memClipZ = Number(e.target.value);
+    el('val-mem-clip').textContent = params.memClipZ >= 7.8 ? 'Full' : `${params.memClipZ.toFixed(1)} Å`;
+    renderCurrentScene();
+  });
   el('btn-mem-null').addEventListener('click', () => { params.memEpsHp = 0.0; el('sl-mem-eps').value = '0'; el('val-mem-eps').textContent = '0.00'; activeSession?.setHydrophobicCoupling?.(0.0); updatePlotsAndHud(); });
-  el('btn-mem-reset').addEventListener('click', () => { params.memEpsHp = 1.85; params.memTempK = 300; el('sl-mem-eps').value = '1.85'; el('val-mem-eps').textContent = '1.85'; el('sl-mem-temp').value = '300'; el('val-mem-temp').textContent = '300 K'; selectMode(currentMode); });
+  el('btn-mem-reset').addEventListener('click', () => {
+    params.memEpsHp = 1.85; params.memTempK = 300; params.memOsmotic = 0.0; params.memClipZ = 8.0;
+    el('sl-mem-eps').value = '1.85'; el('val-mem-eps').textContent = '1.85';
+    el('sl-mem-temp').value = '300'; el('val-mem-temp').textContent = '300 K';
+    el('sl-mem-osm').value = '0'; el('val-mem-osm').textContent = '0.00';
+    if (el('sl-mem-clip')) { el('sl-mem-clip').value = '8.0'; el('val-mem-clip').textContent = 'Full'; }
+    selectMode(currentMode);
+  });
 
   // Layer 2 controls + 1-click FASTA Motif Presets
   el('btn-apply-seq').addEventListener('click', () => selectMode(currentMode, el('inp-seq').value.trim().toUpperCase()));
@@ -1037,7 +1066,13 @@ export async function mountLifeLabDemo() {
   el('sl-fold-eps').addEventListener('input', (e) => { params.foldEpsHp = Number(e.target.value); el('val-fold-eps').textContent = params.foldEpsHp.toFixed(2); activeSession?.setHydrophobicCoupling?.(params.foldEpsHp); });
   el('sl-fold-hb').addEventListener('input', (e) => { params.foldEpsHb = Number(e.target.value); el('val-fold-hb').textContent = params.foldEpsHb.toFixed(2); activeSession?.setHBondStrength?.(params.foldEpsHb); });
   el('btn-fold-denature').addEventListener('click', () => { params.foldTempK = 750; el('sl-fold-temp').value = '750'; el('val-fold-temp').textContent = '750 K'; activeSession?.setTemperatureK?.(750); updatePlotsAndHud(); });
-  el('btn-fold-reset').addEventListener('click', () => { params.foldTempK = 300; el('sl-fold-temp').value = '300'; el('val-fold-temp').textContent = '300 K'; selectMode(currentMode); });
+  el('btn-fold-reset').addEventListener('click', () => {
+    params.foldTempK = 300; params.foldEpsHp = 1.9; params.foldEpsHb = 1.4;
+    el('sl-fold-temp').value = '300'; el('val-fold-temp').textContent = '300 K';
+    el('sl-fold-eps').value = '1.9'; el('val-fold-eps').textContent = '1.90';
+    el('sl-fold-hb').value = '1.4'; el('val-fold-hb').textContent = '1.40';
+    selectMode(currentMode);
+  });
 
   // Layer 3 controls
   el('sl-evo-mu').addEventListener('input', (e) => { params.evoMu = Number(e.target.value); el('val-evo-mu').textContent = params.evoMu.toFixed(3); activeSession?.setMutationRateMu?.(params.evoMu); updatePlotsAndHud(); });
@@ -1070,11 +1105,78 @@ export async function mountLifeLabDemo() {
   el('menu-about-lab').addEventListener('click', () => { el('help-popover').classList.remove('open'); openAboutModal(true); });
   el('modal-close').addEventListener('click', () => el('about-modal').classList.remove('open'));
   el('about-modal').addEventListener('click', (e) => { if (e.target === el('about-modal')) el('about-modal').classList.remove('open'); });
-  el('help-btn').addEventListener('click', () => el('help-popover').classList.toggle('open'));
+  el('help-btn').addEventListener('click', (e) => { e.stopPropagation(); el('help-popover').classList.toggle('open'); });
+  document.addEventListener('click', (e) => {
+    const pop = el('help-popover');
+    if (pop?.classList.contains('open') && !pop.contains(e.target) && e.target !== el('help-btn')) {
+      pop.classList.remove('open');
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      el('help-popover')?.classList.remove('open');
+      el('about-modal')?.classList.remove('open');
+    }
+  });
   el('toggle-plots-btn').addEventListener('click', () => { el('life-shell').classList.toggle('plots-collapsed'); el('life-dock').classList.toggle('mobile-open'); handleResize(); });
   el('mobile-nav-btn').addEventListener('click', () => el('life-sidebar').classList.toggle('mobile-open'));
 
-  await selectMode('lipid-soup');
+  let activeXenoProfile = null;
+  async function applyXenobiologyProfile(profile, { targetMode = null } = {}) {
+    if (!profile) return null;
+    activeXenoProfile = profile;
+    const lp = profile.labParams || profile.lifeLabParams || {};
+    if (Number.isFinite(lp.memTempK)) { params.memTempK = lp.memTempK; if (el('sl-mem-temp')) { el('sl-mem-temp').value = String(params.memTempK); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; } }
+    if (Number.isFinite(lp.memEpsHp)) { params.memEpsHp = lp.memEpsHp; if (el('sl-mem-eps')) { el('sl-mem-eps').value = String(params.memEpsHp); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); } }
+    if (Number.isFinite(lp.memOsmotic)) { params.memOsmotic = lp.memOsmotic; if (el('sl-mem-osm')) { el('sl-mem-osm').value = String(params.memOsmotic); el('val-mem-osm').textContent = params.memOsmotic.toFixed(2); } }
+    if (Number.isFinite(lp.foldTempK)) { params.foldTempK = lp.foldTempK; if (el('sl-fold-temp')) { el('sl-fold-temp').value = String(params.foldTempK); el('val-fold-temp').textContent = `${Math.round(params.foldTempK)} K`; } }
+    if (Number.isFinite(lp.foldEpsHp)) { params.foldEpsHp = lp.foldEpsHp; if (el('sl-fold-eps')) { el('sl-fold-eps').value = String(params.foldEpsHp); el('val-fold-eps').textContent = params.foldEpsHp.toFixed(2); } }
+    if (Number.isFinite(lp.foldEpsHb)) { params.foldEpsHb = lp.foldEpsHb; if (el('sl-fold-hb')) { el('sl-fold-hb').value = String(params.foldEpsHb); el('val-fold-hb').textContent = params.foldEpsHb.toFixed(2); } }
+    if (lp.foldSeq) params.foldSeq = lp.foldSeq;
+    if (Number.isFinite(lp.evoMu)) { params.evoMu = lp.evoMu; if (el('sl-evo-mu')) { el('sl-evo-mu').value = String(params.evoMu); el('val-evo-mu').textContent = params.evoMu.toFixed(3); } }
+    if (Number.isFinite(lp.evoBeta)) { params.evoBeta = lp.evoBeta; if (el('sl-evo-beta')) { el('sl-evo-beta').value = String(params.evoBeta); el('val-evo-beta').textContent = params.evoBeta.toFixed(2); } }
+    if (Number.isFinite(lp.hhDeltaPsi)) { params.hhDeltaPsi = lp.hhDeltaPsi; if (el('sl-hh-psi')) { el('sl-hh-psi').value = String(params.hhDeltaPsi); el('val-hh-psi').textContent = `${Math.round(params.hhDeltaPsi)} mV`; } }
+    if (Number.isFinite(lp.hhDeltaPh)) { params.hhDeltaPh = lp.hhDeltaPh; if (el('sl-hh-dph')) { el('sl-hh-dph').value = String(params.hhDeltaPh); el('val-hh-dph').textContent = params.hhDeltaPh.toFixed(2); } }
+    if (Number.isFinite(lp.morphV0)) { params.morphV0 = lp.morphV0; if (el('sl-m-v0')) { el('sl-m-v0').value = String(params.morphV0); el('val-m-v0').textContent = params.morphV0.toFixed(2); } }
+    if (Number.isFinite(lp.morphChemo)) { params.morphChemo = lp.morphChemo; if (el('sl-m-chemo')) { el('sl-m-chemo').value = String(params.morphChemo); el('val-m-chemo').textContent = params.morphChemo.toFixed(2); } }
+    const tempDispK = Math.round(lp.memTempK ?? profile.tempK ?? 288);
+    const abd = profile.abductedSpecimen || null;
+    if (el('val-xeno-solvent')) {
+      el('val-xeno-solvent').textContent = abd
+        ? `🛸 ${abd.speciesName} (${abd.kind}) · ${profile.solventFormula} · ${tempDispK} K`
+        : `${profile.solventLabel} · ${tempDispK} K`;
+    }
+    if (el('xeno-world-summary')) {
+      el('xeno-world-summary').textContent = abd
+        ? `🛸 ABDUCTED ${abd.kind.toUpperCase()} (${abd.speciesName} · ${abd.morphClass}) from ${profile.worldName} (${abd.latDeg.toFixed(1)}°, ${abd.lonDeg.toFixed(1)}°) · ${profile.membraneType} · εr=${profile.dielectricEr} · Seq: ${abd.fasta.slice(0, 18)}…`
+        : `${profile.worldName}: ${profile.membraneType} · εr=${profile.dielectricEr} · ${profile.civStage}`;
+    }
+    const modeToLoad = targetMode || lp.recommendedMode || 'protocell-vesicle';
+    await selectMode(modeToLoad, modeToLoad.includes('fold') || modeToLoad.includes('helix') || modeToLoad.includes('hairpin') ? lp.foldSeq : null);
+    if (el('pill-name')) {
+      el('pill-name').textContent = abd
+        ? `🛸 ${abd.speciesName} · ${profile.worldName}`
+        : `${profile.worldName} · ${profile.membraneType}`;
+    }
+    return profile;
+  }
+
+  document.querySelectorAll('#xeno-preset-row [data-xeno-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const preset = XENOBIOLOGY_PLANET_PRESETS.find((p) => p.id === btn.dataset.xenoPreset);
+      if (!preset) return;
+      document.querySelectorAll('#xeno-preset-row [data-xeno-preset]').forEach((b) => b.classList.toggle('active', b === btn));
+      const prof = deriveXenobiologyProfile(preset);
+      void applyXenobiologyProfile(prof, { targetMode: preset.recommendedMode });
+    });
+  });
+
+  const urlXeno = parseXenobiologyFromSearch(window.location.search);
+  if (urlXeno?.profile) {
+    await applyXenobiologyProfile(urlXeno.profile, { targetMode: urlXeno.mode });
+  } else {
+    await selectMode('lipid-soup');
+  }
 
   let rafId = 0;
   let lastRafMs = performance.now();
@@ -1102,12 +1204,19 @@ export async function mountLifeLabDemo() {
         foldShowContactMap,
         hhShowPhasePortrait,
         contactMapStats: { ...lastContactMapStats },
+        xenobiology: activeXenoProfile,
         csvRowCount: csvRows.length,
         telemetry: activeSession?.getTelemetry?.() || null,
         gpuErrorCount: gpuErrors.length,
         gpuErrors: [...gpuErrors],
         cameraAutoSpin: false
       };
+    },
+    async applyXenobiologyPreset(presetId) {
+      const preset = XENOBIOLOGY_PLANET_PRESETS.find((p) => p.id === presetId);
+      if (!preset) return null;
+      await applyXenobiologyProfile(deriveXenobiologyProfile(preset), { targetMode: preset.recommendedMode });
+      return api.getState();
     },
     async selectMode(modeId, customSeq = null) { await selectMode(modeId, customSeq); return api.getState(); },
     setParams(patch = {}) {
@@ -1116,17 +1225,21 @@ export async function mountLifeLabDemo() {
         if ('memEpsHp' in patch) { el('sl-mem-eps').value = String(params.memEpsHp); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); activeSession?.setHydrophobicCoupling?.(params.memEpsHp); }
         if ('memTempK' in patch) { el('sl-mem-temp').value = String(params.memTempK); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; activeSession?.setTemperatureK?.(params.memTempK); }
         if ('memOsmotic' in patch) { el('sl-mem-osm').value = String(params.memOsmotic); el('val-mem-osm').textContent = params.memOsmotic.toFixed(2); activeSession?.setOsmoticPressure?.(params.memOsmotic); }
+        if ('memClipZ' in patch && el('sl-mem-clip')) { el('sl-mem-clip').value = String(params.memClipZ); el('val-mem-clip').textContent = params.memClipZ >= 7.8 ? 'Full' : `${params.memClipZ.toFixed(1)} Å`; renderCurrentScene(); }
       } else if (currentLayer === 'fold') {
         if ('foldTempK' in patch) { el('sl-fold-temp').value = String(params.foldTempK); el('val-fold-temp').textContent = `${Math.round(params.foldTempK)} K`; activeSession?.setTemperatureK?.(params.foldTempK); }
-        if ('foldEpsHp' in patch) activeSession?.setHydrophobicCoupling?.(params.foldEpsHp);
-        if ('foldEpsHb' in patch) activeSession?.setHBondStrength?.(params.foldEpsHb);
+        if ('foldEpsHp' in patch) { el('sl-fold-eps').value = String(params.foldEpsHp); el('val-fold-eps').textContent = params.foldEpsHp.toFixed(2); activeSession?.setHydrophobicCoupling?.(params.foldEpsHp); }
+        if ('foldEpsHb' in patch) { el('sl-fold-hb').value = String(params.foldEpsHb); el('val-fold-hb').textContent = params.foldEpsHb.toFixed(2); activeSession?.setHBondStrength?.(params.foldEpsHb); }
       } else if (currentLayer === 'evo') {
         if ('evoMu' in patch) { el('sl-evo-mu').value = String(params.evoMu); el('val-evo-mu').textContent = params.evoMu.toFixed(3); activeSession?.setMutationRateMu?.(params.evoMu); }
-        if ('evoBeta' in patch) activeSession?.setSelectionBeta?.(params.evoBeta);
+        if ('evoBeta' in patch) { el('sl-evo-beta').value = String(params.evoBeta); el('val-evo-beta').textContent = params.evoBeta.toFixed(2); activeSession?.setSelectionBeta?.(params.evoBeta); }
       } else if (currentLayer === 'hh') {
         if ('hhGNa' in patch) { el('sl-hh-gna').value = String(params.hhGNa); el('val-hh-gna').textContent = `${Math.round(params.hhGNa)} mS`; activeSession?.setGNa?.(params.hhGNa); }
-        if ('hhGK' in patch) activeSession?.setGK?.(params.hhGK);
+        if ('hhGK' in patch) { el('sl-hh-gk').value = String(params.hhGK); el('val-hh-gk').textContent = `${Math.round(params.hhGK)} mS`; activeSession?.setGK?.(params.hhGK); }
         if ('hhDeltaPsi' in patch || 'hhDeltaPh' in patch || 'hhUncouplerLeak' in patch) {
+          if ('hhDeltaPsi' in patch) { el('sl-hh-psi').value = String(params.hhDeltaPsi); el('val-hh-psi').textContent = `${Math.round(params.hhDeltaPsi)} mV`; }
+          if ('hhDeltaPh' in patch) { el('sl-hh-dph').value = String(params.hhDeltaPh); el('val-hh-dph').textContent = params.hhDeltaPh.toFixed(2); }
+          if ('hhUncouplerLeak' in patch) { el('sl-hh-leak').value = String(params.hhUncouplerLeak); el('val-hh-leak').textContent = params.hhUncouplerLeak.toFixed(2); }
           activeSession?.setChemiosmosis?.({ deltaPsiMv: params.hhDeltaPsi, deltaPh: params.hhDeltaPh, uncouplerLeak: params.hhUncouplerLeak });
         }
       } else if (currentLayer === 'morph') {

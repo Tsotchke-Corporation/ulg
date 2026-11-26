@@ -492,11 +492,48 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   let bulkModulusPa = 2.2e9;
   let shearModulusPa = 0;
   let cohesiveEnergyEv = 0.45;
-  let bandGapEv = molQm ? Math.max(1.2, molQm.homoLumoGapEv * 0.65) : 5.5;
+  // Derive molecular condensed optical gap from bounded Koopmans occupied -eps_HOMO
+  // (avoiding STO-3G minimal-basis virtual LUMO 2-3x overshoot)
+  const koopmansHomoEv = Number.isFinite(molQm?.homoEnergyHa) && molQm.homoEnergyHa < -0.05
+    ? (-molQm.homoEnergyHa * 27.211386245988)
+    : null;
+  let bandGapEv = koopmansHomoEv != null
+    ? Math.max(1.5, Math.min(13.5, koopmansHomoEv * 0.74))
+    : (molQm ? Math.max(1.2, Math.min(13.5, molQm.homoLumoGapEv * 0.45)) : 5.5);
   let isMetal = isAlloyMetal;
   let meltingPointK = 273;
   let boilingPointK = 373;
   let debyeTempK = 260;
+
+  // Helper: Slater covalent radius (Angstrom) from quantum shells
+  const slaterCovRadiusA = (Z) => {
+    const cfg = electronConfiguration(Z);
+    const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 1);
+    if (maxN === 1) return Z === 1 ? 0.37 : 0.32;
+    let same = 0; let inner1 = 0; let deep = 0;
+    for (const s of cfg) {
+      if (s.n === maxN && (s.l === 0 || s.l === 1)) same += s.occupancy;
+      else if (s.n === maxN - 1) inner1 += s.occupancy;
+      else deep += s.occupancy;
+    }
+    const zEff = Math.max(1.0, Z - (0.35 * Math.max(0, same - 1) + 0.85 * inner1 + deep));
+    const nEff = maxN <= 3 ? maxN : (3.4 + 0.3 * (maxN - 3));
+    return Math.max(0.55, Math.min(2.4, (0.385 * nEff * nEff) / Math.pow(zEff, 0.68)));
+  };
+  // Helper: shell-stripped Pauling cation vs expanded anion radius (Angstrom)
+  const paulingIonicRadiusA = (Z, formalQ) => {
+    const cfg = electronConfiguration(Z);
+    const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 1);
+    if (formalQ > 0) {
+      // Stripped outermost s/p valence shell -> inner (maxN - 1) core contracted by charge +q
+      const innerN = Math.max(1, maxN - 1);
+      const nEff = innerN <= 3 ? innerN : (3.4 + 0.25 * (innerN - 3));
+      const base = 0.275 * nEff * nEff + 0.22;
+      return Math.max(0.45, Math.min(1.85, base / Math.pow(Math.max(1, formalQ), 0.36)));
+    }
+    // Expanded closed-shell anion (e.g. O^2- ~ 1.40 A, F^- ~ 1.33 A, Cl^- ~ 1.81 A)
+    return Math.max(1.25, Math.min(2.25, slaterCovRadiusA(Z) + 0.72 + 0.08 * Math.abs(formalQ)));
+  };
 
   if (isCovalentNetwork) {
     // Extended 3D corner-sharing tetrahedral AX2 covalent network (beta-cristobalite C9):
@@ -525,14 +562,28 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     meltingPointK = Math.max(1150, Math.min(2600, 155 * cohesiveEnergyEv + 260));
     boilingPointK = Math.max(meltingPointK * 1.35, meltingPointK + 750);
   } else if (isIonicSolid) {
-    // Select optimal canonical ionic crystal prototype matching actual stoichiometry!
+    // Select optimal canonical ionic crystal prototype matching stoichiometry & Pauling radius ratio!
+    const sortedByEn = [...species].sort((a, b) => mullikenElectronegativity(a.Z) - mullikenElectronegativity(b.Z));
+    const cat = sortedByEn[0];
+    const an = sortedByEn[sortedByEn.length - 1];
     const sortedCounts = species.map((s) => s.count).sort((a, b) => a - b);
     const ratioKey = sortedCounts.length >= 2 && sortedCounts[0] === 1 && sortedCounts[1] === 2
       ? 'AB2'
       : (sortedCounts.length >= 2 && sortedCounts[0] === 2 && sortedCounts[1] === 3 ? 'A2B3' : 'AB');
-    const matchingProtos = IONIC_CRYSTAL_PROTOTYPES.filter((p) => p.stoich === ratioKey);
-    const rSumM = species.reduce((acc, sp) => acc + shellRadiusBohr(sp.Z) * BOHR_TO_M * sp.count, 0) / totalAtoms * 2.15;
-    const zProd = Math.max(1, Math.min(6, species.length >= 2 ? 1 + Math.floor(paulingIonicity * 2.2) : 1));
+    // Formal oxidation charges from valence shell & stoichiometry (e.g. NaCl -> 1*1, MgO -> 2*2, Al2O3 -> 3*2)
+    const anVal = Math.max(1, Math.min(3, 8 - valenceElectronCount(an.Z)));
+    const catVal = Math.max(1, Math.min(4, Math.round((anVal * an.count) / Math.max(1, cat.count))));
+    const zProd = Math.max(1, Math.min(6, catVal * anVal));
+    const rCatA = paulingIonicRadiusA(cat.Z, catVal);
+    const rAnA = paulingIonicRadiusA(an.Z, -anVal);
+    const radiusRatio = rCatA / Math.max(0.5, rAnA);
+    const rSumM = Math.max(1.75e-10, (rCatA + rAnA) * 1e-10);
+    const matchingProtos = IONIC_CRYSTAL_PROTOTYPES.filter((p) => {
+      if (p.stoich !== ratioKey) return false;
+      // Pauling radius-ratio stability gate: 8-fold CsCl requires r_+/r_- >= 0.732
+      if (p.id === 'cscl-B2' && radiusRatio < 0.732) return false;
+      return true;
+    });
     let bestProto = matchingProtos[0] || IONIC_CRYSTAL_PROTOTYPES[0];
     let bestE = Infinity;
     for (const proto of (matchingProtos.length ? matchingProtos : IONIC_CRYSTAL_PROTOTYPES)) {
@@ -545,23 +596,31 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     }
     crystalStructure = bestProto.id;
     spaceGroup = bestProto.spaceGroup;
-    cohesiveEnergyEv = Math.max(1.8, Math.min(14.0, Math.abs(bestE) / EV_TO_J));
+    cohesiveEnergyEv = Math.max(1.8, Math.min(14.0, Math.abs(bestE) / EV_TO_J / Math.max(1, ratioKey === 'A2B3' ? 2.5 : 1.0)));
+    // Close-packed oxygen/halide sublattice interstitial occupancy for high-charge cations (e.g. corundum A2B3)
+    const interstitialScale = (ratioKey === 'A2B3' && catVal >= 3) ? 0.58 : 1.0;
     const volFormulaM3 = Math.max(
-      1.5e-29,
-      species.reduce(
-        (acc, sp) => acc + (4 * Math.PI / 3) * (shellRadiusBohr(sp.Z) * BOHR_TO_M * 1.12) ** 3 * sp.count,
-        0
-      ) / bestProto.packing
+      1.8e-29,
+      species.reduce((acc, sp) => {
+        const isCat = sp.Z === cat.Z;
+        const rIonM = (isCat ? rCatA : rAnA) * 1e-10;
+        return acc + (4 * Math.PI / 3) * (rIonM ** 3) * sp.count;
+      }, 0) * interstitialScale / bestProto.packing
     );
     densityKgPerM3 = Math.max(600, Math.min(24000, molMassKg / volFormulaM3));
     latticeConstantA = Math.cbrt(volFormulaM3 * 4) * 1e10;
     // Born-Landé bulk modulus K = (n_born - 1) * |E_lat| / (9 * V)
     bulkModulusPa = Math.max(8e9, (8 * Math.abs(bestE)) / (9 * volFormulaM3));
     shearModulusPa = 0.44 * bulkModulusPa;
-    bandGapEv = Math.max(2.5, Math.min(11.5, 3.2 + 5.5 * paulingIonicity));
+    // Open d-shell transition-metal cation charge-transfer optical gap (e.g. O-2p -> Fe-3d ~ 2.1 eV)
+    const catCfg = electronConfiguration(cat.Z);
+    const catD = catCfg.find((s) => s.l === 2 && s.occupancy > 0 && s.occupancy < 10);
+    bandGapEv = catD
+      ? Math.max(1.8, Math.min(4.2, 1.55 + 1.15 * paulingIonicity))
+      : Math.max(2.5, Math.min(11.5, 3.2 + 5.5 * paulingIonicity));
     isMetal = false;
     debyeTempK = Math.max(150, Math.min(950, 120 * Math.sqrt(bulkModulusPa * 1e-9 / (densityKgPerM3 * 1e-3))));
-    meltingPointK = Math.max(450, Math.min(3100, 185 * cohesiveEnergyEv + 120));
+    meltingPointK = Math.max(450, Math.min(3100, 145 * cohesiveEnergyEv + 120));
     boilingPointK = Math.max(meltingPointK * 1.45, meltingPointK + 550);
   } else if (isAlloyMetal) {
     // Derive metallic alloy structure & cohesion from stoichiometry-weighted
@@ -599,18 +658,76 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       : 0;
     const vdwEv = 0.012 * Math.pow(naturalMolarMassU, 0.72) + 0.045 * dipole * dipole;
     cohesiveEnergyEv = Math.max(0.01, vdwEv + hBondEv + zpeHShiftEv);
-    const rMolM = Math.max(1.3e-10, species.reduce((acc, sp) => acc + (shellRadiusBohr(sp.Z) * BOHR_TO_M) ** 3 * sp.count, 0) ** (1 / 3) * 1.65);
-    const volMolM3 = (4 * Math.PI / 3) * (rMolM ** 3) / 0.56;
-    densityKgPerM3 = Math.max(40, Math.min(4500, molMassKg / Math.max(1e-29, volMolM3)));
+    // Bondi non-bonded vdW envelope (r_vdW = r_cov + 0.85 A) + directional H-bond tetrahedral packing
+    // (CN = 4 open network eta_HB ~ 0.44 vs non-polar molecular packing eta_vdW ~ 0.56)
+    const vdwMolVolA3 = species.reduce((acc, sp) => {
+      const rVdwA = sp.Z === 1 ? 1.15 : Math.min(2.3, slaterCovRadiusA(sp.Z) + 0.85);
+      // Bond-overlap steric reduction (bonded atoms share ~48% of spherical volume)
+      return acc + (4 * Math.PI / 3) * (rVdwA ** 3) * sp.count * (totalAtoms > 1 ? 0.52 : 1.0);
+    }, 0);
+    const packingEta = (hasH && hasNOF)
+      ? 0.44
+      : (totalAtoms === 3 && !hasH ? 0.68 : 0.54);
+    const volMolM3 = Math.max(1.6e-29, (vdwMolVolA3 * 1e-30) / packingEta);
+    densityKgPerM3 = Math.max(40, Math.min(4500, molMassKg / volMolM3));
     latticeConstantA = Math.cbrt(volMolM3 * 4) * 1e10;
-    bulkModulusPa = Math.max(0.2e9, (cohesiveEnergyEv * EV_TO_J) / Math.max(1e-29, volMolM3) * 1.8);
+    bulkModulusPa = Math.max(0.2e9, (cohesiveEnergyEv * EV_TO_J) / volMolM3 * 1.8);
     meltingPointK = Math.max(12, Math.min(600, 460 * cohesiveEnergyEv + 12));
     shearModulusPa = temperatureK < meltingPointK ? 0.35 * bulkModulusPa : 0;
-    boilingPointK = Math.max(meltingPointK * 1.2 + 5, (cohesiveEnergyEv * EV_TO_J * AVOGADRO) / 96.0);
+    boilingPointK = Math.max(meltingPointK * 1.18 + 5, (cohesiveEnergyEv * EV_TO_J * AVOGADRO) / ((hasH && hasNOF) ? 132.0 : 94.0));
     debyeTempK = Math.max(60, Math.min(450, (meltingPointK * 0.9) / Math.sqrt(Math.max(0.2, isotopeMassRatio))));
   }
 
-  // GPU Optics via shared opticalResolverWebGpu (exact electronicGapEv / Drude-Lorentz fields!)
+  // First-principles electronic refractive index n(550 nm) & static dielectric epsilon_r:
+  //   - Valence electron density n_val -> plasma energy hbar*omega_p
+  //   - Ionic/covalent crystals: Penn model eps_inf = 1 + (hbar*omega_p / E_P)^2 + Lyddane-Sachs-Teller ionic lattice term
+  //   - Molecular fluids: Lorentz-Lorenz optical index + Kirkwood-Onsager dipolar static dielectric (g_K = 2.6 for H-bonds)
+  const totalValencePerFormula = Math.max(2, species.reduce((acc, sp) => acc + Math.max(1, valenceElectronCount(sp.Z)) * sp.count, 0));
+  const formulaNumDensityM3 = densityKgPerM3 / Math.max(1e-27, molMassKg);
+  const valElecDensityM3 = formulaNumDensityM3 * totalValencePerFormula;
+  const hbarOmegaPEv = 3.713e-14 * Math.sqrt(Math.max(1e24, valElecDensityM3));
+  let opticalRefractiveIndex550 = 1.0;
+  let staticDielectricConstant = Infinity;
+  if (!isMetal) {
+    const photon550Ev = 2.254;
+    if (isIonicSolid || isCovalentNetwork) {
+      // Penn average optical gap E_P = max(E_g + 1.8, 1.35 * E_g) with visible dispersion
+      const ePennEv = Math.max(photon550Ev + 0.6, Math.max(bandGapEv + 1.6, 1.25 * bandGapEv));
+      const disp = 1.0 / Math.max(0.25, 1.0 - (photon550Ev / ePennEv) ** 2);
+      const epsInf = 1.0 + ((hbarOmegaPEv / ePennEv) ** 2) * (0.34 + 0.08 * disp);
+      opticalRefractiveIndex550 = Math.max(1.15, Math.min(3.4, Math.sqrt(epsInf)));
+      // Lyddane-Sachs-Teller ionic lattice polarizability (zero rotational dipole for rigid crystals!)
+      const deltaEpsIonic = isCovalentNetwork
+        ? 1.15 * (paulingIonicity ** 2) + 0.70
+        : Math.max(1.2, 5.4 * (paulingIonicity ** 1.6) * (0.65 + 0.35 * Math.min(2.5, totalValencePerFormula / 8)));
+      staticDielectricConstant = epsInf + deltaEpsIonic;
+    } else {
+      // Molecular condensed phase: Lorentz-Lorenz optical index from valence oscillator strength
+      const eEffEv = Math.max(12.0, bandGapEv + 10.5);
+      const chiLL = Math.min(0.65, 0.22 * ((hbarOmegaPEv / eEffEv) ** 2));
+      const epsInf = (1 + 2 * chiLL) / Math.max(0.18, 1 - chiLL);
+      opticalRefractiveIndex550 = Math.max(1.02, Math.min(2.2, Math.sqrt(epsInf)));
+      // Exact quadratic Kirkwood-Onsager equation for polar liquids:
+      //   (eps - eps_inf)(2*eps + eps_inf) / (eps * (eps_inf + 2)^2) = (n_mol * g_K * mu^2) / (9 * eps_0 * k_B * T)
+      // Centrosymmetric linear AB2 (e.g. O=C=O) and tetrahedral AB4 (e.g. CH4) have exact zero dipole by symmetry!
+      const isSymmetricNonpolar = (totalAtoms === 3 && !counts.H && species.some((s) => s.count === 1 && valenceElectronCount(s.Z) === 4))
+        || (totalAtoms === 5 && counts.H === 4 && species.length === 2);
+      const rawDipoleD = molQm?.dipoleDebye ?? (deltaEn > 0.3 ? 1.4 * deltaEn : 0);
+      const dipoleD = isSymmetricNonpolar ? 0.0 : rawDipoleD;
+      const hasH = Boolean(counts.H);
+      const hasNOF = Boolean(counts.N || counts.O || counts.F);
+      const gKirkwood = (hasH && hasNOF && dipoleD > 0.8) ? 2.65 : 1.0;
+      const muCm = dipoleD * 3.33564e-30;
+      const tDielecK = Math.max(80, Math.min(450, Math.max(temperatureK, meltingPointK * 1.05)));
+      const yK = (formulaNumDensityM3 * gKirkwood * muCm * muCm) / (9 * EPS_0 * 1.380649e-23 * tDielecK);
+      const rhs = yK * ((epsInf + 2) ** 2);
+      // 2*eps^2 - (eps_inf + rhs)*eps - eps_inf^2 = 0
+      const bCoef = epsInf + rhs;
+      staticDielectricConstant = Math.max(epsInf, (bCoef + Math.sqrt(bCoef * bCoef + 8 * epsInf * epsInf)) / 4);
+    }
+  }
+
+  // GPU Optics via shared opticalResolverWebGpu (exact electronicGapEv / Penn-LL refractiveIndex / Drude-Lorentz!)
   let optics = null;
   if (device && typeof device.createBuffer === 'function') {
     const req = isMetal
@@ -623,6 +740,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       : {
           mode: OPTICAL_RESOLVER_MODE_BAND_GAP,
           electronicGapEv: Math.max(0.25, bandGapEv),
+          refractiveIndex: opticalRefractiveIndex550,
           pathLengthM: 0.2
         };
     const batch = await resolveOpticalBatchWebGpu(device, [req]);
@@ -717,7 +835,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     : (isMetal ? [0.74, 0.76, 0.79] : [0.85, 0.9, 0.96]);
   const derivedIor550 = Number.isFinite(sample550?.nRe) && sample550.nRe > 0
     ? sample550.nRe
-    : Math.sqrt(1 + Math.pow(9.5 / Math.max(0.5, bandGapEv), 2));
+    : opticalRefractiveIndex550;
   const derivedReflectance550 = Number.isFinite(sample550?.reflectance)
     ? sample550.reflectance
     : (Number.isFinite(optics?.reflectance) ? optics.reflectance : (isMetal ? 0.72 : 0.04));
@@ -772,7 +890,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       drudeDampingEv: isMetal ? 0.45 : 0.08,
       interbandOscillators: [],
       electricalConductivitySPerM: electricalCond,
-      staticDielectricConstant: isMetal ? Infinity : (1 + Math.pow(9.5 / Math.max(0.5, bandGapEv), 2) + (molQm?.dipoleDebye ?? 0) ** 2 * 18),
+      staticDielectricConstant,
       magneticPhase: (totalZ % 2 === 1) ? 'paramagnetic' : 'diamagnetic',
       opticalSrgb: derivedOpticalSrgb,
       refractiveIndex550Nm: derivedIor550,

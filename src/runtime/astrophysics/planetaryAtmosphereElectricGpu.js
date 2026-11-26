@@ -313,12 +313,14 @@ struct AtmoCell {
   chem: vec4<f32>,
 };
 
-// Electromagnetic & visual-ready state (2 vec4 = 32 B per cell) — directly bound by LIT_SPHERE_WGSL!
-//   em0: vec4(rho_charge, phi_elec, e_mag_norm, lightning_flash)
-//   vis: vec4(cloud_density, dust_density, lightning_glow, aurora_glow)
+// Electromagnetic, visual-ready, & live CFD flow state (3 vec4 = 48 B per cell) — directly bound by LIT_SPHERE_WGSL!
+//   em0:      vec4(rho_charge, phi_elec, e_mag_norm, lightning_flash)
+//   vis:      vec4(cloud_density, dust_density, lightning_glow, aurora_envelope)
+//   cfd_flow: vec4(u_east, v_north, vorticity, t_anom)
 struct EmVisCell {
   em0: vec4<f32>,
   vis: vec4<f32>,
+  cfd_flow: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: AtmoParams;
@@ -395,6 +397,7 @@ fn sample_em_bilin(fx: f32, fy: f32) -> EmVisCell {
   var out: EmVisCell;
   out.em0 = mix(mix(c00.em0, c10.em0, tx), mix(c01.em0, c11.em0, tx), ty);
   out.vis = mix(mix(c00.vis, c10.vis, tx), mix(c01.vis, c11.vis, tx), ty);
+  out.cfd_flow = mix(mix(c00.cfd_flow, c10.cfd_flow, tx), mix(c01.cfd_flow, c11.cfd_flow, tx), ty);
   return out;
 }
 
@@ -452,17 +455,20 @@ fn atmo_step_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let rot_scale = clamp((params.omega_rot / 7.2921e-5) * (params.radius_m / 6.371e6), 0.05, 14.0);
   let f_rot = rot_scale * 2.2 * sin_lat;
 
-  // Physical Hadley / Ferrel / Polar 3-Cell Meridional Circulation (continuous function of Rossby/rotation number!):
-  //   - Fast/Earth-like rotator (rot_scale >= 0.35): Trade easterlies at equator, Ferrel westerlies at mid-latitudes,
-  //     ITCZ moist convergence near lat=0, clear subtropical descending dry belt near |lat|~26 deg, baroclinic storm tracks at |lat|~48 deg!
-  //   - Slow rotator (rot_scale < 0.35): single global Hadley cell!
+  // Physical Hadley / Ferrel / Polar / Multi-Jet Meridional Circulation (continuous function of Rossby/rotation number!):
+  //   - Slow rotator (rot_scale < 0.35): single global Hadley super-rotating cell
+  //   - Earth-like rotator (0.35..2.0): 3-cell Trade easterlies + Ferrel mid-lat westerlies
+  //   - Fast-rotating gas/ice giant (rot_scale > 2.0): emergent alternating Rhines zonal jets (cos(n_jets * lat))!
   let three_cell_w = smoothstep(0.18, 0.55, rot_scale);
+  let multi_jet_w = smoothstep(1.8, 5.5, rot_scale);
+  let earth_zonal = 0.58 * sin(2.0 * lat) * sin(2.0 * lat) - 0.34 * (raw_cos * raw_cos * raw_cos);
+  let giant_zonal = (0.72 * cos(lat * 10.0) + 0.36 * sin(lat * 18.0)) * raw_cos;
   let u_target_zonal = mix(
-    0.25 * raw_cos,
-    0.58 * sin(2.0 * lat) * sin(2.0 * lat) - 0.34 * (raw_cos * raw_cos * raw_cos),
-    three_cell_w
+    mix(0.28 * raw_cos, earth_zonal, three_cell_w),
+    giant_zonal,
+    multi_jet_w
   );
-  let p_grad_u = -dh_dx + (u_target_zonal - adv.flow.x) * 0.22;
+  let p_grad_u = -dh_dx + (u_target_zonal - adv.flow.x) * mix(0.24, 0.38, multi_jet_w);
   let p_grad_v = -dh_dy;
 
   // Exact implicit Coriolis rotation (energy-conserving, unconditionally stable for ANY f_rot!)
@@ -619,16 +625,16 @@ fn atmo_paschen_breakdown(@builtin(global_invocation_id) gid: vec3<u32>) {
     rho_q = rho_q * 0.18;
   }
 
-  // Core-geodynamo magnetic cusp polar auroral oval driven by solar wind pressure
-  // Crisp narrow auroral ring/oval around open magnetic cusp latitude (NOT a solid polar snowcap!)
-  let aur_d = (abs(lat) - params.aurora_lat_rad) / 0.062;
-  let lon = ((f32(ix) + 0.5) / f32(params.width)) * TWO_PI;
-  let curtain = 0.55 + 0.45 * sin(lon * 6.0 + f32(params.step_index) * 0.08) * cos(lon * 4.0 - f32(params.step_index) * 0.05);
-  let aurora = params.aurora_strength * exp(-aur_d * aur_d) * curtain * clamp(params.sun_dir.w * 0.45, 0.25, 1.4);
+  // Core-geodynamo magnetic cusp polar auroral oval driven by solar wind pressure:
+  // Store smooth latitudinal envelope in vis.w; crisp full-resolution 3D Birkeland filament curtains
+  // are evaluated per-fragment in LIT_SPHERE_WGSL (eliminating coarse 128x64 beaded grid aliasing!).
+  let aur_d = (abs(lat) - params.aurora_lat_rad) / 0.068;
+  let aurora = params.aurora_strength * exp(-aur_d * aur_d) * clamp(params.sun_dir.w * 0.48, 0.28, 1.45);
 
   e.em0 = vec4<f32>(rho_q, e.em0.y, e_mag, flash);
-  // Visual-ready zero-copy GPU payload read directly by LIT_SPHERE_WGSL!
+  // Visual-ready zero-copy GPU payload + live spherical CFD velocity/vorticity read directly by LIT_SPHERE_WGSL!
   e.vis = vec4<f32>(a.chem.x, a.chem.y, flash, aurora);
+  e.cfd_flow = vec4<f32>(a.flow.x, a.flow.y, a.chem.z, a.flow.w);
   em_dst[idx] = e;
 }
 
@@ -725,7 +731,9 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
   const p2 = rand() * Math.PI * 2;
   const p3 = rand() * Math.PI * 2;
   const atmoInit = new Float32Array(total * 8);
-  const emInit = new Float32Array(total * 8);
+  const emInit = new Float32Array(total * 12);
+  const rotScaleInit = Math.max(0.05, Math.min(14.0, (phys.rotationOmegaRadS / 7.2921e-5) * (phys.radiusM / 6.371e6)));
+  const multiJetInit = Math.max(0, Math.min(1, (rotScaleInit - 1.8) / 3.7));
   for (let iy = 0; iy < H; iy += 1) {
     const lat = (0.5 - (iy + 0.5) / H) * Math.PI;
     const absLat = Math.abs(lat);
@@ -736,12 +744,16 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
     for (let ix = 0; ix < W; ix += 1) {
       const lon = ((ix + 0.5) / W - 0.5) * 2 * Math.PI;
       const o = (iy * W + ix) * 8;
-      // Smooth baroclinic zonal jet + multi-mode tilted Rossby waves (natural swirling cyclones!)
-      const jet = 0.52 * Math.sin(2 * lat) * Math.sin(2 * lat) - 0.30 * Math.pow(Math.max(0, cosL), 3);
-      const rossby = 0.14 * Math.sin(3 * lon + 2.4 * lat + p1) + 0.10 * Math.cos(5 * lon - 3.2 * lat + p2);
+      const eo = (iy * W + ix) * 12;
+      // Smooth baroclinic zonal jet + multi-mode tilted Rossby waves + Rhines alternating jets on fast rotators!
+      const earthJet = 0.54 * Math.sin(2 * lat) * Math.sin(2 * lat) - 0.32 * Math.pow(Math.max(0, cosL), 3);
+      const giantJet = (0.76 * Math.cos(10 * lat) + 0.36 * Math.sin(18 * lat)) * cosL;
+      const jet = earthJet * (1 - multiJetInit) + giantJet * multiJetInit;
+      const rossby = 0.22 * Math.sin(3 * lon + 2.6 * lat + p1) + 0.15 * Math.cos(5 * lon - 3.4 * lat + p2);
+      const vMerid = 0.18 * Math.cos(4 * lon + 1.8 * lat + p2) + 0.10 * Math.sin(6 * lon - 2.4 * lat + p3);
       atmoInit[o + 0] = jet + rossby;
-      atmoInit[o + 1] = 0.11 * Math.cos(4 * lon + 1.5 * lat + p2) + 0.06 * Math.sin(6 * lon - 2.0 * lat + p3);
-      atmoInit[o + 2] = 0.20 * Math.sin(3 * lon + lat + p1) * cosL;
+      atmoInit[o + 1] = vMerid;
+      atmoInit[o + 2] = 0.24 * Math.sin(3 * lon + lat + p1) * cosL;
       atmoInit[o + 3] = 0.70 * cosL;
       // Coherent synoptic cloud cover: wispy ITCZ wave + mid-latitude baroclinic frontal bands, clear subtropics!
       const waveCloud = 0.5 + 0.32 * Math.sin(3 * lon - 4.2 * lat + p1) + 0.18 * Math.cos(6 * lon + 5.0 * lat + p3);
@@ -749,11 +761,15 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
       const synopDust = Math.max(0.04, Math.min(0.82, 0.28 + 0.30 * (0.5 + 0.5 * Math.sin(2 * lon + 2.2 * lat + p2)) * cosL));
       atmoInit[o + 4] = phys.volatileCloudFrac * synopCloud;
       atmoInit[o + 5] = phys.dustAvailability * synopDust;
-      atmoInit[o + 6] = 0.0;
+      atmoInit[o + 6] = 0.35 * Math.cos(3 * lon + 2.6 * lat + p1) * cosL;
       atmoInit[o + 7] = 0.0;
 
-      emInit[o + 4] = atmoInit[o + 4];
-      emInit[o + 5] = atmoInit[o + 5];
+      emInit[eo + 4] = atmoInit[o + 4];
+      emInit[eo + 5] = atmoInit[o + 5];
+      emInit[eo + 8] = atmoInit[o + 0];
+      emInit[eo + 9] = atmoInit[o + 1];
+      emInit[eo + 10] = atmoInit[o + 6];
+      emInit[eo + 11] = atmoInit[o + 3];
     }
   }
 
@@ -766,7 +782,7 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
     computeBufferBinding(5, 'storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-planetary-atmo-em-${entryPoint}.v2-hadley`,
+    cacheKey: `ulg-planetary-atmo-em-${entryPoint}.v3-cfd-flow`,
     label: `${label}-${entryPoint}`,
     code: planetaryAtmoElectricWgsl,
     entryPoint,
@@ -1009,9 +1025,9 @@ export function registerPlanetaryAtmosphereElectricModule(registry) {
       tensorId: 'planetary-em-vis',
       dtype: 'f32',
       layout: 'interleaved',
-      strideElements: 8,
-      strideBytes: 32,
-      fields: ['rhoQ', 'phiE', 'eMag', 'flash', 'cloud', 'dust', 'lightningGlow', 'auroraGlow']
+      strideElements: 12,
+      strideBytes: 48,
+      fields: ['rhoQ', 'phiE', 'eMag', 'flash', 'cloud', 'dust', 'lightningGlow', 'auroraEnvelope', 'uEast', 'vNorth', 'vorticity', 'tAnom']
     },
     scaleRangeM: [1e4, 1e8],
     async stepCapsule(capsule, { createSimulationArtifact, device }) {

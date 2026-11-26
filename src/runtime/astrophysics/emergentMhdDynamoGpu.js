@@ -179,6 +179,11 @@ fn sample_smooth_vel(ix: i32, iy: i32, iz: i32, n: i32) -> vec3<f32> {
   return v_sum / (w0 + wxp + wxm + wyp + wym + wzp + wzm);
 }
 
+fn clamp_vel_cfl(v: vec3<f32>, v_lim: f32) -> vec3<f32> {
+  let vm = length(v);
+  return select(v, v * (v_lim / max(1e-6, vm)), vm > v_lim);
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn step_dynamo_bfield(@builtin(global_invocation_id) gid: vec3<u32>) {
   let n = i32(params.grid_n);
@@ -204,7 +209,7 @@ fn step_dynamo_bfield(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Open-boundary vacuum taper near outer box wall so streamlines exit smoothly
   let edge_d = max(abs(pos.x), max(abs(pos.y), abs(pos.z))) / half;
   if (edge_d > 0.94) {
-    b_dst[idx] = b_src[idx] * 0.92;
+    b_dst[idx] = b_src[idx] * 0.90;
     return;
   }
 
@@ -216,12 +221,27 @@ fn step_dynamo_bfield(@builtin(global_invocation_id) gid: vec3<u32>) {
   let bzp = b_src[cidx_clamp(ix, iy, iz + 1, n)];
   let bzm = b_src[cidx_clamp(ix, iy, iz - 1, n)];
 
-  let vxp = sample_smooth_vel(ix + 1, iy, iz, n);
-  let vxm = sample_smooth_vel(ix - 1, iy, iz, n);
-  let vyp = sample_smooth_vel(ix, iy + 1, iz, n);
-  let vym = sample_smooth_vel(ix, iy - 1, iz, n);
-  let vzp = sample_smooth_vel(ix, iy, iz + 1, n);
-  let vzm = sample_smooth_vel(ix, iy, iz - 1, n);
+  // Enforce advection CFL bound on sampled velocities so high-dispersion stars never destabilize curl(v x B)
+  let v_lim = 0.26 * dx / max(1e-4, dt);
+  let v0  = clamp_vel_cfl(sample_smooth_vel(ix, iy, iz, n), v_lim);
+  let vxp = clamp_vel_cfl(sample_smooth_vel(ix + 1, iy, iz, n), v_lim);
+  let vxm = clamp_vel_cfl(sample_smooth_vel(ix - 1, iy, iz, n), v_lim);
+  let vyp = clamp_vel_cfl(sample_smooth_vel(ix, iy + 1, iz, n), v_lim);
+  let vym = clamp_vel_cfl(sample_smooth_vel(ix, iy - 1, iz, n), v_lim);
+  let vzp = clamp_vel_cfl(sample_smooth_vel(ix, iy, iz + 1, n), v_lim);
+  let vzm = clamp_vel_cfl(sample_smooth_vel(ix, iy, iz - 1, n), v_lim);
+
+  // Local Rusanov / Lax-Friedrichs upwind magnetic diffusivity guarantees cell Rm = |v|*dx/eta_eff < 2.0,
+  // completely eliminating FTCS odd-even checkerboard ("squiggly coil") instabilities!
+  let v_loc = max(
+    length(v0),
+    max(
+      max(length(vxp), length(vxm)),
+      max(max(length(vyp), length(vym)), max(length(vzp), length(vzm)))
+    )
+  );
+  let eta_cfl_cap = 0.125 * dx * dx / max(1e-4, dt);
+  let eta_eff = min(max(params.eta_res, 0.58 * v_loc * dx), eta_cfl_cap);
 
   // Helical alpha-effect envelope (antisymmetric across equator y=0, dynamically quenched!)
   let r_norm = length(pos) / max(0.5, half * 0.65);
@@ -241,7 +261,7 @@ fn step_dynamo_bfield(@builtin(global_invocation_id) gid: vec3<u32>) {
     (emf_xp.y - emf_xm.y) * inv2dx - (emf_yp.x - emf_ym.x) * inv2dx
   );
 
-  // Resistive + turbulent magnetic diffusivity eta * laplacian(B)
+  // Resistive + Rusanov upwind magnetic diffusivity eta_eff * laplacian(B)
   let lap_b = (bxp.xyz + bxm.xyz + byp.xyz + bym.xyz + bzp.xyz + bzm.xyz - 6.0 * b0.xyz) * invdx2;
   let grad_psi = vec3<f32>(
     (bxp.w - bxm.w) * inv2dx,
@@ -250,17 +270,18 @@ fn step_dynamo_bfield(@builtin(global_invocation_id) gid: vec3<u32>) {
   );
 
   // CFL-safe induction update + dynamical magnetic-buoyancy quenching near saturation
-  let dB = (curl_emf + params.eta_res * lap_b - grad_psi) * dt;
+  let dB = (curl_emf + eta_eff * lap_b - grad_psi) * dt;
   let dB_mag = length(dB);
-  let dB_safe = select(dB, dB * (0.45 * params.b_sat / dB_mag), dB_mag > 0.45 * params.b_sat);
+  let dB_safe = select(dB, dB * (0.28 * params.b_sat / dB_mag), dB_mag > 0.28 * params.b_sat);
   var b_next = b0.xyz + dB_safe;
   let bm = length(b_next);
-  let b_cap = params.b_sat * 3.2;
+  let b_cap = params.b_sat * 2.6;
   if (bm > b_cap) { b_next = b_next * (b_cap / bm); }
 
-  // Dedner GLM divergence cleaning: d(psi)/dt = -c_h^2 div(B) - c_p2 * psi
+  // Dedner GLM divergence cleaning with collocated Laplacian stabilizer (prevents odd-even psi decoupling)
   let div_b = (bxp.x - bxm.x) * inv2dx + (byp.y - bym.y) * inv2dx + (bzp.z - bzm.z) * inv2dx;
-  let psi_next = (b0.w - (params.c_h * params.c_h) * div_b * dt) * exp(-params.c_p2 * dt);
+  let lap_psi = (bxp.w + bxm.w + byp.w + bym.w + bzp.w + bzm.w - 6.0 * b0.w) * 0.06;
+  let psi_next = (b0.w + lap_psi - (params.c_h * params.c_h) * div_b * dt) * exp(-params.c_p2 * dt);
 
   b_dst[idx] = vec4<f32>(b_next, psi_next);
 }
@@ -437,6 +458,30 @@ export function traceEmergent3dBFieldStreamlines({
   const oy = offset[1] || 0;
   const oz = offset[2] || 0;
 
+  // 1-pass divergence-preserving 7-point isotropic filter removes sub-cell Nyquist jitter
+  // while strictly preserving B === 0 in the null limit!
+  const bSmooth = new Float32Array(n * n * n * 4);
+  const clampIdx = (ix, iy, iz) => {
+    const cx = Math.max(0, Math.min(n - 1, ix));
+    const cy = Math.max(0, Math.min(n - 1, iy));
+    const cz = Math.max(0, Math.min(n - 1, iz));
+    return ((cz * n + cy) * n + cx) * 4;
+  };
+  for (let iz = 0; iz < n; iz += 1) {
+    for (let iy = 0; iy < n; iy += 1) {
+      for (let ix = 0; ix < n; ix += 1) {
+        const o0 = clampIdx(ix, iy, iz);
+        const oxp = clampIdx(ix + 1, iy, iz); const oxm = clampIdx(ix - 1, iy, iz);
+        const oyp = clampIdx(ix, iy + 1, iz); const oym = clampIdx(ix, iy - 1, iz);
+        const ozp = clampIdx(ix, iy, iz + 1); const ozm = clampIdx(ix, iy, iz - 1);
+        for (let c = 0; c < 3; c += 1) {
+          const avgNb = (bHost[oxp + c] + bHost[oxm + c] + bHost[oyp + c] + bHost[oym + c] + bHost[ozp + c] + bHost[ozm + c]) / 6.0;
+          bSmooth[o0 + c] = bHost[o0 + c] * 0.50 + avgNb * 0.50;
+        }
+      }
+    }
+  }
+
   const sampleBTrilin = (px, py, pz) => {
     const gx = (px + half) / dx - 0.5;
     const gy = (py + half) / dx - 0.5;
@@ -451,10 +496,10 @@ export function traceEmergent3dBFieldStreamlines({
     const i011 = at(x0, y0 + 1, z0 + 1); const i111 = at(x0 + 1, y0 + 1, z0 + 1);
     const res = [0, 0, 0];
     for (let c = 0; c < 3; c += 1) {
-      const c00 = bHost[i000 + c] * (1 - fx) + bHost[i100 + c] * fx;
-      const c10 = bHost[i010 + c] * (1 - fx) + bHost[i110 + c] * fx;
-      const c01 = bHost[i001 + c] * (1 - fx) + bHost[i101 + c] * fx;
-      const c11 = bHost[i011 + c] * (1 - fx) + bHost[i111 + c] * fx;
+      const c00 = bSmooth[i000 + c] * (1 - fx) + bSmooth[i100 + c] * fx;
+      const c10 = bSmooth[i010 + c] * (1 - fx) + bSmooth[i110 + c] * fx;
+      const c01 = bSmooth[i001 + c] * (1 - fx) + bSmooth[i101 + c] * fx;
+      const c11 = bSmooth[i011 + c] * (1 - fx) + bSmooth[i111 + c] * fx;
       const c0 = c00 * (1 - fy) + c10 * fy;
       const c1 = c01 * (1 - fy) + c11 * fy;
       res[c] = c0 * (1 - fz) + c1 * fz;
@@ -464,22 +509,33 @@ export function traceEmergent3dBFieldStreamlines({
 
   const out = [];
   const lim = half * 0.90;
+  const minSeedB = Math.max(1e-4, refB * 0.08);
+  const minTraceB = Math.max(1e-4, refB * 0.05);
   for (const seed of seedPoints) {
+    const bSeed = sampleBTrilin(seed[0], seed[1], seed[2]);
+    if (Math.hypot(bSeed[0], bSeed[1], bSeed[2]) < minSeedB) continue;
     for (const dirSign of [1, -1]) {
       let x = seed[0]; let y = seed[1]; let z = seed[2];
+      let prevTx = 0; let prevTy = 0; let prevTz = 0;
       for (let st = 0; st < stepsPerDir; st += 1) {
         const b1 = sampleBTrilin(x, y, z);
         const m1 = Math.hypot(b1[0], b1[1], b1[2]);
-        if (m1 < 1e-4) break;
+        if (m1 < minTraceB) break;
         const hx = x + (b1[0] / m1) * dirSign * stepLen * 0.5;
         const hy = y + (b1[1] / m1) * dirSign * stepLen * 0.5;
         const hz = z + (b1[2] / m1) * dirSign * stepLen * 0.5;
         const b2 = sampleBTrilin(hx, hy, hz);
         const m2 = Math.hypot(b2[0], b2[1], b2[2]);
-        if (m2 < 1e-4) break;
-        const nx = x + (b2[0] / m2) * dirSign * stepLen;
-        const ny = y + (b2[1] / m2) * dirSign * stepLen;
-        const nz = z + (b2[2] / m2) * dirSign * stepLen;
+        if (m2 < minTraceB) break;
+        const tx = (b2[0] / m2) * dirSign;
+        const ty = (b2[1] / m2) * dirSign;
+        const tz = (b2[2] / m2) * dirSign;
+        // Stop cleanly at magnetic null reversals (> 75 deg hairpin kink) so streamlines never zig-zag!
+        if (st > 0 && (tx * prevTx + ty * prevTy + tz * prevTz) < 0.25) break;
+        prevTx = tx; prevTy = ty; prevTz = tz;
+        const nx = x + tx * stepLen;
+        const ny = y + ty * stepLen;
+        const nz = z + tz * stepLen;
         if (Math.abs(nx) > lim || Math.abs(ny) > lim || Math.abs(nz) > lim) break;
 
         // Color encodes live emergent toroidal shear / field amplification!
@@ -636,13 +692,13 @@ export function createEmergent3dDynamoFieldWebGpu(device, {
     if (disposed || !particleBuffer || !(particleCount > 0)) return lastTelemetry;
     const nSub = Math.max(1, Math.min(8, Math.trunc(substeps)));
     const dtSafe = Math.max(0.005, Math.min(0.08, Number(dt) || 0.04));
-    const cH = 0.22 * dx / Math.max(1e-4, dtSafe);
+    const cH = 0.16 * dx / Math.max(1e-4, dtSafe);
 
     const ab = new ArrayBuffer(80);
     new Uint32Array(ab, 0, 4).set([n, Math.trunc(particleCount), strideFloats, stepIndex]);
     new Float32Array(ab, 16, 16).set([
       boxSize, dx, dtSafe, etaRes,
-      alphaAmp, cH, 4.2, bSat,
+      alphaAmp, cH, 6.5, bSat,
       velScale, currentB0, geometry === 'stellar' ? 1.0 : 0.0, 0.0,
       centerOffset[0] || 0, centerOffset[1] || 0, centerOffset[2] || 0, 0
     ]);

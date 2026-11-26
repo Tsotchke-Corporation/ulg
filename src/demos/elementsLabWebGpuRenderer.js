@@ -187,8 +187,8 @@ struct VolRenderUniforms {
   pitch: f32,
   dim: u32,
   channels: u32,
-  mode_flags: u32, // bit 0: show Fermi isosurface contour
-  pad0: u32,
+  mode_flags: u32, // bit 0: show Fermi isosurface contour; bit 1: octant cutaway
+  cam_dist: f32,
   tint: vec4<f32>,
 };
 
@@ -262,7 +262,8 @@ fn fs_raymarch(in: VsOut) -> @location(0) vec4<f32> {
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
   let inv_portrait = 1.0 / max(0.35, min(1.0, aspect));
   let ndc = vec2<f32>(in.uv.x * aspect, in.uv.y) * inv_portrait;
-  let ro = rotate_cam(vec3<f32>(0.0, 0.0, 2.85), u.yaw, u.pitch);
+  let dist_cam = clamp(select(2.85, u.cam_dist, u.cam_dist > 0.5), 1.35, 6.0);
+  let ro = rotate_cam(vec3<f32>(0.0, 0.0, dist_cam), u.yaw, u.pitch);
   let rd = normalize(rotate_cam(normalize(vec3<f32>(ndc * 0.62, -1.0)), u.yaw, u.pitch));
 
   // Ray-box intersection against [-1, 1]^3
@@ -275,22 +276,44 @@ fn fs_raymarch(in: VsOut) -> @location(0) vec4<f32> {
   let t_exit = min(min(tmax_v.x, tmax_v.y), tmax_v.z);
 
   // Clean deep-space scientific lab backdrop
-  let bg = vec3<f32>(0.020, 0.035, 0.067) + 0.022 * exp(-dot(ndc, ndc) * 1.4) * u.tint.rgb;
+  let bg = vec3<f32>(0.020, 0.035, 0.067) + 0.026 * exp(-dot(ndc, ndc) * 1.4) * u.tint.rgb;
   if (t_exit <= t_enter) {
     return vec4<f32>(bg, 1.0);
   }
 
-  let steps = 56u;
+  // Pass 2 Deep LOD: 64-step IGN-jittered raymarch + gradient-normal Fresnel specular lobes + ACES filmic bloom glow!
+  let steps = 64u;
   let dt = (t_exit - t_enter) / f32(steps);
+  let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
+  let cutaway = (u.mode_flags & 2u) != 0u;
+  let eps_g = 2.0 / max(12.0, f32(u.dim));
+  let l_dir = normalize(vec3<f32>(0.55, 0.72, 0.42));
   var accum_rgb = vec3<f32>(0.0);
   var accum_a = 0.0;
   for (var s = 0u; s < steps; s = s + 1u) {
-    let t = t_enter + (f32(s) + 0.5) * dt;
+    let t = t_enter + (f32(s) + ign) * dt;
     let p = ro + rd * t;
+    if (cutaway && p.x > 0.0 && p.y > 0.0 && p.z > 0.0) { continue; }
     let v = sample_voxel(p);
-    let alpha = clamp(v.w * dt * 2.1, 0.0, 0.92);
+    if (v.w < 0.004) { continue; }
+    var col_s = v.rgb;
+    if (v.w > 0.14) {
+      let gx = sample_voxel(p + vec3<f32>(eps_g, 0.0, 0.0)).w - sample_voxel(p - vec3<f32>(eps_g, 0.0, 0.0)).w;
+      let gy = sample_voxel(p + vec3<f32>(0.0, eps_g, 0.0)).w - sample_voxel(p - vec3<f32>(0.0, eps_g, 0.0)).w;
+      let gz = sample_voxel(p + vec3<f32>(0.0, 0.0, eps_g)).w - sample_voxel(p - vec3<f32>(0.0, 0.0, eps_g)).w;
+      let g_len = length(vec3<f32>(gx, gy, gz));
+      if (g_len > 1e-4) {
+        let n_iso = -vec3<f32>(gx, gy, gz) / g_len;
+        let ndl = max(0.0, dot(n_iso, l_dir));
+        let ndv = abs(dot(n_iso, -rd));
+        let fres = pow(max(0.0, 1.0 - ndv), 2.8);
+        let spec = pow(max(0.0, dot(n_iso, normalize(l_dir - rd))), 28.0);
+        col_s = col_s * (0.76 + 0.42 * ndl) + col_s * fres * 0.48 + vec3<f32>(1.0, 0.96, 0.90) * spec * 0.36;
+      }
+    }
+    let alpha = clamp(v.w * dt * 2.15, 0.0, 0.92);
     let rem = 1.0 - accum_a;
-    accum_rgb = accum_rgb + rem * v.rgb * alpha * 1.55;
+    accum_rgb = accum_rgb + rem * col_s * alpha * 1.65;
     accum_a = accum_a + rem * alpha;
     if (accum_a > 0.985) { break; }
   }
@@ -300,8 +323,10 @@ fn fs_raymarch(in: VsOut) -> @location(0) vec4<f32> {
   let edge_d = max(min(abs(1.0 - p_in.x), abs(1.0 - p_in.y)), min(abs(1.0 - p_in.y), abs(1.0 - p_in.z)));
   let box_wire = (1.0 - smoothstep(0.0, 0.022, edge_d)) * 0.16;
 
-  let final_rgb = accum_rgb + (1.0 - accum_a) * bg + vec3<f32>(0.34, 0.76, 1.0) * box_wire;
-  return vec4<f32>(clamp(final_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+  let hdr = accum_rgb + (1.0 - accum_a) * bg + vec3<f32>(0.34, 0.76, 1.0) * box_wire;
+  // Filmic ACES rolloff keeps bright core highlights luminous without flat clipping!
+  let mapped = clamp((hdr * (2.51 * hdr + 0.03)) / (hdr * (2.43 * hdr + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
+  return vec4<f32>(mapped, 1.0);
 }
 `;
 
@@ -2201,11 +2226,19 @@ fn fs_poly3d_mesh(in: Poly3DOut) -> @location(0) vec4<f32> {
   let res = eval_polytope_atlas_2d(&polytope_atlas, T, P);
 
   let n = normalize(in.normal);
+  let cy_v = cos(u.res_yaw_pitch.z); let sy_v = sin(u.res_yaw_pitch.z);
+  let cp_v = cos(u.res_yaw_pitch.w); let sp_v = sin(u.res_yaw_pitch.w);
+  let cam_w = vec3<f32>(
+    -u.height_cam.z * cp_v * sy_v,
+    u.height_cam.z * sp_v,
+    -u.height_cam.z * cp_v * cy_v
+  );
+  let view_dir = normalize(cam_w - in.world_pos);
   let light1 = normalize(vec3<f32>(-0.45, 0.80, 0.40));
   let light2 = normalize(vec3<f32>(0.65, 0.45, -0.55));
   let diff = max(0.24, dot(n, light1)) * 0.85 + max(0.0, dot(n, light2)) * 0.28;
-  let half_v = normalize(light1 + vec3<f32>(0.0, 0.35, 0.94));
-  let spec = pow(max(0.0, dot(n, half_v)), 26.0) * 0.34;
+  let half_v = normalize(light1 + view_dir);
+  let spec = pow(max(0.0, dot(n, half_v)), 34.0) * 0.44;
 
   if (res.w < 0.5) {
     let hatch = step(0.84, fract((in.uv_tp.x + in.uv_tp.y) * 26.0)) * 0.14;
@@ -2831,6 +2864,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     channels = 4,
     yaw = 0.48,
     pitch = 0.28,
+    camDist = 2.85,
+    cutaway = false,
     tint = [0.34, 0.76, 1.0],
     showFermiIso = false
   }) {
@@ -2869,9 +2904,11 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
       sBuf = cachedScalarBuf;
     }
 
+    const modeFlags = (showFermiIso ? 1 : 0) | (cutaway ? 2 : 0);
     const uBuf = new ArrayBuffer(48);
     new Float32Array(uBuf, 0, 4).set([w, h, yaw, pitch]);
-    new Uint32Array(uBuf, 16, 4).set([dim >>> 0, channels >>> 0, showFermiIso ? 1 : 0, 0]);
+    new Uint32Array(uBuf, 16, 3).set([dim >>> 0, channels >>> 0, modeFlags >>> 0]);
+    new Float32Array(uBuf, 28, 1).set([Math.max(1.35, Math.min(6.0, Number(camDist) || 2.85))]);
     new Float32Array(uBuf, 32, 4).set([tint[0] ?? 0.34, tint[1] ?? 0.76, tint[2] ?? 1.0, 1.0]);
     device.queue.writeBuffer(volUniformBuf, 0, uBuf);
 
@@ -3953,6 +3990,7 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     viewMode = '3d-surface',
     probe = null,
     mdTempK = null,
+    mdPressurePa = 101325,
     yaw = 0.62,
     pitch = 0.56,
     camDist = 3.25,
@@ -3971,8 +4009,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     const mdFx = mdActive > 0.5
       ? Math.max(0, Math.min(1, (Math.log10(Math.max(1, mdTempK)) - minLt) / Math.max(1e-6, maxLt - minLt)))
       : 0.5;
-    const mdFy = Math.max(0, Math.min(1, (Math.log10(101325) - minLp) / Math.max(1e-6, maxLp - minLp)));
-    const gridN = 68;
+    const mdFy = Math.max(0, Math.min(1, (Math.log10(Math.max(1e-4, Number(mdPressurePa) || 101325)) - minLp) / Math.max(1e-6, maxLp - minLp)));
+    const gridN = 112;
 
     device.queue.writeBuffer(poly3dUniformBuf, 0, new Float32Array([
       w, h, yaw, pitch,

@@ -200,6 +200,7 @@ function resolveMaterialOpticalThermalProfile(sample) {
 export function evaluateLaserMaterialInteraction({
   log10WavelengthM = -6.27,
   powerW = 1e8,
+  maxPowerW = 1e26,
   spotRadiusM = 1.6,
   sample = null,
   currentTempK = 260,
@@ -207,7 +208,8 @@ export function evaluateLaserMaterialInteraction({
 } = {}) {
   const em = evaluateEmWavelengthInfo(log10WavelengthM);
   const mat = resolveMaterialOpticalThermalProfile(sample);
-  const pW = clamp(Number(powerW) || 1e7, 1e3, 1e14);
+  const pCap = Math.max(1e12, Math.min(1e26, Number(maxPowerW) || 1e26));
+  const pW = clamp(Number(powerW) || 1e7, 1e3, pCap);
   const rSpot = Math.max(0.4, Number(spotRadiusM) || 1.6);
   const area = Math.PI * rSpot * rSpot;
 
@@ -299,23 +301,60 @@ export function evaluateLaserMaterialInteraction({
   };
 }
 
-export function evaluateAntimatterAnnihilation({ massRateKgS = 2e-7, dt = 0.02 } = {}) {
-  const mKg = Math.max(1e-12, massRateKgS * dt);
-  // E = 2 * m * c^2 (antimatter particle + matched normal-matter partner!)
+/**
+ * First-principles gravitational + tensile cohesive binding energy U_bind (Joules) of ANY body:
+ *   U_bind = (3/5) * G * M^2 / R  +  (4/3) * pi * R^3 * sigma_coh
+ * Zero planet/body-name hacks! Determines exact shatter threshold for asteroids, comets & moons.
+ */
+export function computeBodyBindingEnergyJ(bodySpec = {}) {
+  const G = 6.67430e-11;
+  const SOLAR_KG = 1.98847e30;
+  const rM = Math.max(50.0, (Number(bodySpec.radiusKm) || 10.0) * 1000.0);
+  const defaultRho = bodySpec.isComet ? 620.0 : (bodySpec.isMetallicAsteroid ? 5400.0 : 2650.0);
+  const mKg = Number(bodySpec.massSolar) > 0
+    ? Number(bodySpec.massSolar) * SOLAR_KG
+    : (4.0 / 3.0) * Math.PI * rM * rM * rM * defaultRho;
+  const uGrav = (0.6 * G * mKg * mKg) / rM;
+  const sigmaCohPa = bodySpec.isComet ? 1.5e4 : (bodySpec.isMetallicAsteroid ? 2.5e7 : 3.5e5);
+  const uCoh = (4.0 / 3.0) * Math.PI * rM * rM * rM * sigmaCohPa;
+  return Math.max(1e9, uGrav + uCoh);
+}
+
+/**
+ * Exact relativistic antimatter annihilation mass-conversion rate (kg/s) for beam power P (W),
+ * with 50% prompt electromagnetic/pion coupling (`P = 2 * m_dot * c^2 * 0.5 => m_dot = P / (2 c^2)`).
+ */
+export function computeAntimatterMassRateKgS(powerW = 1e12) {
+  const p = Math.max(1e3, Number(powerW) || 1e12);
+  return p / (2.0 * C_LIGHT * C_LIGHT);
+}
+
+export function evaluateAntimatterAnnihilation({ massRateKgS = null, powerW = null, dt = 0.02 } = {}) {
+  const mRate = Number.isFinite(Number(massRateKgS)) && Number(massRateKgS) > 0
+    ? Number(massRateKgS)
+    : computeAntimatterMassRateKgS(powerW ?? 3.6e10);
+  const mKg = Math.max(1e-18, mRate * dt);
+  // E = 2 * m * c^2 (antimatter particle + matched normal-matter partner; 50% prompt EM/pion coupling!)
   const energyJ = 2.0 * mKg * C_LIGHT * C_LIGHT;
-  const powerW = 2.0 * massRateKgS * C_LIGHT * C_LIGHT;
-  const tntTons = energyJ / 4.184e9;
-  const craterRadiusM = clamp(8.0 + 4.6 * Math.pow(Math.max(0.01, tntTons), 0.30), 9.0, 38.0);
-  const craterDepthM = clamp(craterRadiusM * 0.36, 3.0, 14.0);
+  const coupledEnergyJ = energyJ * 0.5;
+  const effPowerW = 2.0 * mRate * C_LIGHT * C_LIGHT;
+  const tntTons = coupledEnergyJ / 4.184e9;
+  const craterRadiusM = clamp(8.0 + 4.6 * Math.pow(Math.max(0.01, tntTons), 0.30), 9.0, 58.0);
+  const craterDepthM = clamp(craterRadiusM * 0.36, 3.0, 22.0);
+  const pLbl = effPowerW >= 1e24 ? `${(effPowerW * 1e-24).toFixed(1)} YW`
+    : (effPowerW >= 1e18 ? `${(effPowerW * 1e-18).toFixed(1)} EW`
+      : (effPowerW >= 1e12 ? `${(effPowerW * 1e-12).toFixed(1)} TW` : `${(effPowerW * 1e-9).toFixed(1)} GW`));
   return {
     energyJ,
-    powerW,
+    coupledEnergyJ,
+    massRateKgS: mRate,
+    powerW: effPowerW,
     tntTons,
     craterRadiusM,
     craterDepthM,
     gammaPeakKev: 511.0,
     plasmaTempK: 24000,
-    reactionOutcome: `p̄+p / e⁺+e⁻ Annihilation: E=2mc² (${(powerW * 1e-12).toFixed(1)} TW · 511 keV γ + π± fireball)`
+    reactionOutcome: `p̄+p / e⁺+e⁻ Annihilation: E=2mc² (${pLbl} · 511 keV γ + π± fireball)`
   };
 }
 
@@ -559,17 +598,18 @@ export function appendIconicUfoGeometry(opaqueOut, fxOut, {
 }
 
 export function appendMissileGeometry(opaqueOut, fxOut, missile, curvFn = (p) => p) {
+  const s = Math.max(0.05, Number(missile.scale) || 1.0);
   const p = curvFn(missile.pos);
   const vel = missile.vel || [0, 0, 1];
   const dir = normalize3(vel);
   const rA = normalize3(cross3(dir, Math.abs(dir[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]));
   const rB = normalize3(cross3(dir, rA));
   // Sleek white-titanium missile body + crimson warhead nosecone + blazing rocket exhaust cone
-  pushFrustumMesh(opaqueOut, p, dir, rA, rB, 0.28, 0.28, 1.15, 8, [0.88, 0.92, 0.96], 0.08, 4.0, 0, true);
-  const nose = [p[0] + dir[0] * 1.55, p[1] + dir[1] * 1.55, p[2] + dir[2] * 1.55];
-  pushFrustumMesh(opaqueOut, nose, dir, rA, rB, 0.28, 0.04, 0.45, 8, [1.0, 0.28, 0.16], 0.45, 4.0, 0, true);
-  const tail = [p[0] - dir[0] * 2.4, p[1] - dir[1] * 2.4, p[2] - dir[2] * 2.4];
-  pushBeamCylinder(fxOut, p, tail, 0.42, [1.0, 0.68, 0.18], 0.78, 6, 6.0);
+  pushFrustumMesh(opaqueOut, p, dir, rA, rB, 0.28 * s, 0.28 * s, 1.15 * s, 8, [0.88, 0.92, 0.96], 0.08, 4.0, 0, true);
+  const nose = [p[0] + dir[0] * 1.55 * s, p[1] + dir[1] * 1.55 * s, p[2] + dir[2] * 1.55 * s];
+  pushFrustumMesh(opaqueOut, nose, dir, rA, rB, 0.28 * s, 0.04 * s, 0.45 * s, 8, [1.0, 0.28, 0.16], 0.45, 4.0, 0, true);
+  const tail = [p[0] - dir[0] * 2.4 * s, p[1] - dir[1] * 2.4 * s, p[2] - dir[2] * 2.4 * s];
+  pushBeamCylinder(fxOut, p, tail, 0.42 * s, [1.0, 0.68, 0.18], 0.78, 6, 6.0);
 }
 
 export function appendVonNeumannProbeGeometry(opaqueOut, fxOut, pos, phase, scale = 1.0) {

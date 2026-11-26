@@ -5632,7 +5632,7 @@ export async function mountSphPhaseDemoOverlay({
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       enableWorkers: initialResidentWorkersEnabled,
       requireWorkers: true,
-      workerBootstrapTimeoutMs: 5000,
+      workerBootstrapTimeoutMs: 20000,
       enableWebGPU: true,
       fallbackToDirectManagers: false
     })
@@ -5874,7 +5874,7 @@ export async function mountSphPhaseDemoOverlay({
       presentationTracker: presentationCadenceTracker,
       observation: readVisiblePresentationObservation(now),
       simulationTimeS: currentSimulationTimeS(),
-      scopeIdentity: JSON.stringify([particleSyncGeneration, workerRebuildGeneration])
+      scopeIdentity: `${particleSyncGeneration}:${workerRebuildGeneration}`
     });
     if (sampled) {
       overlay.__sphFrameCounters = frameCounters;
@@ -12776,9 +12776,11 @@ export async function mountSphPhaseDemoOverlay({
           requestPlaybackTick();
           return;
         }
-        scheduleMlsMpmResidentSteps({
-          continueFromResidentState: residentAnyContinuationReady()
-        });
+        if (pendingMlsMpmResidentStepsSignature == null) {
+          scheduleMlsMpmResidentSteps({
+            continueFromResidentState: residentAnyContinuationReady()
+          });
+        }
         renderStatus();
         updateWarningBanner();
         requestPlaybackTick();

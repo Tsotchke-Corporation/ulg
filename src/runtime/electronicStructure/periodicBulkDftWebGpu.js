@@ -50,7 +50,8 @@ function classifyValenceShellBonding(Z) {
   const isMolecularNonmetal = !dAtMaxN && (
     (maxN === 1 && sOcc === 1)
     || pOcc === 5
-    || (maxN === 2 && pOcc >= 3 && pOcc <= 4)
+    || (maxN <= 3 && pOcc >= 3 && pOcc <= 4)
+    || (maxN === 4 && pOcc === 4)
   );
   const isCovalentTetrahedral = !dAtMaxN && (
     (maxN >= 2 && maxN <= 5 && pOcc === 2)
@@ -201,11 +202,12 @@ function cohesiveEnergyPerAtomHa(rWsBohr, structure, atomDesc) {
 
   // Van der Waals molecular / noble-gas solid (London C_6 dispersion + Pauli repulsion)
   if (structure.id === 'vdw-fcc') {
-    const rNN = rWs * 2.2097; // FCC nearest-neighbor distance d_NN / R_WS = (16pi/3)^(1/3) / sqrt(2) * ... ~ 2.2097
+    // Exact FCC nearest-neighbor distance: d_NN / R_WS = (16*pi/3)^(1/3) / sqrt(2) = 1.80941
+    const rNN = rWs * 1.80941;
     const i1Ha = Math.max(0.15, atomDesc.ionizationPotentialHa || 0.5);
     // London C_6 = (3/4) * I_1 * alpha_0^2 (Hartree * Bohr^6)
     const c6 = 0.75 * i1Ha * polarizabilityBohr3 * polarizabilityBohr3;
-    const sigma = Math.max(2.2, rVdwBohr * 1.52);
+    const sigma = Math.max(2.2, rVdwBohr * 1.38);
     // Exact FCC lattice sums: S_12 = 12.13188, S_6 = 14.45392
     const sr = sigma / rNN;
     const sr6 = sr ** 6;
@@ -220,28 +222,41 @@ function cohesiveEnergyPerAtomHa(rWsBohr, structure, atomDesc) {
   const eMad = (structure.madelungAlpha * zv * zv) / (2 * rWs);
   const eCore = (2 * Math.PI * zv * zv * rcBohr * rcBohr) / omega;
 
-  // Friedel d-band / f-band metallic cohesion (rectangular band width W_d ~ 1/rWs^5)
+  // Friedel d-band / f-band metallic cohesion (physical bandwidth W_d ~ 4.5-9 eV)
   let eBand = 0;
   if (dOcc > 0 && dOcc < 10) {
-    const wD = (0.38 * Math.min(1.6, 1 + 0.008 * Z)) * Math.pow(3.0 / rWs, 3.2);
+    const nD = Math.max(3, atomDesc.dPrincipalN || 3);
+    const rD0 = 2.65 + 0.16 * (nD - 3);
+    const wD = (0.145 * Math.pow(nD / 3, 0.45)) * Math.pow(rD0 / rWs, 3.2);
     eBand -= 0.5 * wD * dOcc * (1 - dOcc / 10);
-    // d-core Pauli repulsion stabilizes transition-metal equilibrium volume
-    eBand += 0.16 * wD * (dOcc / 10 + 0.35) * Math.pow(2.85 / rWs, 6.0);
+    // d-core Pauli repulsion stabilizes transition-metal equilibrium volume & B_0
+    eBand += 0.22 * wD * (dOcc / 10 + 0.38) * Math.pow(rD0 / rWs, 6.0);
+  } else if (dOcc === 10 && atomDesc.sOcc === 1 && atomDesc.pOcc === 0) {
+    // Closed d^10 s^1 noble-metal s-d hybridization cohesion & d-core stiffening (Cu/Ag/Au)
+    const nD = Math.max(3, atomDesc.dPrincipalN || 3);
+    const rD0 = 2.62 + 0.14 * (nD - 3);
+    const wSd = 0.085 * Math.pow(nD / 3, 0.35) * Math.pow(rD0 / rWs, 3.4);
+    eBand -= 1.35 * wSd;
+    eBand += 0.65 * wSd * Math.pow(rD0 / rWs, 5.5);
   }
   if (fOcc > 0 && fOcc < 14) {
-    const wF = 0.08 * Math.pow(3.4 / rWs, 4.0);
+    // Localized 4f vs partially itinerant 5f cohesion paired with mandatory f-core Pauli wall
+    const is4f = (atomDesc.fPrincipalN || 4) <= 4;
+    const rF0 = is4f ? 3.55 : 3.35;
+    const wF = (is4f ? 0.025 : 0.055) * Math.pow(rF0 / rWs, 3.5);
     eBand -= 0.25 * wF * fOcc * (1 - fOcc / 14);
+    eBand += 0.28 * wF * (fOcc / 14 + 0.40) * Math.pow(rF0 / rWs, 6.0);
   }
   // Tetrahedral sp3 directional covalent bond stabilization (2 full bonds/atom in diamond lattice).
   // Exact diamond geometry: V_atom = a^3/8 = (4pi/3) R_WS^3 => r_bond = (sqrt(3)/4) a = 1.3959 * R_WS.
-  // Hybridized sp3 bonding (zv=4) localizes electron density along tetrahedral bonds, lowering
-  // energy below close-packed metallic jellium at ambient volume.
+  // Hybridized sp3 bonding (zv=4) localizes electron density along tetrahedral bonds at the
+  // outer valence radius sqrt(<r^2>_val) (not inner noble-gas core radius).
   if (structure.id === 'diamond') {
     const rBond = rWs * 1.3959;
-    const rBondEq = Math.max(2.6, rcBohr * 2.35);
-    const ex = Math.exp(-0.9 * (rBond - rBondEq));
-    const dBondHa = Math.max(0.25, (0.11 * zv * zv) / Math.max(2.0, rBondEq));
-    const sp3Factor = (zv >= 3 && zv <= 5) ? 2.4 : 0.5;
+    const rBondEq = Math.max(2.85, Math.sqrt(Math.max(2.0, atomDesc.meanR2Valence || 6.0)) * 1.44);
+    const ex = Math.exp(-0.56 * (rBond - rBondEq));
+    const dBondHa = Math.max(0.12, (0.072 * zv * zv) / Math.max(2.2, rBondEq));
+    const sp3Factor = (zv >= 3 && zv <= 5) ? 2.25 : 0.5;
     eBand += sp3Factor * dBondHa * (ex * ex - 2 * ex);
   }
   // Relativistic closed-shell inert-pair suppression (e.g. Hg 6s^2 contraction)
@@ -291,10 +306,12 @@ function fitBirchMurnaghan3(rGrid, eGrid) {
   const d2E = 2 * (d2 - d1) / (v0p - v0m);
   const d1E = 0.5 * (d1 + d2);
   let vEq = v00 - (d2E > 1e-12 ? d1E / d2E : 0);
-  vEq = Math.max(v0m * 0.9, Math.min(v0p * 1.1, vEq));
+  vEq = d2E > 1e-12
+    ? Math.max(v0m, Math.min(v0p, vEq))
+    : v00;
   const rWsEq = Math.cbrt((3 * vEq) / (4 * Math.PI));
   const eMin = e0 - (d2E > 1e-12 ? 0.5 * d1E * d1E / d2E : 0);
-  const bulkModulusHaPerBohr3 = Math.max(1e-7, vEq * Math.max(1e-9, d2E));
+  const bulkModulusHaPerBohr3 = Math.max(1e-7, vEq * Math.max(1e-7, d2E));
   const bulkModulusGPa = bulkModulusHaPerBohr3 * HA_PER_BOHR3_TO_GPA;
   return { rWsEq, vEqBohr3: vEq, eMinHa: eMin, bulkModulusGPa };
 }
@@ -311,10 +328,15 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
   const fSub = cfg.find((s) => s.n === maxN - 2 && s.l === 3);
   const sSub = dAtMaxN ? null : cfg.find((s) => s.n === maxN && s.l === 0);
   const pSub = dAtMaxN ? null : cfg.find((s) => s.n === maxN && s.l === 1);
+  const sOcc = sSub?.occupancy ?? 0;
+  const pOcc = pSub?.occupancy ?? 0;
+  const dOcc = dSub?.occupancy ?? 0;
+  const fOcc = fSub?.occupancy ?? 0;
   const zv = Math.max(1, valenceElectronCount(Z) || (dSub ? Math.min(4, dSub.occupancy) : 1));
 
-  // Estimate outer radius & dipole polarizability directly from radial density moments <r^2>
-  let r90 = 2.0;
+  // Estimate core radius, outer vdW radius & dipole polarizability from radial density moments
+  let rCore = 2.0;
+  let rCoreFound = false;
   let rVdw = 3.2;
   let meanR2Valence = 6.0;
   const rg = atomResult?.radialGrid;
@@ -323,12 +345,19 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     let cum = 0;
     let total = 0;
     for (let i = 0; i < r.length; i += 1) total += 4 * Math.PI * r[i] * r[i] * r[i] * rho[i] * dx;
+    // Shell-derived core electron boundary: exclude outer s/p valence, semi-core (n-1)d,
+    // and ONLY open f-shells (closed 4f^14 / 5f^14 is inner core for post-lanthanides Hf..Rn!).
+    const bondingValence = Math.max(1, sOcc + pOcc + 0.55 * (pOcc === 0 ? dOcc : 0) + 0.55 * (fOcc < 14 ? fOcc : 0));
+    const coreTarget = Math.max(0.5, total - bondingValence);
     let r2Outer = 0; let wOuter = 0;
     for (let i = 0; i < r.length; i += 1) {
       const w = 4 * Math.PI * r[i] * r[i] * r[i] * rho[i] * dx;
       cum += w;
-      if (cum >= 0.88 * total && r90 === 2.0) r90 = r[i];
-      if (rho[i] >= 1e-3) rVdw = r[i];
+      if (cum >= coreTarget && !rCoreFound) {
+        rCore = r[i];
+        rCoreFound = true;
+      }
+      if (rho[i] >= 5e-4) rVdw = r[i];
       if (cum >= Math.max(0, total - zv - 1)) {
         r2Outer += r[i] * r[i] * w;
         wOuter += w;
@@ -336,14 +365,15 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     }
     if (wOuter > 1e-6) meanR2Valence = r2Outer / wOuter;
   }
-  const rcBohr = Math.max(0.55, Math.min(3.2, r90 * 0.78));
+  const rcBohr = Math.max(0.55, Math.min(2.85, rCore * 0.82));
   const occupiedOrbs = Array.isArray(atomResult?.orbitals)
     ? atomResult.orbitals.filter((o) => Number(o.occupancy ?? 1) > 0)
     : [];
   const homoHa = occupiedOrbs.length
     ? Math.max(...occupiedOrbs.map((o) => Number(o.energyHa ?? o.energy ?? -0.4)))
     : -0.35;
-  const ionizationPotentialHa = Math.max(0.12, -homoHa);
+  // PBE Kohn-Sham HOMO underestimates I_1 by ~1.5-2x due to self-interaction error; scale by Janak SIE correction
+  const ionizationPotentialHa = Math.max(0.14, -homoHa * 1.65);
   const dOrb = dSub
     ? occupiedOrbs.find((o) => o.n === dSub.n && o.l === 2)
     : null;
@@ -352,8 +382,8 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     : null;
   const dOrbitalEnergyHa = dOrb ? Number(dOrb.energyHa ?? dOrb.energy ?? -0.35) : null;
   const fOrbitalEnergyHa = fOrb ? Number(fOrb.energyHa ?? fOrb.energy ?? -0.45) : null;
-  // Kirkwood static dipole polarizability alpha_0 = (4 / (9 * N_val)) * (<r^2>_val)^2
-  const polarizabilityBohr3 = Math.max(1.2, Math.min(450, (4 / (9 * Math.max(1, zv))) * (meanR2Valence ** 2) * zv));
+  // Kirkwood static dipole polarizability alpha_0 = (2/9) * N_val * (<r^2>_val)^2 (without zv cancellation!)
+  const polarizabilityBohr3 = Math.max(1.2, Math.min(450, (2 / 9) * Math.max(1, zv) * (meanR2Valence ** 2)));
   const relSContraction = Math.min(0.35, 0.5 * ((Z / 137.036) ** 2));
 
   return Object.freeze({
@@ -365,14 +395,14 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     meanR2Valence,
     polarizabilityBohr3,
     ionizationPotentialHa,
-    dOcc: dSub?.occupancy ?? 0,
+    dOcc,
     dPrincipalN: dSub?.n ?? 0,
     dOrbitalEnergyHa,
-    fOcc: fSub?.occupancy ?? 0,
+    fOcc,
     fPrincipalN: fSub?.n ?? 0,
     fOrbitalEnergyHa,
-    sOcc: sSub?.occupancy ?? 0,
-    pOcc: pSub?.occupancy ?? 0,
+    sOcc,
+    pOcc,
     relSContraction,
     spGapHa: 0.22 + 0.4 * relSContraction
   });
@@ -446,7 +476,32 @@ export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
   const cMean = Math.cbrt(3 / (1 / (cLong ** 3) + 2 / (cTrans ** 3)));
   const nAtomPerM3 = 1 / omegaAtomM3;
   const debyeTempK = (HBAR / KB) * Math.cbrt(6 * Math.PI * Math.PI * nAtomPerM3) * cMean;
-  const cohesiveEnergyEv = Math.max(0.01, Math.min(11.0, Math.abs(fit.eMinHa) * HA_TO_EV * 0.45 + (struct.id === 'vdw-fcc' ? 0 : 0.6)));
+  // True cohesive energy referenced to neutral free atoms (subtracting ionized-jellium
+  // baseline rather than using unreferenced total |E_solid| which grows as zv^2):
+  let cohesiveEnergyEv;
+  if (struct.id === 'vdw-fcc') {
+    cohesiveEnergyEv = Math.max(0.0008, Math.min(2.5, Math.abs(fit.eMinHa) * HA_TO_EV));
+  } else {
+    const rEq = Math.max(1.2, fit.rWsEq);
+    const rsEq = rEq / Math.cbrt(Math.max(1, atomDesc.zv));
+    const eJellEq = (1.10495 / (rsEq * rsEq)) * atomDesc.zv
+      + (exchangePerElectronHa(rsEq) + correlationPerElectronHa(rsEq)) * atomDesc.zv
+      + (struct.madelungAlpha * atomDesc.zv * atomDesc.zv) / (2 * rEq)
+      + (2 * Math.PI * atomDesc.zv * atomDesc.zv * atomDesc.rcBohr * atomDesc.rcBohr) / ((4 * Math.PI / 3) * (rEq ** 3));
+    // Band/covalent contribution relative to jellium reference
+    const eBandCohEv = Math.max(0, (eJellEq - fit.eMinHa) * HA_TO_EV);
+    // sp metallic cohesive baseline scales as ~zv^0.65 / r_WS (Wigner-Seitz cell vs neutral atom)
+    let spCohEv = (5.45 * Math.pow(Math.max(1, atomDesc.zv), 0.65)) / Math.max(1.6, rEq);
+    // Closed-shell divalent s^2 / relativistic 6s^2 inert-pair suppression (Zn/Cd/Hg, Ba/Ra)
+    if (atomDesc.dOcc === 10 && atomDesc.sOcc === 2 && atomDesc.pOcc === 0) {
+      const inertSuppress = Math.max(0.18, 1.0 - 2.9 * atomDesc.relSContraction);
+      spCohEv *= 0.44 * inertSuppress;
+    } else if (atomDesc.dOcc === 0 && atomDesc.pOcc === 0 && atomDesc.sOcc === 2) {
+      spCohEv *= 0.72;
+    }
+    const bandWeight = struct.id === 'diamond' ? 0.55 : 0.85;
+    cohesiveEnergyEv = Math.max(0.15, Math.min(9.5, spCohEv + bandWeight * eBandCohEv));
+  }
 
   // ---- Batched WebGPU Bloch k-Point Band Structure Diagonalization ----
   const kPath = highSymmetryKPath();

@@ -294,6 +294,120 @@ test('native Vulkan refraction rejects foreground opaque occluders (depth24plus 
       const fgRejectedShifted = await renderCase({ redDepth: 0.25, useOpaqueDepthRejection: true, shiftX: -0.25 });
       const submergedShifted = await renderCase({ redDepth: 0.82, useOpaqueDepthRejection: true, shiftX: -0.25 });
 
+      // Realistic Studio perspective projection test (PerspectiveCamera 46 deg, aspect 1, near 0.05, far 500):
+      // Water front at z_eye = 7.00 m, foreground red occluder just 5 cm closer (z_eye = 6.95 m,
+      // where non-linear NDC depth diff is only ~5e-5, far below the old 0.002 NDC epsilon!).
+      const f = 1 / Math.tan((46 * Math.PI / 180) * 0.5);
+      const zn = 0.05;
+      const zf = 500.0;
+      const aPersp = -(zf + zn) / (zf - zn);
+      const bPersp = -(2 * zf * zn) / (zf - zn);
+      // Column-major OpenGL perspective matrix (camera at origin looking down -Z: z_world = -z_eye)
+      const perspVp = [
+        f, 0, 0, 0,
+        0, f, 0, 0,
+        0, 0, aPersp, -1,
+        0, 0, bPersp, 0
+      ];
+      // Exact analytical inverse of column-major perspVp
+      const perspInvVp = [
+        1 / f, 0, 0, 0,
+        0, 1 / f, 0, 0,
+        0, 0, 0, 1 / bPersp,
+        0, 0, -1, aPersp / bPersp
+      ];
+      const perspWebGpuDepth = (zEye) => {
+        const zWorld = -zEye;
+        const zGl = (aPersp * zWorld + bPersp) / (-zWorld);
+        return zGl * 0.5 + 0.5;
+      };
+      // Front water quad at z = -7.0 m, back water quad at z = -7.8 m (world x,y in [-4, 4] covers full frustum)
+      const perspWater = (() => {
+        const frontOct = packOctNormal(-0.58, 0.0, 0.815); // facing +Z toward camera at origin
+        const backOct = packOctNormal(0, 0, -1);
+        const zF = -7.0;
+        const zB = -7.8;
+        const pos = new Float32Array([
+          -4, -4, zF, 1,  4, -4, zF, 1,  4,  4, zF, 1,
+          -4, -4, zF, 1,  4,  4, zF, 1, -4,  4, zF, 1,
+          -4, -4, zB, 1,  4,  4, zB, 1,  4, -4, zB, 1,
+          -4, -4, zB, 1, -4,  4, zB, 1,  4,  4, zB, 1
+        ]);
+        const nrm = new Uint32Array([
+          frontOct, frontOct, frontOct, frontOct, frontOct, frontOct,
+          backOct, backOct, backOct, backOct, backOct, backOct
+        ]);
+        const posBuf = device.createBuffer({ size: pos.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const nrmBuf = device.createBuffer({ size: nrm.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const indBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+        const uniBuf = device.createBuffer({ size: matMod.WORKER_NATIVE_SURFACE_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(posBuf, 0, pos);
+        device.queue.writeBuffer(nrmBuf, 0, nrm);
+        device.queue.writeBuffer(indBuf, 0, new Uint32Array([12, 1, 0, 0]));
+        return {
+          descriptor: { surfaceIndex: 0, isovalue: 0.5 },
+          metadata: { materialId: 1, phaseId: 2, opticalStateId: 0, density: 1000, transparencyClassId: 2, depthWriteFlag: 1, renderOrder: 1 },
+          uniformBuffer: uniBuf,
+          translation: {
+            surfaceVertices: {
+              compactPositionRowsBuffer: posBuf,
+              compactNormalRowsBuffer: nrmBuf,
+              compactPositionRowsVertexCount: 12,
+              compactPositionRowsStrideFloats: 4
+            },
+            surfaceDraw: { drawIndirectRowsBuffer: indBuf, compactPositionRowsStrideFloats: 4 },
+            positionTransform: { enabled: false },
+            positionClamp: { enabled: false }
+          },
+          destroy() { posBuf.destroy(); nrmBuf.destroy(); indBuf.destroy(); uniBuf.destroy(); }
+        };
+      })();
+      const perspFrame = {
+        ...frame,
+        viewProjectionMatrix: perspVp,
+        cameraPositionM: [0, 0, 0]
+      };
+      await material.prepare(perspFrame, [width, height]);
+      const renderPerspCase = async ({ redEyeDepthM, drawRed = true }) => {
+        device.queue.writeBuffer(bgUniBuf, 0, new Float32Array([-1, -1, 1, 1, 0.02, 0.12, 0.95, perspWebGpuDepth(12.0)]));
+        device.queue.writeBuffer(redUniBuf, 0, new Float32Array([0.02, -0.95, 0.90, 0.95, 0.98, 0.04, 0.04, perspWebGpuDepth(redEyeDepthM)]));
+        const enc = device.createCommandEncoder();
+        const opPass = enc.beginRenderPass({
+          colorAttachments: [{ view: colorTex.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+          depthStencilAttachment: { view: depthTex.createView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' }
+        });
+        opPass.setPipeline(opaquePipe);
+        opPass.setBindGroup(0, bgBg);
+        opPass.draw(6);
+        if (drawRed) {
+          opPass.setBindGroup(0, redBg);
+          opPass.draw(6);
+        }
+        opPass.end();
+        material.copySceneColor(enc, colorTex);
+        const copiedOpaqueDepth = material.copyOpaqueDepth(enc, depthTex);
+        const backPass = enc.beginRenderPass({
+          colorAttachments: [],
+          depthStencilAttachment: { view: material.backDepthView(), depthClearValue: 1.0, depthLoadOp: 'clear', depthStoreOp: 'store' }
+        });
+        material.draw(backPass, perspFrame, perspWater, { inverse: perspInvVp, backface: true });
+        backPass.end();
+        const frontPass = enc.beginRenderPass({
+          colorAttachments: [{ view: colorTex.createView(), loadOp: 'load', storeOp: 'store' }],
+          depthStencilAttachment: { view: depthTex.createView(), depthLoadOp: 'load', depthStoreOp: 'store' }
+        });
+        material.draw(frontPass, perspFrame, perspWater, { inverse: perspInvVp, refractive: true, hasOpaqueDepth: copiedOpaqueDepth });
+        frontPass.end();
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        const edgePx = Math.floor((0.02 + 1) * 0.5 * width);
+        return readPixel(edgePx - 2, Math.floor(height * 0.5));
+      };
+      const perspBlueBaseline = await renderPerspCase({ redEyeDepthM: 12.0, drawRed: false });
+      const perspFg5cmRejected = await renderPerspCase({ redEyeDepthM: 6.95, drawRed: true });
+      const perspSubmergedRefracted = await renderPerspCase({ redEyeDepthM: 7.45, drawRed: true });
+      perspWater.destroy();
+
       const validationError = await device.popErrorScope();
       waterSurface.destroy();
       colorTex.destroy();
@@ -312,6 +426,9 @@ test('native Vulkan refraction rejects foreground opaque occluders (depth24plus 
         pureBlueShifted,
         fgRejectedShifted,
         submergedShifted,
+        perspBlueBaseline,
+        perspFg5cmRejected,
+        perspSubmergedRefracted,
         validationError: validationError ? validationError.message : null,
         uncapturedErrors
       };
@@ -349,5 +466,13 @@ test('native Vulkan refraction rejects foreground opaque occluders (depth24plus 
       && result.submergedShifted[0] > result.fgRejectedShifted[0] + 0.55,
     `Off-origin shifted scene must preserve foreground rejection & submerged refraction (fg=${JSON.stringify(result.fgRejectedShifted)}, base=${JSON.stringify(result.pureBlueShifted)}, sub=${JSON.stringify(result.submergedShifted)})`
   );
-  t.diagnostic('Real Vulkan depth24plus opaque-depth foreground refraction rejection & translation invariance verified');
+  // 5. Realistic perspective projection (46 deg, zNear=0.05, zFar=500, water at z=7.0 m, foreground occluder 5 cm in front at z=6.95 m):
+  // Non-linear NDC depth diff is ~5e-5, which linear eye-depth rejection catches cleanly while still refracting submerged z=7.45 m!
+  assert.ok(
+    Math.abs(result.perspFg5cmRejected[0] - result.perspBlueBaseline[0]) < 0.02
+      && Math.abs(result.perspFg5cmRejected[2] - result.perspBlueBaseline[2]) < 0.02
+      && result.perspSubmergedRefracted[0] > result.perspFg5cmRejected[0] + 0.55,
+    `Perspective z=7 m 5 cm foreground occluder must be cleanly rejected while submerged z=7.45 m refracts (fg=${JSON.stringify(result.perspFg5cmRejected)}, base=${JSON.stringify(result.perspBlueBaseline)}, sub=${JSON.stringify(result.perspSubmergedRefracted)})`
+  );
+  t.diagnostic('Real Vulkan depth24plus opaque-depth foreground refraction rejection (ortho + perspective 5 cm) & translation invariance verified');
 });

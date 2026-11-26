@@ -2429,6 +2429,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var c10 = 0.0; var c11 = 0.0; var c12 = 0.0;
   var c20 = 0.0; var c21 = 0.0; var c22 = 0.0;
   var sampled_weight = 0.0;
+  var sampled_grid_mass = 0.0;
 
   for (var a = 0i; a < 3i; a = a + 1i) {
     for (var b = 0i; b < 3i; b = b + 1i) {
@@ -2451,6 +2452,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           continue;
         }
         sampled_weight = sampled_weight + weight;
+        sampled_grid_mass = sampled_grid_mass + weight * grid_row.x;
         let grid_velocity = grid_row.yzw;
         velocity = velocity + weight * grid_velocity;
         let dpos = (vec3<f32>(f32(node_i), f32(node_j), f32(node_k)) - p_grid) * params.grid_spacing_m;
@@ -2520,8 +2522,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     nf20 = f20; nf21 = f21; nf22 = f22;
     next_j = row4.z;
   } else if (condensed) {
-    let target_j = g2p_condensed_target_j(next_j, row4.z);
+    var target_j = g2p_condensed_target_j(next_j, row4.z);
     if (!solid) {
+      // Gentle Eulerian grid-density reconciliation in well-supported liquid interior:
+      // prevents multiplicative J drift from leaving splashed parcels permanently stuck
+      // as pressureless dust (J > 1 -> P_gauge = 0) while preserving exact cavitation cutoff!
+      let cell_vol = params.grid_spacing_m * params.grid_spacing_m * params.grid_spacing_m;
+      let rho_grid = sampled_grid_mass / max(cell_vol, 1.0e-12);
+      let rho0 = pos_mass.w / max(row4.y, 1.0e-12);
+      if (rho_grid >= 0.85 * rho0 && rho0 > 1.0e-6) {
+        let j_grid = g2p_clamp(rho0 / max(rho_grid, 1.0e-6), 0.95, 1.05);
+        target_j = mix(target_j, j_grid, 0.06);
+      }
       let s = g2p_cubic_root_positive(target_j);
       nf00 = s; nf01 = 0.0; nf02 = 0.0;
       nf10 = 0.0; nf11 = s; nf12 = 0.0;

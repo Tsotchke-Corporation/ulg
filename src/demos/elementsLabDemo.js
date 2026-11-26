@@ -752,11 +752,49 @@ function renderSpecimenBar() {
 async function handlePolytopePointer(e, isClick = false) {
   if (currentTab !== 'polytope' || !currentAtlas || !gpuRenderer) return;
   const rect = canvas.getBoundingClientRect();
-  const u = (e.clientX - rect.left) / Math.max(1, rect.width);
-  const v = 1.0 - (e.clientY - rect.top) / Math.max(1, rect.height);
-  if (u < 0.06 || u > 0.96 || v < 0.08 || v > 0.90) return;
-  const fx = (u - 0.06) / 0.90;
-  const fy = (v - 0.08) / 0.82;
+  let fx = 0.5;
+  let fy = 0.5;
+  if (uiState.polytopeViewMode === '3d-surface') {
+    // True 3D ray-plane intersection matching POLYTOPE_3D_SURFACE_WGSL `project_p3d`!
+    const w = Math.max(1, rect.width);
+    const h = Math.max(1, rect.height);
+    const aspect = w / h;
+    const fov = 1.78 * Math.min(1.0, aspect);
+    const ndcX = ((e.clientX - rect.left) / w) * 2.0 - 1.0;
+    const ndcY = 1.0 - ((e.clientY - rect.top) / h) * 2.0;
+    const vxR = (ndcX * aspect) / fov;
+    const vyR = ndcY / fov;
+    const cy = Math.cos(camYaw); const sy = Math.sin(camYaw);
+    const cp = Math.cos(camPitch); const sp = Math.sin(camPitch);
+    const effDist = Math.max(1.8, Math.min(5.0, camDist + 0.35));
+    // View-space ray: p_view(t) = (vxR * t, vyR * t, t) -> inverse transform into world space!
+    const invToWorld = (vx, vy, vz) => {
+      const zc = vz - effDist;
+      const yw = vy * cp - zc * sp;
+      const z1 = vy * sp + zc * cp;
+      const xw = vx * cy + z1 * sy;
+      const zw = -vx * sy + z1 * cy;
+      return [xw, yw, zw];
+    };
+    const p0 = invToWorld(0, 0, 0);
+    const p1 = invToWorld(vxR, vyR, 1.0);
+    const rd = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    // Intersect mid-surface plane y = 0.05 (exact inverse of world_x/z = (f*2 - 1) * 1.15)
+    if (Math.abs(rd[1]) < 1e-4) return;
+    const tHit = (0.05 - p0[1]) / rd[1];
+    if (tHit <= 0.1) return;
+    const hx = p0[0] + rd[0] * tHit;
+    const hz = p0[2] + rd[2] * tHit;
+    fx = (hx / 1.15) * 0.5 + 0.5;
+    fy = (hz / 1.15) * 0.5 + 0.5;
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+  } else {
+    const u = (e.clientX - rect.left) / Math.max(1, rect.width);
+    const v = 1.0 - (e.clientY - rect.top) / Math.max(1, rect.height);
+    if (u < 0.06 || u > 0.96 || v < 0.08 || v > 0.90) return;
+    fx = (u - 0.06) / 0.90;
+    fy = (v - 0.08) / 0.82;
+  }
   const bounds = gpuRenderer.getPolytopeAxisBounds(currentAtlas);
   const logT = bounds.minLt + fx * (bounds.maxLt - bounds.minLt);
   const logP = bounds.minLp + fy * (bounds.maxLp - bounds.minLp);
@@ -2713,15 +2751,18 @@ function renderSimControls() {
     });
     document.getElementById('ctrl-lambda')?.addEventListener('input', (e) => {
       uiState.probeWavelengthNm = Number(e.target.value);
-      document.getElementById('lbl-lambda').textContent = String(uiState.probeWavelengthNm);
+      const lbl = document.getElementById('lbl-lambda');
+      if (lbl) lbl.textContent = String(uiState.probeWavelengthNm);
       uiState.photonModeMono = true;
+      document.getElementById('ctrl-ps-rgb')?.classList.remove('active-toggle');
+      document.getElementById('ctrl-ps-mono')?.classList.add('active-toggle');
       liveBlochSession?.reset(uiState.probeWavelengthNm);
       for (let k = 0; k < 35; k += 1) liveBlochSession?.stepFs(0.08);
       liveTdks3dSession?.resetPulse({ nextProbeWavelengthNm: uiState.probeWavelengthNm, nextModeMono: true });
       liveTdks3dSession?.stepSync(34);
       livePhotonSession?.reset(null, { nextProbeWavelengthNm: uiState.probeWavelengthNm });
       livePhotonSession?.stepSync(100);
-      renderSimControls();
+      // Do NOT call renderSimControls() mid-drag — preserve live slider DOM & pointer capture!
       redrawCurrentTab();
     });
     document.getElementById('ctrl-ps-fire')?.addEventListener('click', () => {
@@ -2976,7 +3017,11 @@ function renderSimControls() {
     document.getElementById('ctrl-neb-xi')?.addEventListener('input', (e) => {
       uiState.nebImageIdx = Number(e.target.value);
       uiState.nebPlaying = false;
-      renderSimControls();
+      const lbl = document.getElementById('lbl-neb-xi');
+      if (lbl) lbl.textContent = (uiState.nebImageIdx / Math.max(1, nImgs - 1)).toFixed(2);
+      const playB = document.getElementById('ctrl-neb-play');
+      if (playB) playB.textContent = 'Play Path';
+      // Preserve slider DOM & active drag pointer capture!
       redrawCurrentTab();
     });
     document.getElementById('ctrl-neb-play')?.addEventListener('click', () => {
@@ -3106,6 +3151,7 @@ function renderViewportSync() {
         channels: 4,
         yaw: camYaw,
         pitch: camPitch,
+        camDist,
         tint: [1.0, 0.58, 0.30]
       });
     } else if (uiState.nuclearViewMode === 'fission' && liveFissionVolGpu) {
@@ -3115,6 +3161,7 @@ function renderViewportSync() {
         channels: 4,
         yaw: camYaw,
         pitch: camPitch,
+        camDist,
         tint: [1.0, 0.62, 0.34]
       });
     } else if (currentElementRes?.visualData?.nuclear) {
@@ -3125,6 +3172,7 @@ function renderViewportSync() {
         channels: 4,
         yaw: camYaw,
         pitch: camPitch,
+        camDist,
         tint: [1.0, 0.62, 0.34]
       });
     }
@@ -3153,6 +3201,7 @@ function renderViewportSync() {
           channels: 4,
           yaw: camYaw,
           pitch: camPitch,
+          camDist,
           tint: [0.75, 0.52, 0.99]
         });
       }
@@ -3187,6 +3236,7 @@ function renderViewportSync() {
         channels: 4,
         yaw: camYaw,
         pitch: camPitch,
+        camDist,
         tint: [0.34, 0.76, 1.0]
       });
     }
@@ -3256,6 +3306,7 @@ function renderViewportSync() {
         channels: 1,
         yaw: camYaw,
         pitch: camPitch,
+        camDist,
         tint: em?.opticalSrgb || [0.34, 0.88, 0.65],
         showFermiIso: bulk.isMetal
       });
@@ -4390,6 +4441,8 @@ function tickSimulationLoop(nowMs) {
       if (uiState.spinFieldBTesla <= -4.8) { uiState.spinFieldBTesla = -4.8; uiState.spinSweepDir = 1; }
       const bLbl = document.getElementById('lbl-spin-b');
       if (bLbl) bLbl.textContent = uiState.spinFieldBTesla.toFixed(1);
+      const bSl = document.getElementById('ctrl-spin-b');
+      if (bSl) bSl.value = String(uiState.spinFieldBTesla.toFixed(1));
     }
     liveSpinBusy = true;
     const spinSteps = spd > 1.0 ? Math.min(16, Math.round(8 * spd)) : 8;
@@ -4463,16 +4516,6 @@ function tickSimulationLoop(nowMs) {
     }
   }
 
-  // 3. Live WebGPU CI-NEB Reaction Path Playback on Tab 5!
-  if (currentTab === 'compound' && uiState.nebPlaying && currentNebBarrier?.energiesEv?.length >= 2) {
-    if (nowMs - uiState.nebLastTickMs >= (520 / spd)) {
-      uiState.nebLastTickMs = nowMs;
-      uiState.nebImageIdx = (uiState.nebImageIdx + 1) % currentNebBarrier.energiesEv.length;
-      renderSimControls();
-      redrawCurrentTab();
-    }
-  }
-
   // 4. Synchronous WebGPU viewport render (zero await before getCurrentTexture!)
   renderViewportSync();
 
@@ -4524,7 +4567,10 @@ function tickSimulationLoop(nowMs) {
       if (nowMs - uiState.nebLastTickMs > (460 / spd)) {
         uiState.nebLastTickMs = nowMs;
         uiState.nebImageIdx = (uiState.nebImageIdx + 1) % activePath.energiesEv.length;
-        renderSimControls();
+        const xiSl = document.getElementById('ctrl-neb-xi');
+        const xiLb = document.getElementById('lbl-neb-xi');
+        if (xiSl) xiSl.value = String(uiState.nebImageIdx);
+        if (xiLb) xiLb.textContent = (uiState.nebImageIdx / Math.max(1, activePath.energiesEv.length - 1)).toFixed(2);
         redrawCurrentTab();
       }
     }
@@ -5254,6 +5300,7 @@ function syncDebugState() {
       if (Number.isFinite(Number(yaw))) camYaw = Number(yaw);
       if (Number.isFinite(Number(pitch))) camPitch = Number(pitch);
       if (dist != null && Number.isFinite(Number(dist))) camDist = Number(dist);
+      orbitControls?.setPose({ yaw: camYaw, pitch: camPitch, dist: camDist }, { immediate: true });
       renderViewportSync();
       syncDebugState();
     },

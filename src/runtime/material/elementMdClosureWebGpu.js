@@ -212,8 +212,9 @@ export async function deriveElementThermodynamicsWebGpu(device, {
     : Math.max(1.5, (0.55 * tCohMelt + 0.45 * Math.min(tCohMelt * 1.8, tLindemann)) - 0.15 * zpeMeltShiftK);
   const meltingPointK = Math.max(1.0, Math.min(4200, baseMeltK));
   // Trouton + cohesive boiling point (clamped strictly above meltingPointK)
-  const enthalpyVaporizationJPerMol = Math.max(1500, eCohJ * AVOGADRO * (bulkResult.crystalStructure === 'vdw-fcc' ? 0.92 : 0.88));
-  const boilingPointK = Math.max(meltingPointK * 1.15 + 2, enthalpyVaporizationJPerMol / 88.0);
+  const enthalpyVaporizationJPerMol = Math.max(50, eCohJ * AVOGADRO * (bulkResult.crystalStructure === 'vdw-fcc' ? 0.92 : 0.88));
+  const troutonEntropyJPerMolK = bulkResult.crystalStructure === 'vdw-fcc' ? 88.0 : 104.0;
+  const boilingPointK = Math.max(meltingPointK * 1.15 + 2, enthalpyVaporizationJPerMol / troutonEntropyJPerMolK);
   const latentHeatFusionJPerKg = (R_GAS * 1.15 * meltingPointK) / molarMassKg;
   const latentHeatVaporizationJPerKg = enthalpyVaporizationJPerMol / molarMassKg;
 

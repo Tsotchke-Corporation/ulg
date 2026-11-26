@@ -27,10 +27,11 @@ const GPU_BUFFER_USAGE = Object.freeze({
 });
 
 // Universal nuclear microscopic-macroscopic constants (not per-element fits)
-const A_VOL_MEV = 15.75;
+const A_VOL_MEV = 15.80;
 const A_SURF_MEV = 17.80;
 const A_COUL_MEV = 0.711;
-const A_SYM_MEV = 23.70;
+const A_SYM_MEV = 22.70;
+const A_WIGNER_MEV = 37.0;
 const A_PAIR_MEV = 11.18;
 const MAGIC_NUMBERS = Object.freeze([2, 8, 20, 28, 50, 82, 126, 184]);
 const M_PROTON_MEV = 938.27208816;
@@ -81,16 +82,16 @@ export function shellCorrectionMeV(Z, N) {
     const dz = Z - m;
     const dn = N - m;
     // Strutinsky magic-closure binding enhancement (MeV)
-    const width = 1.6 + 0.03 * m;
-    corr += 3.8 * Math.exp(-(dz * dz) / (2 * width * width));
-    corr += 3.8 * Math.exp(-(dn * dn) / (2 * width * width));
+    const width = 1.15 + 0.022 * m;
+    corr += 2.4 * Math.exp(-(dz * dz) / (2 * width * width));
+    corr += 2.4 * Math.exp(-(dn * dn) / (2 * width * width));
   }
   return corr;
 }
 
 /**
- * Total nuclear binding energy B(Z, A) in MeV (Weizsäcker LDM + Strutinsky
- * magic-shell + pairing corrections). Conserves nucleon count A = Z + N.
+ * Total nuclear binding energy B(Z, A) in MeV (Weizsäcker LDM + Myers-Swiatecki
+ * Wigner congruence + Strutinsky magic-shell + pairing corrections). Conserves A = Z + N.
  */
 export function nuclearBindingEnergyMeV(Z, A) {
   const z = Math.trunc(Z);
@@ -106,25 +107,27 @@ export function nuclearBindingEnergyMeV(Z, A) {
   const surf = -A_SURF_MEV * a23;
   const coul = -A_COUL_MEV * (z * (z - 1)) / a13;
   const sym = -A_SYM_MEV * ((n - z) * (n - z)) / a;
+  const wigner = -A_WIGNER_MEV * Math.abs(n - z) / a;
   let pair = 0;
   if (z % 2 === 0 && n % 2 === 0) pair = A_PAIR_MEV / Math.sqrt(a);
   else if (z % 2 === 1 && n % 2 === 1) pair = -A_PAIR_MEV / Math.sqrt(a);
   const shell = shellCorrectionMeV(z, n);
-  return Math.max(0, vol + surf + coul + sym + pair + shell);
+  return Math.max(0, vol + surf + coul + sym + wigner + pair + shell);
 }
 
 /**
  * Finite 2-parameter Fermi nuclear RMS charge radius in femtometers (fm)
- * and Bohr radii (a_0) for Stage P1.2 finite-nucleus relativistic atomic DFT.
+ * with A-body center-of-mass recoil (1 - 1/A) and finite proton charge radius
+ * convolution (r_p = 0.8414 fm) for Stage P1.2 relativistic atomic DFT.
  */
 export function nuclearChargeRadiusFm(A) {
   const a = Math.max(1, Math.trunc(A));
   if (a === 1) return 0.8414; // proton charge radius (fm)
   const a13 = Math.cbrt(a);
-  // Half-density radius R_0 ~ 1.23 A^(1/3) - 0.60 A^(-1/3), RMS = sqrt(3/5 R_0^2 + 7/5 (pi a)^2)
-  const rHalf = Math.max(0.9, 1.23 * a13 - 0.60 / a13);
-  const diffuseness = 0.523;
-  return Math.sqrt(0.6 * rHalf * rHalf + 1.4 * Math.PI * Math.PI * diffuseness * diffuseness);
+  const c = Math.max(0, 1.128 * a13 - 0.89 / a13);
+  const aDiff = 0.523 * (1 - Math.exp(-c / 1.15));
+  const r2Point = (0.6 * c * c + 1.4 * Math.PI * Math.PI * aDiff * aDiff) * (1 - 1 / a);
+  return Math.sqrt(r2Point + 0.8414 * 0.8414);
 }
 
 /**
@@ -227,15 +230,20 @@ export function mostStableMassNumberForZ(Z) {
   let bestA = Math.round(2 * z + 0.015 * z ** (5 / 3));
   let bestScore = -Infinity;
   for (let a = aMin; a <= aMax; a += 1) {
-    const ba = nuclearBindingEnergyMeV(z, a) / a;
-    // Slight beta-stability preference: favor nuclides where both Q_beta- <= 0 and Q_EC <= 0
+    const bSelf = nuclearBindingEnergyMeV(z, a);
+    // Reject nucleon drip-line unbound isotopes
+    if (a > 2 && (bSelf - nuclearBindingEnergyMeV(z, a - 1) <= 0 || bSelf - nuclearBindingEnergyMeV(z - 1, a - 1) <= 0)) {
+      continue;
+    }
+    const ba = bSelf / a;
+    // Isobaric beta-stability valley: both Q_beta- <= 0 and Q_EC <= 0
     const bPlus = nuclearBindingEnergyMeV(z + 1, a);
     const bMinus = nuclearBindingEnergyMeV(z - 1, a);
-    const bSelf = nuclearBindingEnergyMeV(z, a);
-    const qBetaM = bPlus - bSelf + (M_NEUTRON_MEV - M_PROTON_MEV - M_ELECTRON_MEV);
-    const qEC = bMinus - bSelf - (M_NEUTRON_MEV - M_PROTON_MEV + M_ELECTRON_MEV);
-    const betaStableBonus = (qBetaM <= 0 && qEC <= 0) ? 0.35 : 0;
-    const score = ba + betaStableBonus;
+    const dmNpE = M_NEUTRON_MEV - M_PROTON_MEV - M_ELECTRON_MEV;
+    const qBetaM = bPlus - bSelf + dmNpE;
+    const qEC = bMinus - bSelf - dmNpE;
+    const betaStableBonus = (qBetaM <= 0 && qEC <= 0) ? 50.0 : 0.0;
+    const score = betaStableBonus - Math.max(qBetaM, qEC) + 0.15 * ba;
     if (score > bestScore) {
       bestScore = score;
       bestA = a;
@@ -428,11 +436,11 @@ fn shell_corr(z_f: f32, n_f: f32) -> f32 {
   var acc = 0.0;
   for (var i = 0u; i < 8u; i = i + 1u) {
     let m = mag[i];
-    let w = 1.6 + 0.03 * m;
+    let w = 1.15 + 0.022 * m;
     let inv2w2 = 0.5 / (w * w);
     let dz = z_f - m;
     let dn = n_f - m;
-    acc = acc + 3.8 * exp(-dz * dz * inv2w2) + 3.8 * exp(-dn * dn * inv2w2);
+    acc = acc + 2.4 * exp(-dz * dz * inv2w2) + 2.4 * exp(-dn * dn * inv2w2);
   }
   return acc;
 }
@@ -453,8 +461,8 @@ fn binding_mev(z_i: i32, a_i: i32) -> f32 {
   } else if ((z_i & 1) == 1 && (n_i & 1) == 1) {
     pair = -11.18 / sqrt(a);
   }
-  let b = 15.75 * a - 17.80 * a23 - 0.711 * z * (z - 1.0) / a13
-    - 23.70 * (n - z) * (n - z) / a + pair + shell_corr(z, n);
+  let b = 15.80 * a - 17.80 * a23 - 0.711 * z * (z - 1.0) / a13
+    - 22.70 * (n - z) * (n - z) / a - 37.0 * abs(n - z) / a + pair + shell_corr(z, n);
   return max(0.0, b);
 }
 
@@ -533,7 +541,7 @@ export async function solveNuclearStructureWebGpu(device, Z, A = null, {
   }
   const closure = deriveNuclearClosure(Z, A);
   const a13 = Math.cbrt(closure.A);
-  const rHalfFm = Math.max(0.9, 1.23 * a13 - 0.60 / a13);
+  const rHalfFm = Math.max(0.85, 1.128 * a13 - 0.89 / a13);
   const boxHalfFm = Math.max(4.5, rHalfFm * 1.9);
   const chartCount = maxZ * maxN;
   const volCount = volDim * volDim * volDim;
@@ -721,43 +729,50 @@ fn compute_fission_volume(@builtin(global_invocation_id) id: vec3<u32>) {
   var rho_p = 0.0;
   var rho_n = 0.0;
 
-  if (beta <= 0.98) {
-    // Continuous volume-conserving quadrupole + hexadecapole necking liquid drop along X!
-    let r = max(1.0e-4, length(pos));
-    let ct = pos.x / r;
-    let p2 = 0.5 * (3.0 * ct * ct - 1.0);
-    let p4 = 0.125 * (35.0 * ct * ct * ct * ct - 30.0 * ct * ct + 3.0);
-    // Necking constriction deepens smoothly past beta = 0.45
-    let neck = max(0.0, beta - 0.35) * 0.48;
-    let vol_norm = 1.0 / pow(max(0.25, 1.0 + 0.12 * beta * beta), 0.3333333);
-    let r_surf_p = p.r_half_fm * vol_norm * max(0.06, 1.0 + 0.62 * beta * p2 + neck * p4);
-    let r_surf_n = r_surf_p + skin;
-    rho_p = (z_f / a_f) / (1.0 + exp((r - r_surf_p) / diff));
-    rho_n = (n_f / a_f) / (1.0 + exp((r - r_surf_n) / diff));
-  } else {
-    // Post-scission: two asymmetric Coulomb-repelling fission fragments (e.g. ~58%/42% mass split!)
-    let sep = (beta - 0.96) * p.r_half_fm * 2.35;
-    let r_heavy = p.r_half_fm * pow(0.58, 0.3333333);
-    let r_light = p.r_half_fm * pow(0.42, 0.3333333);
-    let c_heavy = vec3<f32>(-sep * 0.88 - r_heavy * 0.72, 0.0, 0.0);
-    let c_light = vec3<f32>( sep * 1.12 + r_light * 0.72, 0.0, 0.0);
-    let dh = length(pos - c_heavy);
-    let dl = length(pos - c_light);
-    let rp_h = (z_f / a_f) / (1.0 + exp((dh - r_heavy) / diff));
-    let rp_l = (z_f / a_f) / (1.0 + exp((dl - r_light) / diff));
-    let rn_h = (n_f / a_f) / (1.0 + exp((dh - (r_heavy + skin)) / diff));
-    let rn_l = (n_f / a_f) / (1.0 + exp((dl - (r_light + skin)) / diff));
-    rho_p = clamp(rp_h + rp_l, 0.0, 1.0);
-    rho_n = clamp(rn_h + rn_l, 0.0, 1.0);
-  }
+  // Continuous C^infinity Cassini-Oval / Two-Center Liquid-Drop Fission (ZERO abrupt jump at beta = 0.98!)
+  // Smoothly elongates -> forms thin hyperbolic neck -> pinches through scission -> separates into 58%/42% fragments + prompt neutrons!
+  let s_prog = smoothstep(0.20, 1.40, beta);
+  let sep_half = s_prog * p.r_half_fm * 1.42;
+  let r_heavy = p.r_half_fm * mix(1.0, pow(0.58, 0.3333333), smoothstep(0.30, 1.05, beta));
+  let r_light = p.r_half_fm * mix(1.0, pow(0.42, 0.3333333), smoothstep(0.30, 1.05, beta));
+  // Keep center of mass pinned at x = 0 across the entire asymmetric 58/42 split!
+  let c_heavy = vec3<f32>(-sep_half * 0.84, 0.0, 0.0);
+  let c_light = vec3<f32>( sep_half * 1.16, 0.0, 0.0);
+  let dh = length(pos - c_heavy);
+  let dl = length(pos - c_light);
+  // Smooth-min (smin) neck bridge vanishes continuously as beta crosses scission (~0.98)!
+  let neck_k = max(0.02, (1.0 - smoothstep(0.42, 1.04, beta)) * p.r_half_fm * 0.88);
+  let dh_s = dh - r_heavy;
+  let dl_s = dl - r_light;
+  let h_mix = clamp(0.5 + 0.5 * (dl_s - dh_s) / neck_k, 0.0, 1.0);
+  let d_surf_p = mix(dl_s, dh_s, h_mix) - neck_k * h_mix * (1.0 - h_mix);
+  let d_surf_n = d_surf_p - skin;
+  rho_p = (z_f / a_f) / (1.0 + exp(d_surf_p / diff));
+  rho_n = (n_f / a_f) / (1.0 + exp(d_surf_n / diff));
+
+  // Prompt scission neutron evaporation burst emerging perpendicularly from the snapped neck (beta > 0.88)!
+  let scis_w = smoothstep(0.86, 1.02, beta) * (1.0 - smoothstep(1.22, 1.42, beta));
+  let n_rad = max(0.1, (beta - 0.84) * p.r_half_fm * 2.1);
+  let n_p1 = vec3<f32>(0.12 * p.r_half_fm,  n_rad * 0.65,  n_rad * 0.32);
+  let n_p2 = vec3<f32>(-0.10 * p.r_half_fm, -n_rad * 0.58, n_rad * 0.42);
+  let n_p3 = vec3<f32>(0.06 * p.r_half_fm,  n_rad * 0.25, -n_rad * 0.72);
+  let n_sig = max(0.18, diff * 1.35);
+  let prompt_n = scis_w * (
+    exp(-dot(pos - n_p1, pos - n_p1) / (n_sig * n_sig))
+    + exp(-dot(pos - n_p2, pos - n_p2) / (n_sig * n_sig))
+    + exp(-dot(pos - n_p3, pos - n_p3) / (n_sig * n_sig))
+  );
+  rho_n = clamp(rho_n + prompt_n * 0.85, 0.0, 1.0);
 
   let dens = clamp(rho_p + rho_n, 0.0, 1.0);
-  // Warm amber-orange proton core, cyan neutron skin, radiant white-gold neck stress highlight
-  let neck_glow = exp(-pos.x * pos.x / max(0.5, p.r_half_fm * 0.45)) * smoothstep(0.4, 0.98, beta) * step(beta, 1.02) * dens;
-  let col_r = clamp(rho_p * 2.1 + neck_glow * 0.75, 0.0, 1.0);
-  let col_g = clamp(rho_p * 1.15 + rho_n * 0.85 + neck_glow * 0.60, 0.0, 1.0);
-  let col_b = clamp(rho_n * 1.75 + neck_glow * 0.25, 0.0, 1.0);
-  vol_out[idx] = vec4<f32>(col_r, col_g, col_b, dens);
+  // Isovector proton-core (fiery amber-gold) vs outer neutron-skin (electric cyan-blue),
+  // plus incandescent white-gold scission neck stress & bright aqua prompt scission neutrons!
+  let n_frac = rho_n / max(1e-4, dens);
+  let skin_w = smoothstep(0.54, 0.78, n_frac);
+  let base_col = mix(vec3<f32>(1.0, 0.44, 0.08), vec3<f32>(0.10, 0.72, 1.0), skin_w) * (0.45 + 0.75 * dens);
+  let neck_glow = exp(-pos.x * pos.x / max(0.45, p.r_half_fm * 0.38)) * smoothstep(0.38, 0.94, beta) * (1.0 - smoothstep(0.96, 1.12, beta)) * dens;
+  let final_col = clamp(base_col + vec3<f32>(1.0, 0.94, 0.62) * neck_glow * 1.15 + vec3<f32>(0.28, 0.96, 1.0) * prompt_n * 1.1, vec3<f32>(0.0), vec3<f32>(1.0));
+  vol_out[idx] = vec4<f32>(final_col, dens);
 }
 `;
 
@@ -794,7 +809,7 @@ export function buildFissionDeformationVolumeWebGpu(device, nuclear, {
   const z = Math.max(1, Math.trunc(Number(nuclear?.Z) || 92));
   const a = Math.max(z, Math.trunc(Number(nuclear?.A) || 235));
   const a13 = Math.cbrt(a);
-  const rHalfFm = Math.max(0.9, 1.23 * a13 - 0.60 / a13);
+  const rHalfFm = Math.max(0.85, 1.128 * a13 - 0.89 / a13);
   const boxHalfFm = Math.max(6.5, rHalfFm * 2.55);
   const totalVoxels = dim * dim * dim;
   const byteSize = totalVoxels * 16;

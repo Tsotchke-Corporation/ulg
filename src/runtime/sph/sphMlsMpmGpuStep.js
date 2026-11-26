@@ -4433,9 +4433,14 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     if (solidLiquidVelocitySeparation !== false && outStateBuffer && outMechanicsBuffer && particleCount > 0) {
       const slipInfo = detectMixedSolidLiquidContinuumState(mlsMpmParticleState, sphParticleState);
       if (solidLiquidVelocitySeparation === true || slipInfo.hasMixedSolidLiquid) {
+        const preStateCandidate = sphParticleUpload?.stateBuffer;
         runCachedSphSolidLiquidVelocitySeparationStep({
           device,
           stateBuffer: outStateBuffer,
+          preStateBuffer:
+            preStateCandidate && preStateCandidate !== outStateBuffer
+              ? preStateCandidate
+              : null,
           mechanicsBuffer: outMechanicsBuffer,
           particleCount,
           gridDims: gridSpec.gridDims,

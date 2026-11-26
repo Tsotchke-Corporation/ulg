@@ -1591,8 +1591,12 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
 
   const wgGrid = Math.ceil(gridTotal / 64);
   const wgPart = Math.max(1, Math.ceil(particleCount / 64));
+  let mapInFlight = false;
+  let lastTelemetry = null;
+  let disposed = false;
 
   async function step({ readTelemetry = true } = {}) {
+    if (disposed) return lastTelemetry;
     const { hA } = writeUniforms();
     const curKickFac = da / (Math.max(0.01, aScale) ** 2 * Math.max(0.05, hA));
 
@@ -1640,7 +1644,9 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     pass.setPipeline(reduceTelPipe.pipeline); pass.dispatchWorkgroups(2);
     pass.end();
 
-    if (readTelemetry) {
+    const doRead = Boolean(readTelemetry && !disposed && !mapInFlight && readTelemetryBuf.mapState === 'unmapped');
+    if (doRead) {
+      mapInFlight = true;
       enc.copyBufferToBuffer(telemetryBuf, 0, readTelemetryBuf, 0, telemetryBytes);
     }
     device.queue.submit([enc.finish()]);
@@ -1650,10 +1656,22 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     aScale = Math.min(1.5, aScale + da);
     stepIndex += 1;
 
-    if (!readTelemetry) return null;
-    await readTelemetryBuf.mapAsync(GPU_BUFFER_USAGE.MAP_READ);
-    const f32 = new Float32Array(readTelemetryBuf.getMappedRange().slice(0, telemetryBytes));
-    readTelemetryBuf.unmap();
+    if (!doRead) return readTelemetry ? lastTelemetry : null;
+    let f32 = null;
+    try {
+      await readTelemetryBuf.mapAsync(GPU_BUFFER_USAGE.MAP_READ);
+      if (!disposed) {
+        f32 = new Float32Array(readTelemetryBuf.getMappedRange().slice(0, telemetryBytes));
+      }
+      if (!disposed && readTelemetryBuf.mapState === 'mapped') {
+        try { readTelemetryBuf.unmap(); } catch {}
+      }
+    } catch (err) {
+      if (!disposed && err?.name !== 'AbortError') throw err;
+    } finally {
+      mapInFlight = false;
+    }
+    if (!f32 || disposed) return lastTelemetry;
 
     const sigmaDensity = Math.sqrt(Math.max(0, f32[0] / Math.max(1, f32[3])));
     const maxOverdensity = f32[1];
@@ -1683,7 +1701,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     }
     const linearGrowthRatio = initialLowKPower > 0 ? Math.sqrt(lowKPower / initialLowKPower) : 1.0;
 
-    return Object.freeze({
+    lastTelemetry = Object.freeze({
       schema: ULG_SUPERGALACTIC_TREEPM_SCHEMA,
       backend: enableShortRangeTree ? 'webgpu-fft3d-hybrid-treepm' : 'webgpu-fft3d-pm',
       icBackend: ic.icBackend || 'webgpu-fft3d-zeldovich',
@@ -1719,6 +1737,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
         sharedKernel: 'src/runtime/gpuMath/fft3dWebGpu.js'
       })
     });
+    return lastTelemetry;
   }
 
   async function readParticlesSnapshot() {
@@ -1787,9 +1806,11 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     readTileMultipoleSummary,
     getState: () => ({ aScale, redshiftZ: Math.max(0, 1 / aScale - 1), stepIndex, submitsPerStep: lastSubmitsPerStep, remoteTileCount }),
     destroy() {
+      if (disposed) return;
+      disposed = true;
       fftWs.destroy();
       for (const b of [paramsBuf, particleBuf, cicBuf, forceGridBuf, telemetryBuf, readTelemetryBuf, readTileBuf, srAccumBuf, srNodeBuf, kSpaceSaveBuf]) {
-        b.destroy();
+        try { b.destroy(); } catch {}
       }
     }
   });

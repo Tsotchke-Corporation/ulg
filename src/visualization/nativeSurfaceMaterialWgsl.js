@@ -215,6 +215,15 @@ fn resident_refraction_max_path_m() -> f32 {
   return 0.0;
 }
 
+fn resident_refraction_inverse_view_projection() -> mat4x4<f32> {
+  return mat4x4<f32>(
+    vec4<f32>(1.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 1.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 1.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 1.0)
+  );
+}
+
 ${ULG_NATIVE_REFRACTION_TRANSPORT_WGSL}
 
 fn env_latlong_sample(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
@@ -240,14 +249,21 @@ fn sample_refracted_scene_color_at_uv(
   depth_dims: vec2<u32>,
   color_dims: vec2<u32>
 ) -> vec4<f32> {
+  let inv_vp = resident_refraction_inverse_view_projection();
   let fp = refraction_bilinear_footprint(sample_uv, depth_dims);
+  let front_lin = refraction_linear_eye_depth(surface_front_depth, inv_vp);
   let depths = vec4<f32>(
-    textureLoad(opaque_scene_depth, fp.p00, 0),
-    textureLoad(opaque_scene_depth, fp.p10, 0),
-    textureLoad(opaque_scene_depth, fp.p01, 0),
-    textureLoad(opaque_scene_depth, fp.p11, 0)
+    refraction_linear_eye_depth(textureLoad(opaque_scene_depth, fp.p00, 0), inv_vp),
+    refraction_linear_eye_depth(textureLoad(opaque_scene_depth, fp.p10, 0), inv_vp),
+    refraction_linear_eye_depth(textureLoad(opaque_scene_depth, fp.p01, 0), inv_vp),
+    refraction_linear_eye_depth(textureLoad(opaque_scene_depth, fp.p11, 0), inv_vp)
   );
-  let w = refraction_depth_filtered_weights(fp.weights, depths, surface_front_depth, 1.0e-4);
+  let lin_eps = select(
+    1.0e-4,
+    max(front_lin * 5.0e-4, 1.0e-4),
+    abs(inv_vp[2].w) > 1.0e-7
+  );
+  let w = refraction_depth_filtered_weights(fp.weights, depths, front_lin, lin_eps);
   let w_sum = w.x + w.y + w.z + w.w;
   if (w_sum >= 0.999) {
     let c = textureSampleLevel(scene_color_copy, scene_color_sampler, sample_uv, 0.0).rgb;
@@ -603,23 +619,7 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // approximation, then the same ACESFilmic(exposure 1.08) tone pipeline.
   let backface = resident_refractive_backface(in);
   let refraction_max_path_m = resident_refraction_max_path_m();
-  let refracted_path_r = refracted_path_to_back_plane(
-    in.world_position,
-    backface.world_position,
-    backface.valid,
-    refract(-view_dir, normal, 1.0 / refractive_index),
-    camera_data.view_projection,
-    refraction_max_path_m
-  );
-  let refracted_path_g = refracted_path_to_back_plane(
-    in.world_position,
-    backface.world_position,
-    backface.valid,
-    refract(-view_dir, normal, 1.0 / refractive_index),
-    camera_data.view_projection,
-    refraction_max_path_m
-  );
-  let refracted_path_b = refracted_path_to_back_plane(
+  let refracted_path = refracted_path_to_back_plane(
     in.world_position,
     backface.world_position,
     backface.valid,
@@ -628,9 +628,7 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
     refraction_max_path_m
   );
   let scene_color_available = textureDimensions(scene_color_copy, 0).x > 1u;
-  let refracted_geometry_valid = refracted_path_r.valid > 0.5
-    && refracted_path_g.valid > 0.5
-    && refracted_path_b.valid > 0.5;
+  let refracted_geometry_valid = refracted_path.valid > 0.5;
   let transmissive_surface = optical.transmission > 0.01
     && metalness < 0.1
     && !is_vapor
@@ -735,11 +733,7 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
       vec3<f32>(0.0),
       vec3<f32>(1.0)
     );
-    let path_m_rgb = vec3<f32>(
-      refracted_path_r.path_m,
-      refracted_path_g.path_m,
-      refracted_path_b.path_m
-    );
+    let path_m_rgb = vec3<f32>(refracted_path.path_m);
     let attenuation_sigma_rgb = -log(clamp(
       optical.attenuation_linear,
       vec3<f32>(1.0e-6),
@@ -750,17 +744,18 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
       path_m_rgb
     );
     let surface_px = refraction_surface_pixel(in.position.xy, textureDimensions(scene_color_copy, 0));
-    let surface_uv = select(refracted_path_g.exit_uv, surface_px.uv, surface_px.valid > 0.5);
+    let surface_uv = select(refracted_path.exit_uv, surface_px.uv, surface_px.valid > 0.5);
     let env_refract_linear = select(
       env_color,
       env_latlong_sample(refract(-view_dir, normal, 1.0 / refractive_index), roughness),
       textureDimensions(env_map, 0).x > 1u
     );
     let fallback_display = pow(clamp(env_refract_linear, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
-    let refracted = vec3<f32>(
-      sample_refracted_scene_color_depth_rejected(refracted_path_r.exit_uv, surface_uv, in.position.z, fallback_display).r,
-      sample_refracted_scene_color_depth_rejected(refracted_path_g.exit_uv, surface_uv, in.position.z, fallback_display).g,
-      sample_refracted_scene_color_depth_rejected(refracted_path_b.exit_uv, surface_uv, in.position.z, fallback_display).b
+    let refracted = sample_refracted_scene_color_depth_rejected(
+      refracted_path.exit_uv,
+      surface_uv,
+      in.position.z,
+      fallback_display
     );
     // The canvas copy is display-encoded; shading runs in linear light.
     let refracted_linear = pow(clamp(refracted, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2));
@@ -956,6 +951,15 @@ fn resident_environment_light_scale() -> f32 {
     .replace(
       `fn resident_refraction_max_path_m() -> f32 {
   return 0.0;
+}
+
+fn resident_refraction_inverse_view_projection() -> mat4x4<f32> {
+  return mat4x4<f32>(
+    vec4<f32>(1.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 1.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 1.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 1.0)
+  );
 }`,
       `fn resident_refraction_max_path_m() -> f32 {
   let radius_m = camera_data.bounds_radius_m;
@@ -964,6 +968,10 @@ fn resident_environment_light_scale() -> f32 {
     2.0 * radius_m,
     radius_m == radius_m && abs(radius_m) < 1.0e20 && radius_m > 1.0e-6
   );
+}
+
+fn resident_refraction_inverse_view_projection() -> mat4x4<f32> {
+  return camera_data.inverse_view_projection;
 }`
     )
     .replace(

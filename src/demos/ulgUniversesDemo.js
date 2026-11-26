@@ -1076,18 +1076,24 @@ export async function mountUlgUniversesDemo() {
         cargoSpecimensEl.innerHTML = '<div class="uv-cargo-item-sub">No life forms aboard yet. Land on a living world and hold <strong>T</strong> (Tractor Beam) over trees or roaming animals to abduct &amp; examine them in Bio Lab.</div>';
       } else {
         cargoSpecimensEl.innerHTML = abductedSpecimens.map((sp, i) => {
-          const icon = sp.kind === 'flora' ? '🌿' : '🐾';
-          const bioHref = buildLifeLabXenobiologyUrl(sp.profile || null, sp.recommendedBioMode, sp);
+          const icon = sp.kingdom === 'flora' || sp.kind === 'flora'
+            ? '🌿'
+            : (sp.kingdom === 'fungi' || sp.kind === 'fungi'
+              ? '🍄'
+              : (sp.bodyPlan === 'aero-gasbag' ? '🎈' : (sp.bodyPlan === 'aquatic-swimmer' ? '🐟' : '🐾')));
+          const bioHref = buildLifeLabXenobiologyUrl(sp.profile || null, 'organism-overview', sp);
+          const dgTxt = Number.isFinite(sp.deltaGKjMol) ? ` · ΔG=${sp.deltaGKjMol} kJ/mol` : '';
+          const xnaTxt = sp.xnaBackbone ? ` · ${sp.xnaAlphabetSize || 4}-base ${sp.xnaBackbone.split(' ')[0]}` : '';
           return `
             <div class="uv-cargo-item">
               <div class="uv-cargo-item-head">
-                <span>${icon} ${sp.speciesName}</span>
+                <span>${icon} <em>${sp.speciesName}</em></span>
                 <span style="font-family:var(--mono);font-size:9.5px;color:#6ee7b7;">${sp.solventFormula || sp.solvent}</span>
               </div>
-              <div class="uv-cargo-item-sub">${sp.morphClass} · ${sp.worldName} (${sp.latDeg}°, ${sp.lonDeg}°) · ${sp.tempK} K · g=${sp.gravityMS2} m/s²</div>
+              <div class="uv-cargo-item-sub">${sp.morphClass} · ${sp.worldName} (${sp.latDeg}°, ${sp.lonDeg}°) · ${sp.tempK} K · g=${sp.gravityMS2} m/s²${dgTxt}${xnaTxt}</div>
               <div class="uv-cargo-item-sub">FASTA: <code>${String(sp.fasta || '').slice(0, 22)}…</code></div>
               <div class="uv-cargo-item-actions">
-                <a href="${bioHref}" target="_blank" rel="noopener">🔬 Examine in Bio Lab ↗</a>
+                <a href="${bioHref}" target="_blank" rel="noopener">🫧 Bio Aquarium ↗</a>
                 <button type="button" class="release" data-release-spec="${i}">✕ Release</button>
               </div>
             </div>`;

@@ -1,24 +1,76 @@
 // First-Principles GPU-Instanced Planetary Flora, Xenobiota & Civilization Structures
-// (`src/runtime/astrophysics/surfaceFloraPlacementGpu.js`).
+// (`surface-flora-placement@1`, `src/runtime/astrophysics/surfaceFloraPlacementGpu.js`).
 //
 // Strictly Star Spec v0.4 & GPU-Native compliant:
-//   - ZERO hardcoded species/planet names; vegetation density, canopy pigment, stem
-//     buckling height `H ~ (9.81/g)^0.45`, seasonal snow/foliage coloration, and
-//     emergent indigenous settlement towers all derive directly from live physics!
+//   - ZERO hardcoded species/planet names; vegetation density, multi-species morph
+//     distribution (6 genuinely distinct sculptural plant architectures — ZERO generic
+//     mushroom caps! — plus indigenous settlement domes), canopy pigments, stem Euler
+//     buckling height `H ~ (9.81/g)^0.38`, seasonal snow/foliage coloration all derive
+//     directly from `xenobiologyEcologyEngine.js` & live planetary physics!
+//   - 7 GPU-instanced template architectures:
+//       0 = Alpine Spire Conifer (tiered needle whorls)
+//       1 = Multi-Branching Asymmetric Crown Arbor (forked limbs + 4 sculpted foliage clusters)
+//       2 = Swept-Frond Rosette Palm / Fern (curving trunk + 6 arched radiating fronds)
+//       3 = Low-g / Dense-Air Buoyant Gas-Bladder Kelp Spire (twin stalks + lifting spheres)
+//       4 = Cryo / Twilight Bioluminescent Branching Coral-Crystal Tower (glowing crystalline arms)
+//       5 = High-g Buttressed Armored Baobab Monolith (root buttresses + wide layered canopy)
+//       6 = Indigenous Civilization Geodesic Habitation Spire + Glowing Window Band + Beacon
 //   - 1 GPU compute dispatch (`@workgroup_size(64)`, `<= 3` storage buffers) populates
-//     up to `1,024` 48-byte instance records (`48 KB`) whenever the player moves across
-//     a macro cell or seasonal snowline shifts — 0 ms steady-state cost!
-//   - Rendered via hardware instancing (`SURFACE_FLORA_INSTANCED_WGSL`) in 1 draw call.
+//     up to `1,024` 48-byte instance records (`48 KB`) whenever the player crosses a macro cell.
 
 import {
   computeBufferBinding,
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const FLORA_GRID_SIDE = 32;
 export const FLORA_MAX_INSTANCES = FLORA_GRID_SIDE * FLORA_GRID_SIDE; // 1024
 export const FLORA_INSTANCE_STRIDE_BYTES = 48; // 3 x vec4<f32>
+
+export const SURFACE_FLORA_LAW_ADAPTER = Object.freeze({
+  id: 'surface-flora-placement',
+  lawNodeId: 'law:astrophysics-surface-flora-placement',
+  orderConstraint: 'after:surface-tectonics-erosion',
+  adapterMode: LAW_ADAPTER_MODES.SURFACE_INTERFACE,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['tectonic-field', 'surface-deform-field', 'xenobiology-ecology-profile']),
+  writes: Object.freeze(['surface-flora-instances']),
+  accumulates: Object.freeze(['flora-biome-coverage']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['euler-buckling-height-bound', 'snowline-phenology-coupling']),
+  validityDomain: Object.freeze({ requiresSolidCrust: true, minPressurePa: 500 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e0, 1.5e4]),
+  fundamentalLaws: Object.freeze(['euler-column-buckling', 'kiang-canopy-photobiology', 'hydrologic-moisture-carrying-capacity'])
+});
+
+export function evaluateSurfaceFloraActivation(physicalState = {}) {
+  const active = Boolean(physicalState.surfaceViewActive)
+    && physicalState.hasSolidCrust !== false
+    && !physicalState.isMagmaOcean
+    && (Number(physicalState.surfacePressurePa ?? physicalState.pressurePa) || 0) >= 500
+    && (Number(physicalState.biosphereViability) || 0) >= 0.18;
+  return { active, reason: active ? 'viable-surface-flora-present' : 'sterile-or-orbital-dormant' };
+}
+
+export function registerSurfaceFloraModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  const desc = Object.freeze({
+    methodKey: 'surface-flora-placement@1',
+    lawAdapter: SURFACE_FLORA_LAW_ADAPTER,
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    evaluateActivation: evaluateSurfaceFloraActivation
+  });
+  try { registry.registerModule(desc); } catch {}
+  return desc;
+}
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,
@@ -44,14 +96,17 @@ struct FloraParams {
   curv_inv_2r: f32,
   focus_x: f32,
   focus_z: f32,
-  buckling_scale: f32,   // Euler buckling height scale (9.81/g)^0.45
-  pigment_rgb: vec4<f32>,// rgb = Wien stellar photosynthetic pigment, w = biosphereViability [0..1]
+  buckling_scale: f32,   // Euler buckling height scale (9.81/g)^0.38
+  pigment_rgb: vec4<f32>,// rgb = primary stellar photopigment, w = biosphereViability [0..1]
   season_aux: vec4<f32>, // x = autumnShift [0..1], y = civTechK [0..2], z = tectWorldSpanM, w = seaIceFrac
+  pigment2_rgb: vec4<f32>, // rgb = secondary clade pigment, w = biolumBase
+  arch_cdf0: vec4<f32>,  // cumulative CDF thresholds for flora kinds [0, 1, 2, 3]
+  arch_cdf1: vec4<f32>,  // x = CDF for kind 4 (biolum-coral), y = CDF for kind 5 (buttressed-monolith), zw = pad
 };
 
 // 48-byte GPU instance record read directly by SURFACE_FLORA_INSTANCED_WGSL:
-//   pos_scale: vec4(wx, wy_curved, wz, scaleH)  (scaleH <= 0 => culled!)
-//   rot_kind:  vec4(yawRad, radialScale, kindId, snowWeight)  kind: 0=conifer, 1=broadleaf/xeno, 2=settlement
+//   pos_scale: vec4(wx, wy_raw_ground_h, wz, scaleH)  (scaleH <= 0 => culled!)
+//   rot_kind:  vec4(yawRad, radialScale, kindId [0..6], snowWeight)
 //   col_emiss: vec4(r, g, b, emissiveWindow)
 struct FloraInstance {
   pos_scale: vec4<f32>,
@@ -191,14 +246,12 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
   let wx = (cell_x + 0.5 + jx) * params.spacing_m;
   let wz = (cell_z + 0.5 + jz) * params.spacing_m;
 
-  // Keep immediate spawn pad (r < 22 m) clear for Rover/UFO landing
   if (length(vec2<f32>(wx, wz)) < 22.0) {
     instances[idx] = inst;
     return;
   }
 
   let def = sample_def(wx, wz);
-  // Scorched/vaporized laser or missile craters burn away vegetation!
   if (def.w > 0.35 || def.y > 600.0 || def.x < -1.0) {
     instances[idx] = inst;
     return;
@@ -232,14 +285,14 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
   let viability = params.pigment_rgb.w;
   let r_sel = f_hash2(cell_x, cell_z, params.seed_f + 81.9);
   let r_sz = f_hash2(cell_x, cell_z, params.seed_f + 109.7);
+  let r_sp = f_hash2(cell_x, cell_z, params.seed_f + 157.3);
   let yaw = f_hash2(cell_x, cell_z, params.seed_f + 131.3) * 6.2831853;
 
-  // Check for indigenous civilization settlement spire on flat fertile lowlands!
   let civ_k = params.season_aux.y;
   let is_civ_slot = civ_on && civ_k >= 0.35 && slope < 0.14 && h < params.snowline_m - 6.0
     && r_sel > (0.985 - min(0.06, civ_k * 0.035));
 
-  var kind = 0.0;
+  var kind = 1.0;
   var scale_h = 0.0;
   var rad_scale = 1.0;
   var col = params.pigment_rgb.rgb;
@@ -247,40 +300,52 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
   let snow_w = smoothstep(params.snowline_m - 6.0, params.snowline_m + 10.0, h);
 
   if (is_civ_slot) {
-    kind = 2.0; // Indigenous habitation tower / geodesic dome with glowing warm windows!
-    scale_h = (6.5 + r_sz * 11.5) * clamp(params.buckling_scale, 0.7, 1.8);
+    kind = 6.0; // Indigenous habitation tower / geodesic dome with glowing warm windows!
+    scale_h = (6.8 + r_sz * 11.8) * clamp(params.buckling_scale, 0.7, 1.8);
     rad_scale = 0.95 + r_sz * 0.55;
     col = mix(vec3<f32>(0.76, 0.80, 0.86), vec3<f32>(0.92, 0.84, 0.72), r_sz);
     emiss = 0.55 + 0.65 * clamp(civ_k, 0.0, 1.5);
   } else if (bio_on) {
-    // Biological flora density modulated by moisture, viability & altitude!
     let alt_fade = 1.0 - smoothstep(params.snowline_m - 2.0, params.snowline_m + 22.0, h);
-    let dens = clamp(viability * (0.28 + 0.78 * moisture) * alt_fade, 0.0, 0.95);
+    let dens = clamp(viability * (0.30 + 0.76 * moisture) * alt_fade, 0.0, 0.95);
     if (r_sel > dens) {
       instances[idx] = inst;
       return;
     }
-    let is_alpine = snow_w > 0.25 || (r_sz < 0.45 && moisture < 0.55);
-    kind = select(1.0, 0.0, is_alpine);
-    scale_h = (5.2 + r_sz * 9.8) * clamp(params.buckling_scale, 0.55, 2.4);
-    rad_scale = select(1.05 + r_sz * 0.45, 0.72 + r_sz * 0.30, is_alpine);
+    // Select among 6 physically-weighted flora architectures from this world's clade distribution!
+    if (snow_w > 0.35 && params.arch_cdf0.x > 0.08) {
+      kind = 0.0; // Alpine spire conifers hug snowy ridges
+    } else if (r_sp < params.arch_cdf0.x) {
+      kind = 0.0;
+    } else if (r_sp < params.arch_cdf0.y) {
+      kind = 1.0;
+    } else if (r_sp < params.arch_cdf0.z) {
+      kind = 2.0;
+    } else if (r_sp < params.arch_cdf0.w) {
+      kind = 3.0;
+    } else if (r_sp < params.arch_cdf1.x) {
+      kind = 4.0;
+    } else {
+      kind = 5.0;
+    }
 
-    // Emergent orbital autumn / seasonal foliage hue shift & alpine snow dusting
-    let autumn = params.season_aux.x * select(1.0, 0.18, is_alpine);
-    let autumn_col = vec3<f32>(0.82, 0.42, 0.14);
-    col = mix(params.pigment_rgb.rgb * (0.78 + 0.42 * r_sz), autumn_col, autumn * 0.72);
+    scale_h = (5.4 + r_sz * 9.8) * clamp(params.buckling_scale, 0.52, 2.5);
+    rad_scale = select(0.95 + r_sz * 0.42, 0.74 + r_sz * 0.28, kind < 0.5 || (kind > 2.5 && kind < 3.5));
+
+    let base_pig = mix(params.pigment_rgb.rgb, params.pigment2_rgb.rgb, clamp((kind * 0.19) + r_sz * 0.35, 0.0, 1.0));
+    let autumn = params.season_aux.x * select(1.0, 0.18, kind < 0.5);
+    let autumn_col = vec3<f32>(0.84, 0.44, 0.14);
+    col = mix(base_pig * (0.80 + 0.38 * r_sz), autumn_col, autumn * 0.72);
     col = mix(col, vec3<f32>(0.88, 0.93, 0.98), snow_w * 0.68);
-    // Exotic cryo-solvent worlds can exhibit subtle bioluminescence!
-    if ((params.flags & 8u) != 0u) {
-      emiss = 0.18 + 0.28 * r_sz;
+    if ((params.flags & 8u) != 0u || (kind > 3.5 && kind < 4.5) || (kind > 2.5 && kind < 3.5)) {
+      emiss = max(params.pigment2_rgb.w, 0.18 + 0.32 * r_sz);
     }
   } else {
     instances[idx] = inst;
     return;
   }
 
-  // Store raw uncurved ground height h — spherical curvature -(dx^2+dz^2)*curv_inv_2r is applied
-  // LIVE every frame in SURFACE_FLORA_INSTANCED_WGSL so trees NEVER sink into terrain or hop when moving!
+  // Raw uncurved ground height h — spherical curvature applied LIVE every frame in SURFACE_FLORA_INSTANCED_WGSL!
   inst.pos_scale = vec4<f32>(wx, h, wz, scale_h);
   inst.rot_kind = vec4<f32>(yaw, rad_scale, kind, snow_w);
   inst.col_emiss = vec4<f32>(col, emiss);
@@ -289,13 +354,23 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 /**
- * Build a compact 3D template mesh vertex buffer for GPU-instanced trees, alien
- * flora canopies, and indigenous civilization domes (each vertex = 8 floats:
- * `pos_part(x,y,z,partId)` + `norm_kind(nx,ny,nz,kindId)` where `partId`:
- * `0 = trunk/base`, `1 = canopy/dome`, `2 = lit window/beacon`).
+ * Build 7 distinct sculpted procedural 3D template meshes for GPU-instanced ecosystems
+ * (each vertex = 8 floats: `pos_part(x,y,z,partId)` + `norm_kind(nx,ny,nz,kindId)`):
+ *   0 = Alpine Conifer Spire
+ *   1 = Multi-Branching Forked Crown Arbor (ZERO mushroom caps!)
+ *   2 = Swept-Frond Rosette Palm / Fern
+ *   3 = Low-g Buoyant Gas-Bladder Kelp Spire
+ *   4 = Bioluminescent Branching Coral-Crystal Tower
+ *   5 = High-g Buttressed Baobab Monolith
+ *   6 = Indigenous Geodesic Habitation Spire + Glowing Windows + Beacon
  */
 export function buildFloraTemplateMeshFloats() {
   const verts = [];
+  const norm3 = (v) => {
+    const l = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / l, v[1] / l, v[2] / l];
+  };
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   const pushTri = (p0, p1, p2, n0, n1, n2, partId, kindId) => {
     verts.push(
       p0[0], p0[1], p0[2], partId, n0[0], n0[1], n0[2], kindId,
@@ -303,7 +378,7 @@ export function buildFloraTemplateMeshFloats() {
       p2[0], p2[1], p2[2], partId, n2[0], n2[1], n2[2], kindId
     );
   };
-  const pushCone = (y0, y1, r0, r1, sides, partId, kindId) => {
+  const pushCone = (y0, y1, r0, r1, sides, partId, kindId, ox = 0, oz = 0) => {
     const dy = Math.max(1e-4, y1 - y0);
     const slope = (r0 - r1) / dy;
     for (let s = 0; s < sides; s += 1) {
@@ -311,36 +386,109 @@ export function buildFloraTemplateMeshFloats() {
       const a1 = ((s + 1) / sides) * Math.PI * 2;
       const c0 = Math.cos(a0); const s0 = Math.sin(a0);
       const c1 = Math.cos(a1); const s1 = Math.sin(a1);
-      const l0 = Math.hypot(c0, slope, s0) || 1;
-      const l1 = Math.hypot(c1, slope, s1) || 1;
-      const n0 = [c0 / l0, slope / l0, s0 / l0];
-      const n1 = [c1 / l1, slope / l1, s1 / l1];
-      const b0 = [c0 * r0, y0, s0 * r0];
-      const b1 = [c1 * r0, y0, s1 * r0];
-      const t0 = [c0 * r1, y1, s0 * r1];
-      const t1 = [c1 * r1, y1, s1 * r1];
+      const n0 = norm3([c0, slope, s0]);
+      const n1 = norm3([c1, slope, s1]);
+      const b0 = [ox + c0 * r0, y0, oz + s0 * r0];
+      const b1 = [ox + c1 * r0, y0, oz + s1 * r0];
+      const t0 = [ox + c0 * r1, y1, oz + s0 * r1];
+      const t1 = [ox + c1 * r1, y1, oz + s1 * r1];
       pushTri(b0, b1, t1, n0, n1, n1, partId, kindId);
       if (r1 > 1e-4) pushTri(b0, t1, t0, n0, n1, n0, partId, kindId);
     }
   };
+  const pushBranch = (pA, pB, rA, rB, sides, partId, kindId) => {
+    const d = [pB[0] - pA[0], pB[1] - pA[1], pB[2] - pA[2]];
+    const len = Math.hypot(d[0], d[1], d[2]);
+    if (len < 1e-4) return;
+    const ax = [d[0] / len, d[1] / len, d[2] / len];
+    const ref = Math.abs(ax[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+    const r = norm3(cross(ref, ax));
+    const f = cross(ax, r);
+    const slope = (rA - rB) / len;
+    for (let s = 0; s < sides; s += 1) {
+      const a0 = (s / sides) * Math.PI * 2;
+      const a1 = ((s + 1) / sides) * Math.PI * 2;
+      const rad0 = [r[0] * Math.cos(a0) + f[0] * Math.sin(a0), r[1] * Math.cos(a0) + f[1] * Math.sin(a0), r[2] * Math.cos(a0) + f[2] * Math.sin(a0)];
+      const rad1 = [r[0] * Math.cos(a1) + f[0] * Math.sin(a1), r[1] * Math.cos(a1) + f[1] * Math.sin(a1), r[2] * Math.cos(a1) + f[2] * Math.sin(a1)];
+      const n0 = norm3([rad0[0] + ax[0] * slope, rad0[1] + ax[1] * slope, rad0[2] + ax[2] * slope]);
+      const n1 = norm3([rad1[0] + ax[0] * slope, rad1[1] + ax[1] * slope, rad1[2] + ax[2] * slope]);
+      const b0 = [pA[0] + rad0[0] * rA, pA[1] + rad0[1] * rA, pA[2] + rad0[2] * rA];
+      const b1 = [pA[0] + rad1[0] * rA, pA[1] + rad1[1] * rA, pA[2] + rad1[2] * rA];
+      const u0 = [pB[0] + rad0[0] * rB, pB[1] + rad0[1] * rB, pB[2] + rad0[2] * rB];
+      const u1 = [pB[0] + rad1[0] * rB, pB[1] + rad1[1] * rB, pB[2] + rad1[2] * rB];
+      pushTri(b0, b1, u1, n0, n1, n1, partId, kindId);
+      if (rB > 1e-4) pushTri(b0, u1, u0, n0, n1, n0, partId, kindId);
+    }
+  };
+  const pushCluster = (cx, cy, cz, rx, ry, partId, kindId) => {
+    pushCone(cy - ry * 0.7, cy, rx * 0.45, rx, 6, partId, kindId, cx, cz);
+    pushCone(cy, cy + ry * 0.9, rx, 0.002, 6, partId, kindId, cx, cz);
+  };
 
-  // Kind 0: Conifer / Alpine Tree (trunk + 3 layered tiered pine cones)
-  pushCone(-0.05, 0.34, 0.08, 0.05, 5, 0.0, 0.0);
-  pushCone(0.24, 0.62, 0.36, 0.08, 6, 1.0, 0.0);
-  pushCone(0.48, 0.84, 0.28, 0.05, 6, 1.0, 0.0);
-  pushCone(0.70, 1.05, 0.19, 0.001, 6, 1.0, 0.0);
+  // Kind 0: Alpine Spire Conifer (trunk + 4 layered needle tiers)
+  pushCone(-0.08, 0.36, 0.075, 0.045, 5, 0.0, 0.0);
+  pushCone(0.22, 0.56, 0.36, 0.08, 6, 1.0, 0.0);
+  pushCone(0.44, 0.78, 0.29, 0.06, 6, 1.0, 0.0);
+  pushCone(0.64, 0.94, 0.21, 0.04, 6, 1.0, 0.0);
+  pushCone(0.82, 1.12, 0.13, 0.001, 5, 1.0, 0.0);
 
-  // Kind 1: Broadleaf / Xenobiota Canopy Tree (tapered stem + broad domed layered crown)
-  pushCone(-0.05, 0.48, 0.09, 0.05, 6, 0.0, 1.0);
-  pushCone(0.42, 0.72, 0.26, 0.48, 7, 1.0, 1.0);
-  pushCone(0.72, 1.00, 0.48, 0.18, 7, 1.0, 1.0);
-  pushCone(0.98, 1.08, 0.18, 0.001, 7, 1.0, 1.0);
+  // Kind 1: Multi-Branching Asymmetric Crown Arbor (forked branches + 4 organic crown clusters — ZERO mushroom cap!)
+  pushCone(-0.08, 0.48, 0.085, 0.048, 6, 0.0, 1.0);
+  const b1 = [[0.24, 0.80, 0.12, 0.23, 0.18], [-0.22, 0.76, 0.18, 0.21, 0.17], [0.06, 0.84, -0.24, 0.22, 0.18], [-0.04, 0.96, 0.02, 0.26, 0.20]];
+  for (const [bx, by, bz, cr, cy] of b1) {
+    pushBranch([0, 0.42, 0], [bx, by, bz], 0.042, 0.018, 4, 0.0, 1.0);
+    pushCluster(bx, by, bz, cr, cy, 1.0, 1.0);
+  }
 
-  // Kind 2: Indigenous Settlement Spire / Geodesic Habitation Tower + Glowing Window Band + Beacon
-  pushCone(-0.05, 0.42, 0.44, 0.38, 8, 0.0, 2.0);
-  pushCone(0.42, 0.54, 0.40, 0.40, 8, 2.0, 2.0); // Glowing warm habitation windows!
-  pushCone(0.54, 0.86, 0.38, 0.16, 8, 1.0, 2.0);
-  pushCone(0.86, 1.15, 0.05, 0.01, 6, 2.0, 2.0); // Radio/optical spire beacon!
+  // Kind 2: Swept-Frond Rosette Palm / Fern (curving trunk + 6 arched radiating frond blades!)
+  pushBranch([0, -0.08, 0], [0.05, 0.44, 0.02], 0.07, 0.048, 5, 0.0, 2.0);
+  pushBranch([0.05, 0.44, 0.02], [0.02, 0.78, -0.03], 0.048, 0.036, 5, 0.0, 2.0);
+  const crown2 = [0.02, 0.78, -0.03];
+  for (let fi = 0; fi < 6; fi += 1) {
+    const a = (fi / 6) * Math.PI * 2;
+    const ca = Math.cos(a); const sa = Math.sin(a);
+    const mid = [crown2[0] + ca * 0.26, crown2[1] + 0.16, crown2[2] + sa * 0.26];
+    const tip = [crown2[0] + ca * 0.50, crown2[1] - 0.04, crown2[2] + sa * 0.50];
+    const side = [-sa * 0.09, 0.02, ca * 0.09];
+    const nUp = [0, 1, 0];
+    pushTri(crown2, tip, [mid[0] + side[0], mid[1], mid[2] + side[2]], nUp, nUp, nUp, 1.0, 2.0);
+    pushTri(crown2, [mid[0] - side[0], mid[1], mid[2] - side[2]], tip, nUp, nUp, nUp, 1.0, 2.0);
+  }
+
+  // Kind 3: Low-g / Dense-Air Buoyant Gas-Bladder Kelp Spire (3 slender stalks + glowing lifting bladders!)
+  const kelp = [[0.0, 1.15, 0.0, 0.16], [0.14, 0.88, 0.08, 0.12], [-0.12, 0.96, -0.10, 0.13]];
+  for (const [kx, ky, kz, kr] of kelp) {
+    pushBranch([kx * 0.4, -0.08, kz * 0.4], [kx * 0.8, ky * 0.52, kz * 0.8], 0.032, 0.022, 4, 0.0, 3.0);
+    pushBranch([kx * 0.8, ky * 0.52, kz * 0.8], [kx, ky - kr, kz], 0.022, 0.018, 4, 0.0, 3.0);
+    pushCluster(kx, ky, kz, kr, kr * 1.25, 1.0, 3.0);
+  }
+
+  // Kind 4: Cryo / Twilight Bioluminescent Branching Coral-Crystal Tower!
+  pushCone(-0.08, 0.36, 0.11, 0.06, 5, 0.0, 4.0);
+  for (let ci = 0; ci < 5; ci += 1) {
+    const a = (ci / 5) * Math.PI * 2;
+    const rad = 0.26 + (ci % 2) * 0.10;
+    const hTop = 0.78 + (ci % 3) * 0.14;
+    const pTip = [Math.cos(a) * rad, hTop, Math.sin(a) * rad];
+    pushBranch([0, 0.30, 0], pTip, 0.055, 0.018, 5, 1.0, 4.0);
+    pushCluster(pTip[0], pTip[1], pTip[2], 0.07, 0.10, 1.0, 4.0);
+  }
+
+  // Kind 5: High-g Buttressed Armored Baobab Monolith (flanged roots + squat wide layered crown)
+  pushCone(-0.08, 0.58, 0.24, 0.14, 7, 0.0, 5.0);
+  for (let bi = 0; bi < 4; bi += 1) {
+    const a = (bi / 4) * Math.PI * 2;
+    pushBranch([Math.cos(a) * 0.38, -0.06, Math.sin(a) * 0.38], [Math.cos(a) * 0.14, 0.36, Math.sin(a) * 0.14], 0.06, 0.03, 4, 0.0, 5.0);
+  }
+  pushCluster(0, 0.72, 0, 0.46, 0.20, 1.0, 5.0);
+  pushCluster(0.18, 0.80, 0.12, 0.28, 0.16, 1.0, 5.0);
+  pushCluster(-0.20, 0.78, -0.10, 0.26, 0.15, 1.0, 5.0);
+
+  // Kind 6: Indigenous Settlement Spire / Geodesic Habitation Tower + Glowing Window Band + Beacon
+  pushCone(-0.08, 0.42, 0.44, 0.38, 8, 0.0, 6.0);
+  pushCone(0.42, 0.54, 0.40, 0.40, 8, 2.0, 6.0);
+  pushCone(0.54, 0.86, 0.38, 0.16, 8, 1.0, 6.0);
+  pushCone(0.86, 1.15, 0.05, 0.01, 6, 2.0, 6.0);
 
   return new Float32Array(verts);
 }
@@ -366,7 +514,7 @@ export function createSurfaceFloraPlacementGpu(device, {
 
   const paramsBuf = device.createBuffer({
     label: `${label}-params`,
-    size: 96,
+    size: 144,
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   });
   const bindings = [
@@ -376,7 +524,7 @@ export function createSurfaceFloraPlacementGpu(device, {
     computeBufferBinding(3, 'storage')
   ];
   const placePipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-surface-flora-placement.v1',
+    cacheKey: 'ulg-surface-flora-placement.v2-7morphs',
     label: `${label}-place`,
     code: FLORA_PLACEMENT_WGSL,
     entryPoint: 'place_surface_flora',
@@ -393,7 +541,7 @@ export function createSurfaceFloraPlacementGpu(device, {
     ]
   });
 
-  const ab = new ArrayBuffer(96);
+  const ab = new ArrayBuffer(144);
   const u32 = new Uint32Array(ab);
   const f32 = new Float32Array(ab);
   let lastSnapKey = '';
@@ -423,6 +571,7 @@ export function createSurfaceFloraPlacementGpu(device, {
       && !env?.isCryoMoon
       && (Number(env?.pressurePa) || 0) >= 500
       && xeno?.solvent !== 'H2O-subsurface'
+      && xeno?.solvent !== 'H2-He-cloud'
       && xeno?.solvent !== 'none'
     );
     const bioActive = allowSurfaceFlora && Boolean(xeno && xeno.biosphereViability >= 0.18);
@@ -447,6 +596,18 @@ export function createSurfaceFloraPlacementGpu(device, {
       | (civActive ? 4 : 0)
       | (xeno?.solvent && xeno.solvent !== 'H2O' ? 8 : 0);
 
+    // Cumulative CDF from world's derived floraArchWeights [6]
+    const w = Array.isArray(xeno?.floraArchWeights) && xeno.floraArchWeights.length === 6
+      ? xeno.floraArchWeights
+      : [0.35, 0.45, 0.10, 0.03, 0.03, 0.04];
+    let c0 = w[0];
+    let c1 = c0 + w[1];
+    let c2 = c1 + w[2];
+    let c3 = c2 + w[3];
+    let c4 = c3 + w[4];
+    const tot = Math.max(1e-4, c4 + w[5]);
+    c0 /= tot; c1 /= tot; c2 /= tot; c3 /= tot; c4 /= tot;
+
     u32[0] = FLORA_GRID_SIDE;
     u32[1] = flags;
     u32[2] = tectN;
@@ -464,6 +625,7 @@ export function createSurfaceFloraPlacementGpu(device, {
     f32[14] = focusZ;
     f32[15] = Number(xeno?.bucklingHeightScale) || 1.0;
     const pig = xeno?.pigmentRgb || [0.16, 0.52, 0.22];
+    const pig2 = xeno?.secondaryPigmentRgb || [0.24, 0.62, 0.26];
     f32[16] = pig[0];
     f32[17] = pig[1];
     f32[18] = pig[2];
@@ -472,6 +634,18 @@ export function createSurfaceFloraPlacementGpu(device, {
     f32[21] = Number(xeno?.civTechK) || 0.0;
     f32[22] = tectWorldSpanM;
     f32[23] = seaIceFrac;
+    f32[24] = pig2[0];
+    f32[25] = pig2[1];
+    f32[26] = pig2[2];
+    f32[27] = xeno?.solvent !== 'H2O' ? 0.28 : 0.0;
+    f32[28] = c0;
+    f32[29] = c1;
+    f32[30] = c2;
+    f32[31] = c3;
+    f32[32] = c4;
+    f32[33] = 1.0;
+    f32[34] = 0.0;
+    f32[35] = 0.0;
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
     const pass = encoder.beginComputePass({ label: `${label}-pass` });

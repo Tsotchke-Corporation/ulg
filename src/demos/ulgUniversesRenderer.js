@@ -627,14 +627,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   var base_col = in.col_emiss.rgb;
   var emiss = 0.0;
   if (part_id < 0.5) {
-    // Trunk or structural base
-    base_col = select(vec3<f32>(0.34, 0.23, 0.15), in.col_emiss.rgb * 0.72, kind_id > 1.5);
+    // Trunk or structural base (kind 6 = indigenous settlement facade)
+    base_col = select(vec3<f32>(0.34, 0.23, 0.15), in.col_emiss.rgb * 0.72, kind_id > 5.5);
   } else if (part_id > 1.5) {
     // Glowing habitation windows & spire beacons shine brightly at twilight & night!
     base_col = vec3<f32>(1.0, 0.86, 0.54);
     emiss = in.col_emiss.w * (0.45 + 1.45 * (1.0 - sun_day));
-  } else if (kind_id < 1.5 && in.col_emiss.w > 0.05) {
-    // Subtle nocturnal bioluminescence on exotic cryo-solvent flora!
+  } else if (kind_id < 5.5 && in.col_emiss.w > 0.05) {
+    // Subtle nocturnal bioluminescence on exotic cryo-solvent / coral / buoyant kelp flora!
     emiss = in.col_emiss.w * (0.35 + 0.95 * (1.0 - sun_day));
   }
 
@@ -651,8 +651,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   col = mix(col, fog_hor, clamp(max(fog_amt, patch_edge), 0.0, 1.0));
 
   if (cam.em_sensor.z > 0.5) {
-    let t_k = max(40.0, cam.em_aux.x) + select(8.0, 95.0, kind_id > 1.5);
-    let rad_sig = select(0.0, 1.25, kind_id > 1.5);
+    let t_k = max(40.0, cam.em_aux.x) + select(8.0, 95.0, kind_id > 5.5);
+    let rad_sig = select(0.0, 1.25, kind_id > 5.5);
     col = em_sensor_map_rgb(col, t_k, 0.0, 0.0, rad_sig, 0.0);
   }
   return vec4<f32>(col, 1.0);

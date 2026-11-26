@@ -15,6 +15,7 @@ import { configureCompatibleWebGpuCanvas } from '../runtime/shared/webgpuCompat.
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,
+  VERTEX: 0x0020,
   UNIFORM: 0x0040,
   STORAGE: 0x0080
 });
@@ -665,6 +666,78 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
+// 6B. Interactive 3D Xenobiology Specimen Vivarium / Aquarium Mesh Shader (48-byte vertices: pos_part, norm_zone, col_emiss)
+const SPECIMEN_MESH_WGSL = /* wgsl */ `
+${COMMON_UNIFORMS_WGSL}
+
+@group(0) @binding(0) var<uniform> u: RenderUniforms;
+
+struct VsIn {
+  @location(0) pos_part: vec4<f32>,
+  @location(1) norm_zone: vec4<f32>,
+  @location(2) col_emiss: vec4<f32>,
+};
+
+struct VsOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) world_pos: vec3<f32>,
+  @location(1) norm: vec3<f32>,
+  @location(2) col_emiss: vec4<f32>,
+  @location(3) zone: f32,
+};
+
+@vertex
+fn vs_spec_mesh(in: VsIn) -> VsOut {
+  var out: VsOut;
+  out.pos = u.view_proj * vec4<f32>(in.pos_part.xyz, 1.0);
+  out.world_pos = in.pos_part.xyz;
+  out.norm = in.norm_zone.xyz;
+  out.col_emiss = in.col_emiss;
+  out.zone = in.norm_zone.w;
+  return out;
+}
+
+@fragment
+fn fs_spec_mesh(in: VsOut) -> @location(0) vec4<f32> {
+  let n = normalize(in.norm);
+  let v = normalize(u.cam_pos_mode.xyz - in.world_pos);
+  let l1 = normalize(vec3<f32>(0.42, 0.86, 0.48));
+  let l2 = normalize(vec3<f32>(-0.62, 0.28, -0.58));
+  let ndl1 = max(dot(n, l1), 0.0);
+  let ndl2 = max(dot(n, l2), 0.0);
+  let ndv = max(dot(n, v), 0.0);
+  let h1 = normalize(l1 + v);
+  let spec = pow(max(dot(n, h1), 0.0), 34.0) * select(0.55, 0.22, in.zone < 1.5);
+  let fres = pow(max(0.0, 1.0 - ndv), 2.8);
+  // Subtle aquatic / bio-chamber caustic shimmer on vivarium floor & organic dermis!
+  let caust = 0.5 + 0.5 * sin(in.world_pos.x * 4.2 + u.cam_up_time.w * 2.1) * cos(in.world_pos.z * 4.5 - u.cam_up_time.w * 1.7);
+  let caustic_tint = vec3<f32>(0.14, 0.42, 0.48) * caust * (0.10 + 0.16 * max(0.0, n.y));
+  let base = in.col_emiss.rgb;
+  let emiss = max(0.0, in.col_emiss.w);
+  let col = base * (0.24 + 0.88 * ndl1 + 0.30 * ndl2) + vec3<f32>(0.92, 0.98, 1.0) * spec + base * fres * 0.42 + caustic_tint + base * emiss * 1.25;
+  return vec4<f32>(col, 1.0);
+}
+
+@fragment
+fn fs_spec_glass(in: VsOut) -> @location(0) vec4<f32> {
+  let n = normalize(in.norm);
+  let v = normalize(u.cam_pos_mode.xyz - in.world_pos);
+  let ndv = abs(dot(n, v));
+  let fres = pow(max(0.0, 1.0 - ndv), 2.4);
+  if (in.zone > 5.5) {
+    // Glowing active lab tool beam (Thermal Laser, Cryo-Jet, Probe, Neuro-Stim, Biopsy!)
+    let beam = in.col_emiss.rgb * (1.25 + 0.65 * ndv);
+    let a = clamp(in.col_emiss.w * 0.55, 0.25, 0.95);
+    return vec4<f32>(beam * a, a);
+  }
+  // Translucent refractive glass aquarium walls + top solvent meniscus shimmer!
+  let ripple = 0.85 + 0.15 * sin(in.world_pos.x * 5.0 + u.cam_up_time.w * 2.4) * cos(in.world_pos.z * 5.0 - u.cam_up_time.w * 1.9);
+  let alpha = clamp(in.col_emiss.w * (0.45 + 1.35 * fres) * ripple, 0.05, 0.62);
+  let col = in.col_emiss.rgb * (0.85 + 1.25 * fres) + vec3<f32>(0.62, 0.94, 1.0) * fres * 0.45;
+  return vec4<f32>(col * alpha, alpha);
+}
+`;
+
 // 7. 2-Pass Half-Resolution Kawase HDR Bloom + ACES Tonemap & Gamma Blit Pass
 const BLOOM_WGSL = /* wgsl */ `
 struct BloomParams {
@@ -795,6 +868,40 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
   const bioBeadPipe = makePipeline('chembio-bio-bead', BIO_BEAD_WGSL, 'vs_bio_bead', 'fs_bio_bead', hdrTarget, depthState);
   const bioLinkPipe = makePipeline('chembio-bio-link', BIO_LINK_WGSL, 'vs_bio_link', 'fs_bio_link', hdrTarget, depthState);
   const fieldPipe = makePipeline('chembio-field', FIELD_PLANE_WGSL, 'vs_field', 'fs_field', hdrTarget, depthState);
+
+  const specMod = device.createShaderModule({ label: 'chembio-spec-mesh', code: SPECIMEN_MESH_WGSL });
+  const specVertexBuffers = [{
+    arrayStride: 48,
+    attributes: [
+      { shaderLocation: 0, offset: 0, format: 'float32x4' },
+      { shaderLocation: 1, offset: 16, format: 'float32x4' },
+      { shaderLocation: 2, offset: 32, format: 'float32x4' }
+    ]
+  }];
+  const specSolidPipe = device.createRenderPipeline({
+    label: 'chembio-spec-solid',
+    layout: 'auto',
+    vertex: { module: specMod, entryPoint: 'vs_spec_mesh', buffers: specVertexBuffers },
+    fragment: { module: specMod, entryPoint: 'fs_spec_mesh', targets: hdrTarget },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: depthState
+  });
+  const specGlassPipe = device.createRenderPipeline({
+    label: 'chembio-spec-glass',
+    layout: 'auto',
+    vertex: { module: specMod, entryPoint: 'vs_spec_mesh', buffers: specVertexBuffers },
+    fragment: { module: specMod, entryPoint: 'fs_spec_glass', targets: hdrAlphaTarget },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: depthReadOnly
+  });
+  const specSolidBg = device.createBindGroup({
+    layout: specSolidPipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: uniformBuf } }]
+  });
+  const specGlassBg = device.createBindGroup({
+    layout: specGlassPipe.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: uniformBuf } }]
+  });
 
   const bloomMod = device.createShaderModule({ label: 'chembio-bloom', code: BLOOM_WGSL });
   const bloomPipe = device.createRenderPipeline({
@@ -1026,6 +1133,14 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
       }
     }
 
+    // Optional 3D Specimen Vivarium Solid Mesh (Organism + Containment Frame + Rocks)
+    if (scene.specimenSolidBuffer && scene.specimenSolidVertCount > 0) {
+      pass.setPipeline(specSolidPipe);
+      pass.setBindGroup(0, specSolidBg);
+      pass.setVertexBuffer(0, scene.specimenSolidBuffer);
+      pass.draw(scene.specimenSolidVertCount);
+    }
+
     // Optional Biology 48-byte Beads + Optional Polymer/Amphiphile Link Tubes
     if (scene.bioBeadsBuffer && scene.bioBeadCount > 0) {
       if (scene.bioLinkCount > 0 && scene.bioLinkMode > 0) {
@@ -1044,6 +1159,14 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
       pass.setPipeline(bioBeadPipe);
       pass.setBindGroup(0, kbg);
       pass.draw(6, scene.bioBeadCount);
+    }
+
+    // Optional Translucent Fresnel Aquarium Glass Walls + Active Tool Beams (drawn after opaque organism & motes!)
+    if (scene.specimenGlassBuffer && scene.specimenGlassVertCount > 0) {
+      pass.setPipeline(specGlassPipe);
+      pass.setBindGroup(0, specGlassBg);
+      pass.setVertexBuffer(0, scene.specimenGlassBuffer);
+      pass.draw(scene.specimenGlassVertCount);
     }
 
     pass.end();
@@ -1100,6 +1223,22 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
     setCamera,
     getViewProj: () => lastVp,
     getAspect: () => lastAspect,
+    unprojectRay(ndcX, ndcY) {
+      const cp = Math.cos(camera.pitch);
+      const eye = [
+        camera.target[0] + camera.dist * cp * Math.sin(camera.yaw),
+        camera.target[1] + camera.dist * Math.sin(camera.pitch),
+        camera.target[2] + camera.dist * cp * Math.cos(camera.yaw)
+      ];
+      const { right, up, forward } = buildLookAt(eye, camera.target, [0, 1, 0]);
+      const tanHalf = Math.tan(((camera.fovDeg * Math.PI) / 180) * 0.5);
+      const dir = normalize3([
+        forward[0] + right[0] * (ndcX * lastAspect * tanHalf) + up[0] * (ndcY * tanHalf),
+        forward[1] + right[1] * (ndcX * lastAspect * tanHalf) + up[1] * (ndcY * tanHalf),
+        forward[2] + right[2] * (ndcX * lastAspect * tanHalf) + up[2] * (ndcY * tanHalf)
+      ]);
+      return { origin: eye, dir };
+    },
     projectWorld(worldPos, cssW, cssH) {
       const [x, y, z] = worldPos;
       const cx = lastVp[0] * x + lastVp[4] * y + lastVp[8] * z + lastVp[12];

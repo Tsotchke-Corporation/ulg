@@ -109,7 +109,7 @@ export function evaluateOutgassingAndPhotoevaporation({
 export const radiativeWindWgsl = /* wgsl */ `
 struct RadWindParams {
   particle_count: u32,
-  regime_code: u32,    // 0=h2_pillars_nebula, 1=planetary_nebula, 2=snr_pwn_blastwave, 3=comet_dual_tail, 4=hot_jupiter_xuv
+  regime_code: u32,    // 0=h2_pillars_nebula, 1=planetary_nebula, 2=snr_pwn_blastwave, 3=comet_dual_tail, 4=hot_jupiter_xuv, 5=reflection_nebula, 6=wr_bipolar_homunculus
   step_index: u32,
   pad0: u32,
   dt: f32,
@@ -212,11 +212,69 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
 
-  // Regimes 0 (H II Star-Forming Pillars), 1 (Planetary Nebula), 2 (SNR / Crab PWN)!
+  // Regimes 0 (H II Pillars + Protostars/HH Jets), 1 (Planetary Nebula), 2 (Crab SNR/PWN),
+  // 5 (Pleiades Reflection Nebula), 6 (Wolf-Rayet / Eta Carinae Bipolar Homunculus)!
   let r = max(0.25, length(loc));
   let dir = loc / r;
+  if (reg == 5u) {
+    // Reflection Nebula (M45 Pleiades / NGC 7023 Iris): Mie/Rayleigh forward-scattered sapphire dust sheets
+    // gently sculpted by radiation pressure from the embedded hot B-star cluster!
+    let swirl = vec3<f32>(sin(loc.y * 0.9 + p.meta0.x * 6.28), cos(loc.x * 0.7 - loc.z * 0.7), sin(loc.z * 0.9)) * 0.14;
+    let rad_push = dir * (params.rad_beta * 0.22 / (0.6 + r * 0.35));
+    vel = mix(vel, rad_push + swirl, clamp(dt * 1.2, 0.0, 1.0));
+    loc = loc + vel * dt;
+    if (length(loc) > params.box_half * 0.95) { loc = loc * 0.48; }
+    let scatter = 1.0 / (0.38 + 0.14 * r * r);
+    // Species 2 = sapphire Rayleigh wisps (strong OIII/blue channel), species 0 = warm golden background dust
+    let is_blue_veil = p.pos_m.w > 0.5;
+    let blue_sig = select(0.18, 1.45, is_blue_veil) * scatter * (0.65 + 0.55 * params.uv_flux);
+    let gold_sig = select(0.95, 0.22, is_blue_veil) * scatter;
+    let rose_sig = 0.10 * scatter;
+    p.pos_m = vec4<f32>(loc + params.center_offset.xyz, p.pos_m.w);
+    p.vel_ion = vec4<f32>(vel, clamp(scatter * 0.85, 0.0, 1.0));
+    p.em_spec = vec4<f32>(rose_sig, blue_sig, gold_sig, p.em_spec.w + dt);
+    p.meta0.w = 1.0;
+    parcels[i] = p;
+    return;
+  }
+
+  if (reg == 6u) {
+    // Wolf-Rayet / Eta Carinae Bipolar Homunculus: near-Eddington fast wind inflating twin dusty glowing
+    // mottled lobes pinched at the waist by a fast-expanding glowing equatorial skirt!
+    let is_skirt = p.pos_m.w > 2.5;
+    let pole_y = abs(dir.y);
+    let v_exp = params.wind_speed * select(0.55 + 1.35 * pole_y * pole_y, 0.78, is_skirt);
+    let mottled = vec3<f32>(sin(loc.z * 2.4 + p.meta0.x * 6.28), cos(loc.x * 2.4), sin(loc.y * 2.4)) * 0.16;
+    vel = mix(vel, dir * v_exp + mottled, clamp(dt * 1.6, 0.0, 1.0));
+    loc = loc + vel * dt;
+    if (length(loc) > params.box_half * 0.92) {
+      let th = p.meta0.x * 6.2831853;
+      if (is_skirt) {
+        let r_sk = 0.6 + p.meta0.y * 1.4;
+        loc = vec3<f32>(cos(th) * r_sk, (p.meta0.z - 0.5) * 0.45, sin(th) * r_sk);
+      } else {
+        let lobe_sign = select(-1.0, 1.0, p.meta0.z >= 0.5);
+        let u_l = 0.2 + p.meta0.y * 0.8;
+        let rad_l = sin(u_l * 3.14159) * 1.55;
+        loc = vec3<f32>(cos(th) * rad_l, lobe_sign * (0.4 + u_l * 2.8), sin(th) * rad_l);
+      }
+    }
+    let lobe_hot = smoothstep(0.3, 4.5, r);
+    // Warm amber-gold dusty Homunculus skin + fiery crimson H-alpha knots + cyan inner WR shock!
+    let ha_w = (0.65 + 0.55 * lobe_hot) * select(1.0, 0.45, is_skirt);
+    let o3_w = (1.0 - smoothstep(0.6, 2.8, r)) * 1.35 + select(0.0, 0.85, is_skirt);
+    let s2_w = (0.95 + 0.55 * (1.0 - lobe_hot * 0.4)) * select(1.2, 0.7, is_skirt);
+    p.pos_m = vec4<f32>(loc + params.center_offset.xyz, p.pos_m.w);
+    p.vel_ion = vec4<f32>(vel, clamp(0.45 + 0.45 * params.uv_flux, 0.0, 1.0));
+    p.em_spec = vec4<f32>(ha_w, o3_w, s2_w, p.em_spec.w + dt);
+    p.meta0.w = 1.0;
+    parcels[i] = p;
+    return;
+  }
+
   // Local UV flux falls as 1/r^2 and is attenuated inside dense molecular pillar cores (self-shielding!)
   let is_pillar_core = (reg == 0u) && (p.pos_m.w < 0.5);
+  let is_embedded_protostar = (reg == 0u) && (p.pos_m.w > 3.5);
   let shield = select(1.0, 0.18 + 0.82 * smoothstep(-2.0, 4.5, dot(loc, s_dir)), is_pillar_core);
   let f_uv_loc = params.uv_flux * shield / (0.35 + 0.12 * r * r);
 
@@ -240,9 +298,9 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
       vel = normalize(loc) * v_shell * 0.6;
     }
   } else if (reg == 2u) {
-    // Supernova Remnant / Crab PWN: Sedov-Taylor blastwave decelerating (R ~ t^(2/5)) + filamentary turbulence!
+    // Supernova Remnant / Crab PWN: Sedov-Taylor blastwave decelerating (R ~ t^(2/5)) + filamentary RT web!
     let sedov_v = params.wind_speed / pow(0.6 + r * 0.42, 1.15);
-    let rt_swirl = vec3<f32>(sin(loc.y * 2.1 + p.meta0.x * 6.28), cos(loc.z * 2.1), sin(loc.x * 2.1)) * 0.22;
+    let rt_swirl = vec3<f32>(sin(loc.y * 2.3 + p.meta0.x * 6.28), cos(loc.z * 2.3), sin(loc.x * 2.3)) * 0.24;
     vel = mix(vel, dir * sedov_v + rt_swirl, clamp(dt * 2.0, 0.0, 1.0));
     loc = loc + vel * dt;
     if (length(loc) > params.box_half * 0.95) {
@@ -250,6 +308,13 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
       let cy = (p.meta0.z * 2.0 - 1.0);
       let sy = sqrt(max(0.0, 1.0 - cy * cy));
       loc = vec3<f32>(cos(th) * sy, cy, sin(th) * sy) * (0.75 + 0.45 * p.meta0.y);
+    }
+  } else if (is_embedded_protostar) {
+    // Embedded dusty protostars & Herbig-Haro bipolar outflow jets inside pillar tips (pierced by JWST IR!)
+    loc = loc + vel * dt;
+    if (length(vel) > 0.05 && p.em_spec.w > 2.2) {
+      loc = loc - vel * 2.1;
+      p.em_spec.w = 0.0;
     }
   } else {
     // H II Star-Forming Pillars: photoevaporative rocket acceleration ablating sunlit tips away from O-star!
@@ -263,16 +328,21 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   // Physically stratified nebular emission lines (Hubble SHO / optical H-alpha, [O III], [S II]):
-  //   - Inner highly ionized zone -> vivid emerald-cyan [O III] 500.7 nm
-  //   - Intermediate ionized shell -> crimson-rose H-alpha 656.3 nm
-  //   - Outer ionization front / dense shielded molecular skin -> amber-gold [S II] 672 nm
-  let o3 = select(
+  let is_inner_pwn = (reg == 2u) && (p.pos_m.w > 1.5 && p.pos_m.w < 2.5);
+  var o3 = select(
     x_hii * (1.0 - smoothstep(0.9, 5.4, r)) * (0.95 + 0.55 * params.uv_flux),
-    x_hii * (1.0 - smoothstep(1.2, 4.2, r)) * 1.45,
+    x_hii * (1.0 - smoothstep(1.2, 4.4, r)) * 1.55,
     reg == 1u || reg == 2u
   );
-  let ha = x_hii * smoothstep(0.6, 4.8, r) * (0.72 + 0.45 * params.uv_flux);
-  let s2 = (1.0 - x_hii * 0.82) * smoothstep(0.0, 0.55, x_hii + 0.16) * 1.15;
+  var ha = x_hii * smoothstep(0.6, 4.8, r) * (0.78 + 0.45 * params.uv_flux);
+  var s2 = (1.0 - x_hii * 0.82) * smoothstep(0.0, 0.55, x_hii + 0.16) * 1.15;
+  if (is_inner_pwn) {
+    // Crab M1 ghostly inner synchrotron blue-white pulsar wind nebula!
+    o3 = 1.65; ha = 0.16; s2 = 0.08;
+  } else if (is_embedded_protostar) {
+    // Ruby-crimson embedded YSO protostars & HH shocks — faint in optical dust, blazing in JWST IR!
+    ha = 1.75; o3 = 0.18; s2 = 1.45;
+  }
 
   p.pos_m = vec4<f32>(loc + params.center_offset.xyz, p.pos_m.w);
   p.vel_ion = vec4<f32>(vel, x_hii);
@@ -346,7 +416,15 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createRadiativePhotoionizationWindSessionWebGpu requires a live WebGPU GPUDevice');
   }
-  const regimeMap = { 'h2-pillars': 0, 'planetary-nebula': 1, 'snr-pwn': 2, 'comet-dual-tail': 3, 'hot-jupiter-xuv': 4 };
+  const regimeMap = {
+    'h2-pillars': 0,
+    'planetary-nebula': 1,
+    'snr-pwn': 2,
+    'comet-dual-tail': 3,
+    'hot-jupiter-xuv': 4,
+    'reflection-nebula': 5,
+    'wr-bubble': 6
+  };
   const regimeCode = regimeMap[regime] ?? 0;
   const n = Math.max(256, Math.min(32768, Math.trunc(particleCount)));
   const rand = mulberry32(seed);
@@ -365,20 +443,57 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
     let xHii0 = uvFlux > 0 ? 0.35 : 0.0;
 
     if (regimeCode === 0) {
-      // H II Star-Forming Molecular Cloud with 3 dense elephant-trunk pillar filaments!
-      const inPillar = i < n * 0.62;
+      // H II Star-Forming Molecular Cloud (Eagle M16 Pillars of Creation — Hubble / JWST morphology):
+      //   - 3 staggered, organic, crooked tapering elephant-trunk pillars tilted ~18° toward the OB cluster!
+      //   - 54% dense dusty molecular columns (sp=0 -> high optical tau_V, pierced ruby-translucent by JWST IR!)
+      //   - 12% embedded fiery YSO protostars & collimated Herbig-Haro bipolar jets inside the pillar heads (sp=4!)
+      //   - 34% glowing photoionized background [O III]/H-alpha cavity
+      const inPillar = i < n * 0.54;
+      const isProtostar = i >= n * 0.54 && i < n * 0.66;
+      const pillarBases = [-2.55, -0.15, 2.25];
+      const pillarTopsY = [3.65, 2.15, 0.85];
+      const pillarBaseZ = [0.65, -0.85, 0.55];
       if (inPillar) {
         const pIdx = i % 3;
-        const px = (pIdx - 1) * 2.4;
-        const pz = (pIdx === 1 ? -0.9 : 0.7);
-        const h = (rand() - 0.5) * 6.8;
-        const rad = (0.45 + 0.55 * (1.0 - (h + 3.4) / 7.5)) * Math.sqrt(rand());
+        const uH = Math.pow(rand(), 0.88); // 0 = broad misty base, 1 = dense sculpted EGG fingertip
+        const h = -3.65 + uH * (pillarTopsY[pIdx] + 3.65);
+        const leanX = uH * (1.28 + pIdx * 0.14) + Math.sin(uH * 5.2 + pIdx * 1.9) * 0.34;
+        const leanZ = Math.cos(uH * 4.4 - pIdx * 1.3) * 0.32;
+        const bulgeHead = Math.exp(-Math.pow((uH - 0.92) / 0.12, 2)) * 0.34;
+        const radEnv = (0.34 + 0.72 * (1.0 - uH * 0.76) + bulgeHead) * Math.pow(rand(), 0.45);
         const ang = rand() * Math.PI * 2;
-        lx = px + Math.cos(ang) * rad;
+        const fluting = 1.0 + 0.22 * Math.sin(ang * 3.0 + uH * 6.0 + pIdx);
+        lx = pillarBases[pIdx] + leanX + Math.cos(ang) * radEnv * fluting;
         ly = h;
-        lz = pz + Math.sin(ang) * rad;
+        lz = pillarBaseZ[pIdx] + leanZ + Math.sin(ang) * radEnv * fluting;
         sp = 0.0;
-        xHii0 = uvFlux > 0 ? 0.12 : 0.0;
+        const tipGlow = uH > 0.72 ? Math.min(1.0, (uH - 0.72) / 0.28) : 0.0;
+        xHii0 = uvFlux > 0 ? (0.10 + 0.26 * tipGlow) : 0.0;
+      } else if (isProtostar) {
+        // Embedded dusty protostellar cores & collimated Herbig-Haro jets right inside the 3 tilted pillar fingertips!
+        const pIdx = i % 3;
+        const uTop = 0.91;
+        const px = pillarBases[pIdx] + uTop * (1.28 + pIdx * 0.14) + Math.sin(uTop * 5.2 + pIdx * 1.9) * 0.34;
+        const py = -3.65 + uTop * (pillarTopsY[pIdx] + 3.65);
+        const pz = pillarBaseZ[pIdx] + Math.cos(uTop * 4.4 - pIdx * 1.3) * 0.32;
+        const isJet = (i & 1) === 0;
+        const dirSign = (i & 2) === 0 ? 1 : -1;
+        if (isJet) {
+          const sJ = rand() * 1.55;
+          lx = px + dirSign * sJ * 0.72 + (rand() - 0.5) * 0.10;
+          ly = py + dirSign * sJ * 0.52 + (rand() - 0.5) * 0.10;
+          lz = pz + (rand() - 0.5) * 0.12;
+          vx = dirSign * 0.65; vy = dirSign * 0.44; vz = 0.0;
+        } else {
+          const rCore = Math.cbrt(rand()) * 0.44;
+          const th = rand() * Math.PI * 2;
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy));
+          lx = px + rCore * sy * Math.cos(th);
+          ly = py + rCore * cy;
+          lz = pz + rCore * sy * Math.sin(th);
+        }
+        sp = 4.0;
+        xHii0 = 0.92;
       } else {
         const r = Math.cbrt(rand()) * 6.8;
         const cy = 2 * rand() - 1;
@@ -387,6 +502,41 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
         lx = r * sy * Math.cos(th); ly = r * cy; lz = r * sy * Math.sin(th);
         sp = 2.0;
       }
+    } else if (regimeCode === 5) {
+      // Reflection Nebula (Pleiades M45 / Iris NGC 7023): striated sapphire-blue Mie/Rayleigh dust veils!
+      const sheetIdx = i % 5;
+      const isBlueVeil = i < n * 0.78;
+      const u = (rand() - 0.5) * 11.5;
+      const v = (rand() - 0.5) * 9.5;
+      const ripple = Math.sin(u * 0.85 + sheetIdx * 1.4) * 0.75 + Math.cos(v * 0.65 - sheetIdx) * 0.55;
+      lx = u;
+      ly = (sheetIdx - 2) * 1.15 + ripple * 0.65 + (rand() - 0.5) * 0.45;
+      lz = v + Math.sin(u * 0.4) * 0.8;
+      sp = isBlueVeil ? 2.0 : 0.0;
+      xHii0 = 0.68;
+    } else if (regimeCode === 6) {
+      // Wolf-Rayet / Eta Carinae Bipolar Homunculus: twin inflated mottled lobes + glowing equatorial skirt!
+      const isSkirt = i >= n * 0.78;
+      const th = rand() * Math.PI * 2;
+      if (isSkirt) {
+        const rSk = 1.2 + Math.pow(rand(), 0.7) * 3.8;
+        lx = Math.cos(th) * rSk;
+        ly = (rand() - 0.5) * 0.42;
+        lz = Math.sin(th) * rSk;
+        vx = lx * 0.35; vy = 0; vz = lz * 0.35;
+        sp = 3.0;
+      } else {
+        const lobeSign = (i & 1) === 0 ? 1.0 : -1.0;
+        const u = 0.08 + rand() * 0.90;
+        const shellThick = 0.82 + rand() * 0.34;
+        const radL = Math.sin(u * Math.PI) * 2.55 * shellThick;
+        lx = Math.cos(th) * radL;
+        ly = lobeSign * (0.28 + u * 4.45 * shellThick);
+        lz = Math.sin(th) * radL;
+        vx = lx * 0.28; vy = lobeSign * 0.72; vz = lz * 0.28;
+        sp = 1.0;
+      }
+      xHii0 = 0.78;
     } else if (regimeCode === 1) {
       // Bipolar / Ring Planetary Nebula shell around hot central White Dwarf
       const th = rand() * Math.PI * 2;
@@ -440,7 +590,7 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
     computeBufferBinding(2, 'storage')
   ];
   const stepPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-rad-wind-step.v1',
+    cacheKey: 'ulg-rad-wind-step.v2-rich',
     label: `${label}-step`,
     code: radiativeWindWgsl,
     entryPoint: 'step_radiative_wind',

@@ -397,7 +397,7 @@ fn vs_bio_bead(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
     out.rad_w = 0.0;
     return out;
   }
-  let rad = max(0.06, b.col_r.w) * u.field_info.w;
+  let rad = max(0.012, b.col_r.w) * u.field_info.w;
   let to_cam = normalize(u.cam_pos_mode.xyz - b.pos_a.xyz);
   let wpos = b.pos_a.xyz + to_cam * (rad * 0.35) + (u.cam_right_esp.xyz * qv.x + u.cam_up_time.xyz * qv.y) * (rad * 1.08);
   out.pos = u.view_proj * vec4<f32>(wpos, 1.0);

@@ -821,7 +821,7 @@ export async function mountLifeLabDemo() {
         bioBeadCount: vivBeadCount,
         bioLinkMode: 0,
         bioLinkCount: 0,
-        sphereScale: 1.0,
+        sphereScale: 0.72,
         timeSec
       });
     } else if (currentLayer === 'membrane') {
@@ -1392,7 +1392,7 @@ export async function mountLifeLabDemo() {
         ? `🛸 ABDUCTED ${(abd.kingdom || abd.kind || 'fauna').toUpperCase()} (${abd.speciesName} · ${abd.morphClass}) from ${profile.worldName} (${Number(abd.latDeg || 0).toFixed(1)}°, ${Number(abd.lonDeg || 0).toFixed(1)}°) · ${profile.membraneType} · ${profile.xnaAlphabetSize || 4}-base ${profile.xnaBackbone || 'XNA'}`
         : `${profile.worldName}: ${profile.membraneType} · ${(profile.species || []).length} Clades · ${biosig || profile.civStage}`;
     }
-    activeVivariumSpecimen = abd || (profile.species || [])[0] || null;
+    activeVivariumSpecimen = abd || (profile.species || []).find((s) => s.kingdom === 'fauna') || (profile.species || [])[0] || null;
     const modeToLoad = targetMode || (abd ? 'organism-overview' : (lp.recommendedMode || 'organism-overview'));
     await selectMode(modeToLoad, modeToLoad.includes('fold') || modeToLoad.includes('helix') || modeToLoad.includes('hairpin') ? lp.foldSeq : null);
     if (el('pill-name')) {

@@ -490,6 +490,7 @@ export async function mountUlgUniversesDemo() {
   const EM_LOG10_SPAN = EM_LOG10_MAX - EM_LOG10_MIN;
   const EM_SENSOR_PRESETS = {
     vis:   { min: -6.42, max: -6.12, active: false, label: '👁 Human Visible (380–750 nm)' },
+    jwst:  { min: -6.00, max: -4.70, active: true,  label: '🔭 JWST NIRCam / MIRI IR (1–20 μm)' },
     ir:    { min: -5.45, max: -4.60, active: true,  label: '🔥 Thermal IR (3.5–25 μm)' },
     uv:    { min: -7.90, max: -6.50, active: true,  label: '⚡ UV / Aurora (12–320 nm)' },
     xray:  { min: -12.0, max: -8.20, active: true,  label: '☢️ X-Ray / Gamma (1 pm–6 nm)' },
@@ -1347,6 +1348,10 @@ export async function mountUlgUniversesDemo() {
           <select id="uv-gal-preset-sel">
             <option value="disk" ${physics.galaxyPreset === 'disk' ? 'selected' : ''}>Grand-Design Spiral (Sc/Sb)</option>
             <option value="barred" ${physics.galaxyPreset === 'barred' ? 'selected' : ''}>Barred Spiral (SBb · Secular m=2 Bar)</option>
+            <option value="ring" ${physics.galaxyPreset === 'ring' ? 'selected' : ''}>Cartwheel Collisional Ring Galaxy</option>
+            <option value="lenticular" ${physics.galaxyPreset === 'lenticular' ? 'selected' : ''}>Lenticular Disk (S0 · Sombrero)</option>
+            <option value="irregular" ${physics.galaxyPreset === 'irregular' ? 'selected' : ''}>Starburst Irregular (Magellanic / M82)</option>
+            <option value="open-cluster" ${physics.galaxyPreset === 'open-cluster' ? 'selected' : ''}>Open Cluster + Reflection Veil (M45)</option>
             <option value="binary" ${physics.galaxyPreset === 'binary' ? 'selected' : ''}>Interacting Major Merger Pair</option>
             <option value="sphere" ${physics.galaxyPreset === 'sphere' ? 'selected' : ''}>Giant Elliptical Spheroid</option>
             <option value="proto" ${physics.galaxyPreset === 'proto' ? 'selected' : ''}>High-z Clumpy Starburst Protogalaxy</option>
@@ -1432,6 +1437,7 @@ export async function mountUlgUniversesDemo() {
               </optgroup>
               <optgroup label="Relativistic &amp; High-Energy Systems">
                 <option value="quasar-jet" ${physics.solarMode === 'quasar-jet' ? 'selected' : ''}>Quasar / Blazar Kerr BZ Relativistic Jets</option>
+                <option value="tde" ${physics.solarMode === 'tde' ? 'selected' : ''}>Tidal Disruption Event (TDE · Star Spaghettified by SMBH)</option>
                 <option value="xray-binary" ${physics.solarMode === 'xray-binary' ? 'selected' : ''}>X-Ray Binary (Roche L1 Overflow onto BH)</option>
                 <option value="bns-kilonova" ${physics.solarMode === 'bns-kilonova' ? 'selected' : ''}>BNS GW Merger &amp; r-Process Kilonova</option>
                 <option value="type-ia" ${physics.solarMode === 'type-ia' ? 'selected' : ''}>Type Ia White-Dwarf Detonation (M_Ch)</option>
@@ -1523,11 +1529,13 @@ export async function mountUlgUniversesDemo() {
         <div class="uv-row">
           <span>Stellar / Remnant Regime</span>
           <select id="uv-stellar-mode-sel">
-            <option value="fusion" ${physics.stellarMode === 'fusion' ? 'selected' : ''}>Thermonuclear Fusion Core (pp/CNO/3α)</option>
+            <option value="fusion" ${physics.stellarMode === 'fusion' ? 'selected' : ''}>3D MLS-MPM Thermonuclear Fusion Star (pp/CNO/3α)</option>
             <option value="nebular-mhd" ${physics.stellarMode === 'nebular-mhd' ? 'selected' : ''}>3D Resistive MHD Nebular Collapse &amp; Jets</option>
-            <option value="h2-pillars" ${physics.stellarMode === 'h2-pillars' ? 'selected' : ''}>H II Star-Forming Pillars ([O III]/Hα/[S II])</option>
+            <option value="h2-pillars" ${physics.stellarMode === 'h2-pillars' ? 'selected' : ''}>H II Star-Forming Pillars (M16 · Optical vs JWST IR)</option>
             <option value="planetary-nebula" ${physics.stellarMode === 'planetary-nebula' ? 'selected' : ''}>Planetary Nebula &amp; Hot White Dwarf</option>
-            <option value="snr-pwn" ${physics.stellarMode === 'snr-pwn' ? 'selected' : ''}>Supernova Remnant / Crab PWN</option>
+            <option value="snr-pwn" ${physics.stellarMode === 'snr-pwn' ? 'selected' : ''}>Supernova Remnant / Crab PWN (M1)</option>
+            <option value="reflection-nebula" ${physics.stellarMode === 'reflection-nebula' ? 'selected' : ''}>Reflection Nebula (M45 Pleiades / Iris Dust Veil)</option>
+            <option value="wr-bubble" ${physics.stellarMode === 'wr-bubble' ? 'selected' : ''}>Wolf–Rayet / Eta Carinae Bipolar Homunculus</option>
             <option value="pulsar" ${physics.stellarMode === 'pulsar' ? 'selected' : ''}>Millisecond Pulsar (Lighthouse Dipole)</option>
             <option value="magnetar" ${physics.stellarMode === 'magnetar' ? 'selected' : ''}>Magnetar Giant Flare (Hall Crust Yield)</option>
             <option value="white-dwarf-tov" ${physics.stellarMode === 'white-dwarf-tov' ? 'selected' : ''}>White Dwarf / NS / BH (GR TOV EOS)</option>
@@ -1541,8 +1549,12 @@ export async function mountUlgUniversesDemo() {
           </div>
           <div style="font-size:11px;color:var(--muted);line-height:1.35;">3D self-gravitating resistive MHD winding helical B-towers &amp; launching magnetocentrifugal J×B jets.</div>
         ` : physics.stellarMode === 'fusion' ? `
-          <div class="uv-seg-group">
-            <button class="uv-seg-btn ${physics.stellarPreset === 'main-sequence-star' ? 'active' : ''}" data-st-preset="main-sequence-star" type="button">Active Star</button>
+          <div class="uv-seg-group" style="flex-wrap:wrap;">
+            <button class="uv-seg-btn ${physics.stellarPreset === 'main-sequence-star' ? 'active' : ''}" data-st-preset="main-sequence-star" type="button">G2V Sun</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'blue-supergiant' ? 'active' : ''}" data-st-preset="blue-supergiant" type="button">O/B Blue</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'red-supergiant' ? 'active' : ''}" data-st-preset="red-supergiant" type="button">Betelgeuse</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'agb-carbon' ? 'active' : ''}" data-st-preset="agb-carbon" type="button">AGB Carbon</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'brown-dwarf' ? 'active' : ''}" data-st-preset="brown-dwarf" type="button">Brown Dwarf</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'solar-nebula' ? 'active' : ''}" data-st-preset="solar-nebula" type="button">Nebula</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'massive-supernova' ? 'active' : ''}" data-st-preset="massive-supernova" type="button">18 M☉ SN</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'binary-nursery' ? 'active' : ''}" data-st-preset="binary-nursery" type="button">Binary</button>
@@ -1575,6 +1587,7 @@ export async function mountUlgUniversesDemo() {
       });
       for (const b of scaleControlsEl.querySelectorAll('[data-st-preset]')) {
         b.addEventListener('click', async () => {
+          await physics.setStellarMode('fusion');
           await physics.initStellarCore({ preset: b.dataset.stPreset });
           pickedGpuMote = null;
           moteFocusLocked = false;
@@ -2850,7 +2863,7 @@ export async function mountUlgUniversesDemo() {
           skipFirst: 0
         };
       }
-      if (['roche-rings', 'giant-impact', 'red-giant'].includes(physics.solarMode) && physics.tidalRocheSession) {
+      if (['roche-rings', 'giant-impact', 'red-giant', 'tde'].includes(physics.solarMode) && physics.tidalRocheSession) {
         const tScale = 1.06 * Math.pow(10, Math.max(-1.0, Math.min(1.2, 12.6 - span)));
         return {
           kind: 'roche-parcel',
@@ -2898,7 +2911,7 @@ export async function mountUlgUniversesDemo() {
           skipFirst: 0
         };
       }
-      if (['h2-pillars', 'planetary-nebula', 'snr-pwn'].includes(physics.stellarMode) && physics.radWindL3Session) {
+      if (['h2-pillars', 'planetary-nebula', 'snr-pwn', 'reflection-nebula', 'wr-bubble'].includes(physics.stellarMode) && physics.radWindL3Session) {
         return {
           kind: 'radwind-parcel',
           buffer: physics.radWindL3Session.getResidentParcelsBuffer(),
@@ -4049,7 +4062,7 @@ export async function mountUlgUniversesDemo() {
           ['Mean Outflow', `${wt.meanOutflowSpeed.toFixed(2)}`],
           ['Live Parcels', `${wt.activeParcels}`]
         ];
-      } else if (['roche-rings', 'giant-impact', 'red-giant'].includes(physics.solarMode) && physics.tidalRocheTelemetry) {
+      } else if (['roche-rings', 'giant-impact', 'red-giant', 'tde'].includes(physics.solarMode) && physics.tidalRocheTelemetry) {
         const tt = physics.tidalRocheTelemetry;
         cells = [
           ['Ruptured', `${(tt.rupturedFraction * 100).toFixed(0)}%`],
@@ -4082,7 +4095,7 @@ export async function mountUlgUniversesDemo() {
           ['Max |B|', `${nt.maxBField.toFixed(3)}`],
           ['|∇·B| GLM', `${nt.meanAbsDivB.toExponential(1)}`]
         ];
-      } else if (['h2-pillars', 'planetary-nebula', 'snr-pwn'].includes(physics.stellarMode) && physics.radWindL3Telemetry) {
+      } else if (['h2-pillars', 'planetary-nebula', 'snr-pwn', 'reflection-nebula', 'wr-bubble'].includes(physics.stellarMode) && physics.radWindL3Telemetry) {
         const wt = physics.radWindL3Telemetry;
         cells = [
           ['Ionized x_HII', `${(wt.meanIonizedFraction * 100).toFixed(1)}%`],
@@ -4649,12 +4662,22 @@ export async function mountUlgUniversesDemo() {
           extra1: [0, 0, 0, 0]
         });
       }
-    } else if (['roche-rings', 'giant-impact', 'red-giant', 'catastrophic-shatter'].includes(physics.solarMode) && currentLevel === 2 && physics.tidalRocheSession) {
-      // L2 TIDAL ROCHE DISRUPTION RINGS + SHEPHERD MOON / GIANT IMPACT / RED-GIANT / CATASTROPHIC SHATTER!
+    } else if (['roche-rings', 'giant-impact', 'red-giant', 'catastrophic-shatter', 'tde'].includes(physics.solarMode) && currentLevel === 2 && physics.tidalRocheSession) {
+      // L2 TIDAL ROCHE DISRUPTION RINGS + SHEPHERD MOON / GIANT IMPACT / RED-GIANT / CATASTROPHIC SHATTER / TDE!
       const wT = bandWeight(span, 9.6, 10.6, 15.6, 16.8);
       if (wT > 0.01) {
         const tScale = 1.06 * Math.pow(10, Math.max(-1.0, Math.min(1.2, 12.6 - span)));
         spheres.push(...physics.tidalRocheSession.getRenderSpheres(tScale));
+        if (physics.solarMode === 'tde') {
+          disks.push({
+            center: [0, 0, 0],
+            rIn: 1.05 * tScale,
+            normal: [0.06, 0.99, 0.08],
+            rOut: 3.45 * tScale,
+            color: [1.0, 0.72, 0.34],
+            kind: 0
+          });
+        }
         particleClouds.push({
           buffer: physics.tidalRocheSession.getResidentParticlesBuffer(),
           count: physics.tidalRocheSession.particleCount,
@@ -4801,9 +4824,9 @@ export async function mountUlgUniversesDemo() {
             disks.push({
               center: [wx, wy, wz],
               rIn: (spec.ringInnerKm / spec.radiusKm) * trueRWorld,
-              normal: [0.16, 0.89, 0.42],
+              normal: Array.isArray(spec.ringNormal) ? spec.ringNormal : [0.16, 0.89, 0.42],
               rOut: (spec.ringOuterKm / spec.radiusKm) * trueRWorld,
-              color: [0.88, 0.78, 0.62],
+              color: Array.isArray(spec.ringColor) ? spec.ringColor : [0.88, 0.78, 0.62],
               kind: 1
             });
           }
@@ -4824,7 +4847,7 @@ export async function mountUlgUniversesDemo() {
           });
         }
 
-        if (showOrbits && span > 8.1) {
+        if (showOrbits && span > 8.1 && !(currentLevel === 3 && physics.stellarMode !== 'fusion')) {
           const wOrb = bandWeight(span, 8.1, 8.8, 15.2, 16.4);
           lineChunks.push(...buildSolarOsculatingOrbitLines(physics.solarEngine, originAu, scaleAuToWorld, span, wOrb));
         }
@@ -4855,21 +4878,29 @@ export async function mountUlgUniversesDemo() {
             lineChunks.push(rawL[i] * scL, rawL[i + 1] * scL, rawL[i + 2] * scL, rawL[i + 3], rawL[i + 4], rawL[i + 5], rawL[i + 6] * wStarCore);
           }
         }
-      } else if (['h2-pillars', 'planetary-nebula', 'snr-pwn'].includes(physics.stellarMode) && physics.radWindL3Session) {
-        // L3 PHOTOIONIZED NEBULAE: H II Star-Forming Pillars, Bipolar Planetary Nebula, & SNR / Crab PWN!
+      } else if (['h2-pillars', 'planetary-nebula', 'snr-pwn', 'reflection-nebula', 'wr-bubble'].includes(physics.stellarMode) && physics.radWindL3Session) {
+        // L3 PHOTOIONIZED / REFLECTION / WOLF-RAYET NEBULAE!
         particleClouds.push({
           buffer: physics.radWindL3Session.getResidentParcelsBuffer(),
           count: physics.radWindL3Session.particleCount,
           mode: 8,
           worldScale: stScale * 1.05,
-          pointSize: Math.max(0.06, Math.min(0.18, 0.105 * stScale)),
-          alphaGain: 0.17 * wStarCore,
+          pointSize: Math.max(0.06, Math.min(0.20, 0.115 * stScale)),
+          alphaGain: (physics.stellarMode === 'reflection-nebula' ? 0.14 : 0.18) * wStarCore,
           extra1: [0, 0, 0, 0]
         });
         if (physics.stellarMode === 'planetary-nebula') {
           spheres.push({ pos: [0, 0, 0], radius: 0.24 * stScale, color0: [0.76, 0.94, 1.0], color1: [0.42, 0.78, 1.0], kind: 0 });
         } else if (physics.stellarMode === 'snr-pwn') {
           spheres.push({ pos: [0, 0, 0], radius: 0.22 * stScale, color0: [0.62, 0.88, 1.0], color1: [0.85, 0.48, 1.0], kind: 0 });
+        } else if (physics.stellarMode === 'reflection-nebula') {
+          // Embedded hot B-type cluster (Seven Sisters / Merope) illuminating sapphire Mie/Rayleigh dust veils!
+          spheres.push({ pos: [0, 0.2 * stScale, 0], radius: 0.34 * stScale, color0: [0.72, 0.88, 1.0], color1: [0.38, 0.64, 1.0], kind: 0 });
+          spheres.push({ pos: [-2.1 * stScale, 0.6 * stScale, -1.1 * stScale], radius: 0.24 * stScale, color0: [0.76, 0.90, 1.0], color1: [0.42, 0.68, 1.0], kind: 0 });
+          spheres.push({ pos: [2.2 * stScale, -0.5 * stScale, 1.2 * stScale], radius: 0.22 * stScale, color0: [0.78, 0.92, 1.0], color1: [0.46, 0.70, 1.0], kind: 0 });
+        } else if (physics.stellarMode === 'wr-bubble') {
+          // Blazing luminous blue variable / Wolf-Rayet binary core pinching Eta Carinae's Homunculus!
+          spheres.push({ pos: [0, 0, 0], radius: 0.36 * stScale, color0: [1.0, 0.96, 0.84], color1: [0.62, 0.86, 1.0], kind: 0 });
         } else {
           // Ionizing OB star cluster illuminating H II Pillar tips!
           spheres.push({ pos: [3.6 * stScale, 3.2 * stScale, 2.4 * stScale], radius: 0.30 * stScale, color0: [0.72, 0.90, 1.0], color1: [0.45, 0.72, 1.0], kind: 0 });
@@ -4924,6 +4955,7 @@ export async function mountUlgUniversesDemo() {
           }
         }
       } else if (physics.stellarEngine) {
+        const teffLog = Math.log10(Math.max(900, Number(physics.stellarEngine.surfaceTempK) || 5778));
         particleClouds.push({
           buffer: physics.stellarEngine.getResidentBuffer(),
           count: physics.stellarEngine.count,
@@ -4931,7 +4963,7 @@ export async function mountUlgUniversesDemo() {
           worldScale: stScale * 0.95,
           pointSize: Math.max(0.045, Math.min(0.20, 0.125 * stScale)),
           alphaGain: 0.30 * wStarCore,
-          extra1: [0, 0, 0, 0]
+          extra1: [0, 0, 0, teffLog]
         });
         // 100% EMERGENT 3D GPU Stellar Convective Dynamo magnetic streamlines traced through live GPU B(x,y,z)!
         // (Zero hardcoded analytic dipole loops; B₀ = 0 produces 0 streamlines!)
@@ -6017,6 +6049,17 @@ export async function mountUlgUniversesDemo() {
       renderNow(performance.now());
       return this.getState();
     },
+    async setStellarPreset(preset) {
+      await physics.setStellarMode('fusion');
+      await physics.initStellarCore({ preset });
+      pickedGpuMote = null;
+      moteFocusLocked = false;
+      selectDefaultTarget();
+      renderScaleControls();
+      updateInspectorCard();
+      renderNow(performance.now());
+      return this.getState();
+    },
     async setPlanetaryMode(mode) {
       await physics.setPlanetaryMode(mode);
       if (mode === 'cryo-plumes' && currentLevel === 4) {
@@ -6051,15 +6094,6 @@ export async function mountUlgUniversesDemo() {
     },
     async setStellarB0(val) {
       await physics.setStellarB0(val);
-      renderScaleControls();
-      updateInspectorCard();
-      renderNow(performance.now());
-      return this.getState();
-    },
-    async setStellarPreset(preset) {
-      await physics.initStellarCore({ preset });
-      pickedGpuMote = null;
-      moteFocusLocked = false;
       renderScaleControls();
       updateInspectorCard();
       renderNow(performance.now());

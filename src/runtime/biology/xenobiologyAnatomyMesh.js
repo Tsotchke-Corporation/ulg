@@ -333,20 +333,33 @@ export function appendProceduralOrganismGeometry(out, fxOut, org, curvFn = null,
     recordHit('canopy', 0, hT * 0.72, 0, 1.75);
     recordHit('limbs', 0, hT * 0.48, 0, 1.35);
   } else if (bodyPlan === 'buttressed-monolith') {
-    const hT = 4.2 * sc;
+    // High-gravity structural baobab / Socotra dragon-tree with buttressed roots & gnarled multi-branching crown (zero mushroom caps!)
+    const hT = 4.4 * sc;
     const tCol = tintSkin(secondary, 0, 'torso');
-    const cCol = tintSkin(primary, bioStr * 0.2, 'canopy');
-    pushSegmentTube(out, pt(0, -0.08 * sc, 0), pt(0, hT * 0.62, 0), 0.92 * sc, 0.54 * sc, 8, tCol.rgb, tCol.em);
+    const cCol = tintSkin(primary, bioStr * 0.25, 'canopy');
+    const lCol = tintSkin([clamp(primary[0] * 1.15, 0, 1), clamp(primary[1] * 1.15, 0, 1), clamp(primary[2] * 1.12, 0, 1)], bioStr * 0.35, 'canopy');
+    const crownBase = pt(swayX * 0.15, hT * 0.56, swayZ * 0.15);
+    pushSegmentTube(out, pt(0, -0.08 * sc, 0), crownBase, 0.88 * sc, 0.50 * sc, 8, tCol.rgb, tCol.em);
     // 5 massive structural Euler root buttresses
     for (let ri = 0; ri < 5; ri += 1) {
       const a = (ri / 5) * Math.PI * 2;
-      pushFinBlade(out, pt(Math.cos(a) * 1.45 * sc, -0.05 * sc, Math.sin(a) * 1.45 * sc), pt(Math.cos(a) * 0.48 * sc, hT * 0.46, Math.sin(a) * 0.48 * sc), pt(0, 0, 0), tCol.rgb, tCol.em);
+      pushFinBlade(out, pt(Math.cos(a) * 1.48 * sc, -0.05 * sc, Math.sin(a) * 1.48 * sc), pt(Math.cos(a) * 0.48 * sc, hT * 0.44, Math.sin(a) * 0.48 * sc), pt(0, 0, 0), tCol.rgb, tCol.em);
     }
-    pushEllipsoid(out, pt(swayX * 0.25, hT * 0.76, swayZ * 0.25), 2.15 * sc, 0.78 * sc, 2.05 * sc, oRight, oUp, oFwd, 5, 9, cCol.rgb, cCol.em);
-    pushEllipsoid(out, pt(0.7 * sc, hT * 0.88, 0.4 * sc), 1.15 * sc, 0.56 * sc, 1.05 * sc, oRight, oUp, oFwd, 4, 7, cCol.rgb, cCol.em);
+    // 6 thick spreading gnarled boughs + windswept leaf-pad clusters
+    for (let bi = 0; bi < 6; bi += 1) {
+      const a = (bi / 6) * Math.PI * 2 + 0.35;
+      const spread = (1.55 + (bi % 2) * 0.42) * sc * (1.0 - frondClose * 0.28);
+      const lift = hT * (0.82 + (bi % 3) * 0.11);
+      const elbow = pt(Math.cos(a) * spread * 0.52 + swayX * 0.3, hT * 0.70, Math.sin(a) * spread * 0.52 + swayZ * 0.3);
+      const tip = pt(Math.cos(a) * spread + swayX * 0.6, lift, Math.sin(a) * spread + swayZ * 0.6);
+      pushSegmentTube(out, crownBase, elbow, 0.22 * sc, 0.14 * sc, 5, tCol.rgb, tCol.em);
+      pushSegmentTube(out, elbow, tip, 0.14 * sc, 0.06 * sc, 5, tCol.rgb, tCol.em);
+      const padR = (0.76 + (bi % 2) * 0.20) * sc;
+      pushEllipsoid(out, tip, padR * 1.15, padR * 0.42, padR * 1.05, oRight, oUp, oFwd, 4, 7, bi % 2 === 0 ? cCol.rgb : lCol.rgb, cCol.em);
+    }
     recordHit('torso', 0, hT * 0.32, 0, 1.25);
-    recordHit('canopy', 0, hT * 0.78, 0, 2.05);
-    recordHit('limbs', 0, hT * 0.14, 0, 1.45);
+    recordHit('canopy', 0, hT * 0.84, 0, 2.15);
+    recordHit('limbs', 0, hT * 0.56, 0, 1.65);
   } else if (bodyPlan === 'mycelial-fruiting-tree') {
     // =========================================================================
     // B. FUNGI / MYCELIAL / CHEMOTROPH BODY PLANS (3 distinct weird kingdoms!)

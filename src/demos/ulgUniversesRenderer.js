@@ -437,8 +437,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let grain = 0.87 + 0.14 * n1.x + 0.09 * n2.x + 0.05 * n3.x;
     // Geological sedimentary / basaltic strata bands on steeper canyon/crater walls
     let slope_w = smoothstep(0.12, 0.44, 1.0 - n.y);
-    let strata = 0.91 + 0.14 * sin(raw_h * 3.2 + n1.x * 2.4);
-    base_col = base_col * grain * mix(1.0, strata, slope_w * 0.72);
+    let strata = 0.90 + 0.16 * sin(raw_h * 3.4 + n1.x * 2.6);
+    base_col = base_col * grain * mix(1.0, strata, slope_w * 0.78);
+    // Wet darkened shoreline sand + crisp coastal moisture band right above liquid sea level!
+    let wet_shore = (1.0 - smoothstep(0.0, 2.2, abs(raw_h - 0.35))) * smoothstep(-0.3, 0.5, raw_h);
+    base_col = mix(base_col, base_col * 0.62, wet_shore * 0.55);
   }
 
   let ndl = max(0.0, dot(n, sun_dir));
@@ -493,9 +496,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let rim_col = select(sky_hor * 0.38 * sun_day + vec3<f32>(0.14, 0.18, 0.24), vec3<f32>(0.22, 0.28, 0.36), skip_fog);
     lit = lit + sun_tint * m_spec + rim_col * fresnel * 0.48;
   } else {
-    // Subtle mineral sheen on ice/basalt slopes
-    let r_spec = pow(max(0.0, dot(n, half_v)), 20.0) * select(0.08, 0.28, tag > 0.5 && tag < 1.5) * sun_day;
-    lit = lit + sun_tint * r_spec;
+    // Mineral sheen + sparkling crystalline snow/ice micro-glint on snow-covered slopes!
+    let r_spec = pow(max(0.0, dot(n, half_v)), 20.0) * select(0.08, 0.32, tag > 0.5 && tag < 1.5) * sun_day;
+    let snow_sparkle = select(0.0, smoothstep(0.88, 0.98, surf_noise(in.world_pos.xz * 7.5 + v.xz * 1.4)) * 0.42 * sun_day, tag > 0.5 && tag < 1.5);
+    lit = lit + sun_tint * (r_spec + snow_sparkle);
   }
 
   // Per-pixel volcanic basalt-fissure glow enhancement on Magma Ocean worlds (zero blocky vertex borders!)
@@ -520,7 +524,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let patch_edge = smoothstep(4200.0, 5850.0, horiz_dist);
     let total_fog = clamp(max(fog_amt, patch_edge), 0.0, 1.0);
     let fog_hor = mix(vec3<f32>(0.014, 0.022, 0.044), sky_hor, sun_day) + vec3<f32>(0.96, 0.40, 0.14) * sunset_w * 0.75;
-    final_col = mix(lit, fog_hor, total_fog);
+    // Low-sun aerial-perspective Mie forward-scattering golden god-rays!
+    let mie_ray = pow(max(0.0, dot(-v, sun_dir)), 7.0) * opt_depth * sun_day * clamp(total_fog * 1.4, 0.0, 0.65);
+    final_col = mix(lit, fog_hor, total_fog) + sun_tint * mie_ray * 0.32;
   }
 
   // Full-spectrum EM sensor mapping: real FLIR thermal inertia (warm oceans, cool alpine ridges, hot craters & UFO!)
@@ -894,18 +900,30 @@ fn vs_main(
       }
     } else if (pop_tag < 0.78) {
       let f = clamp((pop_tag - 0.35) / 0.43, 0.0, 1.0);
-      // Carbonaceous dust-lane extinction along inner spiral arm edges (enhances spiral contrast!)
+      // Real ISM wavelength-dependent dust extinction: tau(lambda) = tau_V * (0.55 um / lambda)^1.7!
+      // Dark optical spiral dust lanes physically become transparent when switched to JWST IR (1-20 um)!
+      let mid_log_lam = 0.5 * (cam.em_sensor.x + cam.em_sensor.y);
+      let ir_pierce = select(0.0, smoothstep(-6.05, -5.05, mid_log_lam), cam.em_sensor.z > 0.5);
       let r_gal = length(raw_p.xz);
       let arm_phi = atan2(raw_p.z, raw_p.x);
-      let dust_lane = smoothstep(0.62, 0.96, sin(arm_phi * 2.0 - log(max(0.4, r_gal)) * 4.4)) * smoothstep(1.2, 4.5, r_gal) * (1.0 - smoothstep(7.5, 11.5, r_gal));
-      col = mix(vec3<f32>(0.86, 0.91, 1.0), ob_blue, f) * (1.0 - dust_lane * 0.46);
-      pt_size = pt_size_base * (0.44 + 0.72 * f);
-      alpha = alpha_gain * (0.28 + 0.56 * f) * (1.0 - dust_lane * 0.30);
+      let dust_lane = smoothstep(0.58, 0.95, sin(arm_phi * 2.0 - log(max(0.4, r_gal)) * 4.4)) * smoothstep(1.1, 4.4, r_gal) * (1.0 - smoothstep(7.5, 11.8, r_gal)) * (1.0 - ir_pierce * 0.85);
+      col = mix(vec3<f32>(0.86, 0.91, 1.0), ob_blue, f) * (1.0 - dust_lane * 0.56);
+      pt_size = pt_size_base * (0.44 + 0.74 * f);
+      alpha = alpha_gain * (0.28 + 0.56 * f) * (1.0 - dust_lane * 0.36);
+      // Subtle 4-point optical diffraction spikes on blazing young O/B supergiants!
+      if (!is_sky && f > 0.74 && gal_star_hash(iid ^ 0x55aa33ccu) > 0.945) {
+        shape = 3.0;
+        pt_size = pt_size * 2.35;
+      }
     } else {
       let f = clamp((pop_tag - 0.78) / 0.32, 0.0, 1.0);
       col = mix(h2_rose, vec3<f32>(1.0, 0.56, 0.78), f);
-      pt_size = pt_size_base * (0.95 + 0.75 * f);
+      pt_size = pt_size_base * (0.95 + 0.78 * f);
       alpha = alpha_gain * (0.36 + 0.44 * f);
+      if (!is_sky && f > 0.45 && (iid & 3u) == 0u) {
+        shape = 1.0;
+        pt_size = pt_size * 1.45;
+      }
     }
     if (m > 25.0) {
       // Galactic nucleus soft warm amber glow (zero giant black hole at 100 kly!)
@@ -958,11 +976,9 @@ fn vs_main(
       }
     }
   } else if (mode == 2u) {
-    // L3: Self-Gravitating Hydro Plasma (16 floats/parcel)
-    // Purely physical (log_t, log_rho, log_eps) radiative-transport thermalization:
-    //   - Diffuse molecular clouds (log_rho < -5): exact blackbody_rgb(log_t) (violet -> crimson -> amber)
-    //   - Optically thick stellar envelope (log_rho >= -5): solar photospheric golden-orange-white
-    //     transitioning to radiant white-gold core & luminous cyan-white only in active nuclear fusion / SN!
+    // L3: Self-Gravitating Hydro / 3D MLS-MPM Stellar Fusion Plasma (16 floats/parcel)
+    // Purely physical (log_t, log_rho, log_eps) radiative-transport thermalization across
+    // ALL stellar classes (1,150 K Brown Dwarf -> 3,450 K Red Supergiant -> 5,778 K G2V Sun -> 28,500 K O/B Supergiant!):
     let o = iid * 16u;
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
     p_world = (raw_p - cam.extra1.xyz) * world_scale;
@@ -971,16 +987,27 @@ fn vs_main(
     let log_eps = raw_f32[o + 11u];
     let fusion_glow = smoothstep(-0.5, 4.5, log_eps);
     let dens_w = clamp((log_rho + 18.0) / 22.0, 0.15, 1.0);
-    let thick_star = smoothstep(3.45, 4.10, log_t);
-    let env_t = clamp((log_t - 5.2) / 1.9, 0.0, 1.0);
-    let solar_surf = mix(vec3<f32>(1.0, 0.42, 0.08), vec3<f32>(1.0, 0.76, 0.28), env_t);
-    let solar_mid = mix(solar_surf, vec3<f32>(1.0, 0.94, 0.74), smoothstep(0.55, 0.96, env_t));
-    let sn_flash = smoothstep(7.6, 8.6, log_t);
-    let star_col = mix(solar_mid, vec3<f32>(0.76, 0.94, 1.0), clamp(fusion_glow * 0.52 + sn_flash * 0.85, 0.0, 1.0));
+    let teff_log = select(3.76, cam.extra1.w, cam.extra1.w > 2.5);
+    let thick_star = smoothstep(3.05, 3.85, log_t);
+    // Physical convective photosphere color driven continuously by stellar effective temperature T_eff & local thermal buoyancy!
+    let t_phot = clamp(mix(teff_log, clamp(log_t - 2.35, 3.0, 4.7), 0.36), 3.0, 4.65);
+    let c_bd = vec3<f32>(0.76, 0.16, 0.28);      // 1,150 K T/Y Brown Dwarf methane-ember
+    let c_rsg = vec3<f32>(1.00, 0.22, 0.05);     // 3,450 K M-supergiant Betelgeuse ruby-crimson
+    let c_sun = vec3<f32>(1.00, 0.72, 0.24);     // 5,778 K G2V solar amber-gold
+    let c_ob = vec3<f32>(0.38, 0.74, 1.00);      // 28,500 K O/B sapphire-blue supergiant
+    var phot_col = mix(c_bd, c_rsg, smoothstep(3.05, 3.48, t_phot));
+    phot_col = mix(phot_col, c_sun, smoothstep(3.52, 3.82, t_phot));
+    phot_col = mix(phot_col, c_ob, smoothstep(3.88, 4.38, t_phot));
+    // Hot upwelling convective granules brighten toward cream/white-hot core while sinking intergranular lanes deepen!
+    let env_t = clamp((log_t - 4.8) / 2.6, 0.0, 1.0);
+    let core_tint = mix(vec3<f32>(1.0, 0.88, 0.62), vec3<f32>(0.78, 0.94, 1.0), smoothstep(3.85, 4.30, teff_log));
+    let solar_mid = mix(phot_col * (0.72 + 0.52 * env_t), core_tint, smoothstep(0.55, 0.98, env_t) * 0.72);
+    let sn_flash = smoothstep(7.7, 8.6, log_t);
+    let star_col = mix(solar_mid, vec3<f32>(0.74, 0.94, 1.0), clamp(fusion_glow * 0.44 + sn_flash * 0.82, 0.0, 1.0));
     let cloud_col = mix(blackbody_rgb(log_t), vec3<f32>(0.58, 0.94, 1.0), fusion_glow * 0.55);
-    col = mix(cloud_col, star_col, thick_star) * (0.90 + 0.95 * fusion_glow + 0.35 * sn_flash);
-    pt_size = pt_size_base * (0.72 + 1.05 * dens_w);
-    alpha = alpha_gain * (0.28 + 0.58 * dens_w);
+    col = mix(cloud_col, star_col, thick_star) * (0.94 + 0.92 * fusion_glow + 0.35 * sn_flash);
+    pt_size = pt_size_base * (0.76 + 1.08 * dens_w);
+    alpha = alpha_gain * (0.30 + 0.58 * dens_w);
   } else if (mode == 3u) {
     // L6: Quantum Orbital Point Cloud (4 floats/point: vec4(x, y, z, packed_meta))
     // When world_scale < 0.0, renders as a faint faraway electron-shell sky enveloping the L7 femtometer nucleus!
@@ -1132,7 +1159,10 @@ fn vs_main(
       alpha = alpha_gain * clamp(0.30 + 0.48 * emiss, 0.06, 0.88);
     }
   } else if (mode == 8u) {
-    // Mode 8: Photoionized Nebulae (H II Pillars / Planetary Nebula / SNR-PWN: H-alpha, [O III], [S II]) + Dual-Tail Comets + Hot-Jupiter XUV!
+    // Mode 8: Photoionized / Reflection / Wolf-Rayet Nebulae + Embedded Protostars + Dual-Tail Comets!
+    // Real ISM wavelength-dependent dust optical depth tau(lambda) = tau_V * (0.55 um / lambda)^1.7:
+    // Switching Optical -> JWST IR physically turns dusty Pillars of Creation translucent and reveals
+    // blazing embedded fiery ruby protostars & collimated Herbig-Haro outflow jets inside!
     let o = iid * 16u;
     let is_live = raw_f32[o + 15u];
     if (is_live < 0.5) {
@@ -1143,19 +1173,36 @@ fn vs_main(
       return culled8;
     }
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    let sp_tag = raw_f32[o + 3u];
     p_world = (raw_p - cam.extra1.xyz) * world_scale;
     let ha = clamp(raw_f32[o + 8u], 0.0, 2.0);
     let o3 = clamp(raw_f32[o + 9u], 0.0, 2.0);
     let s2_dust = clamp(raw_f32[o + 10u], 0.0, 2.0);
-    // Physically mapped optical emission palette:
-    //   [O III] 500.7nm -> electric teal-cyan, H-alpha 656.3nm -> rose-crimson, [S II]/Dust -> warm amber-gold!
+    let mid_log_lam8 = 0.5 * (cam.em_sensor.x + cam.em_sensor.y);
+    let ir_pierce8 = select(0.0, smoothstep(-6.05, -5.05, mid_log_lam8), cam.em_sensor.z > 0.5);
     let c_ha = vec3<f32>(1.0, 0.28, 0.44) * ha;
     let c_o3 = vec3<f32>(0.16, 0.88, 1.0) * o3;
     let c_s2 = vec3<f32>(1.0, 0.72, 0.28) * s2_dust;
     let tot = max(0.12, ha + o3 + s2_dust);
     col = (c_ha + c_o3 + c_s2) * (0.95 / pow(tot, 0.28));
-    pt_size = pt_size_base * (0.72 + 0.62 * min(1.5, tot));
-    alpha = alpha_gain * clamp(0.24 + 0.56 * min(1.5, tot), 0.05, 0.90);
+    if (sp_tag > 3.5) {
+      // Embedded protostars & Herbig-Haro jets veiled in optical dust, blazing in JWST IR!
+      let vis_veil = mix(0.24, 1.95, ir_pierce8);
+      col = mix(vec3<f32>(1.0, 0.34, 0.16), vec3<f32>(1.0, 0.88, 0.56), ir_pierce8) * vis_veil;
+      pt_size = pt_size_base * mix(0.65, 2.35, ir_pierce8);
+      alpha = alpha_gain * clamp(mix(0.20, 1.45, ir_pierce8), 0.06, 1.0);
+      shape = select(0.0, 3.0, ir_pierce8 > 0.35);
+    } else if (sp_tag < 0.5) {
+      // Dense molecular dust pillar column: opaque sculpted silhouettes in optical, translucent warm PAH veil in JWST IR!
+      col = col * mix(0.68, 0.95, ir_pierce8);
+      pt_size = pt_size_base * (0.95 + 0.75 * min(1.4, tot)) * mix(1.35, 1.05, ir_pierce8);
+      alpha = alpha_gain * clamp(0.32 + 0.52 * min(1.5, tot), 0.05, 0.90) * mix(1.0, 0.42, ir_pierce8);
+      shape = 1.0;
+    } else {
+      pt_size = pt_size_base * (0.85 + 0.72 * min(1.5, tot)) * 1.25;
+      alpha = alpha_gain * clamp(0.24 + 0.56 * min(1.5, tot), 0.05, 0.90);
+      shape = 1.0;
+    }
   } else if (mode == 9u) {
     // Mode 9: Roche-Limit Tidal Disruption Debris, Shepherd-Moon Rings, Giant Impact Ejecta, & Cryovolcanic Ice Plumes!
     let o = iid * 16u;
@@ -1304,7 +1351,7 @@ fn vs_main(
   }
 
   var world_corner: vec3<f32>;
-  if (shape > 1.5) {
+  if (shape > 1.5 && shape < 2.5) {
     // Orient billboard cleanly along projected 3D CFD velocity vector so airflow curves visually in 3D!
     let to_cam = normalize(cam.cam_pos.xyz - p_world);
     let side = normalize(cross(streak_axis, to_cam) + vec3<f32>(0.0, 1e-4, 0.0));
@@ -1315,7 +1362,7 @@ fn vs_main(
     // Clamp non-sky particle billboard radius vs camera distance so a star passing right past the lens
     // never explodes into a screen-filling blob!
     let d_cam_p = length(p_world - cam.cam_pos.xyz);
-    let safe_pt_sz = select(min(pt_size, max(0.015, d_cam_p * 0.085)), pt_size, world_scale < 0.0 || shape > 0.5);
+    let safe_pt_sz = select(min(pt_size, max(0.015, d_cam_p * 0.085)), pt_size, world_scale < 0.0 || (shape > 0.5 && shape < 1.5));
     world_corner = p_world
       + cam.cam_right.xyz * (uv.x * safe_pt_sz)
       + cam.cam_up.xyz * (uv.y * safe_pt_sz);
@@ -1397,6 +1444,19 @@ fn vs_main(
     em_xr = 1.65;
     em_rad = 1.45; // Relativistic synchrotron jet & hot Kerr disk!
     em_gam = 1.15;
+  } else if (mode == 8u) {
+    let o8 = iid * 16u;
+    let sp8 = raw_f32[o8 + 3u];
+    em_t = select(select(11000.0, 185.0, sp8 < 0.5), 1850.0, sp8 > 3.5);
+    em_uv = select(0.95, 0.12, sp8 < 0.5);
+    em_xr = select(0.15, 0.85, sp8 > 1.5 && sp8 < 2.5);
+    em_rad = select(0.35, 1.25, sp8 < 0.5);
+  } else if (mode == 9u) {
+    let o9 = iid * 16u;
+    let tn9 = clamp(raw_f32[o9 + 8u], 0.1, 2.0);
+    em_t = 350.0 + tn9 * 95000.0;
+    em_uv = smoothstep(0.7, 1.8, tn9) * 1.4;
+    em_xr = smoothstep(1.1, 1.9, tn9) * 2.2;
   } else if (mode == 10u) {
     let o10 = iid * 16u;
     let flags10 = u32(round(raw_f32[o10 + 14u]));
@@ -1426,7 +1486,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   if (r2 > 1.0) { discard; }
   var w: f32;
   var rgb = in.color.rgb;
-  if (in.shape > 1.5) {
+  if (in.shape > 2.5) {
+    // Crisp 4-point Hubble/JWST optical diffraction spikes around blazing O/B supergiants & embedded IR protostars!
+    let core_s = exp(-28.0 * r2) * 1.35;
+    let sp_x = exp(-abs(in.uv.y) * 26.0) * exp(-abs(in.uv.x) * 2.8) * 0.62;
+    let sp_y = exp(-abs(in.uv.x) * 26.0) * exp(-abs(in.uv.y) * 2.8) * 0.62;
+    let halo_s = exp(-5.0 * r2) * 0.25;
+    w = core_s + sp_x + sp_y + halo_s;
+  } else if (in.shape > 1.5) {
     // Sleek glowing 3D aerodynamic CFD streamline ribbon!
     let core_y = exp(-7.5 * in.uv.y * in.uv.y);
     let tip_x = max(0.0, 1.0 - in.uv.x * in.uv.x);
@@ -1524,7 +1591,8 @@ fn vs_main(
   let pinpoint_w = 1.0 - smoothstep(min_glint_frac * 0.55, min_glint_frac * 2.2, app_frac);
   let min_world_half = dist * cam.cam_up.w * min_glint_frac;
 
-  let base_inflate = radius * select(1.48, 1.24, dist > radius * 2.6);
+  let halo_inflate = select(1.24, 1.54, kind == 0u || kind == 5u);
+  let base_inflate = radius * select(1.54, halo_inflate, dist > radius * 2.6);
   let inflate = max(base_inflate, select(0.0, min_world_half, kind <= 4u));
   let world_quad = center + to_cam * min(radius * 0.15, dist * 0.05) + right * (uv.x * inflate) + up * (uv.y * inflate);
 
@@ -1667,24 +1735,51 @@ fn fs_main(in: VsOut) -> FsOut {
     let d_min = length(ro_n + rd * closest_n) / max(1e-7, r_n);
     let halo_clip = cam.view_proj * vec4<f32>(in.center, 1.0);
     let halo_depth = max(1.0e-6, eval_frag_depth(halo_clip, cam.em_aux.w) * 0.999);
-    if (kind == 0u && d_min < 1.45) {
-      let corona = exp(-(d_min - 1.0) * 6.8) * 0.78 * (1.0 - clamp(in.sp_info.z * 0.75, 0.0, 0.8));
+    if (kind == 0u && d_min < 1.48) {
+      let edge_fade = 1.0 - smoothstep(1.24, 1.46, d_min);
+      let p_lim = normalize(ro_n + rd * closest_n);
+      let lim_ang = atan2(p_lim.y, p_lim.x + p_lim.z * 0.5);
+      // Sculpted magnetic coronal streamer rays + fiery arched solar prominence loops!
+      let streamer = 0.72 + 0.28 * pow(0.5 + 0.5 * sin(lim_ang * 5.0 + cam.cam_pos.w * 0.14), 2.0);
+      let prom_arch = exp(-pow((d_min - 1.11) / 0.055, 2.0)) * smoothstep(0.72, 0.96, sin(lim_ang * 7.0 - cam.cam_pos.w * 0.18 + in.params.w));
+      let corona = (exp(-(d_min - 1.0) * 6.4) * 0.82 * streamer + prom_arch * 0.65) * (1.0 - clamp(in.sp_info.z * 0.75, 0.0, 0.8)) * edge_fade;
+      if (corona < 0.015) { discard; }
       var out_c: FsOut;
-      var c_rgb = in.color0.rgb * corona * 1.5;
+      var c_rgb = (in.color0.rgb * (exp(-(d_min - 1.0) * 6.4) * 1.35 * streamer) + mix(in.color1.rgb, vec3<f32>(1.0, 0.34, 0.10), 0.65) * prom_arch * 1.45) * (1.0 - clamp(in.sp_info.z * 0.75, 0.0, 0.8)) * edge_fade;
       if (cam.em_sensor.z > 0.5) {
         // Hot 1.5 MK solar corona blazes brightly in EUV / Soft X-Ray!
         c_rgb = em_sensor_map_rgb(c_rgb, 1.5e6, corona * 1.4, corona * 1.8, corona * 0.3, 0.0);
       }
-      out_c.color = vec4<f32>(c_rgb, corona);
-      out_c.depth = halo_depth;
+      out_c.color = vec4<f32>(c_rgb, clamp(corona, 0.0, 1.0));
+      // Reversed-Z far depth on translucent corona so background nebulae/disks never get clipped by a square box!
+      out_c.depth = 0.0;
       return out_c;
+    }
+    if (kind == 5u && dot(in.color0.rgb, in.color0.rgb) < 0.001 && d_min < 1.44) {
+      // EHT M87* / Sgr A* Razor-Sharp Asymmetric Relativistic Doppler-Brightened n=1 Gravitational Photon Ring!
+      let bh_edge = 1.0 - smoothstep(1.22, 1.42, d_min);
+      let p_lim_bh = normalize(ro_n + rd * closest_n);
+      let dopp_side = clamp(0.65 + 0.58 * dot(p_lim_bh, cam.cam_right.xyz - cam.cam_up.xyz * 0.42), 0.22, 1.45);
+      let n1_ring = exp(-pow((d_min - 1.055) / 0.032, 2.0)) * 2.15;
+      let einstein_h = exp(-(d_min - 1.0) * 9.5) * 0.52;
+      let bh_glow = (n1_ring + einstein_h) * dopp_side * bh_edge;
+      if (bh_glow < 0.015) { discard; }
+      var bh_rgb = mix(vec3<f32>(0.96, 0.36, 0.08), vec3<f32>(1.0, 0.92, 0.72), clamp(n1_ring * 0.45 * dopp_side, 0.0, 1.0)) * bh_glow;
+      if (cam.em_sensor.z > 0.5) {
+        bh_rgb = em_sensor_map_rgb(bh_rgb, 1.5e7, bh_glow * 0.8, bh_glow * 1.9, bh_glow * 2.6, bh_glow * 0.7);
+      }
+      var out_bh: FsOut;
+      out_bh.color = vec4<f32>(bh_rgb, clamp(bh_glow * 0.75, 0.0, 1.0));
+      out_bh.depth = 0.0;
+      return out_bh;
     }
     if ((kind == 1u || kind == 4u) && in.color1.w > 0.25 && d_min < 1.07) {
       let h_atmo = exp(-(d_min - 1.0) * 42.0) * in.color1.w * 0.62;
+      if (h_atmo < 0.012) { discard; }
       let lit_side = clamp(dot(normalize(ro_n + rd * closest_n), light_dir) * 0.8 + 0.35, 0.0, 1.0);
       var out_a: FsOut;
       out_a.color = vec4<f32>(vec3<f32>(0.34, 0.68, 1.0) * h_atmo * lit_side, h_atmo * lit_side);
-      out_a.depth = halo_depth;
+      out_a.depth = 0.0;
       return out_a;
     }
     discard;
@@ -1924,11 +2019,21 @@ fn fs_main(in: VsOut) -> FsOut {
       bump_strength = bump_strength * (1.0 - polar * 0.75);
       is_land_hab = is_land_hab * (1.0 - polar);
     } else {
-      // Rocky / Mars / Mercury world with craters, highlands & dust basins
+      // Rocky / Mars / Mercury / Sulfur-Volcanic Io world with craters, highlands & tidal volcanic calderas!
       let crater = smoothstep(0.32, 0.68, detail);
       surf = mix(in.color1.rgb, in.color0.rgb, clamp(elev * 1.15 - 0.1 + 0.25 * crater, 0.0, 1.0));
       let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + (detail - 0.5) * 0.08);
       surf = mix(surf, vec3<f32>(0.88, 0.90, 0.94), polar * select(0.0, 0.85, in.color1.w > 0.12));
+      // Tidally heated sulfur-crust volcanic calderas (driven strictly by sulfur reflectance & vacuum, zero body names!)
+      let is_sulfur_volc = (in.color0.r > 0.85 && in.color0.g > 0.72 && in.color0.b < 0.45 && in.color1.w < 0.05);
+      if (is_sulfur_volc) {
+        let cald_n = fbm5(n_hit * 19.0 + seed_v * 2.1);
+        let caldera = smoothstep(0.74, 0.86, cald_n);
+        let lava_spot = smoothstep(0.82, 0.90, cald_n);
+        surf = mix(surf, vec3<f32>(0.12, 0.09, 0.08), caldera * 0.85);
+        surf = surf + vec3<f32>(1.0, 0.38, 0.06) * lava_spot * 2.2;
+        em_temp_k = mix(em_temp_k, 1480.0, lava_spot);
+      }
       bump_strength = 0.58;
       is_land_hab = (1.0 - smoothstep(0.55, 0.82, abs(n_hit.y))) * 0.65;
     }
@@ -2019,7 +2124,9 @@ fn fs_main(in: VsOut) -> FsOut {
     let sunset = mix(vec3<f32>(0.98, 0.44, 0.14), vec3<f32>(1.0, 0.52, 0.18), select(0.0, 1.0, has_ocean)) * term_sunset * (0.16 + 0.24 * cloud_cover + 0.25 * fresnel);
     col = surf * (0.03 + 0.98 * ndl_eff) * soft_term + surf * 0.03 + sunset + vec3<f32>(1.0, 0.96, 0.88) * water_spec * ndl + atm * (0.14 + 0.86 * ndl) + em_lightning + em_aurora + em_cities;
   } else if (kind == 3u) {
-    // Cratered Moon / Icy World / Ice Giant with analytical crater-rim micro-relief & live CFD flow on ice giants!
+    // Cratered Moon / Icy World / Atmospheric Ice Giant (Uranus & Neptune):
+    // Gate rocky crater relief strictly on airless moons (atm < 0.28) so Ice Giants have silky atmospheric methane bands!
+    let crater_w = 1.0 - smoothstep(0.08, 0.28, in.color1.w);
     let n1 = fbm5(n_hit * 6.0 + seed_v);
     let n2 = fbm5(n_hit * 18.0 - seed_v);
     let up_r3 = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
@@ -2027,9 +2134,20 @@ fn fs_main(in: VsOut) -> FsOut {
     let t2_3 = cross(n_hit, t1_3);
     let c_x = fbm5(normalize(n_hit + t1_3 * 0.012) * 18.0 - seed_v);
     let c_y = fbm5(normalize(n_hit + t2_3 * 0.012) * 18.0 - seed_v);
-    let n_crater = normalize(n_hit + (t1_3 * (n2 - c_x) + t2_3 * (n2 - c_y)) * 2.4);
+    let n_crater = normalize(n_hit + (t1_3 * (n2 - c_x) + t2_3 * (n2 - c_y)) * (2.4 * crater_w));
     let ndl_c = max(0.0, dot(n_crater, light_dir));
-    var base = mix(in.color1.rgb, in.color0.rgb, clamp(0.2 + 0.7 * n1 + 0.25 * n2, 0.0, 1.0));
+    // Smooth methane zonal bands for atmospheric Ice Giants vs cratered terrain contrast for airless moons
+    let ig_band = 0.5 + 0.32 * sin(n_hit.y * 14.0 + n1 * 1.4) + 0.18 * fbm5(n_hit * vec3<f32>(3.0, 11.0, 3.0) + seed_v);
+    let rocky_mix = clamp(0.2 + 0.7 * n1 + 0.25 * n2, 0.0, 1.0);
+    var base = mix(in.color1.rgb, in.color0.rgb, mix(clamp(ig_band, 0.18, 0.92), rocky_mix, crater_w));
+    // Cryogenic tidal-flexure tectonic lineae / tiger-stripe ice fractures on bright airless icy moons!
+    if (in.color0.b > 0.68 && in.color1.w < 0.12) {
+      let l1 = abs(fbm5(n_hit * 8.5 + seed_v) - 0.5);
+      let l2 = abs(fbm5(n_hit * 13.5 - seed_v * 1.6) - 0.5);
+      let crack = max(1.0 - smoothstep(0.008, 0.032, l1), 1.0 - smoothstep(0.008, 0.028, l2));
+      let stain_col = mix(vec3<f32>(0.54, 0.30, 0.20), vec3<f32>(0.36, 0.72, 0.96), smoothstep(0.88, 0.96, in.color0.b));
+      base = mix(base, stain_col, crack * 0.62);
+    }
     var em_ice = vec3<f32>(0.0);
     if (cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z))) {
       let aw = u32(round(cam.extra2.x));
@@ -2194,7 +2312,7 @@ fn fs_main(in: VsOut) -> FsOut {
   let clip = cam.view_proj * vec4<f32>(in.center + p_hit, 1.0);
   var out: FsOut;
   out.color = vec4<f32>(col * in.alpha_fade, in.alpha_fade);
-  out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
+  out.depth = eval_frag_depth(clip, cam.em_aux.w);
   return out;
 }
 `;
@@ -2295,12 +2413,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Analytical planet cylinder shadow cast onto back half of ring plane!
     let rel_p = in.world_pos - in.center;
     let ldir = normalize(cam.extra1.xyz);
+    let view_r = normalize(cam.cam_pos.xyz - in.world_pos);
     let along = dot(rel_p, ldir);
     let perp_r = length(rel_p - ldir * along);
     let planet_r = in.r_in * 0.76;
     let ring_shadow = select(1.0, smoothstep(planet_r * 0.92, planet_r * 1.08, perp_r) * 0.88 + 0.12, along < 0.0);
-    let alpha = clamp(fade * cassini * encke * ringlets * 0.74, 0.0, 0.86);
-    var ring_c = in.color_kind.rgb * (0.85 + 0.25 * ringlets) * ring_shadow;
+    // Physical Henyey-Greenstein forward/back phase scattering for icy ring particles (g = 0.42)!
+    let cos_phase = dot(-view_r, ldir);
+    let g_hg = 0.42;
+    let hg_phase = (1.0 - g_hg * g_hg) / max(0.22, pow(max(0.15, 1.0 + g_hg * g_hg - 2.0 * g_hg * cos_phase), 1.5));
+    let opp_surge = 1.0 + 0.28 * pow(max(0.0, dot(view_r, ldir)), 8.0);
+    let phase_gain = clamp(0.68 + 0.34 * hg_phase * opp_surge, 0.55, 1.55);
+    let alpha = clamp(fade * cassini * encke * ringlets * 0.76, 0.0, 0.88);
+    var ring_c = in.color_kind.rgb * (0.85 + 0.25 * ringlets) * ring_shadow * phase_gain;
     ring_c = em_sensor_map_rgb(ring_c, 85.0, 0.0, 0.0, 0.08, 0.0);
     return vec4<f32>(ring_c * alpha, alpha);
   }

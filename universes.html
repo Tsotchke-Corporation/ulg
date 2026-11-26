@@ -917,6 +917,100 @@
       color: var(--muted);
       white-space: nowrap;
     }
+    /* Full-Spectrum Dual-Caret EM Sensor Stack Floating Bar */
+    #uv-em-sensor-bar {
+      position: fixed;
+      top: 56px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 24;
+      display: none;
+      flex-direction: column;
+      gap: 7px;
+      padding: 10px 14px;
+      width: min(560px, calc(100vw - 24px));
+    }
+    #uv-em-sensor-bar.open { display: flex; }
+    .uv-em-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+    .uv-em-track {
+      position: relative;
+      height: 28px;
+      border-radius: 8px;
+      background: linear-gradient(90deg,
+        #3b0764 0%, #6d28d9 16%, #2563eb 34%,
+        #06b6d4 46%, #22c55e 48.5%, #eab308 50%, #ef4444 51.5%,
+        #991b1b 64%, #78350f 78%, #1e293b 100%);
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      user-select: none;
+      touch-action: none;
+      cursor: pointer;
+    }
+    .uv-em-window {
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      border-radius: 5px;
+      background: linear-gradient(90deg, rgba(139,92,246,0.78), rgba(56,189,248,0.78), rgba(34,197,94,0.78), rgba(250,204,21,0.78), rgba(239,68,68,0.82));
+      border: 1.5px solid #ffffff;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.55);
+      cursor: grab;
+    }
+    .uv-em-caret {
+      position: absolute;
+      top: -4px;
+      bottom: -4px;
+      width: 14px;
+      margin-left: -7px;
+      border-radius: 5px;
+      background: #f8fafc;
+      border: 2px solid #0284c7;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.65);
+      cursor: ew-resize;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      color: #0f172a;
+      font-weight: 900;
+    }
+    .uv-em-ticks {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--muted);
+      padding: 0 2px;
+    }
+    .uv-em-presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    .uv-em-presets button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: rgba(15, 25, 45, 0.84);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .uv-em-presets button:hover, .uv-em-presets button.active {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.28);
+      color: #ffffff;
+    }
+
     @media (hover: hover) and (pointer: fine) {
       .uv-touch-pads.active:not(.force-visible) { display: none; }
     }
@@ -951,6 +1045,7 @@
     </div>
 
     <div class="uv-actions">
+      <button id="uv-em-sensor-btn" class="uv-btn" type="button" title="Toggle Full-Spectrum Dual-Caret EM Sensor Stack (Gamma 10⁻¹³ m → Radio 10 m mapped to visible colors)">🌈 EM</button>
       <button id="uv-cockpit-btn" class="uv-btn" type="button" title="Toggle 3rd-Person Flying Saucer vs Inside-the-Green-Glass-Dome 3D Cockpit View (Shortcut: V)">🛸 Cockpit</button>
       <button id="uv-xr-btn" class="uv-btn" type="button" title="Enter native WebXR WebGPU headset mode (XRGPUBinding) or Side-by-Side Stereo VR Preview">🥽 XR</button>
       <button id="uv-share-btn" class="uv-btn" type="button" title="Copy a seedable URL link to your exact universe, epoch, position, and multiplayer room">🔗 Share</button>
@@ -961,6 +1056,30 @@
       <button id="uv-help-btn" class="uv-btn icon-only" type="button" title="Help, equations for this scale, other ULG labs, and GitHub links">?</button>
     </div>
   </header>
+
+  <!-- Full-Spectrum Dual-Caret EM Sensor Stack (10^-13 m Gamma -> 10^1 m Radio) -->
+  <section id="uv-em-sensor-bar" class="uv-glass" aria-label="Full-Spectrum Dual-Caret EM Sensor Stack">
+    <div class="uv-em-head">
+      <span><strong style="color:#38bdf8;">EM SENSOR STACK</strong> · <span id="uv-em-readout">👁 Human Visible (380–750 nm)</span></span>
+      <button id="uv-em-close-btn" class="uv-btn subtle icon-only" type="button" title="Close EM Sensor bar">✕</button>
+    </div>
+    <div id="uv-em-track" class="uv-em-track" title="Drag left/right carets [λ_min, λ_max] or slide the spectral bar between them across 14 decades of EM wavelengths">
+      <div id="uv-em-window" class="uv-em-window"></div>
+      <div id="uv-em-caret-min" class="uv-em-caret" title="Short-wavelength caret λ_min (mapped to Violet/Blue)">◀</div>
+      <div id="uv-em-caret-max" class="uv-em-caret" title="Long-wavelength caret λ_max (mapped to Red)">▶</div>
+    </div>
+    <div class="uv-em-ticks">
+      <span>γ 10⁻¹³m</span><span>X-Ray</span><span>UV</span><span style="color:#6ee7b7;">VIS</span><span>Thermal IR</span><span>μW/CMB</span><span>Radio 10m</span>
+    </div>
+    <div class="uv-em-presets" id="uv-em-presets">
+      <button type="button" class="active" data-em-preset="vis">👁 Visible</button>
+      <button type="button" data-em-preset="ir">🔥 Thermal IR</button>
+      <button type="button" data-em-preset="uv">⚡ UV / Aurora</button>
+      <button type="button" data-em-preset="xray">☢️ X-Ray / γ</button>
+      <button type="button" data-em-preset="radio">📡 21cm Radio</button>
+      <button type="button" data-em-preset="cmb">🌌 CMB μW</button>
+    </div>
+  </section>
 
   <!-- Collapsible Sim Controls Drawer -->
   <aside id="uv-sim-drawer" class="uv-drawer uv-glass" aria-label="Simulation Controls">
@@ -1189,6 +1308,8 @@
     </div>
     <div class="uv-surf-pills">
       <button id="uv-surf-sample-btn" class="uv-surf-pill sample" type="button" title="Press G to activate the yellow tractor beam, sample directly below your craft, and inspect its atomic lattice, compounds, and elements">🔬 SAMPLE BELOW (G)</button>
+      <button id="uv-surf-timewarp-btn" class="uv-surf-pill" type="button" title="Cycle Surface Orbital Time-Warp (1× → 10³× → 10⁵× → 10⁶×) to watch real sunrises, sunsets, orbiting moons, eclipses, and seasonal winters!">⏩ 1× SKY</button>
+      <a id="uv-surf-xeno-btn" class="uv-surf-pill sample" href="./life-lab.html" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;" title="Open this planet's native solvent, temperature, and stellar pigment directly in the Biophysics &amp; Xenobiology Lab">🧬 BIO LAB ↗</a>
       <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to ascend in UFO/Drone or fire Rover Jump Rockets">⬆ ASCEND (Space)</button>
       <button id="uv-surf-descend-btn" class="uv-surf-pill" type="button" title="Hold Ctrl/C to dive deeper toward surface or atmospheric strata">⬇ DIVE (C)</button>
       <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to Beam Down Rover via tractor beam, deploy Drone, or return to the 60-ft UFO">🚙 BEAM DOWN ROVER (F)</button>

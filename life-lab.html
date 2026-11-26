@@ -287,6 +287,18 @@
           <div style="font-size:9.5px;color:var(--muted);">Drag: orbit target · Right/Shift+Drag: pan · Wheel: zoom · Dbl-click: reset</div>
         </div>
 
+        <div class="card" id="xeno-presets-card">
+          <h3><span>Alien Xenobiology Worlds</span><b id="val-xeno-solvent">H₂O</b></h3>
+          <div class="btn-row" id="xeno-preset-row">
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-xeno-preset="earth-ocean" type="button">🌍 Earth</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-xeno-preset="titan-cryo" type="button">🪐 Titan CH₄</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-xeno-preset="europa-vent" type="button">❄️ Europa</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-xeno-preset="red-dwarf-eyeball" type="button">🔴 M-Dwarf</button>
+            <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-xeno-preset="venus-cloud" type="button">☁️ Acid Cloud</button>
+          </div>
+          <div id="xeno-world-summary" style="font-size:9.5px;color:var(--muted);line-height:1.35;">Select a planetary environment or jump here from ULG Universes to grow native membranes &amp; biopolymers.</div>
+        </div>
+
         <div class="acc-group open active-group" data-group="membranes">
           <button class="acc-header" type="button"><span>1. Amphiphile Self-Assembly &amp; Protocells</span><span class="acc-chev">▸</span></button>
           <div class="acc-body">
@@ -338,7 +350,7 @@
           </div>
           <div class="ctrl-row">
             <div class="ctrl-head"><span>Temperature T</span><b id="val-mem-temp">300 K</b></div>
-            <input id="sl-mem-temp" type="range" min="120" max="750" step="10" value="300" />
+            <input id="sl-mem-temp" type="range" min="75" max="750" step="5" value="300" />
           </div>
           <div class="ctrl-row">
             <div class="ctrl-head"><span>Osmotic Pressure ΔP_osm</span><b id="val-mem-osm">0.00</b></div>

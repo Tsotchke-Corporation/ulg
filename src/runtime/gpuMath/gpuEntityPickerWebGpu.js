@@ -78,9 +78,12 @@ fn pick_nearest_entity(@builtin(local_invocation_id) lid: vec3<u32>) {
     var valid = true;
     var wpos = vec3<f32>(0.0);
 
+    let flags_u = u32(round(max(0.0, params.offset_lo.w)));
+    let include_dm = (flags_u & 1u) != 0u;
+    let rev_z = (flags_u & 2u) != 0u;
     if (mode == 1u) {
       let v1 = entities[base + 1u];
-      if (v1.w < 0.0 && params.offset_lo.w < 0.5) { valid = false; }
+      if (v1.w < 0.0 && !include_dm) { valid = false; }
       wpos = (v0.xyz - params.offset_scale.xyz) * w_scale;
     } else if (mode == 2u) {
       let v1 = entities[base + 1u];
@@ -106,8 +109,9 @@ fn pick_nearest_entity(@builtin(local_invocation_id) lid: vec3<u32>) {
           let dy = (ndc.y - click_xy.y);
           let dist = sqrt(dx * dx + dy * dy);
           if (dist <= max_r) {
-            // Favor closest to cursor first, breaking near-ties by front-most depth!
-            let score = dist + ndc.z * 0.012;
+            // Favor closest to cursor first, breaking near-ties by front-most depth (forward-Z or Reversed-Z)!
+            let depth_bias = select(ndc.z, 1.0 - ndc.z, rev_z);
+            let score = dist + depth_bias * 0.012;
             if (score < best_score) {
               best_score = score;
               best_depth = ndc.z;
@@ -182,7 +186,7 @@ export function createGpuEntityPickerWebGpu(device) {
   });
 
   const pipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-gpu-entity-picker.v1',
+    cacheKey: 'ulg-gpu-entity-picker.v2-revz',
     label: 'ulg-gpu-entity-picker',
     code: gpuEntityPickerWgsl,
     entryPoint: 'pick_nearest_entity',
@@ -211,7 +215,8 @@ export function createGpuEntityPickerWebGpu(device) {
     offsetHi = [0, 0, 0],
     offsetLo = [0, 0, 0],
     worldScale = 1.0,
-    includeDarkMatter = false
+    includeDarkMatter = false,
+    reversedZ = false
   }) {
     if (disposed || pickInFlight || !buffer || !(count > 0) || readBuf.mapState !== 'unmapped') return null;
     pickInFlight = true;
@@ -231,7 +236,7 @@ export function createGpuEntityPickerWebGpu(device) {
       f32[24] = offsetLo[0] || 0;
       f32[25] = offsetLo[1] || 0;
       f32[26] = offsetLo[2] || 0;
-      f32[27] = includeDarkMatter ? 1.0 : 0.0;
+      f32[27] = (includeDarkMatter ? 1.0 : 0.0) + (reversedZ ? 2.0 : 0.0);
       u32[28] = Math.trunc(count);
       u32[29] = Math.max(1, Math.min(4, Math.trunc(strideFloats / 4)));
       u32[30] = layoutMode;

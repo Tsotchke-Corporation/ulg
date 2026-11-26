@@ -833,6 +833,25 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     }
 
     const bodyIdx = catalog.length;
+    // Causal spin obliquity (stochastic giant-impact scatter) & tidal-locking timescale (tau ~ a^6 / M_*^2)!
+    const mHost = Math.max(0.08, stars[0]?.massSolar || 1.0);
+    const tidalRatio = Math.pow(aAu / 0.22, 6.0) / (mHost * mHost * Math.max(0.1, sys.systemAgeGyr));
+    const tidallyLocked = tidalRatio < 1.0 || archetype === 'hot-jupiter' || archetype === 'lava-world';
+    const axialObliquityDeg = tidallyLocked
+      ? Number((rand() * 3.5).toFixed(2))
+      : Number((archetype === 'ice-giant' && rand() < 0.35 ? (65 + rand() * 55) : (4 + rand() * 38)).toFixed(2));
+    const spinAxisLonDeg = Number((rand() * 360).toFixed(1));
+    const orbitPeriodHr = 8766.0 * Math.sqrt(Math.pow(aAu, 3.0) / mHost);
+    const rotationPeriodHr = tidallyLocked
+      ? Number(orbitPeriodHr.toFixed(2))
+      : Number(((archetype === 'gas-giant' || archetype === 'ice-giant') ? (8.5 + rand() * 11.0) : (12.0 + rand() * 36.0)).toFixed(2));
+    // Emergent indigenous civilization sub-Kardashev index (rare, non-zero only on mature habitable/exotic worlds!)
+    const civRoll = rand();
+    const isMature = sys.systemAgeGyr >= 2.2;
+    const isHabLike = archetype === 'earth-like' || archetype === 'ocean-super-earth';
+    const civTechK = (isHabLike && isMature && civRoll < 0.55)
+      ? Number((0.38 + rand() * 0.52).toFixed(2))
+      : 0.0;
     catalog.push({
       id: `planet-${p}`,
       parent: planetParentIdx,
@@ -842,6 +861,12 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       omDeg: Number((rand() * 360).toFixed(1)),
       wDeg: Number((rand() * 360).toFixed(1)),
       m0Deg: Number((rand() * 360).toFixed(1)),
+      axialObliquityDeg,
+      spinAxisLonDeg,
+      rotationPeriodHr,
+      tidallyLocked,
+      civTechK,
+      hostStarTeffK: stars[0]?.effectiveTempK || 5778,
       ...spec
     });
     planetIndices.push(bodyIdx);
@@ -870,6 +895,11 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         omDeg: Number((rand() * 360).toFixed(1)),
         wDeg: Number((rand() * 360).toFixed(1)),
         m0Deg: Number((rand() * 360).toFixed(1)),
+        axialObliquityDeg: Number((axialObliquityDeg * 0.85).toFixed(2)),
+        spinAxisLonDeg,
+        rotationPeriodHr: Number((8766.0 * Math.sqrt(Math.pow(aMoonAu, 3.0) / Math.max(1e-9, spec.massSolar))).toFixed(2)),
+        tidallyLocked: true,
+        hostStarTeffK: stars[0]?.effectiveTempK || 5778,
         color0: isHazyMoon ? [0.86, 0.68, 0.34] : (isVolcanicMoon ? [0.92, 0.80, 0.30] : (beyondSnow ? [0.84, 0.86, 0.90] : [0.66, 0.65, 0.63])),
         color1: isHazyMoon ? [0.62, 0.44, 0.20] : (isVolcanicMoon ? [0.68, 0.44, 0.14] : (beyondSnow ? [0.54, 0.66, 0.78] : [0.40, 0.39, 0.38])),
         atm: isHazyMoon ? 0.78 : 0.0,

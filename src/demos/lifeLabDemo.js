@@ -29,6 +29,11 @@ import { createTargetOrbitControls } from '../runtime/shared/targetOrbitControls
 import { requestCompatibleWebGpuDevice } from '../runtime/shared/webgpuCompat.js';
 import { createChemBioWebGpuRenderer } from './chemBioWebGpuRenderer.js';
 import { LIFE_LAB_ABOUT_ULG, LIFE_MODE_DOCS } from './lifeLabDocs.js';
+import {
+  XENOBIOLOGY_PLANET_PRESETS,
+  deriveXenobiologyProfile,
+  parseXenobiologyFromSearch
+} from '../runtime/biology/xenobiologySynthesizer.js';
 
 function triggerLifeDownload(filename, text, mime = 'text/plain;charset=utf-8') {
   try {
@@ -611,7 +616,7 @@ export async function mountLifeLabDemo() {
       activeSession = createAmphiphileMembraneSessionWebGpu(device, {
         lipidCount: initMode === 'vesicle' ? 320 : 280,
         initMode,
-        epsHp: params.memEpsHp,
+        hydrophobicCoupling: params.memEpsHp,
         temperatureK: params.memTempK,
         osmoticPressure: params.memOsmotic
       });
@@ -624,8 +629,8 @@ export async function mountLifeLabDemo() {
       activeSession = createBiopolymerFoldingSessionWebGpu(device, {
         sequence: seq,
         temperatureK: params.foldTempK,
-        epsHp: params.foldEpsHp,
-        epsHBond: params.foldEpsHb
+        hydrophobicCoupling: params.foldEpsHp,
+        hBondStrength: params.foldEpsHb
       });
       await activeSession.step({ dt: 0.014, substeps: 14, readTelemetry: true });
       lastFoldCoordsF32 = await readResidentFloats(activeSession.getResidentResiduesBuffer(), activeSession.residueCount * 12);
@@ -640,7 +645,7 @@ export async function mountLifeLabDemo() {
       activeSession = createExcitableMembraneSessionWebGpu(device, {
         width: 128,
         height: 128,
-        initMode: modeId === 'excitable-pulse' ? 'pulse' : 'spiral',
+        initSpiral: modeId !== 'excitable-pulse',
         gNa: params.hhGNa,
         gK: params.hhGK,
         deltaPsiMv: params.hhDeltaPsi,
@@ -1074,7 +1079,51 @@ export async function mountLifeLabDemo() {
   el('toggle-plots-btn').addEventListener('click', () => { el('life-shell').classList.toggle('plots-collapsed'); el('life-dock').classList.toggle('mobile-open'); handleResize(); });
   el('mobile-nav-btn').addEventListener('click', () => el('life-sidebar').classList.toggle('mobile-open'));
 
-  await selectMode('lipid-soup');
+  let activeXenoProfile = null;
+  async function applyXenobiologyProfile(profile, { targetMode = null } = {}) {
+    if (!profile) return null;
+    activeXenoProfile = profile;
+    const lp = profile.labParams || profile.lifeLabParams || {};
+    if (Number.isFinite(lp.memTempK)) { params.memTempK = lp.memTempK; if (el('sl-mem-temp')) { el('sl-mem-temp').value = String(params.memTempK); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; } }
+    if (Number.isFinite(lp.memEpsHp)) { params.memEpsHp = lp.memEpsHp; if (el('sl-mem-eps')) { el('sl-mem-eps').value = String(params.memEpsHp); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); } }
+    if (Number.isFinite(lp.memOsmotic)) { params.memOsmotic = lp.memOsmotic; if (el('sl-mem-osm')) { el('sl-mem-osm').value = String(params.memOsmotic); el('val-mem-osm').textContent = params.memOsmotic.toFixed(2); } }
+    if (Number.isFinite(lp.foldTempK)) { params.foldTempK = lp.foldTempK; if (el('sl-fold-temp')) { el('sl-fold-temp').value = String(params.foldTempK); el('val-fold-temp').textContent = `${Math.round(params.foldTempK)} K`; } }
+    if (Number.isFinite(lp.foldEpsHp)) { params.foldEpsHp = lp.foldEpsHp; if (el('sl-fold-eps')) { el('sl-fold-eps').value = String(params.foldEpsHp); el('val-fold-eps').textContent = params.foldEpsHp.toFixed(2); } }
+    if (Number.isFinite(lp.foldEpsHb)) { params.foldEpsHb = lp.foldEpsHb; if (el('sl-fold-hb')) { el('sl-fold-hb').value = String(params.foldEpsHb); el('val-fold-hb').textContent = params.foldEpsHb.toFixed(2); } }
+    if (lp.foldSeq) params.foldSeq = lp.foldSeq;
+    if (Number.isFinite(lp.evoMu)) { params.evoMu = lp.evoMu; if (el('sl-evo-mu')) { el('sl-evo-mu').value = String(params.evoMu); el('val-evo-mu').textContent = params.evoMu.toFixed(3); } }
+    if (Number.isFinite(lp.evoBeta)) { params.evoBeta = lp.evoBeta; if (el('sl-evo-beta')) { el('sl-evo-beta').value = String(params.evoBeta); el('val-evo-beta').textContent = params.evoBeta.toFixed(2); } }
+    if (Number.isFinite(lp.hhDeltaPsi)) { params.hhDeltaPsi = lp.hhDeltaPsi; if (el('sl-hh-psi')) { el('sl-hh-psi').value = String(params.hhDeltaPsi); el('val-hh-psi').textContent = `${Math.round(params.hhDeltaPsi)} mV`; } }
+    if (Number.isFinite(lp.hhDeltaPh)) { params.hhDeltaPh = lp.hhDeltaPh; if (el('sl-hh-dph')) { el('sl-hh-dph').value = String(params.hhDeltaPh); el('val-hh-dph').textContent = params.hhDeltaPh.toFixed(2); } }
+    if (Number.isFinite(lp.morphV0)) { params.morphV0 = lp.morphV0; if (el('sl-m-v0')) { el('sl-m-v0').value = String(params.morphV0); el('val-m-v0').textContent = params.morphV0.toFixed(2); } }
+    if (Number.isFinite(lp.morphChemo)) { params.morphChemo = lp.morphChemo; if (el('sl-m-chemo')) { el('sl-m-chemo').value = String(params.morphChemo); el('val-m-chemo').textContent = params.morphChemo.toFixed(2); } }
+    const tempDispK = Math.round(lp.memTempK ?? profile.tempK ?? 288);
+    if (el('val-xeno-solvent')) el('val-xeno-solvent').textContent = `${profile.solventLabel} · ${tempDispK} K`;
+    if (el('xeno-world-summary')) {
+      el('xeno-world-summary').textContent = `${profile.worldName}: ${profile.membraneType} · εr=${profile.dielectricEr} · ${profile.civStage}`;
+    }
+    const modeToLoad = targetMode || lp.recommendedMode || 'protocell-vesicle';
+    await selectMode(modeToLoad, modeToLoad.includes('fold') || modeToLoad.includes('helix') ? lp.foldSeq : null);
+    if (el('pill-name')) el('pill-name').textContent = `${profile.worldName} · ${profile.membraneType}`;
+    return profile;
+  }
+
+  document.querySelectorAll('#xeno-preset-row [data-xeno-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const preset = XENOBIOLOGY_PLANET_PRESETS.find((p) => p.id === btn.dataset.xenoPreset);
+      if (!preset) return;
+      document.querySelectorAll('#xeno-preset-row [data-xeno-preset]').forEach((b) => b.classList.toggle('active', b === btn));
+      const prof = deriveXenobiologyProfile(preset);
+      void applyXenobiologyProfile(prof, { targetMode: preset.recommendedMode });
+    });
+  });
+
+  const urlXeno = parseXenobiologyFromSearch(window.location.search);
+  if (urlXeno?.profile) {
+    await applyXenobiologyProfile(urlXeno.profile, { targetMode: urlXeno.mode });
+  } else {
+    await selectMode('lipid-soup');
+  }
 
   let rafId = 0;
   let lastRafMs = performance.now();
@@ -1102,12 +1151,19 @@ export async function mountLifeLabDemo() {
         foldShowContactMap,
         hhShowPhasePortrait,
         contactMapStats: { ...lastContactMapStats },
+        xenobiology: activeXenoProfile,
         csvRowCount: csvRows.length,
         telemetry: activeSession?.getTelemetry?.() || null,
         gpuErrorCount: gpuErrors.length,
         gpuErrors: [...gpuErrors],
         cameraAutoSpin: false
       };
+    },
+    async applyXenobiologyPreset(presetId) {
+      const preset = XENOBIOLOGY_PLANET_PRESETS.find((p) => p.id === presetId);
+      if (!preset) return null;
+      await applyXenobiologyProfile(deriveXenobiologyProfile(preset), { targetMode: preset.recommendedMode });
+      return api.getState();
     },
     async selectMode(modeId, customSeq = null) { await selectMode(modeId, customSeq); return api.getState(); },
     setParams(patch = {}) {

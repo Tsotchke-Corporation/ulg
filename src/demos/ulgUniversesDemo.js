@@ -47,6 +47,11 @@ import {
   createUlgUniversesPhysics
 } from './ulgUniversesPhysics.js';
 import { createUlgUniversesRenderer } from './ulgUniversesRenderer.js';
+import {
+  buildLiveSurfaceCelestialSky,
+  buildOrbitalCfdStreamlines
+} from '../runtime/astrophysics/surfaceCelestialSkyAndSeasons.js';
+import { buildLifeLabXenobiologyUrl } from '../runtime/biology/xenobiologySynthesizer.js';
 
 // ---- Pure Linear Algebra for Column-Major WebGPU [0, 1] Perspective Camera ----
 function vec3Sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
@@ -63,15 +68,16 @@ function vec3Norm(v) {
   return [v[0] / len, v[1] / len, v[2] / len];
 }
 
-function mat4PerspectiveWebGpu(fovYRad, aspect, near, far) {
+// Reversed-Z Infinite Far Plane Column-Major WebGPU [0, 1] Perspective Projection!
+// Maps z = -near -> ndcZ = 1.0, z = -infinity -> ndcZ = 0.0 (eliminates depth z-fighting from 0.2 m -> 10^12 m!).
+function mat4PerspectiveWebGpu(fovYRad, aspect, near, _far = Infinity) {
   const f = 1.0 / Math.tan(fovYRad * 0.5);
-  const nf = 1.0 / (near - far);
   const m = new Float32Array(16);
   m[0] = f / Math.max(0.25, aspect);
   m[5] = f;
-  m[10] = far * nf;
+  m[10] = 0.0;
   m[11] = -1.0;
-  m[14] = near * far * nf;
+  m[14] = near;
   return m;
 }
 
@@ -410,11 +416,22 @@ export async function mountUlgUniversesDemo() {
   const probeBtn = document.getElementById('uv-probe-btn');
   const kardashevBadge = document.getElementById('uv-kardashev-badge');
   const surfaceSampleBtn = document.getElementById('uv-surf-sample-btn');
+  const surfaceTimewarpBtn = document.getElementById('uv-surf-timewarp-btn');
+  const surfaceXenoBtn = document.getElementById('uv-surf-xeno-btn');
   const surfaceJumpBtn = document.getElementById('uv-surf-jump-btn');
   const surfaceDescendBtn = document.getElementById('uv-surf-descend-btn');
   const surfaceVehicleBtn = document.getElementById('uv-surf-vehicle-btn');
   const surfaceCamBtn = document.getElementById('uv-surf-cam-btn');
   const surfaceOrbitBtn = document.getElementById('uv-surf-orbit-btn');
+  const emSensorBtn = document.getElementById('uv-em-sensor-btn');
+  const emSensorBar = document.getElementById('uv-em-sensor-bar');
+  const emReadoutEl = document.getElementById('uv-em-readout');
+  const emCloseBtn = document.getElementById('uv-em-close-btn');
+  const emTrackEl = document.getElementById('uv-em-track');
+  const emWindowEl = document.getElementById('uv-em-window');
+  const emCaretMinEl = document.getElementById('uv-em-caret-min');
+  const emCaretMaxEl = document.getElementById('uv-em-caret-max');
+  const emPresetsEl = document.getElementById('uv-em-presets');
   const touchPadsEl = document.getElementById('uv-touch-pads');
   const joyMoveEl = document.getElementById('uv-joy-move');
   const joyMoveKnob = document.getElementById('uv-joy-move-knob');
@@ -446,6 +463,179 @@ export async function mountUlgUniversesDemo() {
   let spaceWeaponFiring = false;
   let spaceTractorOn = false;
   let simElapsedSec = shareParams.simTimeS ?? 0;
+  let lastSurfaceSkyCount = 0;
+
+  // Full-Spectrum Dual-Caret EM Sensor Stack (`10^-13 m` Gamma -> `10^1 m` Radio mapped onto human visible spectrum).
+  // When `active === false` (Human Visible default `[-6.42, -6.12]`), shaders execute bit-exact passthrough!
+  const EM_LOG10_MIN = -13.0;
+  const EM_LOG10_MAX = 1.0;
+  const EM_LOG10_SPAN = EM_LOG10_MAX - EM_LOG10_MIN;
+  const EM_SENSOR_PRESETS = {
+    vis:   { min: -6.42, max: -6.12, active: false, label: '👁 Human Visible (380–750 nm)' },
+    ir:    { min: -5.45, max: -4.60, active: true,  label: '🔥 Thermal IR (3.5–25 μm)' },
+    uv:    { min: -7.90, max: -6.50, active: true,  label: '⚡ UV / Aurora (12–320 nm)' },
+    xray:  { min: -12.0, max: -8.20, active: true,  label: '☢️ X-Ray / Gamma (1 pm–6 nm)' },
+    radio: { min: -1.10, max:  0.80, active: true,  label: '📡 21 cm Radio / Synchrotron (8 cm–6 m)' },
+    cmb:   { min: -3.20, max: -2.00, active: true,  label: '🌌 CMB / mm Microwave (0.6–10 mm)' }
+  };
+  const emSensorState = {
+    log10LambdaMin: -6.42,
+    log10LambdaMax: -6.12,
+    active: false,
+    gain: 1.0,
+    preset: 'vis'
+  };
+
+  function formatEmWavelengthShort(log10M) {
+    const m = Math.pow(10, log10M);
+    if (m < 1e-11) return `${(m * 1e12).toFixed(1)} pm`;
+    if (m < 1e-9) return `${(m * 1e12).toFixed(0)} pm`;
+    if (m < 1e-6) return `${(m * 1e9).toFixed(0)} nm`;
+    if (m < 1e-3) return `${(m * 1e6).toFixed(1)} μm`;
+    if (m < 1e-1) return `${(m * 1e3).toFixed(1)} mm`;
+    if (m < 1.0) return `${(m * 1e2).toFixed(1)} cm`;
+    return `${m.toFixed(1)} m`;
+  }
+
+  function syncEmSensorUi() {
+    const pMin = Math.max(0, Math.min(1, (emSensorState.log10LambdaMin - EM_LOG10_MIN) / EM_LOG10_SPAN)) * 100;
+    const pMax = Math.max(0, Math.min(1, (emSensorState.log10LambdaMax - EM_LOG10_MIN) / EM_LOG10_SPAN)) * 100;
+    if (emCaretMinEl) emCaretMinEl.style.left = `${pMin.toFixed(2)}%`;
+    if (emCaretMaxEl) emCaretMaxEl.style.left = `${pMax.toFixed(2)}%`;
+    if (emWindowEl) {
+      emWindowEl.style.left = `${pMin.toFixed(2)}%`;
+      emWindowEl.style.width = `${Math.max(0.8, pMax - pMin).toFixed(2)}%`;
+    }
+    if (emReadoutEl) {
+      const presetInfo = emSensorState.preset && EM_SENSOR_PRESETS[emSensorState.preset];
+      emReadoutEl.textContent = !emSensorState.active
+        ? '👁 Human Visible (380–750 nm)'
+        : (presetInfo?.label || `${formatEmWavelengthShort(emSensorState.log10LambdaMin)} – ${formatEmWavelengthShort(emSensorState.log10LambdaMax)} (10^${emSensorState.log10LambdaMin.toFixed(1)}..10^${emSensorState.log10LambdaMax.toFixed(1)} m)`);
+    }
+    if (emSensorBtn) {
+      emSensorBtn.classList.toggle('active', emSensorState.active || emSensorBar?.classList.contains('open'));
+      emSensorBtn.textContent = emSensorState.active
+        ? `🌈 ${formatEmWavelengthShort(0.5 * (emSensorState.log10LambdaMin + emSensorState.log10LambdaMax))}`
+        : '🌈 EM';
+    }
+    if (emPresetsEl) {
+      for (const b of emPresetsEl.querySelectorAll('[data-em-preset]')) {
+        b.classList.toggle('active', b.dataset.emPreset === emSensorState.preset);
+      }
+    }
+  }
+
+  function setEmSensorWindow(minLog10, maxLog10, { active = null, preset = 'custom', gain = 1.0 } = {}) {
+    let lo = Math.max(EM_LOG10_MIN, Math.min(EM_LOG10_MAX - 0.15, Number(minLog10)));
+    let hi = Math.max(lo + 0.15, Math.min(EM_LOG10_MAX, Number(maxLog10)));
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+      lo = -6.42;
+      hi = -6.12;
+    }
+    emSensorState.log10LambdaMin = lo;
+    emSensorState.log10LambdaMax = hi;
+    const isHumanVis = Math.abs(lo - (-6.42)) < 0.08 && Math.abs(hi - (-6.12)) < 0.08;
+    emSensorState.active = active !== null ? Boolean(active) : !isHumanVis;
+    emSensorState.preset = !emSensorState.active ? 'vis' : preset;
+    emSensorState.gain = Math.max(0.2, Math.min(4.0, Number(gain) || 1.0));
+    syncEmSensorUi();
+    return { ...emSensorState };
+  }
+
+  emSensorBtn?.addEventListener('click', () => {
+    emSensorBar?.classList.toggle('open');
+    syncEmSensorUi();
+  });
+  emCloseBtn?.addEventListener('click', () => {
+    emSensorBar?.classList.remove('open');
+    syncEmSensorUi();
+  });
+  if (emPresetsEl) {
+    for (const b of emPresetsEl.querySelectorAll('[data-em-preset]')) {
+      b.addEventListener('click', () => {
+        const key = b.dataset.emPreset;
+        const p = EM_SENSOR_PRESETS[key];
+        if (!p) return;
+        setEmSensorWindow(p.min, p.max, { active: p.active, preset: key });
+        renderNow(performance.now());
+      });
+    }
+  }
+  if (emTrackEl) {
+    let emDragMode = null; // 'min' | 'max' | 'window'
+    let emDragStartLog = 0;
+    let emDragOrigMin = -6.42;
+    let emDragOrigMax = -6.12;
+    const clientXToLog10 = (clientX) => {
+      const r = emTrackEl.getBoundingClientRect();
+      const t = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+      return EM_LOG10_MIN + t * EM_LOG10_SPAN;
+    };
+    const startEmDrag = (mode, ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      emDragMode = mode;
+      emDragStartLog = clientXToLog10(ev.clientX);
+      emDragOrigMin = emSensorState.log10LambdaMin;
+      emDragOrigMax = emSensorState.log10LambdaMax;
+      emTrackEl.setPointerCapture?.(ev.pointerId);
+    };
+    emCaretMinEl?.addEventListener('pointerdown', (e) => startEmDrag('min', e));
+    emCaretMaxEl?.addEventListener('pointerdown', (e) => startEmDrag('max', e));
+    emWindowEl?.addEventListener('pointerdown', (e) => startEmDrag('window', e));
+    emTrackEl.addEventListener('pointerdown', (e) => {
+      if (e.target === emCaretMinEl || e.target === emCaretMaxEl || e.target === emWindowEl) return;
+      const clickLog = clientXToLog10(e.clientX);
+      const dMin = Math.abs(clickLog - emSensorState.log10LambdaMin);
+      const dMax = Math.abs(clickLog - emSensorState.log10LambdaMax);
+      const mode = dMin <= dMax ? 'min' : 'max';
+      startEmDrag(mode, e);
+      if (mode === 'min') {
+        setEmSensorWindow(Math.min(clickLog, emSensorState.log10LambdaMax - 0.15), emSensorState.log10LambdaMax, { active: true, preset: 'custom' });
+      } else {
+        setEmSensorWindow(emSensorState.log10LambdaMin, Math.max(clickLog, emSensorState.log10LambdaMin + 0.15), { active: true, preset: 'custom' });
+      }
+      renderNow(performance.now());
+    });
+    emTrackEl.addEventListener('pointermove', (e) => {
+      if (!emDragMode) return;
+      const cur = clientXToLog10(e.clientX);
+      if (emDragMode === 'min') {
+        setEmSensorWindow(Math.min(cur, emSensorState.log10LambdaMax - 0.15), emSensorState.log10LambdaMax, { active: true, preset: 'custom' });
+      } else if (emDragMode === 'max') {
+        setEmSensorWindow(emSensorState.log10LambdaMin, Math.max(cur, emSensorState.log10LambdaMin + 0.15), { active: true, preset: 'custom' });
+      } else if (emDragMode === 'window') {
+        const spanW = emDragOrigMax - emDragOrigMin;
+        const delta = cur - emDragStartLog;
+        let nextMin = Math.max(EM_LOG10_MIN, Math.min(EM_LOG10_MAX - spanW, emDragOrigMin + delta));
+        setEmSensorWindow(nextMin, nextMin + spanW, { active: true, preset: 'custom' });
+      }
+      renderNow(performance.now());
+    });
+    const endEmDrag = (e) => {
+      if (!emDragMode) return;
+      emDragMode = null;
+      emTrackEl.releasePointerCapture?.(e.pointerId);
+    };
+    emTrackEl.addEventListener('pointerup', endEmDrag);
+    emTrackEl.addEventListener('pointercancel', endEmDrag);
+  }
+  syncEmSensorUi();
+
+  const SURFACE_TIMEWARP_STEPS = [1, 1e3, 1e5, 1e6];
+  function formatSurfaceTimeWarp(w) {
+    if (w >= 1e6) return '10⁶× SKY';
+    if (w >= 1e5) return '10⁵× SKY';
+    if (w >= 1e3) return '10³× SKY';
+    return '1× SKY';
+  }
+  surfaceTimewarpBtn?.addEventListener('click', () => {
+    const cur = physics.surfaceTimeWarp || 1;
+    const idx = SURFACE_TIMEWARP_STEPS.findIndex((v) => v > cur * 1.05);
+    const next = idx >= 0 ? SURFACE_TIMEWARP_STEPS[idx] : SURFACE_TIMEWARP_STEPS[0];
+    physics.setSurfaceTimeWarp(next);
+    syncSurfaceHud();
+  });
 
   const kardashev = createKardashevProgressionState();
   const xrBridge = createWebXrWebGpuBridge(device, {
@@ -1598,8 +1788,29 @@ export async function mountUlgUniversesDemo() {
       vehMetrics = `Alt ${(tel.roverAltitudeM || 0).toFixed(1)} m · Spd ${(tel.roverSpeedMS || 0).toFixed(1)} m/s · Fuel ${Math.round((tel.roverRocketFuel ?? 1) * 100)}%`;
     }
     if (surfaceTelemetryEl) {
+      const cl = physics.surfaceClimate;
+      const hr = Number.isFinite(cl?.localHour) ? cl.localHour : 12.0;
+      const clockPart = cl
+        ? ` · <strong>${cl.seasonName}</strong> ${String(Math.floor(hr)).padStart(2, '0')}:${String(Math.floor((hr % 1) * 60)).padStart(2, '0')} · ${Math.round(cl.surfaceTempK)} K${cl.eclipseFactor < 0.92 ? ' · <span class="warn">🌑 ECLIPSE</span>' : ''}${cl.iceCoverFrac >= 0.72 ? ' · <span class="good">❄️ Frozen Sea</span>' : ''}`
+        : '';
       surfaceTelemetryEl.innerHTML =
-        `<span><strong>${vehBadge}</strong> · ${worldName} · g=${env.gravityMS2.toFixed(2)} m/s² · ${atmStr} · ${vehMetrics}</span>`;
+        `<span><strong>${vehBadge}</strong> · ${worldName} · g=${env.gravityMS2.toFixed(2)} m/s² · ${atmStr} · ${vehMetrics}${clockPart}</span>`;
+    }
+    if (surfaceTimewarpBtn) {
+      const tw = physics.surfaceTimeWarp || 1;
+      surfaceTimewarpBtn.textContent = `⏩ ${formatSurfaceTimeWarp(tw)}`;
+      surfaceTimewarpBtn.classList.toggle('active', tw > 1.5);
+    }
+    if (surfaceXenoBtn) {
+      const xp = sess.xenobiology;
+      if (xp && xp.solvent && xp.solvent !== 'none') {
+        surfaceXenoBtn.href = buildLifeLabXenobiologyUrl(xp);
+        surfaceXenoBtn.style.display = 'inline-flex';
+        surfaceXenoBtn.textContent = `🧬 ${xp.solventFormula} BIO LAB ↗`;
+        surfaceXenoBtn.title = `Open ${xp.worldName} (${xp.solventLabel}, ${Math.round(xp.labParams?.memTempK || env.tempK)} K, ${xp.membraneType}) in Biophysics & Xenobiology Lab`;
+      } else {
+        surfaceXenoBtn.style.display = 'none';
+      }
     }
     if (surfaceReactionBarEl) {
       const wr = tel.weaponReaction;
@@ -2670,7 +2881,8 @@ export async function mountUlgUniversesDemo() {
         maxPickNdc: desc.kind === 'solar-asteroid' ? 0.18 : 0.14,
         offsetHi: desc.offsetHi,
         offsetLo: desc.offsetLo,
-        worldScale: desc.worldScale
+        worldScale: desc.worldScale,
+        reversedZ: true
       });
       if (hit) {
         const raw = new Float32Array([...hit.vec0, ...hit.vec1, ...hit.vec2, ...hit.vec3]);
@@ -3120,6 +3332,7 @@ export async function mountUlgUniversesDemo() {
         <button class="uv-chip ${currentLevel === 6 && physics.quantumMode === 'molecule' ? 'active' : ''}" data-sample-step="6m" type="button">L6 Compound</button>
         <button class="uv-chip ${currentLevel === 6 && physics.quantumMode === 'atom' ? 'active' : ''}" data-sample-step="6a" type="button">L6 Element</button>
         <button class="uv-chip ${currentLevel === 7 ? 'active' : ''}" data-sample-step="7" type="button">L7 Nucleus</button>
+        ${sm.xenoUrl ? `<a class="uv-chip" href="${sm.xenoUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;border-color:rgba(167,139,250,0.65);color:#ddd6fe;" title="Synthesize native alien membranes &amp; biopolymers for this world in Life Lab">🧬 Bio Lab ↗</a>` : ''}
       </div>`;
     sampleStripEl.querySelector('[data-return-surface]')?.addEventListener('click', () => {
       void returnToSavedSurface();
@@ -3812,6 +4025,7 @@ export async function mountUlgUniversesDemo() {
           const isCryoMoon = (isFocusL4 && !isCutPlanet && physics.planetaryMode === 'cryo-plumes');
           const isRogue = (isFocusL4 && !isCutPlanet && physics.planetaryMode === 'rogue');
           const sphereIdx = spheres.length;
+          const dysonCov = bodyIsStar ? Math.min(0.92, Math.max(0, (kardashev.state.probes.length >= 2 ? (kardashev.state.kardashevK - 1.05) * 0.85 : 0))) : 0;
           spheres.push({
             pos: [wx, wy, wz],
             radius: trueRWorld,
@@ -3822,9 +4036,12 @@ export async function mountUlgUniversesDemo() {
             rCore: rCoreNorm,
             rMantle: rMantleNorm,
             cutaway: isCutPlanet,
+            tempK: Number(spec.tempK) || (bodyIsStar ? 5778 : 288),
+            civTechK: Number(spec.civTechK) || 0,
+            dysonCoverage: dysonCov,
             seed: i * 2.17 + 1.3
           });
-          // Bind zero-copy live GPU spherical baroclinic atmosphere + triboelectric lightning + polar aurorae onto the focused world!
+          // Bind zero-copy live GPU spherical baroclinic atmosphere + triboelectric lightning + polar aurorae + CFD flow onto the focused world!
           if (isFocusL4 && !isMagmaOcean && !isCryoMoon && physics.planetaryAtmoSession) {
             atmoEm = {
               buffer: physics.planetaryAtmoSession.getResidentEmVisBuffer(),
@@ -3832,6 +4049,17 @@ export async function mountUlgUniversesDemo() {
               height: physics.planetaryAtmoSession.height,
               sphereIndex: sphereIdx
             };
+            // Visible 3D spherical atmospheric CFD wind-flow streamlines hovering just above the focused L4 planet!
+            if (showOrbits && !isCutPlanet && physics.planetaryAtmoState?.surfacePressurePa >= 20.0) {
+              lineChunks.push(...buildOrbitalCfdStreamlines({
+                center: [wx, wy, wz],
+                radius: trueRWorld,
+                atmoState: physics.planetaryAtmoState,
+                timeSec: nowSec,
+                seed: i * 2.17 + 1.3,
+                alphaMul: wSolar * 0.85
+              }));
+            }
           }
           // Supersonic Cryovolcanic Ice Plumes erupting from south pole of the focused icy moon!
           if (isCryoMoon && physics.cryoPlumeSession) {
@@ -4154,9 +4382,9 @@ export async function mountUlgUniversesDemo() {
         camera.pos[2] + camera.fwd[2] * 0.15 - camera.up[2] * 0.28
       ]
       : [
-        camera.pos[0] + camera.fwd[0] * 5.2 - camera.up[0] * 1.42,
-        camera.pos[1] + camera.fwd[1] * 5.2 - camera.up[1] * 1.42,
-        camera.pos[2] + camera.fwd[2] * 5.2 - camera.up[2] * 1.42
+        camera.pos[0] + camera.fwd[0] * 5.9 - camera.up[0] * 1.72,
+        camera.pos[1] + camera.fwd[1] * 5.9 - camera.up[1] * 1.72,
+        camera.pos[2] + camera.fwd[2] * 5.9 - camera.up[2] * 1.72
       ];
     const emInfo = evaluateEmWavelengthInfo(spaceLambdaLog10);
     const beamTarget = pickedGpuMote?.worldPos || camTarget || [0, 0, 0];
@@ -4174,7 +4402,7 @@ export async function mountUlgUniversesDemo() {
       yaw: yawShip,
       pitch: Math.max(-0.22, Math.min(0.22, -camera.fwd[1] * 0.45)),
       roll: Math.sin(nowSec * 0.9) * 0.04,
-      radius: 0.72, // Crisp ship-chase foreground scale in cosmic coordinates!
+      radius: 0.52, // Crisp ship-chase foreground scale framed cleanly above bottom rim!
       rimAngle: nowSec * 2.2,
       vertThrust: flyTargetLog10 !== null ? 0.65 : 0.0,
       tractorActive: Boolean(spaceTractorOn || (flyTargetLog10 !== null && currentLevel === 4)),
@@ -4254,23 +4482,35 @@ export async function mountUlgUniversesDemo() {
         level: 4,
         log10SpanM: 2.0
       };
-      const surfLightDir = s.env.isRogue
-        ? vec3Norm([0.15, 0.96, 0.22])
-        : (s.env.isMagmaOcean ? vec3Norm([0.70, 0.28, 0.65]) : vec3Norm([0.58, 0.44, 0.68]));
+      const catSurf = physics.getActiveSystemCatalog();
+      const skyData = buildLiveSurfaceCelestialSky({
+        solarEngine: physics.solarEngine,
+        catalog: catSurf,
+        focusIdx: physics.planetaryBodyIndex,
+        cameraPos: pose.eye,
+        env: s.env,
+        surfaceSimSec: physics.surfaceSimSec,
+        observerLatDeg: 32.0,
+        dysonCoverage: kardashev.state.probes.length >= 2 ? Math.min(0.92, Math.max(0, (kardashev.state.kardashevK - 1.05) * 0.85)) : 0
+      });
+      physics.setSurfaceClimate(skyData.climate);
+      const surfLightDir = skyData.lightDir;
+      lastSurfaceSkyCount = skyData.spheres.length;
 
       const skyEnv = s.getActiveSkyEnv ? s.getActiveSkyEnv() : s.env;
       const surfaceClouds = [];
-      if (physics.galaxyEngine && (skyEnv.skyOpticalDepth ?? 1.0) < 0.35) {
+      const dayVisFactor = smoothstep(-0.10, 0.22, surfLightDir[1]) * (skyData.climate.eclipseFactor ?? 1.0);
+      if (physics.galaxyEngine && ((skyEnv.skyOpticalDepth ?? 1.0) * dayVisFactor) < 0.36) {
         const starGalPos = physics.activeStarSite?.posGal || physics.galaxyFocusPos || [4.8, 0.04, 2.1];
-        const skyStarVis = Math.max(0.08, 1.0 - (skyEnv.skyOpticalDepth ?? 0) * 2.6);
+        const skyStarVis = Math.max(0.10, 1.0 - (skyEnv.skyOpticalDepth ?? 0) * dayVisFactor * 2.5);
         surfaceClouds.push({
           buffer: physics.galaxyEngine.getResidentBuffer(),
           count: physics.galaxyEngine.count,
           mode: 1,
           isBackdrop: true,
-          worldScale: -240.0,
-          pointSize: 1.35,
-          alphaGain: 0.34 * skyStarVis,
+          worldScale: -240000.0,
+          pointSize: 1350.0,
+          alphaGain: 0.38 * skyStarVis,
           extra1: [starGalPos[0], starGalPos[1], starGalPos[2], 0]
         });
       }
@@ -4310,14 +4550,27 @@ export async function mountUlgUniversesDemo() {
       }
 
       const amFlash = physics.surfaceTelemetry?.antimatterFlash || 0;
+      const floraInstBuf = s.getResidentFloraInstancesBuffer?.();
+      const floraVertBuf = s.getResidentFloraTemplateVertBuffer?.();
       renderer.renderFrame({
         camera,
         lightDir: surfLightDir,
+        spheres: skyData.spheres.length ? skyData.spheres : null,
+        disks: skyData.disks.length ? skyData.disks : null,
+        emSensor: emSensorState,
         surfaceScene: {
           terrainVertBuf: s.getResidentTerrainVertBuffer(),
           terrainIdxBuf: s.getResidentTerrainIndexBuffer(),
           indexCount: s.indexCount,
           hideTerrain: !s.env.hasSolidCrust,
+          flora: (floraInstBuf && floraVertBuf && s.floraInstanceCount > 0)
+            ? {
+              instanceBuf: floraInstBuf,
+              templateVertBuf: floraVertBuf,
+              instanceCount: s.floraInstanceCount,
+              templateVertCount: s.floraTemplateVertCount
+            }
+            : null,
           boulderVertBuf: s.getResidentBoulderVertBuffer?.(),
           boulderVertCount: s.boulderVertCount || 0,
           vehicleVertBuf: s.getResidentVehicleVertBuffer(),
@@ -4325,7 +4578,9 @@ export async function mountUlgUniversesDemo() {
           fxVertBuf: s.getResidentFxVertBuffer?.(),
           fxVertCount: s.fxVertCount || 0,
           env: skyEnv,
-          lightDir: surfLightDir
+          lightDir: surfLightDir,
+          ambientTempK: skyData.climate.surfaceTempK,
+          eclipseFactor: skyData.climate.eclipseFactor
         },
         particleClouds: surfaceClouds,
         stereoSbs: !xrEyeView && xrBridge.isStereoPreview,
@@ -4400,6 +4655,7 @@ export async function mountUlgUniversesDemo() {
 
     const scenePayload = buildContinuousScenePayload(camera, nowMs * 0.001);
     scenePayload.cosmicMeshes = buildCosmicUfoMeshes(camera, nowMs * 0.001);
+    scenePayload.emSensor = emSensorState;
     scenePayload.stereoSbs = !xrEyeView && xrBridge.isStereoPreview;
     scenePayload.xrEyeTarget = xrEyeView;
     renderer.renderFrame(scenePayload);
@@ -4696,6 +4952,12 @@ export async function mountUlgUniversesDemo() {
         surfaceDroneMaxAeroLiftN: physics.surfaceSession?.env?.maxAeroLiftN ?? null,
         surfaceTelemetry: physics.surfaceTelemetry ?? null,
         surfaceLocalSample: physics.surfaceSession?.getLocalSample?.() ?? null,
+        surfaceClimate: physics.surfaceClimate ?? null,
+        surfaceSkyBodyCount: lastSurfaceSkyCount,
+        surfaceTimeWarp: physics.surfaceTimeWarp ?? 1,
+        surfaceSimSec: physics.surfaceSimSec ?? 0,
+        surfaceXenobiology: physics.surfaceSession?.xenobiology ?? null,
+        emSensor: { ...emSensorState },
         hasSavedSurfaceCheckpoint: Boolean(savedSurfaceCheckpoint),
         savedSurfaceWorld: savedSurfaceCheckpoint?.worldName ?? null,
         activeSampledMaterial: physics.activeSampledMaterial ?? null,
@@ -5112,6 +5374,29 @@ export async function mountUlgUniversesDemo() {
     },
     setSurfaceControls(partial = {}) {
       physics.setSurfaceControls(partial);
+      syncSurfaceHud();
+      return this.getState();
+    },
+    setEmSensorWindow(minLog10, maxLog10, opts = {}) {
+      setEmSensorWindow(minLog10, maxLog10, opts);
+      renderNow(performance.now());
+      return this.getState();
+    },
+    setEmSensorPreset(presetKey = 'vis') {
+      const p = EM_SENSOR_PRESETS[presetKey] || EM_SENSOR_PRESETS.vis;
+      setEmSensorWindow(p.min, p.max, { active: p.active, preset: presetKey });
+      renderNow(performance.now());
+      return this.getState();
+    },
+    setSurfaceTimeWarp(warp = 1.0) {
+      physics.setSurfaceTimeWarp(warp);
+      syncSurfaceHud();
+      renderNow(performance.now());
+      return this.getState();
+    },
+    advanceSurfaceSimSec(deltaSec = 0) {
+      physics.advanceSurfaceSimSec(deltaSec);
+      renderNow(performance.now());
       syncSurfaceHud();
       return this.getState();
     },

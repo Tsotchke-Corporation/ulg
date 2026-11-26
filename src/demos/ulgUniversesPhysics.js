@@ -867,6 +867,9 @@ export function createUlgUniversesPhysics(device, {
   let surfaceActive = false;
   let surfaceSession = null;
   let surfaceTelemetry = null;
+  let surfaceTimeWarp = 1.0;
+  let surfaceSimSec = 0.0;
+  let surfaceClimate = null;
   let surfaceControls = {
     forward: false,
     backward: false,
@@ -2078,11 +2081,26 @@ export function createUlgUniversesPhysics(device, {
         }
       } else if (activeLevel === 4) {
         if (surfaceActive && surfaceSession) {
-          surfaceTelemetry = await surfaceSession.step({
-            dt: 0.020 * Math.max(0.25, Math.min(2.5, timeScale)),
-            controls: surfaceControls,
-            readTelemetry: (surfaceSession.stepIndex % 4) === 0
-          });
+          const activeSurf = surfaceSession;
+          const dtSurf = 0.020 * Math.max(0.25, Math.min(2.5, timeScale));
+          const warpEff = Math.max(1.0, Math.min(1e7, surfaceTimeWarp));
+          surfaceSimSec += dtSurf * warpEff;
+          // Step live N-body solar system while standing on the surface so sunrises, moons, eclipses & seasons evolve!
+          if (solarEngine && planetaryMode !== 'eyeball-locked' && planetaryMode !== 'rogue') {
+            const dtYrTotal = (dtSurf * warpEff) / 31557600.0;
+            const nSub = Math.max(1, Math.min(8, Math.ceil(dtYrTotal / 0.0004)));
+            const dtSubYr = Math.min(0.0006, Math.max(1e-8, dtYrTotal / nSub));
+            await solarEngine.step({ dtSubYr, substeps: nSub, readMassive: true });
+          }
+          // Re-check after awaiting solarEngine in case exitSurfaceView() ran concurrently!
+          if (surfaceActive && surfaceSession === activeSurf) {
+            surfaceTelemetry = await activeSurf.step({
+              dt: dtSurf,
+              controls: surfaceControls,
+              climate: surfaceClimate,
+              readTelemetry: (activeSurf.stepIndex % 4) === 0
+            });
+          }
         } else {
           let sunDir = planetaryMode === 'eyeball-locked' ? [1.0, 0.0, 0.0] : [0.65, 0.25, 0.70];
           if (planetaryMode === 'cryo-plumes' && cryoPlumeSession) {
@@ -3224,6 +3242,9 @@ export function createUlgUniversesPhysics(device, {
     get surfaceSession() { return surfaceSession; },
     get surfaceTelemetry() { return surfaceTelemetry; },
     get surfaceControls() { return surfaceControls; },
+    get surfaceTimeWarp() { return surfaceTimeWarp; },
+    get surfaceSimSec() { return surfaceSimSec; },
+    get surfaceClimate() { return surfaceClimate; },
     get mdSession() { return mdSession; },
     get mdTelemetry() { return mdTelemetry; },
     get mdElementZ() { return mdElementZ; },
@@ -3290,6 +3311,9 @@ export function createUlgUniversesPhysics(device, {
     setSurfaceUfoAltitudeKm,
     setSurfaceCameraMode,
     setSurfaceControls,
+    setSurfaceTimeWarp(w) { surfaceTimeWarp = Math.max(1.0, Math.min(1e7, Number(w) || 1.0)); return surfaceTimeWarp; },
+    advanceSurfaceSimSec(deltaSec) { surfaceSimSec += Number(deltaSec) || 0; return surfaceSimSec; },
+    setSurfaceClimate(c) { surfaceClimate = c || null; },
     addSurfaceLookDelta,
     adjustSurfaceChaseDistance,
     triggerSurfaceTractorPulse: (dur) => surfaceSession?.triggerTractorPulse?.(dur),

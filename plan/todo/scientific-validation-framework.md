@@ -1,45 +1,50 @@
 # First-Principles Scientific Validation & Calibration Layer (Post-G7 Cross-Scale Audit Framework)
 
-> **Status:** Planned Priority #1 (`plan/todo/`).
-> **Foundation:** Builds directly on accepted G7 (`plan/done/g7-release-audit.md`, `src/tools/scienceReleaseAudit.js`, `scripts/science-release-audit.mjs`), preserving the Star Spec hard rule that empirical audits remain **strictly offline, operator-side, and advisory** (`advisory: true`, `runtimeAuthority: false`, `blocksWorkflow: false`) — never a curve-fitting lookup table or runtime admission gate.
+> **Status:** Active Priority #1 (`plan/todo/` — framework live at `de7fc5f2`, calibration & benchmark expansion hardened 2026-11-25 against live code audit).
+> **Foundation:** Builds on accepted G7 (`plan/done/g7-release-audit.md`) and `src/tools/scientificValidationFramework.js` (`522` baseline observables, `173/522 = 33.1%` pre-calibration), preserving `advisory: true`, `runtimeAuthority: false`, `blocksWorkflow: false`, `scientificValidation: false` — strictly general first-principles physics, zero per-element or per-material lookup hacks.
 
 ---
 
-## 1. Objective
+## 1. Verified Root-Cause Physics Calibration Plan (Zero Material Hacks)
 
-Today, G7 audits static entries in `data/material-properties/elements.json` against cached PubChem & NIST atomic weights snapshots. This initiative expands G7 into a **live simulation-output validation and tuning framework** that actually executes ULG's WebGPU & first-principles physics engines across every scale (`10⁻¹⁵ m → 10⁺²⁵ m`), compares simulated physical observables against immutable public empirical reference datasets, and produces actionable diagnostic scorecards pinpointing **which physical terms need deeper modeling** (never ad-hoc material hacks!).
+Every calibration below fixes a genuine mathematical or physical modeling bug in ULG's general first-principles equations:
+
+### 1.1 Nuclear Structure (`src/runtime/nuclear/nuclearStructureGpu.js` — JS & WGSL in lockstep)
+1. **Beta-Stability Valley & `qEC` Sign Fix (`:78-114`, `:221-245`, WGSL `:426-459`):**
+   - Fix `qEC` electron-mass sign bug at `:236` (`-(M_NEUTRON - M_PROTON - M_ELECTRON)` instead of `+ M_ELECTRON`).
+   - Add standard Myers–Swiatecki / Kirson Wigner `T = 0` congruence energy `-37.0 * |N - Z| / A` with calibrated LDM constants (`a_V=15.80, a_S=17.80, a_C=0.711, a_A=22.70, a_P=11.18`) and tightened Strutinsky shell width (`1.15 + 0.022 * m`, amplitude `2.4 MeV`).
+   - Reject nucleon drip-line unbound nuclides and select `mostStableMassNumberForZ(Z)` at the bottom of the isobaric beta-stability valley rather than fixed-`Z` `B/A` (fixing `C-14 -> C-12`, `Si-32 -> Si-28`, `Pb-198 -> Pb-206`, `U-226 -> U-236` while preserving `tripleAlphaJPerKgHe ∈ [5.0e13, 9.5e13]`).
+2. **Finite Nuclear Charge Radius (`nuclearChargeRadiusFm`, `:120-128`, `:536`, `:797`):**
+   - Replace double-counted `rHalf = 1.23 A^{1/3}` + constant skin floor (`>= 1.944 fm`) with point-nucleon `c = max(0, 1.128 A^{1/3} - 0.89 A^{-1/3})`, vanishing-core skin taper `aDiff = 0.523 (1 - exp(-c/1.15))`, exact A-body center-of-mass recoil `(1 - 1/A)`, and finite proton charge radius convolution `r_p = 0.8414 fm` (`He-4: 2.29 -> 1.62 fm`, `C-12: 2.77 -> 2.42 fm`, `Pb-208: 5.47 fm`, `11/11` AME2020 PASS).
+
+### 1.2 Elemental Bulk DFT, Cohesive Energy, Actinide `5f` Repulsion & MD (`periodicBulkDftWebGpu.js`, `elementMdClosureWebGpu.js`)
+1. **Fix Unreferenced Jellium `E_coh` Ceiling (`periodicBulkDftWebGpu.js:449`):** Stop taking `0.45 * |E_solid|` relative to fully ionized `M^{zv+}` (which pinned `86/118` elements at `11.0 eV` -> `T_b = 10,613 K`); compute true cohesive energy `E_coh = E_sp_coh + max(0, -eBand_eq)` with Dirac relativistic `6s²` inert-pair suppression (`Hg`).
+2. **Fix Actinide `5f` Collapse (`:231-234`, `:330-339`):** Add mandatory `4f`/`5f` core Pauli repulsion wall (`+0.28 * wF * (fOcc/14 + 0.40) * (rF0/rWs)^6`) alongside `f`-band attraction and derive `rc` from valence shell electron count instead of fixed `0.88 * total` (eliminating `180,000 kg/m³` `Pu/Am/Bk` collapse and restoring finite `B_0`).
+3. **Fix `vdw-fcc` Geometry & Kirkwood Polarizability + Molecular Nonmetal Classification (`:50-54, :204, :346, :356`):**
+   - Fix FCC `rNN = rWs * 1.80941` (exact `(16π/3)^{1/3}/√2`, eliminating `1.82×` density overshoot).
+   - Fix Kirkwood `zv` cancellation bug + PBE SIE correction on `I_1`.
+   - Include `3p^3 / 3p^4 / 4p^4` (`P`, `S`, `Se`) in `isMolecularNonmetal`.
+   - Scale Friedel `d`-bandwidth to physical `4.5–8 eV` (fixing `Fe`/`W` `B_0` & `Θ_D` overshoot) + `s-d` hybridization cohesion for closed `d^{10} s^1` noble metals (`Cu/Ag/Au`).
+   - In `elementMdClosureWebGpu.js:215-216`, lower cryogenic vaporization floor `1500 -> 50 J/mol` and use `104 J/(mol·K)` metallic Trouton entropy (`88` for `vdw-fcc`).
+
+### 1.3 Compound Crystal Packing, Dielectric `ε_r` & Optical Index `n(550 nm)` (`recursiveCompoundPipeline.js`, `opticalResolverWebGpu.js`)
+1. **Intermolecular vdW & Shell-Stripped Ionic Radii (`recursiveCompoundPipeline.js:534-604`):**
+   - Molecular solids/liquids: Bondi non-bonded vdW envelope `r_vdW = r_cov + 0.85 Å` with directional H-bond tetrahedral packing (`η_HB ≈ 0.44` when `hasH && hasNOF`, `η_vdW ≈ 0.54` otherwise) -> `H₂O ~ 990`, `NH₃ ~ 690`, `CH₄ ~ 405 kg/m³`.
+   - Ionic crystals: shell-stripped Pauling cation radii, expanded anion radii, stoichiometric formal charges `z_+ z_-`, and Pauling radius-ratio gate (`r_+/r_- < 0.732 -> rocksalt-B1` over `cscl-B2`).
+2. **Dielectric `ε_r` Separation (`:775`):** Never apply gas-phase rotational dipole `18 μ²` to rigid ionic/covalent solids (`Al₂O₃: 24,600 -> ~9`, `NaCl: 2,930 -> ~5.9`); use **Penn electronic `ε_∞` + Lyddane–Sachs–Teller ionic lattice polarizability** for ionic/covalent crystals and exact quadratic **Kirkwood–Onsager** (with H-bond `g_K ≈ 2.6`) for polar molecular liquids (`H₂O ~ 78`).
+3. **Optical Gap & `n(550 nm)` (`:495, :561`):** Derive condensed molecular optical gap from bounded Koopmans `-ε_HOMO` instead of STO-3G virtual LUMO; include open-`d` charge-transfer gap reduction for transition-metal oxides (`Fe₂O₃`); evaluate Penn / Lorentz–Lorenz refractive index `n(550 nm)` and feed into `OPTICAL_RESOLVER_MODE_BAND_GAP`.
+
+### 1.4 Smooth Radiative/Convective Stellar Evolution (`src/runtime/astrophysics/cosmicEpochState.js:164-200`)
+- Replace discontinuous `M = 2.0` piecewise `lumMs` with smooth `C^∞` convective-to-Kramers-to-Thomson + Eddington-capped ZAMS luminosity, convective-core `μ^4` MS brightening, and fuel-conserving `tauMsGyr ∝ M / L` (bringing Vega `2.135 M☉` into empirical agreement while preserving Sun, Proxima, Red Giant, White Dwarf, NS, and BH regimes).
 
 ---
 
-## 2. Target Validation Suites & Public Reference Databases
+## 2. Live WebGPU Atlas Refresh & Expanded Cross-Scale Benchmarks
 
-| Domain & Scale | Live ULG Simulator Audited | Immutable Public Reference Datasets | Key Audited Observables |
-|---|---|---|---|
-| **Nuclear (`10⁻¹⁵ m`)** | `periodicTableEngineWebGpu` (`Z=1..118`, `(Z, A)` isotopes) + Visscher TDSE | **AME2020** (Atomic Mass Evaluation), **NuDat 3 / NNDC** | Binding energy per nucleon `B(Z, A)/A`, charge radius `R_ch`, α/β/EC `Q`-values, shell magic gaps |
-| **Atomic & Optical (`10⁻¹⁰ m`)** | Dirac–KS SCF + 3D TD-KS/FDTD + optical dispersion | **NIST ASD** (Atomic Spectra Database), **NIST SRD 144**, **CODATA 2022** | First ionization energy `IE₁`, covalent/vdW radii, static polarizability `α`, relativistic color (`Au`/`Ag`/`Cu`/`Cs`), refractive index `n(λ)` & extinction `k(λ)` |
-| **Bulk Solids & Phase (`10⁻⁹ m`)** | Bulk Periodic DFT + 100K WebGPU MD + Gate 2 Polytope Atlas | **Materials Project**, **CRC Handbook**, **NIST Chemistry WebBook** | Equilibrium crystal class (`fcc`/`bcc`/`hcp`/`diamond`), lattice constant `a₀`, mass density `ρ₀`, bulk modulus `B₀`, `T_melt`, `T_boil`, heat capacity `C_p`, enthalpy of fusion/vaporization, band gap `E_g` |
-| **Chemistry & Reactions (`10⁻¹⁰ m`)** | WebGPU RHF + CI-NEB + `organicChemistryGpu` (`QEq`, `pK_a`, Hückel, `V(θ)`) | **PubChem**, **NIST WebBook**, **CCCBDB** | Equilibrium bond lengths & angles, dipole moments, reaction enthalpies `ΔH_rxn`, activation barriers `E_a`, organic `pK_a`, conformational barriers (butane/cyclohexane/Sulflower) |
-| **Continuum Fluid & Solid (`10⁻³..10⁺² m`)** | `index.html` MLS-MPM / SS Continuum Engine | **IAPWS-95** (Water EOS), **NIST REFPROP**, classic analytical benchmarks | Hydrostatic density/pressure profiles, sound speed `c_s`, buoyancy/Archimedes sinking of dense solids, Stefan melting/freezing front speed, exact `2^-149` mass/energy conservation |
-| **Biophysics (`10⁻⁹..10⁻⁴ m`)** | `life-lab.html` (`biopolymerFoldingGpu`, `vesicle`, `hodgkinHuxley`) | **RCSB PDB**, **Hodgkin & Huxley (1952)** | Radius of gyration `R_g` scaling (`N^0.33` globular vs `N^0.59` IDP), contact-order folding kinetics, action potential peak (`+30..+40 mV`), threshold & refractory period |
-| **Planetary, Stellar & Cosmological (`10⁺⁶..10⁺²⁵ m`)** | `universes.html` (Hydrostatic Interiors, Lane–Emden/Fusion, TOV, TreePM `P(k)`) | **PREM** (Earth interior), **NASA Planetary Fact Sheets**, **MESA / Gaia DR3**, **Planck 2018 / CAMB** | Core pressure/density & Moment-of-Inertia `I/(MR²)`, Main-Sequence Mass–Luminosity–Radius (`L ∝ M^3.5`), Chandrasekhar & TOV NS mass limits, linear growth `D(z)` & matter power spectrum `P(k)` |
-
----
-
-## 3. Framework Architecture
-
-1. **Immutable Provenance Snapshot Store (`scripts/science-snapshot-ingest.mjs`):**
-   - Extend existing SHA-256 + read-only manifest ingestion to all new reference parsers (AME2020, NIST ASD, NIST WebBook, Materials Project export, PREM, NASA Fact Sheets, Planck `P(k)`).
-2. **Unified Live Validation Harness (`src/tools/scientificValidationFramework.js` & `scripts/run-scientific-validation.mjs`):**
-   - Runs headless host + native Vulkan probes across declared physics suites, emitting one standardized `ulg.science.validation.v1` JSON + Markdown report.
-   - Tracks **accuracy tier**, **signed error**, **median absolute percentage error (MAPE)**, **worst outliers**, and **regression diffs** against the previous verified baseline!
-3. **Physics-Root-Cause Triage & Calibration Ledger:**
-   - Automatically groups outliers by **missing physical law / closure approximation** rather than by element name (e.g., *"3d/5d transition metal `T_melt` overshoot → anharmonic phonon / d-band cohesion refinement"*, *"noble-gas `T_boil` → dispersion `C_6 / r^6` London term"*, *"actinide `5f` density → DFT+U / 4-component Dirac–KS"*).
-   - Surfaces live **Advisory Validation Scorecard** inside an operator panel / `plan/validation-scorecard.md` (with `scientificValidation: false` honestly preserved until independent domain accuracy thresholds are met).
-
----
-
-## 4. Acceptance & Verification Plan
-
-- Offline execution (`globalThis.fetch` throws) verified by unit tests.
-- Every dataset verifies cryptographic manifest SHA-256 + unit normalization.
-- Live Vulkan validation run produces real quantitative MAPE tables across all 7 domains (`Nuclear`, `Atomic/Optical`, `Bulk/Phase`, `Chemistry`, `Continuum`, `Biophysics`, `Astrophysics`) with zero curve-fitting hacks.
+1. Re-run `scripts/material-properties/generate-foundation-atlas-webgpu.mjs` (bounded `MemoryMax=3G`, `CPUQuota=50%`) to refresh `data/material-properties/foundation-polytope-atlas.json` (`schemaVersion: 2`, `118` elements + `20` compounds including live `SiO₂ cristobalite-C9`, zero `KBr`/`GeO2`, zero `reference-fallback`).
+2. Expand `src/tools/scientificValidationFramework.js` to audit **4 additional real physics domains** offline & live:
+   - **Continuum Water EOS & Hydrodynamics** (IAPWS-95 density/sound-speed/vaporization vs ULG continuum material closure + Stefan melt scaling).
+   - **Biophysics Kinetics & Scaling** (Flory `R_g ~ N^0.33` globular vs `N^0.59` IDP, Hodgkin–Huxley `+30..+40 mV` AP peak & refractory period, duplex `T_m`).
+   - **PREM Planetary Interiors** (Earth core/mantle pressure, central density, and `I/(MR²)` from Gate 5 hydrostatic interior solver).
+   - **Relativistic Optical Dispersion (`Au`, `Ag`, `Cu`, `Cs`)** (Drude-interband visible reflectance / relativistic gold color shift).
+3. Regenerate `plan/validation-scorecard.md` via `node scripts/run-scientific-validation.mjs`, verify massive empirical agreement uplift across all domains, and ensure ALL existing Gate 1–6 & `scientificValidationFramework` tests stay 100% green.

@@ -25,6 +25,7 @@ import {
 } from '../runtime/biology/morphogenesisActiveMatterGpu.js';
 import { resolveActiveUniversalLaws } from '../runtime/universalLawGraph.js';
 import { GPU_PICK_LAYOUT, createGpuEntityPickerWebGpu } from '../runtime/gpuMath/gpuEntityPickerWebGpu.js';
+import { createTargetOrbitControls } from '../runtime/shared/targetOrbitControls.js';
 import { createChemBioWebGpuRenderer } from './chemBioWebGpuRenderer.js';
 import { LIFE_LAB_ABOUT_ULG, LIFE_MODE_DOCS } from './lifeLabDocs.js';
 
@@ -142,6 +143,8 @@ export async function mountLifeLabDemo() {
     morphDiffRatio: 2.00
   };
 
+  let simSpeed = 0.30;
+  let stepAccum = 0.0;
   let paused = false;
   let disposed = false;
   let busy = false;
@@ -150,22 +153,35 @@ export async function mountLifeLabDemo() {
   let histB = [];
   let histC = [];
   const startTimeMs = performance.now();
+  let orbitControls = null;
+
+  function applySimSpeed(next) {
+    simSpeed = Math.max(0.05, Math.min(2.0, Math.round((Number(next) || 0.30) * 20) / 20));
+    if (el('sl-sim-speed')) el('sl-sim-speed').value = simSpeed.toFixed(2);
+    if (el('val-sim-speed')) el('val-sim-speed').textContent = `${simSpeed.toFixed(2)}×`;
+    document.querySelectorAll('#speed-preset-row [data-speed]').forEach((b) => {
+      b.classList.toggle('active', Math.abs(Number(b.dataset.speed) - simSpeed) < 0.02);
+    });
+  }
 
   function refreshCameraForMode(modeId) {
     const layer = layerForMode(modeId);
+    let pose;
     if (layer === 'membrane') {
-      if (modeId === 'protocell-vesicle') renderer.setCamera({ yaw: 0.55, pitch: 0.35, dist: 17.5, target: [0, 0, 0] });
-      else if (modeId === 'lipid-bilayer') renderer.setCamera({ yaw: 0.62, pitch: 0.42, dist: 17.5, target: [0, 0, 0] });
-      else renderer.setCamera({ yaw: 0.52, pitch: 0.44, dist: 18.0, target: [0, 0, 0] });
+      if (modeId === 'protocell-vesicle') pose = { yaw: 0.55, pitch: 0.35, dist: 17.5, target: [0, 0, 0] };
+      else if (modeId === 'lipid-bilayer') pose = { yaw: 0.62, pitch: 0.42, dist: 17.5, target: [0, 0, 0] };
+      else pose = { yaw: 0.52, pitch: 0.44, dist: 18.0, target: [0, 0, 0] };
     } else if (layer === 'fold') {
-      renderer.setCamera({ yaw: 0.48, pitch: 0.38, dist: 13.5, target: [0, 0, 0] });
+      pose = { yaw: 0.48, pitch: 0.38, dist: 13.5, target: [0, 0, 0] };
     } else if (layer === 'evo') {
-      renderer.setCamera({ yaw: 0.55, pitch: 0.52, dist: 16.5, target: [0, 0, 0] });
+      pose = { yaw: 0.55, pitch: 0.52, dist: 16.5, target: [0, 0, 0] };
     } else if (layer === 'hh') {
-      renderer.setCamera({ yaw: 0.0, pitch: 1.12, dist: 19.2, target: [0, 0, 0] });
+      pose = { yaw: 0.0, pitch: 1.12, dist: 19.2, target: [0, 0, 0] };
     } else {
-      renderer.setCamera({ yaw: 0.42, pitch: 0.88, dist: 21.5, target: [0, 0, 0] });
+      pose = { yaw: 0.42, pitch: 0.88, dist: 21.5, target: [0, 0, 0] };
     }
+    if (orbitControls) orbitControls.setPose(pose, { immediate: true, updateHome: true });
+    else renderer.setCamera(pose);
   }
 
   function updatePlotsAndHud() {
@@ -522,26 +538,36 @@ export async function mountLifeLabDemo() {
     }
   }
 
-  async function stepSimulationOnce({ forceRead = false } = {}) {
+  async function stepSimulationOnce({ forceRead = false, useSpeed = true } = {}) {
     if (disposed || busy || !activeSession) return;
     busy = true;
     try {
+      const spd = useSpeed ? simSpeed : 1.0;
+      if (useSpeed && spd < 0.25 && !forceRead) {
+        stepAccum += spd * 4.0;
+        if (stepAccum < 1.0) {
+          renderCurrentScene();
+          return;
+        }
+        stepAccum -= 1.0;
+      }
       frameCount += 1;
       const doRead = forceRead || (frameCount % 4 === 0);
       let tel = null;
+      const dtScale = useSpeed ? Math.max(0.2, Math.min(1.0, spd * 1.4)) : 1.0;
       if (currentLayer === 'membrane') {
-        tel = await activeSession.step({ dt: 0.015, substeps: 4, readTelemetry: doRead });
+        tel = await activeSession.step({ dt: 0.015 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(4 * spd)) : 4, readTelemetry: doRead });
         if (doRead) { histA.push(tel.meanTailCoordination); histB.push(tel.radialHeadOrder); }
       } else if (currentLayer === 'fold') {
-        tel = await activeSession.step({ dt: 0.014, substeps: 5, readTelemetry: doRead });
+        tel = await activeSession.step({ dt: 0.014 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(5 * spd)) : 5, readTelemetry: doRead });
         if (doRead) { histA.push(tel.radiusOfGyrationA); histB.push(tel.catalyticRateBoost); }
       } else if (currentLayer === 'evo') {
-        tel = await activeSession.step({ substeps: 2, readTelemetry: doRead });
+        tel = await activeSession.step({ substeps: useSpeed ? Math.max(1, Math.round(2 * spd)) : 2, readTelemetry: doRead });
         if (doRead) { histA.push(tel.meanSequenceIdentity); histB.push(tel.quasispeciesFraction); }
       } else if (currentLayer === 'hh') {
-        tel = await activeSession.step({ dt: 0.025, substeps: 10, readTelemetry: doRead });
+        tel = await activeSession.step({ dt: 0.025 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(10 * spd)) : 10, readTelemetry: doRead });
       } else {
-        tel = await activeSession.step({ substeps: 10, readTelemetry: doRead });
+        tel = await activeSession.step({ substeps: useSpeed ? Math.max(1, Math.round(10 * spd)) : 10, readTelemetry: doRead });
         if (doRead) { histA.push(tel.turingPatternStd); histB.push(tel.chemotacticEnrichment); }
       }
       if (histA.length > 96) histA.shift();
@@ -662,33 +688,38 @@ export async function mountLifeLabDemo() {
     return pickedEntity;
   }
 
-  let dragging = false; let moved = false; let downX = 0; let downY = 0; let lastX = 0; let lastY = 0;
-  canvas.addEventListener('pointerdown', (e) => { dragging = true; moved = false; downX = lastX = e.clientX; downY = lastY = e.clientY; canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    const dx = e.clientX - lastX; const dy = e.clientY - lastY;
-    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) moved = true;
-    lastX = e.clientX; lastY = e.clientY;
-    renderer.setCamera({ yaw: renderer.camera.yaw - dx * 0.007, pitch: renderer.camera.pitch + dy * 0.007 });
-    renderCurrentScene();
-    updatePickOverlay();
-  });
-  canvas.addEventListener('pointerup', (e) => {
-    if (dragging && !moved) void pickAtClientPoint(e.clientX, e.clientY);
-    dragging = false;
+  // Target-anchored OrbitControls (smooth damping, pan, dolly-to-target, click-to-pick, cameraAutoSpin: false!)
+  orbitControls = createTargetOrbitControls(canvas, {
+    yaw: 0.52,
+    pitch: 0.44,
+    dist: 18.0,
+    target: [0, 0, 0],
+    minDist: 2.2,
+    maxDist: 48.0,
+    enablePan: true,
+    enableDamping: true,
+    onClick: (cx, cy) => { void pickAtClientPoint(cx, cy); },
+    onChange: (pose) => {
+      renderer.setCamera(pose);
+      renderCurrentScene();
+      updatePickOverlay();
+    }
   });
   el('pick-close')?.addEventListener('click', () => { pickedEntity = null; updatePickOverlay(); });
   el('pick-zoom')?.addEventListener('click', () => {
     if (!pickedEntity) return;
-    renderer.setCamera({ target: [...pickedEntity.pos], dist: Math.min(renderer.camera.dist, 5.2) });
-    renderCurrentScene();
-    updatePickOverlay();
+    orbitControls.focusTarget([...pickedEntity.pos], Math.min(renderer.camera.dist, 5.2));
   });
-  canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    renderer.setCamera({ dist: renderer.camera.dist * (1 + Math.sign(e.deltaY) * 0.09) });
-    renderCurrentScene();
-  }, { passive: false });
+  el('sl-sim-speed')?.addEventListener('input', (e) => applySimSpeed(e.target.value));
+  document.querySelectorAll('#speed-preset-row [data-speed]').forEach((b) => {
+    b.addEventListener('click', () => applySimSpeed(Number(b.dataset.speed)));
+  });
+  el('btn-step-once')?.addEventListener('click', () => {
+    paused = true;
+    el('btn-play').textContent = '▶ Play';
+    void stepSimulationOnce({ forceRead: true, useSpeed: false });
+  });
+  applySimSpeed(simSpeed);
 
   document.querySelectorAll('.acc-header').forEach((h) => h.addEventListener('click', () => h.parentElement.classList.toggle('open')));
   document.querySelectorAll('.mode-btn').forEach((btn) => btn.addEventListener('click', () => {
@@ -749,10 +780,14 @@ export async function mountLifeLabDemo() {
   await selectMode('lipid-soup');
 
   let rafId = 0;
-  function loop() {
+  let lastRafMs = performance.now();
+  function loop(nowMs = performance.now()) {
     if (disposed) return;
-    if (!paused) stepSimulationOnce();
-    else renderCurrentScene();
+    const dtSec = Math.max(0.004, Math.min(0.05, (nowMs - lastRafMs) * 0.001));
+    lastRafMs = nowMs;
+    const camMoved = orbitControls?.update(dtSec);
+    if (!paused) stepSimulationOnce({ useSpeed: true });
+    else if (!camMoved) renderCurrentScene();
     rafId = requestAnimationFrame(loop);
   }
   rafId = requestAnimationFrame(loop);
@@ -764,6 +799,8 @@ export async function mountLifeLabDemo() {
         mode: currentMode,
         layer: currentLayer,
         stepIndex: activeSession?.stepIndex || 0,
+        simSpeed,
+        camera: orbitControls ? orbitControls.state : { ...renderer.camera },
         params: { ...params },
         telemetry: activeSession?.getTelemetry?.() || null,
         gpuErrorCount: gpuErrors.length,
@@ -799,8 +836,15 @@ export async function mountLifeLabDemo() {
       updatePlotsAndHud();
     },
     triggerStimulus() { activeSession?.triggerStimulus?.(); },
+    setSimSpeed(s) { applySimSpeed(s); },
+    resetCamera() { orbitControls?.reset({ immediate: true }); renderCurrentScene(); updatePickOverlay(); },
     setPaused(p) { paused = Boolean(p); el('btn-play').textContent = paused ? '▶ Play' : '⏸ Pause'; },
-    setCamera(patch) { renderer.setCamera(patch); renderCurrentScene(); updatePickOverlay(); },
+    setCamera(patch) {
+      if (orbitControls) orbitControls.setPose(patch, { immediate: true });
+      else renderer.setCamera(patch);
+      renderCurrentScene();
+      updatePickOverlay();
+    },
     async pickAtCenter() {
       const rect = canvas.getBoundingClientRect();
       // Try exact center first, then scan a small cross around center so rings/hollow vesicles pick a live bead cleanly!
@@ -814,7 +858,7 @@ export async function mountLifeLabDemo() {
     async stepNow(n = 8) {
       for (let i = 0; i < n; i += 1) {
         while (busy) await new Promise((r) => setTimeout(r, 8));
-        await stepSimulationOnce({ forceRead: i === n - 1 });
+        await stepSimulationOnce({ forceRead: i === n - 1, useSpeed: false });
       }
       if (pickedEntity) {
         const info = getActivePickBufferInfo();
@@ -835,6 +879,7 @@ export async function mountLifeLabDemo() {
     dispose() {
       disposed = true;
       cancelAnimationFrame(rafId);
+      orbitControls?.dispose();
       activeSession?.dispose();
       gpuPicker.dispose();
       renderer.dispose();

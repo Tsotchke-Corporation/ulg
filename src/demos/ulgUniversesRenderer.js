@@ -345,6 +345,7 @@ struct VsOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) color: vec4<f32>,
   @location(1) uv: vec2<f32>,
+  @location(2) shape: f32, // 0 = crisp glowing star/spark, 1 = soft volumetric 3D cloud billow, 2 = CFD flow streak
 };
 
 fn blackbody_rgb(log10_t: f32) -> vec3<f32> {
@@ -380,6 +381,9 @@ fn vs_main(
   var col = vec3<f32>(0.6, 0.85, 1.0);
   var pt_size = pt_size_base;
   var alpha = alpha_gain;
+  var shape = 0.0;
+  var streak_axis = vec3<f32>(0.0);
+  var streak_len = 0.0;
 
   if (mode == 0u) {
     // L0: Supergalactic 2LPT + TreePM (16 floats/particle) — IllustrisTNG / Millennium cosmic web
@@ -705,7 +709,7 @@ fn vs_main(
     // Mode 11: Planetary Surface Jump-Rocket Exhaust Flames, Ballistic Regolith Dust, & Drone Rotor Downwash!
     let o = iid * 16u;
     let is_live = raw_f32[o + 15u];
-    if (is_live < 0.5) {
+    if (is_live < 0.05) {
       var culled11: VsOut;
       culled11.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
       culled11.color = vec4<f32>(0.0);
@@ -713,12 +717,15 @@ fn vs_main(
       return culled11;
     }
     var rp = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
-    // Apply exact same TinyPlanet spherical curvature drop around active vehicle focus (extra1.xz, curv_inv_2r = extra1.w)
-    let dx_c = rp.x - cam.extra1.x;
-    let dz_c = rp.z - cam.extra1.z;
-    rp.y = rp.y - (dx_c * dx_c + dz_c * dz_c) * cam.extra1.w;
-    p_world = rp * world_scale;
     let role = raw_f32[o + 3u];
+    // Apply exact TinyPlanet spherical curvature drop to surface plumes (roles 0..2);
+    // keep 3D volumetric atmospheric CFD cloud strata & vortex tracers (roles 3..4) in true 3D space!
+    if (role < 2.5) {
+      let dx_c = rp.x - cam.extra1.x;
+      let dz_c = rp.z - cam.extra1.z;
+      rp.y = rp.y - (dx_c * dx_c + dz_c * dz_c) * cam.extra1.w;
+    }
+    p_world = rp * world_scale;
     let age = raw_f32[o + 7u];
     let base_rgb = vec3<f32>(raw_f32[o + 8u], raw_f32[o + 9u], raw_f32[o + 10u]);
     let max_life = max(0.15, raw_f32[o + 11u]);
@@ -736,23 +743,56 @@ fn vs_main(
       col = base_rgb * (0.48 + 0.22 * (1.0 - life_f));
       pt_size = pt_size_base * sz * (0.48 + 0.92 * life_f);
       alpha = alpha_gain * fade * 0.052;
-    } else {
+    } else if (role < 2.5) {
       // Subtle drone rotor downwash dust ring & fine wind-blown atmospheric motes!
       col = base_rgb * 0.52;
       pt_size = pt_size_base * sz * (0.42 + 0.55 * life_f);
       alpha = alpha_gain * fade * 0.068;
+    } else if (role < 3.5) {
+      // 3D Volumetric Atmospheric CFD Cloud Strata Bank (huge soft layered cumulus/NH3/NH4SH billows!)
+      let puff_fade = sin(clamp(life_f, 0.0, 1.0) * 3.1415926);
+      let d_cam = length(p_world - cam.cam_pos.xyz);
+      let near_fade = smoothstep(5.0, 18.0, d_cam);
+      col = base_rgb * 0.48;
+      pt_size = pt_size_base * sz * 2.15 * (0.85 + 0.30 * puff_fade);
+      alpha = alpha_gain * is_live * (0.42 + 0.58 * puff_fade) * near_fade * 0.14;
+      shape = 1.0;
+    } else {
+      // Crisp Velocity-Aligned 3D CFD Flow Ribbon / Eddy Streamline!
+      let s_fade = sin(clamp(life_f, 0.0, 1.0) * 3.1415926);
+      let v_raw = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
+      let v_mag = length(v_raw);
+      col = base_rgb * 1.15;
+      pt_size = pt_size_base * max(0.28, sz * 0.42);
+      alpha = alpha_gain * is_live * (0.28 + 0.72 * s_fade) * 0.42;
+      if (v_mag > 0.15) {
+        streak_axis = v_raw / v_mag;
+        streak_len = clamp(v_mag * 0.36, 1.4, 6.2);
+        shape = 2.0;
+      }
     }
   }
 
-  let world_corner = p_world
-    + cam.cam_right.xyz * (uv.x * pt_size)
-    + cam.cam_up.xyz * (uv.y * pt_size);
+  var world_corner: vec3<f32>;
+  if (shape > 1.5) {
+    // Orient billboard cleanly along projected 3D CFD velocity vector so airflow curves visually in 3D!
+    let to_cam = normalize(cam.cam_pos.xyz - p_world);
+    let side = normalize(cross(streak_axis, to_cam) + vec3<f32>(0.0, 1e-4, 0.0));
+    world_corner = p_world
+      + streak_axis * (uv.x * streak_len)
+      + side * (uv.y * pt_size * 0.42);
+  } else {
+    world_corner = p_world
+      + cam.cam_right.xyz * (uv.x * pt_size)
+      + cam.cam_up.xyz * (uv.y * pt_size);
+  }
   let clip = cam.view_proj * vec4<f32>(world_corner, 1.0);
 
   var out: VsOut;
   out.pos = clip;
   out.color = vec4<f32>(col, alpha);
   out.uv = uv;
+  out.shape = shape;
   return out;
 }
 
@@ -760,9 +800,21 @@ fn vs_main(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let r2 = dot(in.uv, in.uv);
   if (r2 > 1.0) { discard; }
-  let core = exp(-6.2 * r2);
-  let halo = exp(-2.2 * r2) * 0.28;
-  let w = core + halo;
+  var w: f32;
+  if (in.shape > 1.5) {
+    // Sleek glowing 3D aerodynamic CFD streamline ribbon!
+    let core_y = exp(-7.5 * in.uv.y * in.uv.y);
+    let tip_x = max(0.0, 1.0 - in.uv.x * in.uv.x);
+    w = core_y * tip_x * 1.15;
+  } else if (in.shape > 0.5) {
+    // Soft broad volumetric 3D cloud billow (zero bright pinpoint snowflake dots!)
+    let soft = max(0.0, 1.0 - r2);
+    w = soft * soft * 0.72;
+  } else {
+    let core = exp(-6.2 * r2);
+    let halo = exp(-2.2 * r2) * 0.28;
+    w = core + halo;
+  }
   return vec4<f32>(in.color.rgb * w * in.color.a, in.color.a * w);
 }
 `;
@@ -1122,17 +1174,30 @@ fn fs_main(in: VsOut) -> FsOut {
     var em_aurora = vec3<f32>(0.0);
     if (live_atmo) {
       let av = sample_live_atmo_vis(n_hit, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
-      // Crisp broken swirling baroclinic cloud bands (clear oceans & continents between cyclonic fronts!)
-      let cloud_d = smoothstep(0.20, 0.76, av.x) * 0.86;
-      // Vivid billowing rust-amber aeolian dust fronts
-      let dust_d = smoothstep(0.14, 0.68, av.y) * 0.82;
-      surf = mix(surf, vec3<f32>(0.88, 0.48, 0.22), dust_d * select(0.78, 0.20, has_ocean));
-      surf = mix(surf, vec3<f32>(0.97, 0.98, 1.0), cloud_d * 0.88);
+      // Advect fine wispy 3D FBM cloud micro-structure onto the live GPU baroclinic cloud field
+      // so synoptic ITCZ & Rossby storm bands break into realistic feathery cumulus/cyclone wisps (zero blocky texels!)
+      let drift_v = vec3<f32>(cam.cam_pos.w * 0.018, 0.0, -cam.cam_pos.w * 0.014);
+      let wisp1 = fbm5(n_hit * 10.5 + drift_v + seed_v * 0.6);
+      let wisp2 = fbm5(n_hit * 23.0 - drift_v * 1.4 - seed_v);
+      let cloud_wisp = clamp(wisp1 * 0.68 + wisp2 * 0.42, 0.0, 1.0);
+      let cloud_raw = av.x * (0.55 + 0.85 * cloud_wisp);
+      let cloud_d = smoothstep(0.18, 0.72, cloud_raw) * 0.88;
+      // Subtle 3D cloud drop-shadow cast onto ocean & continents directly away from host-star light_dir!
+      let n_sh = normalize(n_hit + light_dir * 0.018);
+      let av_sh = sample_live_atmo_vis(n_sh, u32(round(cam.extra2.x)), u32(round(cam.extra2.y)));
+      let cloud_shadow = smoothstep(0.22, 0.72, av_sh.x * (0.55 + 0.85 * cloud_wisp)) * 0.28 * ndl;
+      surf = surf * (1.0 - cloud_shadow);
+      // Vivid billowing rust-amber aeolian dust fronts modulated by fine turbulent eddies
+      let dust_d = smoothstep(0.15, 0.66, av.y * (0.65 + 0.65 * wisp1)) * 0.80;
+      surf = mix(surf, vec3<f32>(0.88, 0.48, 0.22), dust_d * select(0.76, 0.18, has_ocean));
+      surf = mix(surf, vec3<f32>(0.97, 0.985, 1.0), cloud_d * 0.92);
       water_spec = water_spec * (1.0 - max(cloud_d, dust_d));
-      // Real Paschen dielectric-breakdown lightning bolts (electric cyan in moist clouds, violet-gold in CO2 dust!)
-      let bolt = smoothstep(0.36, 1.15, av.z);
-      let bolt_col = mix(vec3<f32>(0.82, 0.54, 1.0), vec3<f32>(0.62, 0.94, 1.0), select(0.20, 1.0, has_ocean));
-      em_lightning = bolt_col * bolt * (2.0 + 1.8 * (1.0 - ndl));
+      // Real Paschen dielectric-breakdown lightning: crisp localized convective pinpoint flashes inside active storm cores!
+      let spark_n = fbm5(n_hit * 34.0 + vec3<f32>(cam.cam_pos.w * 1.8, -cam.cam_pos.w * 1.3, 4.1));
+      let spark_core = smoothstep(0.56, 0.82, spark_n);
+      let bolt = smoothstep(0.42, 1.20, av.z) * spark_core;
+      let bolt_col = mix(vec3<f32>(0.84, 0.56, 1.0), vec3<f32>(0.76, 0.95, 1.0), select(0.20, 1.0, has_ocean));
+      em_lightning = bolt_col * bolt * (2.6 + 2.2 * (1.0 - ndl));
       // Core-geodynamo polar auroral oval curtains (emerald-green 557.7nm O I -> violet N2+)!
       let aur = clamp(av.w, 0.0, 1.15);
       em_aurora = mix(vec3<f32>(0.14, 0.96, 0.56), vec3<f32>(0.58, 0.30, 1.0), clamp((abs(n_hit.y) - 0.80) * 4.0, 0.0, 1.0)) * aur * (0.42 + 0.90 * (1.0 - ndl));
@@ -2179,7 +2244,7 @@ export function createUlgUniversesRenderer(device, canvas) {
         pass.setBindGroup(0, surfaceSkyBg);
         pass.draw(3, 1, 0, 0);
 
-        if (surfaceScene.terrainVertBuf && surfaceScene.terrainIdxBuf && surfaceScene.indexCount > 0) {
+        if (!surfaceScene.hideTerrain && surfaceScene.terrainVertBuf && surfaceScene.terrainIdxBuf && surfaceScene.indexCount > 0) {
           pass.setPipeline(surfaceMeshPipe);
           pass.setBindGroup(0, surfaceMeshBg);
           pass.setVertexBuffer(0, surfaceScene.terrainVertBuf);

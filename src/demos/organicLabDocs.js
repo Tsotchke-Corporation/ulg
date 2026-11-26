@@ -19,6 +19,23 @@ export const ORGANIC_LAB_ABOUT_ULG = Object.freeze({
 });
 
 export const ORGANIC_MODE_DOCS = Object.freeze({
+  'sulflower-bearing': {
+    title: 'Sulflower Molecular Bearing (C₁₆S₈ @ Calix[11]furan) — Coprime 8:11 Superlubric Nanobearing',
+    badge: '8:11 Coprime Superlubric · 134 Atoms',
+    scale: '10⁻⁹ m',
+    equations: [
+      'gcd(N_rotor = 8, N_stator = 11) = 1  →  V(θ) corrugation period = 360° / 88 ≈ 4.09° (structural superlubricity!)',
+      'E_raceway = Σ [ 4ε((σ/r)¹² − (σ/r)⁶) + k_e q_S q_O / (ε_r r) ]   at r_S···O ≈ 2.79 Å ≈ 2^(1/6)σ_SO',
+      'H_π = H_Sulflower(24×24) ⊕ 11·H_Furan(5×5)  solved via Gate 0B WebGPU Jacobi eigensolver'
+    ],
+    whatYouSee:
+      'A planar D₈h octathio[8]circulene "Sulflower" rotor (C₁₆S₈ — 16 conjugated carbons ringed by 8 golden sulfur teeth) spins freely inside an 11-fold Calix[11]furan oxa-macrocycle stator (C₅₅O₁₁H₄₄ — 11 aromatic furans with inward red oxygens linked by sp³ –CH₂– bridges). Because 8 and 11 are coprime, the S···O Lennard-Jones & QEq repulsions cancel across the raceway rather than locking in phase — enabling near-frictionless molecular rotation directly on the GPU!',
+    experiments: [
+      'Adjust "Bearing Drive Torque τ" from 0.00 (pure thermal Brownian rotational diffusion at T) up to 1.50 to drive steady superlubric rotation.',
+      'Click any golden sulfur tooth or red furan oxygen to inspect its live WebGPU position, velocity, hybridization, and QEq partial charge.',
+      'Toggle "Show 3D π-MO Wavefunction Lobes" or "ESP Partial-Charge Coloring (QEq)" to visualize the Sulflower conjugated π-ring and polarized S···O raceway!'
+    ]
+  },
   benzene: {
     title: 'Benzene (C₆H₆) — 6π Hückel (4n+2) Aromatic Delocalization',
     badge: '4n+2 Aromatic · GPU Jacobi π-MO',

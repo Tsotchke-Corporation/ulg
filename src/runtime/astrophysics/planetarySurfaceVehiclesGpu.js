@@ -32,6 +32,10 @@ import {
 } from '../sph/lawAdapterContract.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 import { deriveFluidElectrodynamicsState } from './planetaryAtmosphereElectricGpu.js';
+import {
+  createPlanetaryAtmo3dCfdSessionWebGpu,
+  evaluateAtmosphericChemistryAtAltitude
+} from './planetaryAtmosphere3dCfdGpu.js';
 
 export const ULG_PLANETARY_SURFACE_SCHEMA = 'ulg.astrophysics.planetary-surface-vehicles-webgpu.v1';
 
@@ -237,11 +241,16 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
 // =========================================================================
 // Exact Deterministic JS + WGSL Shared Planetary Surface Heightfield
 // =========================================================================
-function fractJs(x) { return x - Math.floor(x); }
+// Exact Bit-Matched u32 Integer Hash (0.00000 m divergence between JS f64 & WebGPU f32!)
 function smoothJs(t) { return t * t * (3 - 2 * t); }
-function hash2Js(ix, iz, seedF) {
-  const h = Math.sin(ix * 127.1 + iz * 311.7 + seedF * 19.19) * 43758.5453123;
-  return fractJs(h);
+function hash2Js(ix, iz, seedU) {
+  const xi = Math.floor(ix) | 0;
+  const zi = Math.floor(iz) | 0;
+  const si = Math.round(seedU * 100) | 0;
+  let h = (Math.imul(xi, 374761393) + Math.imul(zi, 668265263) + Math.imul(si, 1442695041)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) | 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  return (h & 0xFFFFFF) / 16777216.0;
 }
 function vnoise2Js(x, z, seedF) {
   const ix = Math.floor(x); const iz = Math.floor(z);
@@ -316,6 +325,138 @@ export function evaluatePlanetaryTerrainHeight(x, z, env) {
     return env.seaLevelM;
   }
   return rawH;
+}
+
+/**
+ * Evaluate raw unclamped crust elevation (returns `< env.seaLevelM` underwater so
+ * rover shoreline collision detects water boundaries accurately!).
+ */
+export function evaluatePlanetaryCrustElevation(x, z, env) {
+  const seedF = ((env.seed % 997) * 0.13) + 1.7;
+  if (!env.hasSolidCrust) {
+    return fbm2Js(x * 0.018, z * 0.018, seedF) * env.terrainAmpM - 16.0;
+  }
+  const r0 = Math.hypot(x, z);
+  const apron = Math.min(1.0, Math.max(0.0, (r0 - 6.0) / 22.0));
+  const apronSmooth = apron * apron * (3 - 2 * apron);
+  const rolling = fbm2Js(x * 0.015, z * 0.015, seedF) * env.terrainAmpM;
+  const ridge = Math.abs(fbm2Js(x * 0.028 + 5.1, z * 0.028 - 3.4, seedF + 2.1)) * (env.terrainAmpM * 0.34);
+  const detail = fbm2Js(x * 0.085, z * 0.085, seedF + 4.9) * (env.terrainAmpM * 0.07);
+  const craters = env.craterStrength > 0.02
+    ? (craterFieldJs(x, z, 0.022, seedF) * env.terrainAmpM * 0.68
+      + craterFieldJs(x, z, 0.068, seedF + 11.0) * env.terrainAmpM * 0.22) * env.craterStrength
+    : 0.0;
+  return (rolling + ridge * 0.45 + detail + craters) * (0.14 + 0.86 * apronSmooth);
+}
+
+/**
+ * Exact barycentric height on the GPU-rendered terrain triangle mesh at `(x, z)`!
+ * Because terrain grid snapping aligns vertices to exact integer multiples of `cellSizeM`
+ * and triangulates each quad as `(0,0)-(0,1)-(1,0)` (u+v<=1) and `(1,0)-(0,1)-(1,1)` (u+v>1),
+ * this matches the live rendered WebGPU surface triangles to floating-point precision!
+ */
+export function evaluateRenderedTerrainTriangleHeight(x, z, cellSizeM, env) {
+  const cs = Math.max(0.25, Number(cellSizeM) || 2.2);
+  const gx = Math.floor(x / cs);
+  const gz = Math.floor(z / cs);
+  const u = (x / cs) - gx;
+  const v = (z / cs) - gz;
+  const x0 = gx * cs; const x1 = (gx + 1) * cs;
+  const z0 = gz * cs; const z1 = (gz + 1) * cs;
+  const h00 = evaluatePlanetaryTerrainHeight(x0, z0, env);
+  const h10 = evaluatePlanetaryTerrainHeight(x1, z0, env);
+  const h01 = evaluatePlanetaryTerrainHeight(x0, z1, env);
+  const h11 = evaluatePlanetaryTerrainHeight(x1, z1, env);
+  if (u + v <= 1.0) {
+    return h00 + u * (h10 - h00) + v * (h01 - h00);
+  }
+  return h11 + (1.0 - u) * (h01 - h11) + (1.0 - v) * (h10 - h11);
+}
+
+/**
+ * Exact 6-Wheel Rocker-Bogie + Belly Multi-Contact Support Plane Solver!
+ * Samples all 6 wheel footprints `(±1.22, -1.22 / 0 / +1.22)` + center `(0, 0)` on the exact
+ * rendered GPU terrain triangles, fits the least-squares rocker-bogie normal, and returns
+ * the exact minimum chassis root `supportY` guaranteeing ZERO wheel or belly penetration!
+ */
+export function resolveRoverMultiWheelSupport(x, z, yaw, cellSizeM, env) {
+  const sy = Math.sin(yaw);
+  const cy = Math.cos(yaw);
+  // Local basis in XZ: fwd = (sy, 0, cy), right = (cy, 0, -sy) (matches buildRoverAndDroneMeshFloats!)
+  const wheelOffsets = [
+    [-1.22, -1.22], [1.22, -1.22],
+    [-1.22, 0.0],   [1.22, 0.0],
+    [-1.22, 1.22],  [1.22, 1.22]
+  ];
+  let sumH = 0;
+  let sumRxH = 0; let sumRx2 = 0;
+  let sumRzH = 0; let sumRz2 = 0;
+  let anyUnderwater = false;
+  const samples = [];
+
+  for (let k = 0; k < wheelOffsets.length; k += 1) {
+    const [rx, rz] = wheelOffsets[k];
+    const wx = x + cy * rx + sy * rz;
+    const wz = z - sy * rx + cy * rz;
+    const hTri = evaluateRenderedTerrainTriangleHeight(wx, wz, cellSizeM, env);
+    const hAna = evaluatePlanetaryTerrainHeight(wx, wz, env);
+    const hGround = Math.max(hTri, hAna);
+    if (env.hasLiquidOcean && evaluatePlanetaryCrustElevation(wx, wz, env) < env.seaLevelM + 0.08) {
+      anyUnderwater = true;
+    }
+    samples.push({ rx, rz, hGround });
+    sumH += hGround;
+    sumRxH += rx * hGround;
+    sumRx2 += rx * rx;
+    sumRzH += rz * hGround;
+    sumRz2 += rz * rz;
+  }
+  const hCenter = Math.max(
+    evaluateRenderedTerrainTriangleHeight(x, z, cellSizeM, env),
+    evaluatePlanetaryTerrainHeight(x, z, env)
+  );
+  if (env.hasLiquidOcean && evaluatePlanetaryCrustElevation(x, z, env) < env.seaLevelM + 0.08) {
+    anyUnderwater = true;
+  }
+
+  // Least-squares support plane h(rx, rz) = hMean + sx * rx + sz * rz (zero cross terms by symmetry!)
+  const sx = sumRxH / Math.max(1e-6, sumRx2);
+  const sz = sumRzH / Math.max(1e-6, sumRz2);
+  // Convert local slopes (sx along right, sz along fwd) into world normal `up`
+  const nx = -(cy * sx + sy * sz);
+  const nz = -(-sy * sx + cy * sz);
+  const nLen = Math.hypot(nx, 1.0, nz) || 1.0;
+  const fitUp = [nx / nLen, 1.0 / nLen, nz / nLen];
+
+  // Exact rover frame (fwd, right) derived from `fitUp` identically to `buildRoverAndDroneMeshFloats`:
+  const dotFU = sy * fitUp[0] + cy * fitUp[2];
+  const fwdRaw = [sy - fitUp[0] * dotFU, -fitUp[1] * dotFU, cy - fitUp[2] * dotFU];
+  const fLen = Math.hypot(fwdRaw[0], fwdRaw[1], fwdRaw[2]) || 1.0;
+  const fwdY = fwdRaw[1] / fLen;
+  const rightRaw = [
+    fitUp[1] * (fwdRaw[2] / fLen) - fitUp[2] * fwdY,
+    fitUp[2] * (fwdRaw[0] / fLen) - fitUp[0] * (fwdRaw[2] / fLen),
+    fitUp[0] * fwdY - fitUp[1] * (fwdRaw[0] / fLen)
+  ];
+  const rLen = Math.hypot(rightRaw[0], rightRaw[1], rightRaw[2]) || 1.0;
+  const rightY = rightRaw[1] / rLen;
+
+  // Guarantee EVERY wheel bottom (incl. 45-deg rotated tread corners: 0.34*(sqrt(2)-1)=0.141m)
+  // AND center belly clear rendered GPU terrain triangles with zero visual clipping!
+  let requiredY = hCenter + 0.16;
+  for (let k = 0; k < samples.length; k += 1) {
+    const s = samples[k];
+    const reqK = s.hGround - (rightY * s.rx + fwdY * s.rz) + 0.16;
+    if (reqK > requiredY) requiredY = reqK;
+  }
+
+  return {
+    supportY: requiredY,
+    centerGroundY: hCenter,
+    normal: fitUp,
+    anyUnderwater,
+    maxSlopeSin: Math.sqrt(Math.max(0, 1.0 - fitUp[1] * fitUp[1]))
+  };
 }
 
 export function evaluatePlanetaryTerrainNormal(x, z, env) {
@@ -395,7 +536,13 @@ var<workgroup> wg2: array<f32, 64>;
 var<workgroup> wg3: array<f32, 64>;
 
 fn hash2(ix: f32, iz: f32, s: f32) -> f32 {
-  return fract(sin(ix * 127.1 + iz * 311.7 + s * 19.19) * 43758.5453123);
+  let xi = bitcast<u32>(i32(floor(ix)));
+  let zi = bitcast<u32>(i32(floor(iz)));
+  let si = bitcast<u32>(i32(round(s * 100.0)));
+  var h = xi * 374761393u + zi * 668265263u + si * 1442695041u;
+  h = (h ^ (h >> 13u)) * 1274126177u;
+  h = h ^ (h >> 16u);
+  return f32(h & 0xFFFFFFu) * (1.0 / 16777216.0);
 }
 
 fn vnoise2(x: f32, z: f32, s: f32) -> f32 {
@@ -748,7 +895,7 @@ function cross3(a, b) {
   return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 }
 
-function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ) {
+function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo = null) {
   const out = [];
   const applyCurv = (p) => {
     const dx = p[0] - refX;
@@ -815,7 +962,7 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ) {
   }
 
   // --- 2. INGENUITY / DRAGONFLY COAXIAL ATMOSPHERIC DRONE ---
-  {
+  if (drone.visible !== false) {
     const dBase = applyCurv(drone.pos);
     const cy = Math.cos(drone.yaw); const sy = Math.sin(drone.yaw);
     const cp = Math.cos(drone.pitch); const sp = Math.sin(drone.pitch);
@@ -852,6 +999,68 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ) {
       pushOrientedBox(out, dp(0, 0.84 + rIdx * 0.11, 0), bR, dUp, bF, 1.05, 0.015, 0.08, [0.24, 0.28, 0.34], 0.0);
       pushOrientedBox(out, dp(0, 0.84 + rIdx * 0.11, 0), bF, dUp, bR, 1.05, 0.015, 0.08, [0.24, 0.28, 0.34], 0.0);
     }
+  }
+
+  // --- 3. BUOYANT DISC-SHAPED ATMOSPHERIC RESEARCH UFO / AEROSTAT PROBE ---
+  if (ufo && ufo.visible) {
+    const uBase = applyCurv(ufo.pos);
+    const cy = Math.cos(ufo.yaw); const sy = Math.sin(ufo.yaw);
+    const cp = Math.cos(ufo.pitch); const sp = Math.sin(ufo.pitch);
+    const cr = Math.cos(ufo.roll); const sr = Math.sin(ufo.roll);
+    const uFwd = normalize3([sy * cp, -sp, cy * cp]);
+    const uRight0 = normalize3([cy, 0, -sy]);
+    const uUp0 = normalize3(cross3(uFwd, uRight0));
+    const uRight = normalize3([uRight0[0] * cr + uUp0[0] * sr, uRight0[1] * cr + uUp0[1] * sr, uRight0[2] * cr + uUp0[2] * sr]);
+    const uUp = normalize3(cross3(uFwd, uRight));
+    const upPt = (rx, ry, rz) => [
+      uBase[0] + uRight[0] * rx + uUp[0] * ry + uFwd[0] * rz,
+      uBase[1] + uRight[1] * rx + uUp[1] * ry + uFwd[1] * rz,
+      uBase[2] + uRight[2] * rx + uUp[2] * ry + uFwd[2] * rz
+    ];
+
+    // 12-segmented sleek metallic flying-saucer hull (upper tapered deck, beveled dark rim, ventral dish)
+    const segs = 12;
+    const rimGlowCol = ufo.vertThrust > 0.15
+      ? [0.24, 0.96, 1.0]     // Ascending: electric cyan buoyancy glow
+      : (ufo.vertThrust < -0.15
+        ? [1.0, 0.56, 0.22]   // Diving deeper: warm amber-plasma glow
+        : [0.32, 0.84, 0.98]);
+    const rimGlow = 1.15 + Math.abs(ufo.vertThrust) * 0.95;
+
+    for (let s = 0; s < segs; s += 1) {
+      const ang = (s / segs) * Math.PI * 2 + ufo.rimAngle * 0.35;
+      const ca = Math.cos(ang); const sa = Math.sin(ang);
+      const radDir = [uRight[0] * ca + uFwd[0] * sa, uRight[1] * ca + uFwd[1] * sa, uRight[2] * ca + uFwd[2] * sa];
+      const tanDir = [uFwd[0] * ca - uRight[0] * sa, uFwd[1] * ca - uRight[1] * sa, uFwd[2] * ca - uRight[2] * sa];
+
+      // Main brushed-titanium saucer wedge
+      const cMain = upPt(ca * 1.15, 0.10, sa * 1.15);
+      pushOrientedBox(out, cMain, radDir, uUp, tanDir, 1.12, 0.16, 0.62, [0.84, 0.88, 0.94], 0.04);
+      // Tapered upper fairing
+      const cTop = upPt(ca * 0.85, 0.32, sa * 0.85);
+      pushOrientedBox(out, cTop, radDir, uUp, tanDir, 0.72, 0.14, 0.48, [0.74, 0.79, 0.86], 0.04);
+      // Dark outer aerodynamic bumper rim
+      const cRim = upPt(ca * 2.28, 0.04, sa * 2.28);
+      pushOrientedBox(out, cRim, radDir, uUp, tanDir, 0.18, 0.09, 0.62, [0.22, 0.26, 0.34], 0.02);
+      // Glowing plasma/ion rim-thruster node
+      const cNode = upPt(ca * 2.38, 0.05, sa * 2.38);
+      pushOrientedBox(out, cNode, radDir, uUp, tanDir, 0.10, 0.06, 0.22, rimGlowCol, rimGlow);
+    }
+
+    // Panoramic glowing cyan observation cockpit dome on top (two stepped octagons)
+    for (let k = 0; k < 4; k += 1) {
+      const a = (k / 4) * Math.PI + ufo.rimAngle * 0.1;
+      const ca = Math.cos(a); const sa = Math.sin(a);
+      const dR = [uRight[0] * ca + uFwd[0] * sa, uRight[1] * ca + uFwd[1] * sa, uRight[2] * ca + uFwd[2] * sa];
+      const dF = [uFwd[0] * ca - uRight[0] * sa, uFwd[1] * ca - uRight[1] * sa, uFwd[2] * ca - uRight[2] * sa];
+      pushOrientedBox(out, upPt(0, 0.58, 0), dR, uUp, dF, 0.92, 0.20, 0.92, [0.36, 0.82, 1.0], 0.45);
+      pushOrientedBox(out, upPt(0, 0.80, 0), dR, uUp, dF, 0.54, 0.12, 0.54, [0.58, 0.92, 1.0], 0.62);
+    }
+
+    // Ventral glowing buoyancy/grav-field core ring + downward atmospheric chemistry laser-spectrometer nozzle!
+    pushOrientedBox(out, upPt(0, -0.14, 0), uRight, uUp, uFwd, 1.05, 0.10, 1.05, [0.30, 0.36, 0.44], 0.02);
+    pushOrientedBox(out, upPt(0, -0.26, 0), uRight, uUp, uFwd, 0.58, 0.07, 0.58, rimGlowCol, 1.55);
+    pushOrientedBox(out, upPt(0, -0.44, 0), uRight, uUp, uFwd, 0.12, 0.18, 0.12, [0.96, 0.82, 0.30], 0.95);
   }
 
   return new Float32Array(out);
@@ -911,7 +1120,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     computeBufferBinding(3, 'storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-planetary-surface-${entryPoint}.v1`,
+    cacheKey: `ulg-planetary-surface-${entryPoint}.v2-u32hash`,
     label: `${label}-${entryPoint}`,
     code: planetarySurfaceWgsl,
     entryPoint,
@@ -928,12 +1137,26 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telReadBuf = device.createBuffer({ label: `${label}-tel-rd`, size: 16, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
 
-  // Vehicle dynamic solid mesh buffer (up to 4,096 vertices = 196 KB)
-  const MAX_VEHICLE_VERTS = 4096;
+  // Vehicle dynamic solid mesh buffer (up to 8,192 vertices = 393 KB — fits Rover + Drone + 12-faceted Disc UFO!)
+  const MAX_VEHICLE_VERTS = 8192;
   const vehicleVertBuf = device.createBuffer({ label: `${label}-veh-verts`, size: MAX_VEHICLE_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
 
   device.queue.writeBuffer(terrainIdxBuf, 0, indices);
   device.queue.writeBuffer(plumesBuf, 0, initPlumes);
+
+  // Live 3D WebGPU Stratified Atmospheric CFD & Multi-Species Chemistry (active on ANY atmosphere-bearing world, strictly null/dormant in vacuum!)
+  const hasAtmosphereForCfd = !env.hasSolidCrust || env.pressurePa >= 20.0;
+  const cfdSession = hasAtmosphereForCfd
+    ? createPlanetaryAtmo3dCfdSessionWebGpu(device, {
+      bodySpec,
+      env,
+      nx: 32,
+      ny: 24,
+      nz: 32,
+      moteCount: Math.min(3072, pCount + 1024),
+      label: `${label}-cfd3d`
+    })
+    : null;
 
   const bg = createCachedExplicitBindGroup(device, {
     layout: terrainPipe.bindGroupLayout,
@@ -946,14 +1169,15 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     ]
   });
 
-  // Live Vehicle Physical States
-  const h0 = evaluatePlanetaryTerrainHeight(0, 0, env);
+  // Live Vehicle Physical States (placed cleanly on exact 6-wheel rendered-triangle support plane!)
+  const initSup = resolveRoverMultiWheelSupport(0, 0, 0.35, cellSizeM, env);
+  const h0 = initSup.supportY;
   const rover = {
     visible: env.hasSolidCrust,
     pos: [0, h0, 0],
     vel: [0, 0, 0],
     yaw: 0.35,
-    up: evaluatePlanetaryTerrainNormal(0, 0, env),
+    up: initSup.normal,
     wheelAngle: 0,
     onGround: env.hasSolidCrust,
     rocketFuel: 1.0,
@@ -962,6 +1186,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     speedMS: 0.0
   };
   const drone = {
+    visible: env.hasSolidCrust,
     docked: env.hasSolidCrust,
     pos: [0, env.hasSolidCrust ? (h0 + 1.25) : 6.0, -0.35],
     vel: [0, 0, 0],
@@ -969,14 +1194,27 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     pitch: 0,
     roll: 0,
     rotorAngle: 0,
-    throttle: env.hasSolidCrust ? 0.0 : 0.65,
+    throttle: 0.0,
     rcsFuel: 1.0,
     altitudeM: env.hasSolidCrust ? 1.25 : 22.0,
     aeroLiftN: 0.0,
     speedMS: 0.0
   };
+  const ufo = {
+    visible: !env.hasSolidCrust,
+    pos: [0, env.hasSolidCrust ? (h0 + 18.0) : 10.0, 0],
+    vel: [0, 0, 0],
+    yaw: 0.35,
+    pitch: 0,
+    roll: 0,
+    rimAngle: 0,
+    vertThrust: 0,
+    altitudeKm: cfdSession ? cfdSession.profile.startAltKm : 3.5,
+    altitudeM: env.hasSolidCrust ? 18.0 : 14000.0,
+    speedMS: 0.0
+  };
 
-  let activeVehicle = env.hasSolidCrust ? 'rover' : 'drone';
+  let activeVehicle = env.hasSolidCrust ? 'rover' : 'ufo';
   let cameraMode = 'chase'; // 'chase' | 'first-person'
   let lookYawOffset = -0.34; // Hero 3/4 rear-quarter angle showing all 6 rocker-bogie wheels, drone deck, & rocket plumes!
   let lookPitch = 0.18;
@@ -985,6 +1223,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   let simTimeS = 0;
   let mapInFlight = false;
   let disposed = false;
+  let lastCfdTelemetry = cfdSession ? cfdSession.getTelemetry() : null;
 
   let lastTelemetry = Object.freeze({
     schema: ULG_PLANETARY_SURFACE_SCHEMA,
@@ -1006,6 +1245,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     dronePos: [...drone.pos],
     droneSpeedMS: 0,
     droneAltitudeM: drone.altitudeM,
+    ufoPos: [...ufo.pos],
+    ufoSpeedMS: 0,
+    ufoAltitudeKm: ufo.altitudeKm,
+    cfdActive: Boolean(cfdSession && (activeVehicle === 'ufo' || !env.hasSolidCrust)),
+    cfdAvailable: Boolean(cfdSession),
+    cfdTelemetry: lastCfdTelemetry,
     activePlumeParticles: 0,
     flameParticles: 0,
     dustParticles: 0,
@@ -1020,16 +1265,50 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   function setActiveVehicle(mode) {
     if (mode === 'rover' && env.hasSolidCrust) {
       activeVehicle = 'rover';
+      ufo.visible = false;
+      drone.visible = true;
     } else if (mode === 'drone') {
       activeVehicle = 'drone';
+      drone.visible = true;
+      ufo.visible = false;
       if (drone.docked) {
         drone.docked = false;
         drone.pos = [rover.pos[0], rover.pos[1] + 1.55, rover.pos[2]];
         drone.vel = [rover.vel[0], env.droneFlightCapable ? 3.2 : 0.0, rover.vel[2]];
         drone.yaw = rover.yaw;
       }
+    } else if (mode === 'ufo' && cfdSession) {
+      activeVehicle = 'ufo';
+      ufo.visible = true;
+      if (!env.hasSolidCrust) drone.visible = false;
+      if (env.hasSolidCrust) {
+        const gh = evaluatePlanetaryTerrainHeight(rover.pos[0], rover.pos[2], env);
+        ufo.pos = [rover.pos[0], Math.max(gh + 14.0, ufo.pos[1]), rover.pos[2]];
+        ufo.yaw = rover.yaw;
+      }
     }
     return activeVehicle;
+  }
+
+  function setUfoAltitudeKm(altKm) {
+    if (!cfdSession) return ufo.altitudeKm;
+    const prof = cfdSession.profile;
+    ufo.altitudeKm = Math.max(prof.minAltKm, Math.min(prof.maxAltKm, Number(altKm) || prof.startAltKm));
+    ufo.altitudeM = ufo.altitudeKm * 1000.0;
+    return ufo.altitudeKm;
+  }
+
+  function getActiveSkyEnv() {
+    if (cfdSession && (activeVehicle === 'ufo' || !env.hasSolidCrust)) {
+      const chem = lastCfdTelemetry?.chemistry || evaluateAtmosphericChemistryAtAltitude(cfdSession.profile, ufo.altitudeKm);
+      return {
+        ...env,
+        skyZenithRgb: chem.skyZenithRgb,
+        skyHorizonRgb: chem.skyHorizonRgb,
+        skyOpticalDepth: chem.opticalDepth
+      };
+    }
+    return env;
   }
 
   function setCameraMode(mode) {
@@ -1056,99 +1335,145 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     const windX = env.baseWindMS * Math.cos(simTimeS * 0.09 + 0.6);
     const windZ = env.baseWindMS * Math.sin(simTimeS * 0.09 + 0.6);
 
-    // --- 1. INTEGRATE 6-WHEEL ROVER WITH JUMP ROCKETS ---
+    // --- 1. INTEGRATE 6-WHEEL ROVER WITH JUMP ROCKETS (4x Swept Micro-Substeps + 6-Wheel Triangle Collision!) ---
     if (rover.visible) {
       const isCtrl = activeVehicle === 'rover';
       const driveCmd = isCtrl ? Math.max(-1, Math.min(1, fwdIn)) : 0;
       const steerCmd = isCtrl ? Math.max(-1, Math.min(1, turnIn)) : 0;
       const brakeCmd = isCtrl && downHeld;
-
-      // Steering yaw (crisp on ground, RCS attitude trim in air!)
-      const steerRate = rover.onGround ? 1.85 : 1.15;
-      rover.yaw -= steerCmd * steerRate * dt;
-
-      const fx = Math.sin(rover.yaw);
-      const fz = Math.cos(rover.yaw);
+      const subN = 4;
+      const subDt = dt / subN;
 
       // Jump Rocket Thrusters (works in BOTH vacuum and atmosphere — Newton's 3rd Law!)
-      // Rocket accel scales cleanly above local gravity (`max(15.5, 2.55 * g)`) so you can jump on ANY rocky world!
       const rocketAccel = Math.max(15.5, env.gravityMS2 * 2.55);
-      if (isCtrl && jumpHeld && rover.rocketFuel > 0.02) {
-        const wasOnGround = rover.onGround;
-        rover.rocketThrottle = 1.0;
-        rover.rocketFuel = Math.max(0, rover.rocketFuel - 0.32 * dt);
-        if (wasOnGround) {
-          // Crisp liftoff impulse so uphill terrain slopes never pin the Rover during ignition
+      const firingRocket = isCtrl && jumpHeld && rover.rocketFuel > 0.02;
+      if (firingRocket) {
+        if (rover.onGround) {
           rover.vel[1] = Math.max(rover.vel[1], 3.4);
           rover.pos[1] += 0.08;
         }
-        rover.vel[1] += rocketAccel * dt;
-        // Subtle forward rocket-hop vectoring when holding W!
-        rover.vel[0] += fx * driveCmd * 5.2 * dt;
-        rover.vel[2] += fz * driveCmd * 5.2 * dt;
+        rover.rocketThrottle = 1.0;
+        rover.rocketFuel = Math.max(0, rover.rocketFuel - 0.32 * dt);
         rover.onGround = false;
       } else {
         rover.rocketThrottle = 0.0;
         if (rover.onGround) {
-          // RTG + solar capacitor recharges jump-rocket fuel smoothly on surface
           rover.rocketFuel = Math.min(1.0, rover.rocketFuel + 0.26 * dt);
         }
       }
 
-      if (rover.onGround) {
-        const maxSpd = turbo ? 30.0 : 18.0;
-        const driveAccel = (turbo ? 44.0 : 28.0) * driveCmd;
-        // Project onto local terrain tangent so steep uphill climbs respect real gravity!
-        const n = evaluatePlanetaryTerrainNormal(rover.pos[0], rover.pos[2], env);
-        rover.vel[0] += fx * driveAccel * dt - n[0] * env.gravityMS2 * 0.35 * dt;
-        rover.vel[2] += fz * driveAccel * dt - n[2] * env.gravityMS2 * 0.35 * dt;
-        // Rolling resistance + lateral tire grip (prevents unrealistic ice-skating!)
-        const vFwd = rover.vel[0] * fx + rover.vel[2] * fz;
-        const rx = fz; const rz = -fx;
-        const vLat = rover.vel[0] * rx + rover.vel[2] * rz;
-        const latDamp = Math.exp(-8.5 * dt);
-        const fwdDamp = brakeCmd ? Math.exp(-9.0 * dt) : (Math.abs(driveCmd) < 0.05 ? Math.exp(-4.2 * dt) : Math.exp(-1.1 * dt));
-        const newVFwd = Math.max(-maxSpd * 0.6, Math.min(maxSpd, vFwd * fwdDamp));
-        const newVLat = vLat * latDamp;
-        rover.vel[0] = fx * newVFwd + rx * newVLat;
-        rover.vel[2] = fz * newVFwd + rz * newVLat;
-        rover.wheelAngle += (newVFwd / 0.34) * dt;
-      } else {
-        // Real ballistic gravity + atmospheric quadratic drag
-        rover.vel[1] -= env.gravityMS2 * dt;
-        const vMag = Math.hypot(rover.vel[0], rover.vel[1], rover.vel[2]);
-        const dragA = 0.5 * env.rhoAtmKgM3 * 0.014 * vMag;
-        rover.vel[0] += (windX - rover.vel[0]) * Math.min(0.4, dragA * dt);
-        rover.vel[2] += (windZ - rover.vel[2]) * Math.min(0.4, dragA * dt);
+      let lastSup = resolveRoverMultiWheelSupport(rover.pos[0], rover.pos[2], rover.yaw, cellSizeM, env);
+      for (let s = 0; s < subN; s += 1) {
+        const steerRate = rover.onGround ? 1.85 : 1.15;
+        rover.yaw -= steerCmd * steerRate * subDt;
+        const fx = Math.sin(rover.yaw);
+        const fz = Math.cos(rover.yaw);
+        const rx = fz;
+        const rz = -fx;
+
+        if (firingRocket) {
+          rover.vel[1] += rocketAccel * subDt;
+          rover.vel[0] += fx * driveCmd * 5.2 * subDt;
+          rover.vel[2] += fz * driveCmd * 5.2 * subDt;
+        }
+
+        if (rover.onGround) {
+          const maxSpd = turbo ? 28.0 : 17.5;
+          const driveAccel = (turbo ? 42.0 : 28.0) * driveCmd;
+          const n = lastSup.normal;
+          // Project downhill gravity slope acceleration cleanly from 6-wheel contact plane normal
+          rover.vel[0] += fx * driveAccel * subDt + n[0] * env.gravityMS2 * 0.55 * subDt;
+          rover.vel[2] += fz * driveAccel * subDt + n[2] * env.gravityMS2 * 0.55 * subDt;
+
+          const vFwd = rover.vel[0] * fx + rover.vel[2] * fz;
+          const vLat = rover.vel[0] * rx + rover.vel[2] * rz;
+          const latDamp = Math.exp(-9.0 * subDt);
+          const fwdDamp = brakeCmd ? Math.exp(-9.5 * subDt) : (Math.abs(driveCmd) < 0.05 ? Math.exp(-4.4 * subDt) : Math.exp(-1.1 * subDt));
+          const newVFwd = Math.max(-maxSpd * 0.6, Math.min(maxSpd, vFwd * fwdDamp));
+          const newVLat = vLat * latDamp;
+          rover.vel[0] = fx * newVFwd + rx * newVLat;
+          rover.vel[2] = fz * newVFwd + rz * newVLat;
+          rover.wheelAngle += (newVFwd / 0.34) * subDt;
+        } else {
+          // Real ballistic gravity + atmospheric quadratic drag
+          rover.vel[1] -= env.gravityMS2 * subDt;
+          const vMag = Math.hypot(rover.vel[0], rover.vel[1], rover.vel[2]);
+          const dragA = 0.5 * env.rhoAtmKgM3 * 0.014 * vMag;
+          rover.vel[0] += (windX - rover.vel[0]) * Math.min(0.4, dragA * subDt);
+          rover.vel[2] += (windZ - rover.vel[2]) * Math.min(0.4, dragA * subDt);
+        }
+
+        const prevX = rover.pos[0];
+        const prevZ = rover.pos[2];
+        const candX = prevX + rover.vel[0] * subDt;
+        const candZ = prevZ + rover.vel[2] * subDt;
+        const candY = rover.pos[1] + rover.vel[1] * subDt;
+
+        let nextSup = resolveRoverMultiWheelSupport(candX, candZ, rover.yaw, cellSizeM, env);
+
+        // 1. Steep Cliff Wall Collision (`normal.y < 0.58` => >54 deg cliff face): block uphill penetration & slide!
+        const hitSteepCliff = nextSup.normal[1] < 0.58 && (candY <= nextSup.supportY + 0.45);
+        // 2. Liquid Ocean Shoreline Boundary: prevent terrestrial rover from sinking/driving underwater!
+        const hitOceanShore = env.hasLiquidOcean && nextSup.anyUnderwater && !lastSup.anyUnderwater && (candY <= nextSup.supportY + 0.45);
+
+        if (hitSteepCliff || hitOceanShore) {
+          // Compute horizontal wall normal pointing away from cliff/ocean
+          const wallNx = hitSteepCliff ? nextSup.normal[0] : (prevX - candX);
+          const wallNz = hitSteepCliff ? nextSup.normal[2] : (prevZ - candZ);
+          const wLen = Math.hypot(wallNx, wallNz) || 1.0;
+          const wnx = wallNx / wLen;
+          const wnz = wallNz / wLen;
+          const vn = rover.vel[0] * wnx + rover.vel[2] * wnz;
+          if (vn < 0) {
+            rover.vel[0] -= vn * wnx * 1.25;
+            rover.vel[2] -= vn * wnz * 1.25;
+          }
+          rover.pos[0] = prevX + wnx * 0.04;
+          rover.pos[2] = prevZ + wnz * 0.04;
+          nextSup = resolveRoverMultiWheelSupport(rover.pos[0], rover.pos[2], rover.yaw, cellSizeM, env);
+        } else {
+          rover.pos[0] = candX;
+          rover.pos[2] = candZ;
+        }
+        rover.pos[1] = candY;
+
+        // Exact 6-Wheel + Belly Zero-Penetration Contact Resolution!
+        const gh = nextSup.supportY;
+        const sn = nextSup.normal;
+        if (rover.pos[1] <= gh + 0.03 && rover.vel[1] <= 0.15 && rover.rocketThrottle < 0.05) {
+          rover.pos[1] = gh;
+          // Follow downward terrain slope smoothly when grounded instead of flying off tiny bumps
+          const slopeVy = -(rover.vel[0] * sn[0] + rover.vel[2] * sn[2]) / Math.max(0.35, sn[1]);
+          rover.vel[1] = Math.min(0.0, slopeVy);
+          rover.onGround = true;
+        } else if (rover.pos[1] < gh) {
+          rover.pos[1] = gh;
+          // Project out into-ground normal velocity on hard landing (damped rocker-bogie suspension!)
+          const vDotN = rover.vel[0] * sn[0] + rover.vel[1] * sn[1] + rover.vel[2] * sn[2];
+          if (vDotN < 0) {
+            rover.vel[0] -= vDotN * sn[0] * 0.35;
+            rover.vel[1] -= vDotN * sn[1];
+            rover.vel[2] -= vDotN * sn[2] * 0.35;
+          }
+          if (rover.vel[1] < 0) rover.vel[1] = 0;
+          rover.onGround = rover.rocketThrottle < 0.05;
+        } else if (rover.pos[1] > gh + 0.18) {
+          rover.onGround = false;
+        }
+
+        // Smoothly align rocker-bogie chassis normal directly to exact 6-wheel contact plane normal!
+        const targetUp = rover.onGround ? sn : [0, 1, 0];
+        const blend = Math.min(1, subDt * 12.0);
+        rover.up = normalize3([
+          rover.up[0] + (targetUp[0] - rover.up[0]) * blend,
+          rover.up[1] + (targetUp[1] - rover.up[1]) * blend,
+          rover.up[2] + (targetUp[2] - rover.up[2]) * blend
+        ]);
+        lastSup = nextSup;
       }
 
-      rover.pos[0] += rover.vel[0] * dt;
-      rover.pos[1] += rover.vel[1] * dt;
-      rover.pos[2] += rover.vel[2] * dt;
-
-      const gh = evaluatePlanetaryTerrainHeight(rover.pos[0], rover.pos[2], env);
-      if (rover.pos[1] <= gh + 0.02 && rover.vel[1] <= 0.0 && rover.rocketThrottle < 0.05) {
-        rover.pos[1] = gh;
-        rover.vel[1] = 0;
-        rover.onGround = true;
-      } else if (rover.pos[1] < gh) {
-        rover.pos[1] = gh;
-        if (rover.vel[1] < 0) rover.vel[1] = 0;
-        rover.onGround = rover.rocketThrottle < 0.05;
-      } else if (rover.pos[1] > gh + 0.12) {
-        rover.onGround = false;
-      }
-      rover.altitudeM = Math.max(0, rover.pos[1] - gh);
+      rover.altitudeM = Math.max(0, rover.pos[1] - lastSup.supportY);
       rover.speedMS = Math.hypot(rover.vel[0], rover.vel[1], rover.vel[2]);
-
-      // Smoothly align rocker-bogie up vector to live terrain normal (or vertical in midair)
-      const targetUp = rover.onGround ? evaluatePlanetaryTerrainNormal(rover.pos[0], rover.pos[2], env) : [0, 1, 0];
-      const blend = Math.min(1, dt * 8.5);
-      rover.up = normalize3([
-        rover.up[0] + (targetUp[0] - rover.up[0]) * blend,
-        rover.up[1] + (targetUp[1] - rover.up[1]) * blend,
-        rover.up[2] + (targetUp[2] - rover.up[2]) * blend
-      ]);
     }
 
     // --- 2. INTEGRATE COAXIAL ATMOSPHERIC DRONE ---
@@ -1236,8 +1561,11 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       drone.pos[1] += drone.vel[1] * dt;
       drone.pos[2] += drone.vel[2] * dt;
 
-      const ghNext = evaluatePlanetaryTerrainHeight(drone.pos[0], drone.pos[2], env);
-      const minFloor = env.hasSolidCrust ? (ghNext + 0.05) : (ghNext + 6.0);
+      const ghNext = Math.max(
+        evaluateRenderedTerrainTriangleHeight(drone.pos[0], drone.pos[2], cellSizeM, env),
+        evaluatePlanetaryTerrainHeight(drone.pos[0], drone.pos[2], env)
+      );
+      const minFloor = env.hasSolidCrust ? (ghNext + 0.06) : (ghNext + 6.0);
       if (drone.pos[1] < minFloor) {
         drone.pos[1] = minFloor;
         if (drone.vel[1] < 0) drone.vel[1] = 0;
@@ -1248,13 +1576,73 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       drone.speedMS = Math.hypot(drone.vel[0], drone.vel[1], drone.vel[2]);
     }
 
+    // --- 3. INTEGRATE BUOYANT DISC-SHAPED ATMOSPHERIC RESEARCH UFO (3D CFD FLOW COUPLED!) ---
+    if (ufo.visible && cfdSession) {
+      const isCtrl = activeVehicle === 'ufo';
+      const fwdCmd = isCtrl ? Math.max(-1, Math.min(1, fwdIn)) : 0;
+      const strafeCmd = isCtrl ? Math.max(-1, Math.min(1, turnIn)) : 0;
+      const upCmd = isCtrl ? ((jumpHeld ? 1 : 0) - (downHeld ? 1 : 0)) : 0;
+      if (isCtrl && Math.abs(yawIn) > 0.01) {
+        ufo.yaw += yawIn * 1.6 * dt;
+      }
+      ufo.vertThrust += (upCmd - ufo.vertThrust) * Math.min(1, dt * 8.0);
+      ufo.rimAngle = (ufo.rimAngle + (2.4 + Math.abs(ufo.vertThrust) * 4.5 + Math.hypot(fwdCmd, strafeCmd) * 3.0) * dt) % (Math.PI * 2);
+
+      const heading = ufo.yaw + (isCtrl ? lookYawOffset : 0);
+      const fx = Math.sin(heading);
+      const fz = Math.cos(heading);
+      const rx = fz;
+      const rz = -fx;
+
+      // Live 3D GPU Navier-Stokes CFD velocity sampled directly at the UFO's 3D location!
+      const cfdW = lastCfdTelemetry?.craftWindMS || [windX * 0.5, 0, windZ * 0.5];
+      const maxBank = turbo ? 0.34 : 0.22;
+      ufo.pitch += (fwdCmd * maxBank - ufo.pitch) * Math.min(1, dt * 6.5);
+      ufo.roll += (-strafeCmd * maxBank + Math.max(-0.18, Math.min(0.18, cfdW[0] * 0.008)) - ufo.roll) * Math.min(1, dt * 6.5);
+
+      const horizThrust = turbo ? 44.0 : 26.0;
+      const vertThrustAccel = turbo ? 26.0 : 15.0;
+      // Aerodynamic coupling: 3D CFD jet streams & convective updrafts physically push & lift the buoyant saucer!
+      const aeroCoupling = 0.85;
+      ufo.vel[0] += ((fx * fwdCmd + rx * strafeCmd) * horizThrust + (cfdW[0] * 0.55 - ufo.vel[0]) * aeroCoupling) * dt;
+      ufo.vel[2] += ((fz * fwdCmd + rz * strafeCmd) * horizThrust + (cfdW[2] * 0.55 - ufo.vel[2]) * aeroCoupling) * dt;
+      ufo.vel[1] += (upCmd * vertThrustAccel + (cfdW[1] * 0.65 - ufo.vel[1]) * 1.45) * dt;
+
+      ufo.pos[0] += ufo.vel[0] * dt;
+      ufo.pos[1] += ufo.vel[1] * dt;
+      ufo.pos[2] += ufo.vel[2] * dt;
+
+      // Keep vertical 3D position bounded cleanly over terrain (rocky) or centered in endless 3D clouds (giants)
+      const prof = cfdSession.profile;
+      const kmRate = prof.isDeepFluid ? (turbo ? 18.0 : 9.5) : (turbo ? 4.2 : 2.2);
+      ufo.altitudeKm = Math.max(
+        prof.minAltKm,
+        Math.min(prof.maxAltKm, ufo.altitudeKm + (upCmd * kmRate + cfdW[1] * 0.08) * dt)
+      );
+      if (env.hasSolidCrust) {
+        const ghUfo = Math.max(
+          evaluateRenderedTerrainTriangleHeight(ufo.pos[0], ufo.pos[2], cellSizeM, env),
+          evaluatePlanetaryTerrainHeight(ufo.pos[0], ufo.pos[2], env)
+        );
+        if (ufo.pos[1] < ghUfo + 2.8) {
+          ufo.pos[1] = ghUfo + 2.8;
+          if (ufo.vel[1] < 0) ufo.vel[1] = 0;
+        }
+        ufo.altitudeM = Math.max(0, ufo.pos[1] - ghUfo) + Math.max(0, ufo.altitudeKm * 1000.0 - 20.0);
+      } else {
+        ufo.altitudeM = ufo.altitudeKm * 1000.0;
+      }
+      ufo.speedMS = Math.hypot(ufo.vel[0], ufo.vel[1], ufo.vel[2]);
+    }
+
     return { windX, windZ };
   }
 
   function getCameraPose() {
+    const isUfo = activeVehicle === 'ufo';
     const isDrone = activeVehicle === 'drone';
-    const vehPos = isDrone ? drone.pos : rover.pos;
-    const baseYaw = (isDrone ? drone.yaw : rover.yaw) + lookYawOffset;
+    const vehPos = isUfo ? ufo.pos : (isDrone ? drone.pos : rover.pos);
+    const baseYaw = (isUfo ? ufo.yaw : (isDrone ? drone.yaw : rover.yaw)) + lookYawOffset;
     const cp = Math.cos(lookPitch);
     const sp = Math.sin(lookPitch);
     const sy = Math.sin(baseYaw);
@@ -1262,18 +1650,24 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
 
     if (cameraMode === 'first-person') {
       // TinyPlanetControls-style 1st-person mast/cockpit view!
-      const eyeH = isDrone ? 0.55 : 2.28;
-      const eye = [vehPos[0] + sy * 0.45, vehPos[1] + eyeH, vehPos[2] + cy * 0.45];
+      const eyeH = isUfo ? 0.92 : (isDrone ? 0.55 : 2.28);
+      const eye = [vehPos[0] + sy * 0.55, vehPos[1] + eyeH, vehPos[2] + cy * 0.55];
       const target = [eye[0] + sy * cp * 12.0, eye[1] - sp * 12.0, eye[2] + cy * cp * 12.0];
       return { eye, target, up: [0, 1, 0], focusPos: vehPos };
     }
-    // Dynamic 3rd-person chase camera showing articulated Rover / Drone + curved planetary horizon!
-    const dist = isDrone ? 8.5 : 10.5;
+    // Dynamic 3rd-person chase camera showing articulated Rover / Drone / Buoyant UFO + 3D clouds!
+    const dist = isUfo ? 11.8 : (isDrone ? 8.5 : 10.5);
     const eyeX = vehPos[0] - sy * cp * dist;
     const eyeZ = vehPos[2] - cy * cp * dist;
-    const ghEye = evaluatePlanetaryTerrainHeight(eyeX, eyeZ, env);
-    const eyeY = Math.max(ghEye + 1.4, vehPos[1] + 2.6 + sp * dist);
-    const target = [vehPos[0] + sy * 2.5, vehPos[1] + (isDrone ? 0.8 : 1.45), vehPos[2] + cy * 2.5];
+    let eyeY = vehPos[1] + (isUfo ? 2.4 : 2.6) + sp * dist;
+    if (env.hasSolidCrust) {
+      const ghEye = Math.max(
+        evaluateRenderedTerrainTriangleHeight(eyeX, eyeZ, cellSizeM, env),
+        evaluatePlanetaryTerrainHeight(eyeX, eyeZ, env)
+      );
+      eyeY = Math.max(ghEye + 1.65, eyeY);
+    }
+    const target = [vehPos[0] + sy * 2.5, vehPos[1] + (isUfo ? 0.45 : (isDrone ? 0.8 : 1.45)), vehPos[2] + cy * 2.5];
     return { eye: [eyeX, eyeY, eyeZ], target, up: [0, 1, 0], focusPos: vehPos };
   }
 
@@ -1284,7 +1678,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     stepIndex += 1;
 
     const { windX, windZ } = integrateVehicles(dtSafe, controls);
-    const focus = activeVehicle === 'drone' ? drone.pos : rover.pos;
+    const focus = activeVehicle === 'ufo' ? ufo.pos : (activeVehicle === 'drone' ? drone.pos : rover.pos);
     // Snap terrain patch origin to integer cellSizeM so mountain vertices NEVER shimmer as you move!
     const snapX = Math.round(focus[0] / cellSizeM) * cellSizeM;
     const snapZ = Math.round(focus[2] / cellSizeM) * cellSizeM;
@@ -1294,7 +1688,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       | (env.isCryoMoon ? 4 : 0)
       | (env.hasLiquidOcean ? 8 : 0);
     const seedF = ((env.seed % 997) * 0.13) + 1.7;
-    const curvInv2R = 1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM);
+    const curvInv2R = env.hasSolidCrust ? (1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM)) : 0.0;
 
     const ab = new ArrayBuffer(144);
     new Uint32Array(ab, 0, 4).set([n, pCount, modeFlags, stepIndex]);
@@ -1310,8 +1704,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
-    // Upload articulated Rover + Drone 3D triangles curved around active focus
-    const vehFloats = buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, focus[0], focus[2]);
+    // Upload articulated Rover + Drone + Buoyant Disc UFO 3D triangles
+    const vehFloats = buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, focus[0], focus[2], ufo);
     vehicleVertCount = Math.min(MAX_VEHICLE_VERTS, Math.floor(vehFloats.length / 12));
     if (vehicleVertCount > 0) {
       device.queue.writeBuffer(vehicleVertBuf, 0, vehFloats.subarray(0, vehicleVertCount * 12));
@@ -1334,6 +1728,17 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       enc.copyBufferToBuffer(telBuf, 0, telReadBuf, 0, 16);
     }
     device.queue.submit([enc.finish()]);
+
+    // Step live 3D WebGPU Stratified Atmospheric CFD whenever flying the UFO or diving in a deep fluid envelope!
+    const runCfd = Boolean(cfdSession && (activeVehicle === 'ufo' || !env.hasSolidCrust || stepIndex <= 2));
+    if (runCfd) {
+      lastCfdTelemetry = await cfdSession.step({
+        dt: Math.min(0.035, dtSafe * 1.35),
+        craftPos: focus,
+        altKm: ufo.altitudeKm,
+        readTelemetry: readTelemetry || (stepIndex <= 2)
+      });
+    }
 
     let activePlumes = lastTelemetry.activePlumeParticles;
     let flameCnt = lastTelemetry.flameParticles;
@@ -1364,9 +1769,15 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       activeVehicle,
       cameraMode,
       gravityMS2: env.gravityMS2,
-      rhoAtmKgM3: env.rhoAtmKgM3,
-      pressurePa: env.pressurePa,
-      tempK: env.tempK,
+      rhoAtmKgM3: lastCfdTelemetry?.chemistry && (activeVehicle === 'ufo' || !env.hasSolidCrust)
+        ? lastCfdTelemetry.chemistry.rhoKgM3
+        : env.rhoAtmKgM3,
+      pressurePa: lastCfdTelemetry?.chemistry && (activeVehicle === 'ufo' || !env.hasSolidCrust)
+        ? lastCfdTelemetry.chemistry.pressurePa
+        : env.pressurePa,
+      tempK: lastCfdTelemetry?.chemistry && (activeVehicle === 'ufo' || !env.hasSolidCrust)
+        ? lastCfdTelemetry.chemistry.tempK
+        : env.tempK,
       droneFlightCapable: env.droneFlightCapable,
       droneMaxAeroLiftN: env.maxAeroLiftN,
       droneAeroLiftN: drone.aeroLiftN,
@@ -1378,6 +1789,12 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       dronePos: [...drone.pos],
       droneSpeedMS: drone.speedMS,
       droneAltitudeM: drone.altitudeM,
+      ufoPos: [...ufo.pos],
+      ufoSpeedMS: ufo.speedMS,
+      ufoAltitudeKm: ufo.altitudeKm,
+      cfdActive: runCfd,
+      cfdAvailable: Boolean(cfdSession),
+      cfdTelemetry: lastCfdTelemetry,
       activePlumeParticles: activePlumes,
       flameParticles: flameCnt,
       dustParticles: dustCnt,
@@ -1391,6 +1808,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   function dispose() {
     if (disposed) return;
     disposed = true;
+    try { cfdSession?.dispose(); } catch {}
     for (const b of [paramsBuf, terrainVertBuf, terrainIdxBuf, plumesBuf, telBuf, telReadBuf, vehicleVertBuf]) {
       try { b.destroy(); } catch {}
     }
@@ -1406,13 +1824,18 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     get indexCount() { return indexCount; },
     get vehicleVertCount() { return vehicleVertCount; },
     get particleCount() { return pCount; },
+    get cfdMoteCount() { return cfdSession ? cfdSession.moteCount : 0; },
+    get cfdProfile() { return cfdSession ? cfdSession.profile : null; },
     get stepIndex() { return stepIndex; },
     getResidentTerrainVertBuffer: () => terrainVertBuf,
     getResidentTerrainIndexBuffer: () => terrainIdxBuf,
     getResidentVehicleVertBuffer: () => vehicleVertBuf,
     getResidentPlumesBuffer: () => plumesBuf,
+    getResidentCfdMotesBuffer: () => (cfdSession ? cfdSession.getResidentMotesBuffer() : null),
+    getActiveSkyEnv,
     getCameraPose,
     setActiveVehicle,
+    setUfoAltitudeKm,
     setCameraMode,
     addLookDelta,
     getTelemetry: () => lastTelemetry,

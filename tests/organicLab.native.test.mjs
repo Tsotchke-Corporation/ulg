@@ -60,7 +60,43 @@ test('ULG Organic Chemistry Lab (organic-lab.html) live Vulkan physics, null lim
     await page.waitForFunction(() => Boolean(window.__ulgOrganicLab?.getState?.()?.ready), null, { timeout: 60_000 });
     await page.evaluate(() => window.__ulgOrganicLab.setPaused(true));
 
+    // 0. Default Flagship Mode: Sulflower Molecular Bearing (C16S8 @ Calix[11]furan, 134 atoms, 8:11 coprime superlubricity!)
+    const stBear0 = await page.evaluate(() => window.__ulgOrganicLab.stepNow(4));
+    assert.equal(stBear0.mode, 'sulflower-bearing', 'Default mode on organic-lab.html must be sulflower-bearing');
+    assert.equal(stBear0.gpuErrorCount, 0, `GPU errors on Sulflower Bearing: ${stBear0.gpuErrors.join(' | ')}`);
+    assert.equal(stBear0.formula, 'C71H44O11S8');
+    assert.equal(stBear0.telemetry.atomCount, 134);
+    const fBear0 = await snap(page, '00-sulflower-bearing-t0');
+    const stBear1 = await page.evaluate(() => window.__ulgOrganicLab.stepNow(28));
+    const fBear1 = await snap(page, '00-sulflower-bearing-t28');
+    const bearDiff = comparePhysicalPixelPngFrames(fBear0, fBear1);
+    const bearComDrift = await page.evaluate(() => window.__ulgOrganicLab.readComDrift());
+    assert.ok(bearDiff.changedPixelCount > 2000, `Sulflower rotor must visibly spin inside stator (changed=${bearDiff.changedPixelCount})`);
+    assert.ok(Math.abs(stBear1.telemetry.rotorOmegaRadPs) > 0.10, `Sulflower rotor must have active angular velocity omega > 0.10 rad/ps (got ${stBear1.telemetry.rotorOmegaRadPs})`);
+    assert.ok(Math.abs(stBear1.telemetry.rotorThetaRad - stBear0.telemetry.rotorThetaRad) > 0.08, `Sulflower rotor must advance visibly in angle (dTheta=${stBear1.telemetry.rotorThetaRad - stBear0.telemetry.rotorThetaRad})`);
+    assert.ok(bearComDrift < 0.20, `Sulflower bearing COM drift must stay anchored (< 0.20 A, got ${bearComDrift})`);
+    const pickedBearing = await page.evaluate(() => window.__ulgOrganicLab.pickAtCenter());
+    assert.ok(pickedBearing && Number.isInteger(pickedBearing.index) && pickedBearing.index >= 0, 'GPU ray-picker must pick an atom on Sulflower Bearing');
+    report.sulflowerBearing = {
+      atomCount: stBear1.telemetry.atomCount,
+      omegaRadPs: Number((stBear1.telemetry.rotorOmegaRadPs || 0).toFixed(3)),
+      thetaRad: Number((stBear1.telemetry.rotorThetaRad || 0).toFixed(3)),
+      changedPx: bearDiff.changedPixelCount,
+      comDriftA: Number(bearComDrift.toFixed(4)),
+      pickedAtom: pickedBearing.title
+    };
+
+    // 0b. Anti-Jiggle COM-Drift Proof on Dihedral Rotor (n-Butane at 450 K)
+    await page.evaluate(() => window.__ulgOrganicLab.selectMode('butane'));
+    await page.evaluate(() => window.__ulgOrganicLab.setTemperatureK(450));
+    await page.evaluate(() => window.__ulgOrganicLab.stepNow(32));
+    const butaneComDrift = await page.evaluate(() => window.__ulgOrganicLab.readComDrift());
+    assert.ok(butaneComDrift < 0.12, `n-Butane must NOT jiggle/drift out of view (COM drift=${butaneComDrift} A)`);
+    report.butaneStability = { comDriftA: Number(butaneComDrift.toFixed(4)) };
+    await page.evaluate(() => window.__ulgOrganicLab.setTemperatureK(300));
+
     // 1. Benzene 6pi Aromaticity
+    await page.evaluate(() => window.__ulgOrganicLab.selectMode('benzene'));
     const stBenz = await page.evaluate(() => window.__ulgOrganicLab.stepNow(6));
     assert.equal(stBenz.gpuErrorCount, 0, `GPU errors on Benzene: ${stBenz.gpuErrors.join(' | ')}`);
     assert.equal(stBenz.formula, 'C6H6');

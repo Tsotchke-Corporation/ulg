@@ -144,7 +144,7 @@ fn refraction_rear_surface_admitted(
   }
   if (!(front_depth >= 0.0 && front_depth <= 1.0
     && back_depth >= 0.0 && back_depth < 0.999999
-    && back_depth > front_depth + 1.0e-5
+    && back_depth > front_depth + 1.0e-7
     && max_path_m > 1.0e-6)) {
     return 0.0;
   }
@@ -258,6 +258,23 @@ struct RefractionBilinearFootprint {
   p11: vec2<i32>,
   weights: vec4<f32>,
 };
+
+fn refraction_linear_eye_depth(
+  depth_01: f32,
+  inverse_view_projection: mat4x4<f32>
+) -> f32 {
+  let persp_z = inverse_view_projection[2].w;
+  if (abs(persp_z) <= 1.0e-7) {
+    // Orthographic / identity VP fallback preserves raw NDC depth comparison.
+    return depth_01;
+  }
+  if (depth_01 >= 0.999999) {
+    return 1.0e12;
+  }
+  let ndc_z = depth_01 * 2.0 - 1.0;
+  let inv_z = ndc_z * persp_z + inverse_view_projection[3].w;
+  return select(1.0e12, 1.0 / inv_z, inv_z > 1.0e-9);
+}
 
 fn refraction_opaque_depth_is_behind(
   opaque_depth: f32,

@@ -10968,7 +10968,9 @@ const BOX_EDGES = array<vec3<f32>, 24>(
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
   let corner = BOX_EDGES[index] * params.dims_m.xyz;
-  return params.view_projection * vec4<f32>(corner, 1.0);
+  var clip = params.view_projection * vec4<f32>(corner, 1.0);
+  clip.z = clip.z * 0.5 + clip.w * 0.5;
+  return clip;
 }
 
 @fragment
@@ -12561,7 +12563,7 @@ fn main(
         label: 'ulg-sph-staged-native-surface-foreground-validation-depth',
         size: [width, height],
         format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
-        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
+        usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC
       })
     };
     createStagedSphNativeSurfaceCandidateForegroundReadbackBuffer(targets);
@@ -19864,13 +19866,6 @@ fn main(
             opaquePass.setBindGroup(0, additionalDraw.bindGroup);
             opaquePass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
           }
-          if (
-            !stagedCompositeProof
-            && depthView
-            && !diagnosticDrawPlan.suppressBoxWireframe
-          ) {
-            drawSphNativeSurfaceBoxWireframe(bridge, opaquePass, viewProjection);
-          }
         }
       let schroederProxySubmit = null;
       if (schroederProxyExecutor?.ready && !nativeSurfaceClearOnly) {
@@ -20177,7 +20172,30 @@ fn main(
             vaporPass.setBindGroup(0, additionalDraw.bindGroup);
             vaporPass.drawIndirect(additionalDraw.drawIndirectRowsBuffer, 0);
           }
+          if (!stagedCompositeProof && depthView && !diagnosticDrawPlan.suppressBoxWireframe) {
+            drawSphNativeSurfaceBoxWireframe(bridge, vaporPass, viewProjection);
+          }
           vaporPass.end();
+        } else if (
+          !nativeSurfaceClearOnly
+          && !stagedCompositeProof
+          && depthView
+          && !diagnosticDrawPlan.suppressBoxWireframe
+        ) {
+          const boxPass = encoder.beginRenderPass({
+            colorAttachments: [{
+              view: canvasView,
+              loadOp: 'load',
+              storeOp: 'store'
+            }],
+            depthStencilAttachment: {
+              view: depthView,
+              depthLoadOp: 'load',
+              depthStoreOp: 'store'
+            }
+          });
+          drawSphNativeSurfaceBoxWireframe(bridge, boxPass, viewProjection);
+          boxPass.end();
         }
         if (stageOnly && diagnosticPixelProofEnabled) {
           if (

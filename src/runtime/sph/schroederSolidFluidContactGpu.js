@@ -40,7 +40,8 @@ struct ContactParams {
 @group(0) @binding(7) var<storage, read_write> contact_ledger: array<atomic<u32>>;
 // Canonical SS fluid directory (SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI)
 @group(0) @binding(8) var<storage, read> fluid_directory: array<u32>;
-// Fixed-point (1e6 m/s) per-fluid-particle delta-v accumulators [dvx, dvy, dvz]
+// Fixed-point (1e6 m/s) per-fluid-particle delta-v accumulators + contact count:
+// [dvx, dvy, dvz, contact_count] (4 atomic<i32> words per fluid particle)
 @group(0) @binding(9) var<storage, read_write> fluid_dv: array<atomic<i32>>;
 
 const ROWS: u32 = 6u;
@@ -75,6 +76,30 @@ fn ss_find_cell(cell_count: u32, keys_off: u32, want_key: array<u32, 5>) -> u32 
   return 0xffffffffu;
 }
 
+fn count_member_with_fluid_particle(
+  j: u32,
+  xm: vec3<f32>,
+  vm: vec3<f32>,
+  a: f32,
+  dt: f32
+) {
+  if (j >= params.counts.y || (j * 4u + 3u) >= arrayLength(&fluid_dv)) { return; }
+  let p = fluid_state[j * 2u];
+  let mass_p = p.w;
+  if (!(mass_p > 0.0)) { return; }
+  let radius_p = fluid_thermo[j * 3u + 2u].w;
+  let offset = p.xyz - xm;
+  let d = length(offset);
+  let reach = a + radius_p;
+  if (!(d < reach && d > 1.0e-9)) { return; }
+  let n = offset / d;
+  let v = fluid_state[j * 2u + 1u].xyz;
+  let vn = dot(v - vm, n);
+  let goal_speed = min(params.law.z * max(reach - d - params.law.y, 0.0) / dt, params.law.w);
+  if (!(vn < goal_speed)) { return; }
+  atomicAdd(&fluid_dv[j * 4u + 3u], 1);
+}
+
 fn contact_member_with_fluid_particle(
   j: u32,
   body: u32,
@@ -84,7 +109,7 @@ fn contact_member_with_fluid_particle(
   a: f32,
   dt: f32
 ) -> vec2<u32> {
-  if (j >= params.counts.y || (j * 3u + 2u) >= arrayLength(&fluid_dv)) { return vec2<u32>(0u, 0u); }
+  if (j >= params.counts.y || (j * 4u + 3u) >= arrayLength(&fluid_dv)) { return vec2<u32>(0u, 0u); }
   let p = fluid_state[j * 2u];
   let mass_p = p.w;
   if (!(mass_p > 0.0)) { return vec2<u32>(0u, 0u); }
@@ -98,15 +123,20 @@ fn contact_member_with_fluid_particle(
   let vn = dot(v - vm, n);
   let goal_speed = min(params.law.z * max(reach - d - params.law.y, 0.0) / dt, params.law.w);
   if (!(vn < goal_speed)) { return vec2<u32>(0u, 0u); }
-  let inv_mass = 1.0 / mass_p + select(0.0, 1.0 / frame0.w, frame0.w > 0.0);
+  // Exact Jacobi mass-splitting: when K rigid members simultaneously touch fluid
+  // particle j, each contact gets 1/K of the fluid particle's mass (eff_inv_mass =
+  // K/mass_p + 1/M_body). Preserves bit-exact M1-M4 for K=1 while preventing
+  // multi-member impulse over-accumulation & spurious bounce explosion.
+  let n_contacts = max(1, atomicLoad(&fluid_dv[j * 4u + 3u]));
+  let inv_mass = f32(n_contacts) / mass_p + select(0.0, 1.0 / frame0.w, frame0.w > 0.0);
   let impulse = ((goal_speed - vn) / inv_mass) * n;
   let dv = impulse / mass_p;
   let qx = i32(clamp(round(dv.x * DV_SCALE), -DV_CLAMP, DV_CLAMP));
   let qy = i32(clamp(round(dv.y * DV_SCALE), -DV_CLAMP, DV_CLAMP));
   let qz = i32(clamp(round(dv.z * DV_SCALE), -DV_CLAMP, DV_CLAMP));
-  atomicAdd(&fluid_dv[j * 3u + 0u], qx);
-  atomicAdd(&fluid_dv[j * 3u + 1u], qy);
-  atomicAdd(&fluid_dv[j * 3u + 2u], qz);
+  atomicAdd(&fluid_dv[j * 4u + 0u], qx);
+  atomicAdd(&fluid_dv[j * 4u + 1u], qy);
+  atomicAdd(&fluid_dv[j * 4u + 2u], qz);
   let applied_impulse = (vec3<f32>(f32(qx), f32(qy), f32(qz)) / DV_SCALE) * mass_p;
   let lever = (xm + n * a) - frame0.xyz;
   let reaction = -applied_impulse;
@@ -124,14 +154,78 @@ fn contact_member_with_fluid_particle(
 
 @compute @workgroup_size(64)
 fn reset_ledger_ss(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x < params.counts.y && (id.x * 3u + 2u) < arrayLength(&fluid_dv)) {
-    atomicStore(&fluid_dv[id.x * 3u + 0u], 0);
-    atomicStore(&fluid_dv[id.x * 3u + 1u], 0);
-    atomicStore(&fluid_dv[id.x * 3u + 2u], 0);
+  if (id.x < params.counts.y && (id.x * 4u + 3u) < arrayLength(&fluid_dv)) {
+    atomicStore(&fluid_dv[id.x * 4u + 0u], 0);
+    atomicStore(&fluid_dv[id.x * 4u + 1u], 0);
+    atomicStore(&fluid_dv[id.x * 4u + 2u], 0);
+    atomicStore(&fluid_dv[id.x * 4u + 3u], 0);
   }
   if (id.x == 0u) {
     atomicStore(&contact_ledger[0], 0u);
     atomicStore(&contact_ledger[2], 0u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn count_contacts_ss(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.counts.x) { return; }
+  let m = members[i * 2u];
+  if (!(m.w > 0.0)) { return; }
+  let body = bitcast<u32>(members[i * 2u + 1u].x);
+  if (body >= params.counts.z) { return; }
+  let xm = member_world[i * 2u].xyz;
+  let vm = member_world[i * 2u + 1u].xyz;
+  let a = params.law.x;
+  let dt = params.time.x;
+  let base_spacing = params.ss_geom.x;
+
+  if (base_spacing > 0.0) {
+    if (!ss_dir_valid()) { return; }
+    let cell_count = fluid_directory[18u];
+    let keys_off = fluid_directory[29u];
+    let offsets_off = fluid_directory[30u];
+    let members_off = fluid_directory[31u];
+    let chart_id = u32(max(0.0, floor(params.ss_geom.y + 0.5)));
+    let min_level = i32(round(params.ss_geom.z));
+    let max_level = i32(round(params.ss_geom.w));
+    let max_reach = 3.0 * a + params.law.y;
+
+    for (var level = min_level; level <= max_level; level = level + 1i) {
+      let spacing = base_spacing * exp2(f32(level));
+      if (!(spacing > 0.0)) { continue; }
+      let level_key = bitcast<u32>(level) ^ 0x80000000u;
+      let reach_level = max(max_reach, a + spacing + params.law.y);
+      let halo_needed = i32(ceil(reach_level / spacing));
+      let halo_r = clamp(halo_needed, 1i, 8i);
+      let base_cell = vec3<i32>(floor(xm / spacing));
+      for (var dz = -halo_r; dz <= halo_r; dz = dz + 1i) {
+        for (var dy = -halo_r; dy <= halo_r; dy = dy + 1i) {
+          for (var dx = -halo_r; dx <= halo_r; dx = dx + 1i) {
+            let c = base_cell + vec3<i32>(dx, dy, dz);
+            let want_key = array<u32, 5>(
+              chart_id,
+              level_key,
+              bitcast<u32>(c.x) ^ 0x80000000u,
+              bitcast<u32>(c.y) ^ 0x80000000u,
+              bitcast<u32>(c.z) ^ 0x80000000u
+            );
+            let cell_idx = ss_find_cell(cell_count, keys_off, want_key);
+            if (cell_idx == 0xffffffffu) { continue; }
+            let begin = fluid_directory[offsets_off + cell_idx];
+            let end = fluid_directory[offsets_off + cell_idx + 1u];
+            for (var mm = begin; mm < end; mm = mm + 1u) {
+              let j = fluid_directory[members_off + mm];
+              count_member_with_fluid_particle(j, xm, vm, a, dt);
+            }
+          }
+        }
+      }
+    }
+  } else {
+    for (var j = 0u; j < params.counts.y; j = j + 1u) {
+      count_member_with_fluid_particle(j, xm, vm, a, dt);
+    }
   }
 }
 
@@ -213,10 +307,11 @@ fn contact_members_ss(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(64)
 fn apply_fluid_dv_ss(@builtin(global_invocation_id) id: vec3<u32>) {
   let j = id.x;
-  if (j >= params.counts.y || (j * 3u + 2u) >= arrayLength(&fluid_dv)) { return; }
-  let ix = atomicExchange(&fluid_dv[j * 3u + 0u], 0);
-  let iy = atomicExchange(&fluid_dv[j * 3u + 1u], 0);
-  let iz = atomicExchange(&fluid_dv[j * 3u + 2u], 0);
+  if (j >= params.counts.y || (j * 4u + 3u) >= arrayLength(&fluid_dv)) { return; }
+  let ix = atomicExchange(&fluid_dv[j * 4u + 0u], 0);
+  let iy = atomicExchange(&fluid_dv[j * 4u + 1u], 0);
+  let iz = atomicExchange(&fluid_dv[j * 4u + 2u], 0);
+  atomicStore(&fluid_dv[j * 4u + 3u], 0);
   if (ix == 0 && iy == 0 && iz == 0) { return; }
   let old = fluid_state[j * 2u + 1u];
   fluid_state[j * 2u + 1u] = vec4<f32>(old.xyz + vec3<f32>(f32(ix), f32(iy), f32(iz)) / DV_SCALE, old.w);
@@ -248,8 +343,8 @@ export function createSchroederSolidFluidContactStage({ device, memberCount, bod
   frameBuffer, memberRadiusM, law = SCHROEDER_SOLID_FLUID_CONTACT_LAW } = {}) {
   const ssBindings = ['uniform', 'read-only-storage', 'read-only-storage', 'storage', 'storage', 'read-only-storage',
     'storage', 'storage', 'read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
-  const ssPipelines = Object.fromEntries(['reset_ledger_ss', 'contact_members_ss', 'apply_fluid_dv_ss', 'apply_impulses'].map((entryPoint) =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-ss-${entryPoint}.v2`,
+  const ssPipelines = Object.fromEntries(['reset_ledger_ss', 'count_contacts_ss', 'contact_members_ss', 'apply_fluid_dv_ss', 'apply_impulses'].map((entryPoint) =>
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-ss-${entryPoint}.v3`,
       label: `ulg-solid-fluid-contact-ss-${entryPoint}`, code: schroederSolidFluidContactSsWgsl, entryPoint, bindings: ssBindings })]));
   const counters = device.createBuffer({ label: 'ulg-solid-fluid-contact-counters',
     size: (bodyCount * 6 * COUNTER_WORDS_PER_ROW + 4) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
@@ -266,7 +361,7 @@ export function createSchroederSolidFluidContactStage({ device, memberCount, bod
     fluidDvCapacity = needed;
     fluidDv = device.createBuffer({
       label: 'ulg-solid-fluid-contact-ss-dv',
-      size: needed * 3 * 4,
+      size: needed * 4 * 4,
       usage: GPU_BUFFER_USAGE.STORAGE
     });
     return fluidDv;
@@ -314,6 +409,7 @@ export function createSchroederSolidFluidContactStage({ device, memberCount, bod
       pass.setBindGroup(0, group);
       for (const [entryPoint, count] of [
         ['reset_ledger_ss', Math.max(1, particleCount)],
+        ['count_contacts_ss', memberCount],
         ['contact_members_ss', memberCount],
         ['apply_fluid_dv_ss', particleCount],
         ['apply_impulses', bodyCount]

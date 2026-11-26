@@ -214,15 +214,16 @@ test('ALL 5 ULG Flagship Pages & Every Scale: Live Vulkan Stability, Zero-Jiggle
     assert.equal(l4EarthSt.planetaryAtmoActive, true);
     await saveDataUrl(await page.evaluate(() => window.__ulgUniversesDemo.capturePng()), '16-univ-L4-earthlike-weather');
 
-    // L4 Fixed 6-Wheel Rover Collision on Mars Crater Terrain (Drive + Turbo + Jump Rocket + Land!)
+    // L4 Fixed 6-Wheel Rover Collision on Mars Crater Terrain (Deploy from UFO -> Drive + Turbo + Jump Rocket + Land!)
     await page.evaluate(() => window.__ulgUniversesDemo.enterSurfaceView({ bodyIndex: 'mars' }));
+    await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceVehicle('rover'));
     await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceControls({ forward: true, turbo: true }));
     await page.evaluate(async () => { for (let i = 0; i < 32; i += 1) await window.__ulgUniversesDemo.stepOnce(); });
     await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceControls({ forward: true, turbo: false, jump: true }));
     await page.evaluate(async () => { for (let i = 0; i < 10; i += 1) await window.__ulgUniversesDemo.stepOnce(); });
     await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceControls({ forward: false, jump: false }));
     await page.evaluate(async () => {
-      for (let i = 0; i < 180; i += 1) {
+      for (let i = 0; i < 420; i += 1) {
         const st = await window.__ulgUniversesDemo.stepOnce();
         if (i >= 15 && st.surfaceTelemetry?.roverOnGround) break;
       }
@@ -233,6 +234,7 @@ test('ALL 5 ULG Flagship Pages & Every Scale: Live Vulkan Stability, Zero-Jiggle
 
     // L4 Earth Shoreline Rover Collision + Earth-Like 3D CFD Buoyant UFO Ascent!
     await page.evaluate(() => window.__ulgUniversesDemo.enterSurfaceView({ bodyIndex: 'earth' }));
+    await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceVehicle('rover'));
     await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceControls({ forward: true }));
     await page.evaluate(async () => { for (let i = 0; i < 24; i += 1) await window.__ulgUniversesDemo.stepOnce(); });
     await saveDataUrl(await page.evaluate(() => window.__ulgUniversesDemo.capturePng()), '18-univ-L4-rover-earth');

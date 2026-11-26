@@ -72,8 +72,12 @@ test('Planetary Surface View (Jump-Rocket Rover + Atmospheric Drone) live Vulkan
       );
     };
 
-    // --- 1. MARS: 6-WHEEL ROVER DRIVE + JUMP ROCKETS + COAXIAL ATMOSPHERIC DRONE ---
+    // --- 1. MARS: UFO-FIRST ENTRY -> TRACTOR-BEAM ROVER DEPLOY + JUMP ROCKETS + COAXIAL DRONE ---
     await page.evaluate(() => window.__ulgUniversesDemo.enterSurfaceView({ bodyIndex: 'mars' }));
+    await stepN(4);
+    const stMarsUfo = await page.evaluate(() => window.__ulgUniversesDemo.getState());
+    assert.equal(stMarsUfo.surfaceVehicle, 'ufo', 'All worlds now start in the 60-ft Explorer UFO until Rover/Drone is deployed');
+    await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceVehicle('rover'));
     await stepN(4);
     const stMars0 = await page.evaluate(() => window.__ulgUniversesDemo.getState());
     if (stMars0.gpuErrorCount > 0 || pageErrors.length > 0 || consoleErrors.length > 0) {
@@ -192,6 +196,7 @@ test('Planetary Surface View (Jump-Rocket Rover + Atmospheric Drone) live Vulkan
 
     // --- 5. HADEAN MAGMA OCEAN: MOLTEN LAVA CHANNELS + ROVER JUMP ---
     await page.evaluate(() => window.__ulgUniversesDemo.enterSurfaceView({ bodyIndex: 'earth', planetaryModeOverride: 'magma-ocean' }));
+    await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceVehicle('rover'));
     await page.evaluate(() => window.__ulgUniversesDemo.setSurfaceControls({ forward: true, jump: true }));
     await stepN(24);
     await snapGpu(page, '08-magma-ocean-rover');

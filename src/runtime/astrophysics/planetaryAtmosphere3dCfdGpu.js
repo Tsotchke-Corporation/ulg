@@ -848,16 +848,16 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Vertical envelope:
   //   - Deep fluid gas/ice giants: full 360-deg surrounding cloud canyons & zonal jet streams around craft!
-  //   - Rocky solid-crust worlds: keep 3D CFD flow ribbons sweeping right through rover/drone airspace
-  //     (ground_y + 1.4m .. +26m) and lift volumetric cumulus/haze cloud decks cleanly into the sky dome
-  //     (ground_y + 14m .. +48m) so clouds never clip underground!
+  //   - Rocky solid-crust worlds: keep 3D CFD flow ribbons sweeping cleanly through rover/drone/UFO airspace
+  //     (ground_y + 2.5m .. +46m) and lift volumetric cumulus/cirrus cloud decks high into the real sky dome
+  //     (ground_y + 115m .. +230m) so clouds form an overhead sky canopy and NEVER whiteout the camera!
   let y_min = select(
-    select(ground_y + 1.4, ground_y + 14.0, role < 3.5),
+    select(ground_y + 2.5, max(ground_y + 115.0, cy + 48.0), role < 3.5),
     cy - half_y,
     is_deep
   );
   let y_max = select(
-    select(max(ground_y + 26.0, cy + 20.0), max(ground_y + 48.0, cy + 36.0), role < 3.5),
+    select(max(ground_y + 46.0, cy + 20.0), max(ground_y + 230.0, cy + 135.0), role < 3.5),
     cy + half_y,
     is_deep
   );
@@ -898,12 +898,12 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
   var sz = 1.8;
   var live = 1.0;
   if (role < 3.5) {
-    // 3D Volumetric Cloud Strata Puff: visible where live GPU Clausius-Clapeyron cloud q > 0.08!
-    let flash_boost = c_loc.w * 2.4;
-    col = deck_rgb * (0.78 + 0.42 * yn) + vec3<f32>(0.72, 0.88, 1.0) * flash_boost;
-    sz = select(2.6 + c_loc.x * 3.8, 3.2 + c_loc.x * 4.4, is_deep);
-    let q_vis = select(c_loc.x, max(c_loc.x, p.phys1.w * 0.32), !is_deep);
-    live = select(0.0, clamp((q_vis - 0.08) * 1.65, 0.0, 1.0), q_vis > 0.08);
+    // 3D Volumetric Cloud Strata Puff: visible where live GPU Clausius-Clapeyron cloud q > 0.14!
+    let flash_boost = c_loc.w * 2.0;
+    col = deck_rgb * (0.76 + 0.36 * yn) + vec3<f32>(0.72, 0.88, 1.0) * flash_boost;
+    sz = select(2.8 + c_loc.x * 3.6, 3.0 + c_loc.x * 4.0, is_deep);
+    let q_vis = select(c_loc.x * clamp(p.phys1.w * 1.45, 0.12, 1.0), c_loc.x, is_deep);
+    live = select(0.0, clamp((q_vis - 0.14) * 1.45, 0.0, 0.85), q_vis > 0.14);
   } else {
     // 3D CFD Flow Streamer / Vortex Tracer: color-coded by vertical buoyancy & vorticity!
     let vort_t = clamp(c_loc.z * 0.28, 0.0, 1.0);
@@ -1044,9 +1044,9 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
   // Initialize 3D cloud puffs + crisp 3D CFD flow streamers in Mode 11 compatible 64-byte layout
   // On rocky crust worlds, tighten XZ domain and give 46% to vivid flow ribbons so 3D CFD pops right around Rover & Drone!
   const initMotes = new Float32Array(mCount * 16);
-  const boxHalfXZ = profile.isDeepFluid ? 72.0 : 54.0;
-  const boxHalfY = profile.isDeepFluid ? 34.0 : 22.0;
-  const cloudFrac = profile.isDeepFluid ? 0.64 : 0.68;
+  const boxHalfXZ = profile.isDeepFluid ? 96.0 : 165.0;
+  const boxHalfY = profile.isDeepFluid ? 38.0 : 32.0;
+  const cloudFrac = profile.isDeepFluid ? 0.62 : 0.56;
   for (let i = 0; i < mCount; i += 1) {
     const o = i * 16;
     const h1 = ((Math.sin(i * 12.9898 + 1.1) * 43758.5453) % 1 + 1) % 1;

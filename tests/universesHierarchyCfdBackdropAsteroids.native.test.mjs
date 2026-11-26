@@ -129,14 +129,22 @@ test('ULG Universes: Parent-Scale Backdrops, Asteroid Picking, Always-On Surface
       return window.__ulgUniversesDemo.getState();
     });
     assert.equal(surfEarthRover.surfaceActive, true, 'Diving from L4 Planet must enter planetary surface view first!');
-    assert.equal(surfEarthRover.surfaceVehicle, 'rover');
-    assert.equal(surfEarthRover.surfaceTelemetry?.cfdActive, true, '3D WebGPU CFD MUST be active for Earth Rover!');
+    assert.equal(surfEarthRover.surfaceVehicle, 'ufo', 'Diving from L4 Planet arrives in the Explorer UFO before deploying Rover/Drone');
+    assert.equal(surfEarthRover.surfaceTelemetry?.cfdActive, true, '3D WebGPU CFD MUST be active for Earth Explorer UFO!');
     assert.ok(
       (surfEarthRover.surfaceTelemetry?.cfdTelemetry?.rmsWindMS ?? 0) > 0.2,
-      `Earth Rover 3D CFD must have non-zero live wind, got ${surfEarthRover.surfaceTelemetry?.cfdTelemetry?.rmsWindMS}`
+      `Earth Explorer UFO 3D CFD must have non-zero live wind, got ${surfEarthRover.surfaceTelemetry?.cfdTelemetry?.rmsWindMS}`
     );
-    assert.ok(surfEarthRover.surfaceLocalSample?.id, 'Local surface material directly below Rover must be sampled');
+    assert.ok(surfEarthRover.surfaceLocalSample?.id, 'Local surface material directly below UFO must be sampled');
     assert.equal(surfEarthRover.scaleTimeDilation.clockLabel, '1.0 s/s');
+    // Also verify deploying the Rover keeps 3D WebGPU CFD actively running!
+    await page.evaluate(async () => {
+      window.__ulgUniversesDemo.setSurfaceVehicle('rover');
+      for (let i = 0; i < 6; i += 1) await window.__ulgUniversesDemo.stepOnce();
+    });
+    const surfEarthRoverDeployed = await page.evaluate(() => window.__ulgUniversesDemo.getState());
+    assert.equal(surfEarthRoverDeployed.surfaceVehicle, 'rover');
+    assert.equal(surfEarthRoverDeployed.surfaceTelemetry?.cfdActive, true, '3D WebGPU CFD MUST stay active when Rover is beamed down!');
     await saveShot(page, 'v2_surface_earth_rover_3d_cfd.png');
 
     // Also verify Mars Rover has visible always-on 3D CFD AND Moon stays strictly vacuum-dormant!

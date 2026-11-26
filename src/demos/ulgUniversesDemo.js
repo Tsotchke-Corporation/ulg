@@ -11,6 +11,18 @@ import {
   normalizeWheelDeltaY,
   requestCompatibleWebGpuDevice
 } from '../runtime/shared/webgpuCompat.js';
+import { createWebXrWebGpuBridge } from '../runtime/shared/webxrWebGpuBridge.js';
+import {
+  appendIconicUfoGeometry,
+  appendVonNeumannProbeGeometry,
+  evaluateEmWavelengthInfo
+} from '../runtime/astrophysics/ufoWeaponsAndPhysicsGpu.js';
+import {
+  buildUniverseShareUrl,
+  createKardashevProgressionState,
+  createUfoMultiplayerMesh,
+  parseUniverseShareParams
+} from '../runtime/astrophysics/ufoMultiplayerMesh.js';
 import {
   GPU_PICK_LAYOUT,
   createGpuEntityPickerWebGpu
@@ -296,21 +308,24 @@ function mapLog10ScaleToInitialSpan(log10Val) {
 }
 
 export async function mountUlgUniversesDemo() {
-  const { device } = await requestCompatibleWebGpuDevice({ label: 'ulg-universes-demo' });
+  const { device } = await requestCompatibleWebGpuDevice({ label: 'ulg-universes-demo', xrCompatible: true });
   const gpuErrorBucket = [];
   device.addEventListener('uncapturederror', (e) => {
     gpuErrorBucket.push(String(e?.error?.message ?? e));
   });
   attachWebGpuUncapturedErrorTelemetry(device, 'ulg-universes-demo');
 
-  // Parse URL params
+  // Parse seedable Universe Share-Link & URL params!
   const urlParams = new URLSearchParams(window.location.search);
+  const shareParams = parseUniverseShareParams(window.location.search);
   const initialZ = Math.max(1, Math.min(118, Number.parseInt(urlParams.get('Z') || urlParams.get('z') || '26', 10) || 26));
-  const initialSeed = Number.parseInt(urlParams.get('seed') || '20261125', 10) || 20261125;
+  const initialSeed = shareParams.seed != null ? Math.trunc(shareParams.seed) : (Number.parseInt(urlParams.get('seed') || '20261125', 10) || 20261125);
   const initialQuality = QUALITY_PRESETS[urlParams.get('quality')] ? urlParams.get('quality') : 'med';
 
   let log10ViewSpanM = UNIVERSES_SCALES[0].log10SpanM;
-  if (urlParams.has('scale')) {
+  if (shareParams.log10SpanM != null) {
+    log10ViewSpanM = mapLog10ScaleToInitialSpan(shareParams.log10SpanM);
+  } else if (urlParams.has('scale')) {
     log10ViewSpanM = mapLog10ScaleToInitialSpan(Number.parseFloat(urlParams.get('scale')) || 24.8);
   } else if (urlParams.has('level')) {
     const reqLvl = Math.max(0, Math.min(7, Number.parseInt(urlParams.get('level'), 10) || 0));
@@ -329,6 +344,10 @@ export async function mountUlgUniversesDemo() {
   const scaleBadge = document.getElementById('uv-scale-badge');
   const clockBadge = document.getElementById('uv-clock-badge');
   const fpsBadge = document.getElementById('uv-fps-badge');
+  const cockpitTopBtn = document.getElementById('uv-cockpit-btn');
+  const xrTopBtn = document.getElementById('uv-xr-btn');
+  const shareTopBtn = document.getElementById('uv-share-btn');
+  const roomTopBtn = document.getElementById('uv-room-btn');
   const autopilotBtn = document.getElementById('uv-autopilot-btn');
   const simBtn = document.getElementById('uv-sim-btn');
   const configBtn = document.getElementById('uv-config-btn');
@@ -380,6 +399,16 @@ export async function mountUlgUniversesDemo() {
   const surfaceHudEl = document.getElementById('uv-surface-hud');
   const surfaceTelemetryEl = document.getElementById('uv-surf-telemetry');
   const surfaceChemBarEl = document.getElementById('uv-surf-chem-bar');
+  const surfaceReactionBarEl = document.getElementById('uv-surf-reaction-bar');
+  const surfaceWeaponBarEl = document.getElementById('uv-surf-weapon-bar');
+  const weaponFireBtn = document.getElementById('uv-weapon-fire-btn');
+  const tractorBtn = document.getElementById('uv-tractor-btn');
+  const lambdaSlider = document.getElementById('uv-lambda-slider');
+  const lambdaReadout = document.getElementById('uv-lambda-readout');
+  const powerSlider = document.getElementById('uv-power-slider');
+  const powerReadout = document.getElementById('uv-power-readout');
+  const probeBtn = document.getElementById('uv-probe-btn');
+  const kardashevBadge = document.getElementById('uv-kardashev-badge');
   const surfaceSampleBtn = document.getElementById('uv-surf-sample-btn');
   const surfaceJumpBtn = document.getElementById('uv-surf-jump-btn');
   const surfaceDescendBtn = document.getElementById('uv-surf-descend-btn');
@@ -408,6 +437,123 @@ export async function mountUlgUniversesDemo() {
     qualityId: initialQuality,
     initialElementZ: initialZ
   });
+
+  // Cosmic UFO Cockpit, WebXR WebGPU (`XRGPUBinding`), Kardashev/Von Neumann Progression & PeerCompute Multiplayer!
+  let cosmicCockpitMode = Boolean(shareParams.cockpit);
+  let spaceWeaponMode = 'laser';
+  let spaceLambdaLog10 = -6.27;
+  let spacePowerW = 2.5e8;
+  let spaceWeaponFiring = false;
+  let spaceTractorOn = false;
+  let simElapsedSec = shareParams.simTimeS ?? 0;
+
+  const kardashev = createKardashevProgressionState();
+  const xrBridge = createWebXrWebGpuBridge(device, {
+    onStateChange: (st) => {
+      if (xrTopBtn) {
+        xrTopBtn.classList.toggle('active', st.active);
+        xrTopBtn.textContent = st.active ? '🥽 Exit XR' : '🥽 XR';
+        xrTopBtn.title = st.statusText;
+      }
+    }
+  });
+  const ufoMultiplayer = createUfoMultiplayerMesh({
+    onWeaponHitLocal: (hit) => {
+      kardashev.applyDamage(hit.damage || 10);
+      bigBangFlash = Math.max(bigBangFlash, 0.25);
+    },
+    onRemoteMissile: (missile) => {
+      if (physics.surfaceActive && missile?.pos) {
+        physics.launchSurfaceMissile({
+          fromPos: missile.pos,
+          vel: missile.vel,
+          aimWorldPos: missile.target,
+          isRemote: true
+        });
+      }
+    },
+    onStateChange: () => { syncMultiplayerChrome(); }
+  });
+
+  function formatPowerW(pW) {
+    if (pW >= 1e12) return `${(pW * 1e-12).toFixed(1)} TW`;
+    if (pW >= 1e9) return `${(pW * 1e-9).toFixed(1)} GW`;
+    if (pW >= 1e6) return `${(pW * 1e-6).toFixed(0)} MW`;
+    return `${(pW * 1e-3).toFixed(0)} kW`;
+  }
+
+  function syncMultiplayerChrome() {
+    const ms = ufoMultiplayer.getStatus();
+    if (ms.timescaleLocked) {
+      timeScale = 1.0;
+    }
+    if (timeScaleSlider) {
+      timeScaleSlider.disabled = ms.timescaleLocked;
+      if (ms.timescaleLocked) timeScaleSlider.value = '1.0';
+    }
+    if (timeScaleVal) {
+      timeScaleVal.textContent = ms.timescaleLocked ? '🔒 1.0×' : `${timeScale.toFixed(1)}×`;
+    }
+    if (roomTopBtn) {
+      roomTopBtn.classList.toggle('active', ms.connected);
+      roomTopBtn.textContent = ms.connected
+        ? `🌐 ${ms.roomId} (${ms.remotePeerCount + 1})`
+        : '🌐 Solo';
+      roomTopBtn.title = ms.connected
+        ? `PeerCompute multiplayer room "${ms.roomId}" (${ms.transportKind}) — timescale locked at 1.0×. Click to leave.`
+        : 'Join a PeerCompute multiplayer UFO room (locks timescale to canonical 1.0×!)';
+    }
+  }
+
+  function syncWeaponControlsUi() {
+    const em = evaluateEmWavelengthInfo(spaceLambdaLog10);
+    if (lambdaReadout) {
+      lambdaReadout.textContent = `${em.shortBand} · ${em.displayLabel.split(' ')[0]}${em.displayLabel.split(' ')[1] ? ' ' + em.displayLabel.split(' ')[1] : ''}`;
+      const r = Math.round(em.rgb[0] * 255);
+      const g = Math.round(em.rgb[1] * 255);
+      const b = Math.round(em.rgb[2] * 255);
+      lambdaReadout.style.color = `rgb(${r},${g},${b})`;
+    }
+    if (powerReadout) powerReadout.textContent = formatPowerW(spacePowerW);
+    if (surfaceWeaponBarEl) {
+      for (const btn of surfaceWeaponBarEl.querySelectorAll('[data-weapon]')) {
+        btn.classList.toggle('active', btn.dataset.weapon === spaceWeaponMode);
+      }
+    }
+    if (tractorBtn) tractorBtn.classList.toggle('active', spaceTractorOn);
+    if (weaponFireBtn) weaponFireBtn.classList.toggle('firing', spaceWeaponFiring);
+    if (kardashevBadge) {
+      const ks = kardashev.state;
+      kardashevBadge.textContent = `K ${ks.kardashevIndex.toFixed(2)} · ${ks.probes.length} Probes · 🛡${Math.round(ks.shieldHp)}%`;
+    }
+    if (cockpitTopBtn) {
+      const inCockpit = physics.surfaceActive
+        ? physics.surfaceSession?.cameraMode === 'first-person'
+        : cosmicCockpitMode;
+      cockpitTopBtn.classList.toggle('active', inCockpit);
+      cockpitTopBtn.textContent = inCockpit ? '🛸 3rd View' : '🛸 Cockpit';
+    }
+  }
+
+  function buildCurrentShareUrl() {
+    const cat = physics.getActiveSystemCatalog();
+    const bodyId = cat[physics.focusedSolarBodyIndex]?.id || 'earth';
+    const tel = physics.surfaceTelemetry;
+    const ms = ufoMultiplayer.getStatus();
+    return buildUniverseShareUrl(window.location.href, {
+      seed: physics.seed,
+      epoch: physics.cosmicEpoch?.id || 'present',
+      log10SpanM: log10ViewSpanM,
+      useSol: physics.useSolReference,
+      bodyId,
+      surfaceActive: physics.surfaceActive,
+      pos: physics.surfaceActive ? (tel?.ufoPos || tel?.roverPos) : null,
+      yaw: physics.surfaceActive ? (tel?.ufoYaw ?? 0.35) : null,
+      simTimeS: simElapsedSec,
+      roomId: ms.connected ? ms.roomId : null,
+      relayUrl: ms.connected && ms.relayUrl ? ms.relayUrl : null
+    });
+  }
 
   // App State
   const isFocusedSolarBodyStar = () => {
@@ -1374,23 +1520,34 @@ export async function mountUlgUniversesDemo() {
     flyToLog10Span(UNIVERSES_SCALES[currentLevel - 1].log10SpanM);
   }
 
-  // ---- Planetary Surface & 3D Atmospheric CFD Explorer (Jump-Rocket Rover + Coaxial Drone + Buoyant 3D CFD UFO!) ----
+  // ---- Planetary Surface & 3D Atmospheric CFD Explorer (Universal 60-ft Emerald-Dome UFO + Beam-Down Rover + Coaxial Drone!) ----
   function cycleSurfaceVehicle() {
     if (!physics.surfaceSession) return;
     const sess = physics.surfaceSession;
     const env = sess.env;
     const cur = sess.activeVehicle;
-    const hasCfd = Boolean(sess.cfdProfile);
     let next = cur;
     if (!env.hasSolidCrust) {
       next = cur === 'ufo' ? 'drone' : 'ufo';
-    } else if (hasCfd) {
-      next = cur === 'rover' ? 'drone' : (cur === 'drone' ? 'ufo' : 'rover');
     } else {
-      next = cur === 'drone' ? 'rover' : 'drone';
+      // UFO -> Beam Down Rover (with yellow tractor beam!) -> Deploy Drone -> Return to UFO!
+      next = cur === 'ufo' ? 'rover' : (cur === 'rover' ? 'drone' : 'ufo');
     }
     physics.setSurfaceVehicle(next);
     syncSurfaceHud();
+    syncWeaponControlsUi();
+    renderNow(performance.now());
+  }
+
+  function toggleCockpitView() {
+    if (physics.surfaceActive && physics.surfaceSession) {
+      const next = physics.surfaceSession.cameraMode === 'chase' ? 'first-person' : 'chase';
+      physics.setSurfaceCameraMode(next);
+      syncSurfaceHud();
+    } else {
+      cosmicCockpitMode = !cosmicCockpitMode;
+    }
+    syncWeaponControlsUi();
     renderNow(performance.now());
   }
 
@@ -1425,12 +1582,14 @@ export async function mountUlgUniversesDemo() {
     const atmStr = localRho > 1e-4 ? `ρ=${localRho.toFixed(localRho < 0.1 ? 3 : 2)} kg/m³` : '<span class="warn">VACUUM (0 Pa)</span>';
     const cfd = tel.cfdTelemetry;
     const chem = cfd?.chemistry;
-    const vehBadge = isUfo ? '🛸 3D CFD UFO' : (isDrone ? '🚁 DRONE' : '🚙 ROVER');
+    const vehBadge = isUfo ? '🛸 60ft UFO' : (isDrone ? '🚁 DRONE' : '🚙 ROVER');
     let vehMetrics;
     if (isUfo && chem) {
       const pStr = chem.pressureBar >= 0.1 ? `${chem.pressureBar.toFixed(2)} bar` : `${(chem.pressureBar * 101.325).toFixed(1)} kPa`;
       const windSpd = cfd?.craftWindSpeedMS || 0;
-      vehMetrics = `Alt ${chem.altKm.toFixed(1)} km · <strong>${pStr}</strong> · ${Math.round(chem.tempK)} K · <span class="good">3D Wind ${windSpd.toFixed(1)} m/s</span> · Deck: <strong>${chem.activeCloudDeck}</strong>`;
+      vehMetrics = `Alt ${env.hasSolidCrust ? `${(tel.ufoAltitudeM || 0).toFixed(1)} m` : `${chem.altKm.toFixed(1)} km`} · <strong>${pStr}</strong> · ${Math.round(chem.tempK)} K · <span class="good">3D Wind ${windSpd.toFixed(1)} m/s</span> · Rocks: ${tel.aliveBoulderCount ?? 0} · Craters: ${tel.totalCratersCarved ?? 0}`;
+    } else if (isUfo) {
+      vehMetrics = `Alt ${(tel.ufoAltitudeM || 0).toFixed(1)} m · Spd ${(tel.ufoSpeedMS || 0).toFixed(1)} m/s · Rocks: ${tel.aliveBoulderCount ?? 0} · Craters: ${tel.totalCratersCarved ?? 0}`;
     } else if (isDrone) {
       vehMetrics = env.droneFlightCapable
         ? `Alt ${(tel.droneAltitudeM || 0).toFixed(1)} m · Spd ${(tel.droneSpeedMS || 0).toFixed(1)} m/s · <span class="good">Lift ${(tel.droneAeroLiftN || 0).toFixed(1)}/${env.maxAeroLiftN.toFixed(1)} N</span>`
@@ -1442,6 +1601,16 @@ export async function mountUlgUniversesDemo() {
       surfaceTelemetryEl.innerHTML =
         `<span><strong>${vehBadge}</strong> · ${worldName} · g=${env.gravityMS2.toFixed(2)} m/s² · ${atmStr} · ${vehMetrics}</span>`;
     }
+    if (surfaceReactionBarEl) {
+      const wr = tel.weaponReaction;
+      if (wr?.reactionOutcome) {
+        surfaceReactionBarEl.innerHTML = `<span><strong>${wr.phaseState || 'ACTIVE'}</strong>: ${wr.reactionOutcome}${tel.mpmActive ? ' · <span class="good">GPU MLS-MPM Active</span>' : ''}</span>`;
+        surfaceReactionBarEl.style.display = 'flex';
+      } else {
+        surfaceReactionBarEl.style.display = 'none';
+      }
+    }
+    syncWeaponControlsUi();
     if (surfaceChemBarEl) {
       const sample = tel.localSample || sess.getLocalSample?.();
       if (cfd && chem && chem.species?.length > 0) {
@@ -1494,7 +1663,7 @@ export async function mountUlgUniversesDemo() {
     }
   }
 
-  async function enterSurfaceViewUi({ bodyIndex = null, planetaryModeOverride = null, restoreCheckpoint = null } = {}) {
+  async function enterSurfaceViewUi({ bodyIndex = null, planetaryModeOverride = null, restoreCheckpoint = null, initialVehicle = 'ufo' } = {}) {
     autopilot = false;
     autopilotBtn?.classList.remove('active');
     if (autopilotBtn) autopilotBtn.textContent = '▶ Tour';
@@ -1524,10 +1693,14 @@ export async function mountUlgUniversesDemo() {
     camTarget = [0, 0, 0];
     currentLevel = 4;
     log10ViewSpanM = 2.0; // ~100 m surface horizon scale!
-    await physics.enterSurfaceView({ bodyIndex: idx, planetaryModeOverride, restoreCheckpoint });
+    await physics.enterSurfaceView({ bodyIndex: idx, planetaryModeOverride, restoreCheckpoint, initialVehicle });
+    physics.setSurfaceWeaponConfig({ mode: spaceWeaponMode, log10WavelengthM: spaceLambdaLog10, powerW: spacePowerW });
+    physics.setSurfaceTractorBeam(spaceTractorOn);
+    if (cosmicCockpitMode) physics.setSurfaceCameraMode('first-person');
     selectDefaultTarget();
     syncScaleChrome();
     syncSurfaceHud();
+    syncWeaponControlsUi();
     updateInspectorCard();
     renderNow(performance.now());
     return physics.surfaceTelemetry;
@@ -1581,14 +1754,85 @@ export async function mountUlgUniversesDemo() {
   surfaceDescendBtn?.addEventListener('pointerleave', stopSurfaceDescend);
   surfaceDescendBtn?.addEventListener('pointercancel', stopSurfaceDescend);
   surfaceVehicleBtn?.addEventListener('click', () => cycleSurfaceVehicle());
-  surfaceCamBtn?.addEventListener('click', () => {
-    if (!physics.surfaceSession) return;
-    const next = physics.surfaceSession.cameraMode === 'chase' ? 'first-person' : 'chase';
-    physics.setSurfaceCameraMode(next);
-    syncSurfaceHud();
-    renderNow(performance.now());
-  });
+  surfaceCamBtn?.addEventListener('click', () => toggleCockpitView());
   surfaceOrbitBtn?.addEventListener('click', () => exitSurfaceViewUi());
+
+  // Wire Cosmic UFO Cockpit, WebXR, Seedable Share-Link, PeerCompute Multiplayer Room, Rim Weapons & Von Neumann Probes!
+  cockpitTopBtn?.addEventListener('click', () => toggleCockpitView());
+  xrTopBtn?.addEventListener('click', () => {
+    void xrBridge.toggleXr((_t, eyeViews) => {
+      // Native WebXR WebGPU (`XRGPUBinding`) stereo render loop per eye!
+      for (const ev of eyeViews) {
+        renderNow(performance.now(), ev);
+      }
+    });
+  });
+  shareTopBtn?.addEventListener('click', async () => {
+    const shareUrl = buildCurrentShareUrl();
+    try {
+      window.history?.replaceState?.(null, '', shareUrl);
+      await navigator.clipboard?.writeText?.(shareUrl);
+    } catch {}
+    if (shareTopBtn) {
+      shareTopBtn.textContent = '✓ Copied!';
+      setTimeout(() => { if (shareTopBtn) shareTopBtn.textContent = '🔗 Share'; }, 1600);
+    }
+  });
+  roomTopBtn?.addEventListener('click', () => {
+    if (ufoMultiplayer.isConnected) {
+      ufoMultiplayer.disconnect();
+    } else {
+      const relay = peerUrlInput?.value?.trim() || '';
+      ufoMultiplayer.connect({ room: `cosmos-${physics.seed % 10000}`, relay });
+    }
+    syncMultiplayerChrome();
+  });
+
+  if (surfaceWeaponBarEl) {
+    for (const btn of surfaceWeaponBarEl.querySelectorAll('[data-weapon]')) {
+      btn.addEventListener('click', () => {
+        spaceWeaponMode = btn.dataset.weapon || 'laser';
+        physics.setSurfaceWeaponConfig({ mode: spaceWeaponMode });
+        syncWeaponControlsUi();
+      });
+    }
+  }
+  const setFiringState = (on) => {
+    spaceWeaponFiring = Boolean(on);
+    if (spaceWeaponMode === 'missile' && on && physics.surfaceActive) {
+      const launched = physics.launchSurfaceMissile({});
+      if (launched && ufoMultiplayer.isConnected) ufoMultiplayer.broadcastMissileLaunch(launched);
+      spaceWeaponFiring = false;
+    } else {
+      physics.setSurfaceWeaponFire({ firing: spaceWeaponFiring });
+    }
+    syncWeaponControlsUi();
+  };
+  weaponFireBtn?.addEventListener('pointerdown', (e) => { e.preventDefault(); setFiringState(true); });
+  weaponFireBtn?.addEventListener('pointerup', () => setFiringState(false));
+  weaponFireBtn?.addEventListener('pointerleave', () => setFiringState(false));
+  tractorBtn?.addEventListener('click', () => {
+    spaceTractorOn = !spaceTractorOn;
+    physics.setSurfaceTractorBeam(spaceTractorOn);
+    syncWeaponControlsUi();
+  });
+  lambdaSlider?.addEventListener('input', (e) => {
+    spaceLambdaLog10 = Number(e.target.value);
+    physics.setSurfaceWeaponConfig({ log10WavelengthM: spaceLambdaLog10 });
+    syncWeaponControlsUi();
+  });
+  powerSlider?.addEventListener('input', (e) => {
+    const exp = Number(e.target.value);
+    spacePowerW = Math.min(kardashev.state.maxPowerW * 1e4, Math.pow(10, exp));
+    physics.setSurfaceWeaponConfig({ powerW: spacePowerW });
+    syncWeaponControlsUi();
+  });
+  probeBtn?.addEventListener('click', () => {
+    const cat = physics.getActiveSystemCatalog();
+    const bId = cat[physics.focusedSolarBodyIndex]?.id || 'earth';
+    kardashev.deployVonNeumannProbe({ bodyId: bId, orbitRadius: 1.8 + Math.random() * 1.4 });
+    syncWeaponControlsUi();
+  });
 
   // Touch Dual-Joysticks (modeled on peercompute/demos/planetgen TinyPlanetControls)
   function bindTouchJoystick(padEl, knobEl, onMove) {
@@ -1635,10 +1879,38 @@ export async function mountUlgUniversesDemo() {
     physics.addSurfaceLookDelta(-nx * 0.08, -ny * 0.05);
   });
 
-  // Desktop TinyPlanetControls Keyboard Handlers (WASD + Space Jump Rockets + F Drone + V Cam + Esc Orbit!)
+  // Desktop TinyPlanetControls + Cosmic UFO Keyboard Handlers!
   const handleSurfaceKeyDown = (e) => {
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if (e.code === 'KeyV' && !e.repeat) {
+      toggleCockpitView();
+      return;
+    }
+    if (e.code === 'KeyT' && !e.repeat) {
+      spaceTractorOn = !spaceTractorOn;
+      physics.setSurfaceTractorBeam(spaceTractorOn);
+      syncWeaponControlsUi();
+      return;
+    }
+    if (e.code === 'KeyX') {
+      setFiringState(true);
+      return;
+    }
+    if (e.code === 'KeyM' && !e.repeat && physics.surfaceActive) {
+      const launched = physics.launchSurfaceMissile({});
+      if (launched && ufoMultiplayer.isConnected) ufoMultiplayer.broadcastMissileLaunch(launched);
+      return;
+    }
+    if (e.code === 'Digit1') { spaceWeaponMode = 'laser'; physics.setSurfaceWeaponConfig({ mode: 'laser' }); syncWeaponControlsUi(); return; }
+    if (e.code === 'Digit2') { spaceWeaponMode = 'missile'; physics.setSurfaceWeaponConfig({ mode: 'missile' }); syncWeaponControlsUi(); return; }
+    if (e.code === 'Digit3') { spaceWeaponMode = 'antimatter'; physics.setSurfaceWeaponConfig({ mode: 'antimatter' }); syncWeaponControlsUi(); return; }
+    if (e.code === 'KeyP' && !e.repeat) {
+      const cat = physics.getActiveSystemCatalog();
+      kardashev.deployVonNeumannProbe({ bodyId: cat[physics.focusedSolarBodyIndex]?.id || 'earth' });
+      syncWeaponControlsUi();
+      return;
+    }
     if (!physics.surfaceActive) {
       if (e.code === 'KeyL' && currentLevel === 4 && !e.repeat) {
         void enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex });
@@ -1657,15 +1929,14 @@ export async function mountUlgUniversesDemo() {
     else if (e.code === 'KeyF' && !e.repeat && physics.surfaceSession) {
       cycleSurfaceVehicle();
     } else if (e.code === 'KeyG' && !e.repeat && physics.surfaceSession) {
+      physics.triggerSurfaceTractorPulse(2.0);
       void sampleLocalSurfaceAndDiveToLattice();
-    } else if (e.code === 'KeyV' && !e.repeat && physics.surfaceSession) {
-      physics.setSurfaceCameraMode(physics.surfaceSession.cameraMode === 'chase' ? 'first-person' : 'chase');
-      syncSurfaceHud();
     } else if (e.code === 'Escape') {
       exitSurfaceViewUi();
     }
   };
   const handleSurfaceKeyUp = (e) => {
+    if (e.code === 'KeyX') setFiringState(false);
     if (!physics.surfaceActive) return;
     if (e.code === 'KeyW' || e.code === 'ArrowUp') physics.setSurfaceControls({ forward: false });
     else if (e.code === 'KeyS' || e.code === 'ArrowDown') physics.setSurfaceControls({ backward: false });
@@ -1710,6 +1981,12 @@ export async function mountUlgUniversesDemo() {
     statusDot?.classList.toggle('paused', !running);
   });
   timeScaleSlider?.addEventListener('input', (e) => {
+    if (ufoMultiplayer.timescaleLocked) {
+      timeScale = 1.0;
+      if (timeScaleSlider) timeScaleSlider.value = '1.0';
+      if (timeScaleVal) timeScaleVal.textContent = '🔒 1.0×';
+      return;
+    }
     timeScale = Number(e.target.value) || 1.0;
     if (timeScaleVal) timeScaleVal.textContent = `${timeScale.toFixed(1)}×`;
   });
@@ -3862,16 +4139,105 @@ export async function mountUlgUniversesDemo() {
   let fpsFrames = 0;
   let fpsDisplay = 60;
 
-  function renderNow(nowMs = performance.now()) {
-    syncCanvasSize();
-    const aspect = canvas.width / Math.max(1, canvas.height);
+  function buildCosmicUfoMeshes(camera, nowSec) {
+    // Render our iconic smooth 60-ft silver saucer + glowing emerald-green glass bubble
+    // across ALL cosmic exploration scales (L0 Cosmic Web -> L4 Planet Orbit)!
+    // (Hide saucer on L5..L7 microscope views once you've taken a sample into Lattice/Atom/Nucleus!)
+    if (currentLevel >= 5) return null;
+    const opaqueOut = [];
+    const fxOut = [];
+    const yawShip = Math.atan2(camera.fwd[0], camera.fwd[2]);
+    const shipPos = cosmicCockpitMode
+      ? [
+        camera.pos[0] + camera.fwd[0] * 0.15 - camera.up[0] * 0.28,
+        camera.pos[1] + camera.fwd[1] * 0.15 - camera.up[1] * 0.28,
+        camera.pos[2] + camera.fwd[2] * 0.15 - camera.up[2] * 0.28
+      ]
+      : [
+        camera.pos[0] + camera.fwd[0] * 5.2 - camera.up[0] * 1.42,
+        camera.pos[1] + camera.fwd[1] * 5.2 - camera.up[1] * 1.42,
+        camera.pos[2] + camera.fwd[2] * 5.2 - camera.up[2] * 1.42
+      ];
+    const emInfo = evaluateEmWavelengthInfo(spaceLambdaLog10);
+    const beamTarget = pickedGpuMote?.worldPos || camTarget || [0, 0, 0];
+    const beamObj = spaceWeaponFiring
+      ? {
+        targetPos: beamTarget,
+        rgb: spaceWeaponMode === 'antimatter' ? [0.85, 0.34, 1.0] : emInfo.rgb,
+        isAntimatter: spaceWeaponMode === 'antimatter',
+        thicknessMul: 1.15
+      }
+      : null;
 
-    // Planetary Surface View (TinyPlanetControls + Jump-Rocket Rover + Atmospheric Drone!)
+    appendIconicUfoGeometry(opaqueOut, fxOut, {
+      pos: shipPos,
+      yaw: yawShip,
+      pitch: Math.max(-0.22, Math.min(0.22, -camera.fwd[1] * 0.45)),
+      roll: Math.sin(nowSec * 0.9) * 0.04,
+      radius: 0.72, // Crisp ship-chase foreground scale in cosmic coordinates!
+      rimAngle: nowSec * 2.2,
+      vertThrust: flyTargetLog10 !== null ? 0.65 : 0.0,
+      tractorActive: Boolean(spaceTractorOn || (flyTargetLog10 !== null && currentLevel === 4)),
+      tractorHeight: 3.4,
+      beam: beamObj,
+      isCockpit: cosmicCockpitMode,
+      isRemote: false,
+      shieldFlash: kardashev.state.shieldFlash
+    });
+
+    // Render Remote PeerCompute Multiplayer Saucers in the same cosmic scale!
+    const peers = ufoMultiplayer.getRemotePeersForContext({ level: currentLevel, surfaceActive: false });
+    for (let i = 0; i < peers.length; i += 1) {
+      const rp = peers[i];
+      const rPos = Array.isArray(rp.pos) ? rp.pos : [
+        shipPos[0] + camera.right[0] * (2.6 + i * 1.8),
+        shipPos[1] + camera.up[1] * 0.4,
+        shipPos[2] + camera.right[2] * (2.6 + i * 1.8)
+      ];
+      appendIconicUfoGeometry(opaqueOut, fxOut, {
+        pos: rPos,
+        yaw: rp.yaw || yawShip,
+        pitch: 0,
+        roll: 0,
+        radius: 0.72,
+        rimAngle: nowSec * 2.5 + i,
+        tractorActive: Boolean(rp.tractorActive),
+        tractorHeight: 2.8,
+        beam: rp.beam || null,
+        isRemote: true,
+        shieldFlash: rp.shieldFlash || 0
+      });
+    }
+
+    // Render Deployed Self-Replicating Von Neumann Probes orbiting the focused body/star!
+    for (let i = 0; i < kardashev.state.probes.length; i += 1) {
+      const pr = kardashev.state.probes[i];
+      const ang = pr.angle || 0;
+      const rad = 2.6 + (pr.orbitRadius || 1.8) * 0.75;
+      const px = Math.cos(ang) * rad;
+      const pz = Math.sin(ang) * rad;
+      const py = Math.sin(ang * 1.7 + i) * rad * Math.sin(pr.inclination || 0.25);
+      appendVonNeumannProbeGeometry(opaqueOut, fxOut, [px, py, pz], ang * 2.0, 0.32);
+    }
+
+    return {
+      opaque: new Float32Array(opaqueOut),
+      fx: new Float32Array(fxOut)
+    };
+  }
+
+  function renderNow(nowMs = performance.now(), xrEyeView = null) {
+    syncCanvasSize();
+    const aspect = xrEyeView?.viewport
+      ? xrEyeView.viewport.width / Math.max(1, xrEyeView.viewport.height)
+      : (xrBridge.isStereoPreview ? (canvas.width * 0.5) / Math.max(1, canvas.height) : canvas.width / Math.max(1, canvas.height));
+
+    // Planetary Surface View (60-ft Emerald-Dome UFO + Yellow Tractor Beam + 64 Rigid Boulders + Active-Zone GPU MLS-MPM!)
     if (physics.surfaceActive && physics.surfaceSession) {
       const s = physics.surfaceSession;
       const pose = s.getCameraPose();
       const fovRad = (58 * Math.PI) / 180;
-      const proj = mat4PerspectiveWebGpu(fovRad, aspect, 0.15, 420.0);
+      const proj = mat4PerspectiveWebGpu(fovRad, aspect, 0.25, 2400.0);
       const look = mat4LookAt(pose.eye, pose.target, pose.up);
       const viewProj = mat4Mul(proj, look.mat);
       lastViewProj = viewProj;
@@ -3894,7 +4260,6 @@ export async function mountUlgUniversesDemo() {
 
       const skyEnv = s.getActiveSkyEnv ? s.getActiveSkyEnv() : s.env;
       const surfaceClouds = [];
-      // Render live rescaled parent L1 Spiral Galaxy arching across airless / thin-sky planetary horizons!
       if (physics.galaxyEngine && (skyEnv.skyOpticalDepth ?? 1.0) < 0.35) {
         const starGalPos = physics.activeStarSite?.posGal || physics.galaxyFocusPos || [4.8, 0.04, 2.1];
         const skyStarVis = Math.max(0.08, 1.0 - (skyEnv.skyOpticalDepth ?? 0) * 2.6);
@@ -3914,12 +4279,23 @@ export async function mountUlgUniversesDemo() {
         count: s.particleCount,
         mode: 11,
         worldScale: 1.0,
-        pointSize: 0.72,
+        pointSize: 0.85,
         alphaGain: 0.92,
         extra1: [pose.focusPos[0], 0, pose.focusPos[2], s.env.hasSolidCrust ? (1.0 / (2.0 * s.env.tinyPlanetCurvatureRadiusM)) : 0.0]
       });
-      // Render live 3D WebGPU Stratified Atmospheric CFD clouds & streamlines on ALL atmosphere-bearing surfaces
-      // (Rover, Drone, AND UFO — strictly dormant/null in vacuum!)
+      // Active-Zone Dormant-Zero GPU MLS-MPM Blast / Crater-Slump / Molten Ejecta Cloud (0 overhead when idle!)
+      const mpmBuf = s.getResidentMpmPointsBuffer?.();
+      if (mpmBuf && s.mpmPointCount > 0) {
+        surfaceClouds.push({
+          buffer: mpmBuf,
+          count: s.mpmPointCount,
+          mode: 11,
+          worldScale: 1.0,
+          pointSize: 1.45,
+          alphaGain: 1.0,
+          extra1: [pose.focusPos[0], 0, pose.focusPos[2], s.env.hasSolidCrust ? (1.0 / (2.0 * s.env.tinyPlanetCurvatureRadiusM)) : 0.0]
+        });
+      }
       const cfdMotesBuf = s.getResidentCfdMotesBuffer?.();
       if (cfdMotesBuf && s.cfdMoteCount > 0) {
         surfaceClouds.push({
@@ -3927,12 +4303,13 @@ export async function mountUlgUniversesDemo() {
           count: s.cfdMoteCount,
           mode: 11,
           worldScale: 1.0,
-          pointSize: s.env.hasSolidCrust ? 1.25 : 1.15,
+          pointSize: s.env.hasSolidCrust ? 0.95 : 1.05,
           alphaGain: 1.0,
           extra1: [pose.focusPos[0], 0, pose.focusPos[2], 0.0]
         });
       }
 
+      const amFlash = physics.surfaceTelemetry?.antimatterFlash || 0;
       renderer.renderFrame({
         camera,
         lightDir: surfLightDir,
@@ -3941,23 +4318,46 @@ export async function mountUlgUniversesDemo() {
           terrainIdxBuf: s.getResidentTerrainIndexBuffer(),
           indexCount: s.indexCount,
           hideTerrain: !s.env.hasSolidCrust,
+          boulderVertBuf: s.getResidentBoulderVertBuffer?.(),
+          boulderVertCount: s.boulderVertCount || 0,
           vehicleVertBuf: s.getResidentVehicleVertBuffer(),
           vehicleVertCount: s.vehicleVertCount,
+          fxVertBuf: s.getResidentFxVertBuffer?.(),
+          fxVertCount: s.fxVertCount || 0,
           env: skyEnv,
           lightDir: surfLightDir
         },
         particleClouds: surfaceClouds,
+        stereoSbs: !xrEyeView && xrBridge.isStereoPreview,
+        xrEyeTarget: xrEyeView,
         post: {
           bhUv: [0.5, 0.5],
           bhStrength: 0,
           warpAmount: 0,
-          flashAmount: bigBangFlash,
+          flashAmount: Math.max(bigBangFlash, amFlash * 0.55),
           crtEnabled: retroCrt,
           pixelSize,
           timeSec: nowMs * 0.001
         }
       });
-      if (reticleCtx) reticleCtx.clearRect(0, 0, lastCssW, lastCssH);
+      if (reticleCtx) {
+        reticleCtx.clearRect(0, 0, lastCssW, lastCssH);
+        // Subtle green holographic cockpit crosshair reticle in 1st-person UFO Cockpit View!
+        if (s.activeVehicle === 'ufo' && s.cameraMode === 'first-person') {
+          const cx = lastCssW * 0.5; const cy = lastCssH * 0.5;
+          reticleCtx.save();
+          reticleCtx.strokeStyle = 'rgba(52, 211, 153, 0.72)';
+          reticleCtx.lineWidth = 1.6;
+          reticleCtx.beginPath();
+          reticleCtx.arc(cx, cy, 18, 0, Math.PI * 2);
+          reticleCtx.moveTo(cx - 28, cy); reticleCtx.lineTo(cx - 10, cy);
+          reticleCtx.moveTo(cx + 10, cy); reticleCtx.lineTo(cx + 28, cy);
+          reticleCtx.moveTo(cx, cy - 28); reticleCtx.lineTo(cx, cy - 10);
+          reticleCtx.moveTo(cx, cy + 10); reticleCtx.lineTo(cx, cy + 28);
+          reticleCtx.stroke();
+          reticleCtx.restore();
+        }
+      }
       return;
     }
 
@@ -3999,6 +4399,9 @@ export async function mountUlgUniversesDemo() {
     };
 
     const scenePayload = buildContinuousScenePayload(camera, nowMs * 0.001);
+    scenePayload.cosmicMeshes = buildCosmicUfoMeshes(camera, nowMs * 0.001);
+    scenePayload.stereoSbs = !xrEyeView && xrBridge.isStereoPreview;
+    scenePayload.xrEyeTarget = xrEyeView;
     renderer.renderFrame(scenePayload);
     drawReticles(viewProj);
   }
@@ -4065,7 +4468,47 @@ export async function mountUlgUniversesDemo() {
     }
 
     if (running) {
-      void physics.stepActiveRegimes(currentLevel, log10ViewSpanM, timeScale);
+      const effectiveTimeScale = ufoMultiplayer.timescaleLocked ? 1.0 : timeScale;
+      simElapsedSec += dtSec * effectiveTimeScale;
+      void physics.stepActiveRegimes(currentLevel, log10ViewSpanM, effectiveTimeScale);
+      kardashev.step(dtSec);
+
+      // Drain harvested surface elements & multiplayer UFO-vs-UFO shield hits!
+      if (physics.surfaceActive) {
+        const ev = physics.drainSurfaceEvents();
+        kardashev.addHarvest(ev.harvested);
+        for (const h of ev.peerHits) {
+          ufoMultiplayer.sendWeaponHit(h.targetPeerId, h);
+        }
+        const cat = physics.getActiveSystemCatalog();
+        const bId = cat[physics.planetaryBodyIndex]?.id || 'earth';
+        const remotePeers = ufoMultiplayer.getRemotePeersForContext({ level: 4, bodyId: bId, surfaceActive: true });
+        physics.setSurfaceExternalEntities({
+          remoteUfos: remotePeers,
+          probes: kardashev.state.probes,
+          shieldFlash: kardashev.state.shieldFlash
+        });
+      }
+
+      if (ufoMultiplayer.isConnected) {
+        const cat = physics.getActiveSystemCatalog();
+        const bId = cat[physics.focusedSolarBodyIndex]?.id || 'earth';
+        const tel = physics.surfaceTelemetry;
+        ufoMultiplayer.broadcastLocalState({
+          level: currentLevel,
+          log10SpanM: log10ViewSpanM,
+          bodyId: bId,
+          surfaceActive: physics.surfaceActive,
+          pos: physics.surfaceActive ? (tel?.ufoPos || [0, 30, 0]) : [0, 0, 0],
+          yaw: physics.surfaceActive ? (tel?.ufoYaw || 0) : camState.yaw,
+          pitch: physics.surfaceActive ? (tel?.ufoPitch || 0) : 0,
+          roll: physics.surfaceActive ? (tel?.ufoRoll || 0) : 0,
+          vertThrust: physics.surfaceActive ? (tel?.ufoVertThrust || 0) : 0,
+          tractorActive: physics.surfaceActive ? Boolean(tel?.tractorActive) : spaceTractorOn,
+          beam: physics.surfaceActive ? (tel?.activeBeam || null) : null,
+          shieldFlash: kardashev.state.shieldFlash
+        });
+      }
     }
 
     moteTrackAccum += dtSec;
@@ -4091,11 +4534,36 @@ export async function mountUlgUniversesDemo() {
     }
   }
 
-  // ---- Initial Boot ----
+  // ---- Initial Boot + Seedable URL Share-Link Hydration ----
   warpOverlay?.classList.remove('active');
+  if (shareParams.epoch) {
+    await physics.setCosmicEpoch(shareParams.epoch);
+    syncEpochChrome();
+  }
+  if (shareParams.useSol !== null) {
+    await physics.setUseSolReference(shareParams.useSol);
+  }
   await warmVisibleLevels(log10ViewSpanM);
+  if (shareParams.bodyId) {
+    physics.setFocusedSolarBody(shareParams.bodyId);
+  }
+  if (shareParams.roomId) {
+    ufoMultiplayer.connect({ room: shareParams.roomId, relay: shareParams.relayUrl || '' });
+    syncMultiplayerChrome();
+  }
+  if (shareParams.surfaceActive) {
+    const ck = shareParams.pos ? {
+      activeVehicle: 'ufo',
+      ufoPos: shareParams.pos,
+      ufoYaw: shareParams.yaw ?? 0.35,
+      cameraMode: shareParams.cockpit ? 'first-person' : 'chase'
+    } : null;
+    await enterSurfaceViewUi({ bodyIndex: shareParams.bodyId || physics.planetaryBodyIndex, restoreCheckpoint: ck });
+  }
   selectDefaultTarget();
   syncScaleChrome();
+  syncWeaponControlsUi();
+  syncMultiplayerChrome();
 
   const urlPeerRelay = urlParams.get('peerRelay');
   if (urlPeerRelay) {
@@ -4110,7 +4578,10 @@ export async function mountUlgUniversesDemo() {
     updatePeerStatusUi();
   }
   updateInspectorCard();
-  const handleUnload = () => { void physics.disconnectPeerMesh(); };
+  const handleUnload = () => {
+    ufoMultiplayer.disconnect();
+    void physics.disconnectPeerMesh();
+  };
   window.addEventListener('pagehide', handleUnload);
   window.addEventListener('beforeunload', handleUnload);
   rafId = requestAnimationFrame(frame);
@@ -4228,6 +4699,27 @@ export async function mountUlgUniversesDemo() {
         hasSavedSurfaceCheckpoint: Boolean(savedSurfaceCheckpoint),
         savedSurfaceWorld: savedSurfaceCheckpoint?.worldName ?? null,
         activeSampledMaterial: physics.activeSampledMaterial ?? null,
+        cosmicCockpitMode,
+        xrState: xrBridge.getState(),
+        ufoMultiplayer: ufoMultiplayer.getStatus(),
+        timescaleLocked: ufoMultiplayer.timescaleLocked,
+        kardashev: {
+          index: kardashev.state.kardashevIndex,
+          harvestedPowerW: kardashev.state.harvestedPowerW,
+          probeCount: kardashev.state.probes.length,
+          reactorTier: kardashev.state.reactorTier,
+          shieldHp: kardashev.state.shieldHp,
+          silicatesKg: kardashev.state.silicatesKg,
+          metalsKg: kardashev.state.metalsKg,
+          volatilesKg: kardashev.state.volatilesKg
+        },
+        weaponState: {
+          mode: spaceWeaponMode,
+          log10WavelengthM: spaceLambdaLog10,
+          powerW: spacePowerW,
+          firing: spaceWeaponFiring,
+          tractorOn: spaceTractorOn
+        },
         scaleTimeDilation: physics.computeScaleAdaptiveTimeDilation(log10ViewSpanM, {
           surfaceActive: physics.surfaceActive,
           userTimeScale: timeScale
@@ -4555,8 +5047,68 @@ export async function mountUlgUniversesDemo() {
     setSurfaceCameraMode(mode) {
       physics.setSurfaceCameraMode(mode);
       syncSurfaceHud();
+      syncWeaponControlsUi();
       renderNow(performance.now());
       return this.getState();
+    },
+    toggleCockpit() {
+      toggleCockpitView();
+      return this.getState();
+    },
+    async toggleXr() {
+      await xrBridge.toggleXr((_t, eyeViews) => {
+        for (const ev of eyeViews) renderNow(performance.now(), ev);
+      });
+      renderNow(performance.now());
+      return this.getState();
+    },
+    setTractorBeam(on) {
+      spaceTractorOn = Boolean(on);
+      physics.setSurfaceTractorBeam(spaceTractorOn);
+      syncWeaponControlsUi();
+      renderNow(performance.now());
+      return this.getState();
+    },
+    setWeaponConfig(cfg = {}) {
+      if (cfg.mode) spaceWeaponMode = cfg.mode;
+      if (Number.isFinite(Number(cfg.log10WavelengthM))) spaceLambdaLog10 = Number(cfg.log10WavelengthM);
+      if (Number.isFinite(Number(cfg.powerW))) spacePowerW = Number(cfg.powerW);
+      physics.setSurfaceWeaponConfig({ mode: spaceWeaponMode, log10WavelengthM: spaceLambdaLog10, powerW: spacePowerW });
+      syncWeaponControlsUi();
+      return this.getState();
+    },
+    setWeaponFire(opts = {}) {
+      spaceWeaponFiring = Boolean(opts.firing);
+      physics.setSurfaceWeaponFire(opts);
+      syncWeaponControlsUi();
+      return this.getState();
+    },
+    launchMissile(opts = {}) {
+      const m = physics.launchSurfaceMissile(opts);
+      if (m && ufoMultiplayer.isConnected) ufoMultiplayer.broadcastMissileLaunch(m);
+      return m;
+    },
+    buildShareUrl: () => buildCurrentShareUrl(),
+    joinMultiplayerRoom(roomId = 'ulg-test-room', relayUrl = '') {
+      const st = ufoMultiplayer.connect({ room: roomId, relay: relayUrl });
+      syncMultiplayerChrome();
+      return st;
+    },
+    leaveMultiplayerRoom() {
+      const st = ufoMultiplayer.disconnect();
+      syncMultiplayerChrome();
+      return st;
+    },
+    deployVonNeumannProbe() {
+      const cat = physics.getActiveSystemCatalog();
+      const pr = kardashev.deployVonNeumannProbe({ bodyId: cat[physics.focusedSolarBodyIndex]?.id || 'earth' });
+      syncWeaponControlsUi();
+      return pr;
+    },
+    upgradeReactor() {
+      const ok = kardashev.upgradeReactor();
+      syncWeaponControlsUi();
+      return ok;
     },
     setSurfaceControls(partial = {}) {
       physics.setSurfaceControls(partial);
@@ -4635,6 +5187,8 @@ export async function mountUlgUniversesDemo() {
       window.removeEventListener('keyup', handleSurfaceKeyUp);
       window.removeEventListener('pagehide', handleUnload);
       window.removeEventListener('beforeunload', handleUnload);
+      ufoMultiplayer.disconnect();
+      void xrBridge.exitXr();
       entityPicker.dispose();
       physics.dispose();
       renderer.dispose();

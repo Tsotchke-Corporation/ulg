@@ -951,6 +951,10 @@
     </div>
 
     <div class="uv-actions">
+      <button id="uv-cockpit-btn" class="uv-btn" type="button" title="Toggle 3rd-Person Flying Saucer vs Inside-the-Green-Glass-Dome 3D Cockpit View (Shortcut: V)">🛸 Cockpit</button>
+      <button id="uv-xr-btn" class="uv-btn" type="button" title="Enter native WebXR WebGPU headset mode (XRGPUBinding) or Side-by-Side Stereo VR Preview">🥽 XR</button>
+      <button id="uv-share-btn" class="uv-btn" type="button" title="Copy a seedable URL link to your exact universe, epoch, position, and multiplayer room">🔗 Share</button>
+      <button id="uv-room-btn" class="uv-btn" type="button" title="Join or leave a PeerCompute multiplayer UFO room (locks timescale to synchronized 1.0x!)">🌐 Solo</button>
       <button id="uv-autopilot-btn" class="uv-btn" type="button" title="Toggle hands-free Autopilot tour from the Cosmic Web (10²⁵ m) down to the Atomic Nucleus (10⁻¹⁵ m)">▶ Tour</button>
       <button id="uv-sim-btn" class="uv-btn" type="button" title="Open Simulation controls: pause, time scale, Big Bang, reseed, and active-scale physics settings">🎛 Sim</button>
       <button id="uv-config-btn" class="uv-btn" type="button" title="Open Visual &amp; Engine Config: quality, Schwarzschild lensing, orbit trails, Retro CRT, and PeerCompute mesh">⚙ Config</button>
@@ -1162,15 +1166,36 @@
     </div>
     <div class="uv-surf-telemetry" id="uv-surf-chem-bar" style="display:none;gap:6px;font-size:10.5px;border-top:1px solid rgba(120,175,255,0.16);padding-top:5px;">
     </div>
+    <div class="uv-surf-telemetry" id="uv-surf-reaction-bar" style="display:none;gap:6px;font-size:10.5px;color:#fde68a;border-top:1px solid rgba(251,191,36,0.22);padding-top:4px;">
+    </div>
+    <div class="uv-surf-pills" id="uv-surf-weapon-bar" style="border-top:1px solid rgba(120,175,255,0.16);padding-top:5px;">
+      <button class="uv-surf-pill active" data-weapon="laser" type="button" title="Full-Spectrum Tunable EM Laser (10⁻¹³ m Gamma → 10 m Radio) firing from the 360° saucer rim [Key: 1]">⚡ EM Laser</button>
+      <button class="uv-surf-pill" data-weapon="missile" type="button" title="Rim-launched guided thermobaric missiles carving GPU MLS-MPM craters &amp; scattering boulders [Key: 2 / M]">🚀 Missile (M)</button>
+      <button class="uv-surf-pill" data-weapon="antimatter" type="button" title="Antimatter annihilation beam (E = 2mc², 511 keV gamma flash &amp; mega-crater) [Key: 3]">🟣 Antimatter</button>
+      <button id="uv-weapon-fire-btn" class="uv-surf-pill rocket" type="button" title="Hold X or click/hold to fire active 360° rim weapon">🔫 FIRE (X)</button>
+      <button id="uv-tractor-btn" class="uv-surf-pill" type="button" style="border-color:rgba(250,204,21,0.55);color:#fef08a;" title="Hold/Toggle T for Yellow Conical Tractor Beam: lift rigid boulders &amp; harvest elemental resources">🛸 TRACTOR (T)</button>
+      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#bae6fd;" title="Tune EM laser wavelength logarithmically from Gamma (10⁻¹³ m) through X-Ray, UV, Visible, IR, Microwave, to Radio (10 m)">
+        <span>λ</span>
+        <input id="uv-lambda-slider" type="range" min="-13" max="1" step="0.05" value="-6.27" style="width:82px;accent-color:#34d399;" />
+        <span id="uv-lambda-readout" style="min-width:78px;color:#6ee7b7;font-weight:700;">532 nm VIS</span>
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:#fde68a;" title="Tune EM laser output power from 1 kW (10³ W) to 100 TW (10¹⁴ W)">
+        <span>P</span>
+        <input id="uv-power-slider" type="range" min="3" max="14" step="0.2" value="8.4" style="width:62px;accent-color:#f59e0b;" />
+        <span id="uv-power-readout" style="min-width:48px;font-weight:700;">250 MW</span>
+      </label>
+      <button id="uv-probe-btn" class="uv-surf-pill sample" type="button" title="Spend 40 kg Metals + 40 kg Silicates to deploy a self-replicating Von Neumann Probe (Key: P)">🤖 Probe (P)</button>
+      <span id="uv-kardashev-badge" style="font-family:var(--mono);font-size:10px;color:#6ee7b7;padding:0 4px;">K 0.72 · 0 Probes</span>
+    </div>
     <div class="uv-surf-pills">
-      <button id="uv-surf-sample-btn" class="uv-surf-pill sample" type="button" title="Press G to sample the exact local terrain or atmospheric stratum directly below your vehicle and zoom into its atomic lattice, compounds, and elements">🔬 SAMPLE BELOW (G)</button>
-      <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to fire Rover Jump Rockets (or ascend in Drone / UFO)">🔥 ROCKET JUMP</button>
-      <button id="uv-surf-descend-btn" class="uv-surf-pill" style="display:none;" type="button" title="Hold Ctrl/C or press to dive deeper into atmospheric pressure strata">⬇ DIVE DEEPER (C)</button>
-      <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to switch between Rover, Atmospheric Drone, and 3D CFD Buoyant UFO">🚁 DEPLOY DRONE (F)</button>
-      <button id="uv-surf-cam-btn" class="uv-surf-pill" type="button" title="Press V to toggle 3rd-Person Chase and 1st-Person Cockpit Camera">📷 3RD CAM (V)</button>
+      <button id="uv-surf-sample-btn" class="uv-surf-pill sample" type="button" title="Press G to activate the yellow tractor beam, sample directly below your craft, and inspect its atomic lattice, compounds, and elements">🔬 SAMPLE BELOW (G)</button>
+      <button id="uv-surf-jump-btn" class="uv-surf-pill rocket" type="button" title="Hold Space or press to ascend in UFO/Drone or fire Rover Jump Rockets">⬆ ASCEND (Space)</button>
+      <button id="uv-surf-descend-btn" class="uv-surf-pill" type="button" title="Hold Ctrl/C to dive deeper toward surface or atmospheric strata">⬇ DIVE (C)</button>
+      <button id="uv-surf-vehicle-btn" class="uv-surf-pill" type="button" title="Press F to Beam Down Rover via tractor beam, deploy Drone, or return to the 60-ft UFO">🚙 BEAM DOWN ROVER (F)</button>
+      <button id="uv-surf-cam-btn" class="uv-surf-pill" type="button" title="Press V to toggle 3rd-Person Chase and Inside-the-Green-Glass-Dome 3D Cockpit View">📷 3RD CAM (V)</button>
       <button id="uv-surf-orbit-btn" class="uv-surf-pill" type="button" title="Press Esc to launch back to Orbital Planetary View">🚀 ORBIT (Esc)</button>
     </div>
-    <div class="uv-surf-keys" id="uv-surf-keys">WASD: Drive/Fly · G: Sample Below → Lattice · Space: Jump/Ascend · Ctrl/C: Brake/Dive · F: Rover/Drone/UFO · V: Cam · Esc: Orbit</div>
+    <div class="uv-surf-keys" id="uv-surf-keys">WASD: Fly/Drive · Space/C: Up/Down · X: Fire Rim Weapon · M: Missile · T: Yellow Tractor Beam · G: Sample → Lattice · F: Beam Down Rover/Drone/UFO · V: Cockpit · P: Von Neumann Probe · Esc: Orbit</div>
   </section>
 
   <!-- Hyperdrive Transition Overlay -->

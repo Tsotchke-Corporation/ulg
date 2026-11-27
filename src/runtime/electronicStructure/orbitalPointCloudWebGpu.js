@@ -123,8 +123,9 @@ export function buildOrbitalCdfTables({
   const radialShell = new Float32Array(RADIAL_CDF_BINS);
   const radialSign = new Float32Array(RADIAL_CDF_BINS);
 
-  const useSolvedKs = Array.isArray(rGrid) && rGrid.length >= 32
-    && orbitalU && orbitalU.length === rGrid.length;
+  const hasRGrid = (Array.isArray(rGrid) || ArrayBuffer.isView(rGrid)) && rGrid.length >= 32;
+  const hasOrbU = (Array.isArray(orbitalU) || ArrayBuffer.isView(orbitalU)) && orbitalU.length === rGrid?.length;
+  const useSolvedKs = hasRGrid && hasOrbU;
 
   let rExtentBohr = 6.0;
   let sourceKind = 'analytic-laguerre-slater';
@@ -212,23 +213,42 @@ export function buildOrbitalCdfTables({
     for (let b = 0; b < RADIAL_CDF_BINS; b += 1) radialCdf[b] *= invTot;
   }
 
-  // Exact polar distribution |P_l^{|m|}(mu)|^2 * spinOrbitFactor(mu) on mu = cos(theta) in [-1, 1]
+  // Exact parity-conserving polar distribution on mu = cos(theta) in [-1, 1]:
+  //   Non-relativistic: |P_l^{|m|}(mu)|^2 (strictly even in mu!)
+  //   Relativistic Dirac spinor |kappa, m_j>: Clebsch-Gordan weighted |Y_l^{m_j-1/2}|^2 + |Y_l^{m_j+1/2}|^2
+  //   (strictly EVEN under parity inversion mu -> -mu; ZERO parity-breaking linear mu bias!)
   const zEffSo = slaterEffectiveZ(Z, nSafe, lSafe, screeningExchange);
   const betaSo = (FINE_STRUCTURE_ALPHA * zEffSo) ** 2;
-  const soCoupling = (relativisticSpinOrbit && lSafe > 0 && mSafe !== 0)
-    ? (betaSo * 0.28 * lSafe) / Math.max(1, nSafe * nSafe)
-    : 0;
+  const soMix = (relativisticSpinOrbit && lSafe > 0)
+    ? Math.min(0.45, betaSo * 0.65)
+    : 0.0;
+  const mAlt = Math.min(lSafe, Math.abs(mAbs === lSafe ? Math.max(0, mAbs - 1) : mAbs + 1));
 
   const polarCdf = new Float32Array(POLAR_CDF_BINS);
   const polarSign = new Float32Array(POLAR_CDF_BINS);
   let polAcc = 0;
+  let normAlt = 1.0;
+  if (soMix > 0) {
+    let sMain = 0;
+    let sAlt = 0;
+    for (let b = 0; b < POLAR_CDF_BINS; b += 1) {
+      const mu = -1.0 + ((b + 0.5) / POLAR_CDF_BINS) * 2.0;
+      const p0 = associatedLegendre(lSafe, mAbs, mu);
+      const p1 = associatedLegendre(lSafe, mAlt, mu);
+      sMain += p0 * p0;
+      sAlt += p1 * p1;
+    }
+    normAlt = sAlt > 1e-12 ? sMain / sAlt : 1.0;
+  }
   for (let b = 0; b < POLAR_CDF_BINS; b += 1) {
     const mu = -1.0 + ((b + 0.5) / POLAR_CDF_BINS) * 2.0;
     const plm = associatedLegendre(lSafe, mAbs, mu);
-    const soFactor = soCoupling > 0
-      ? Math.max(0.35, Math.min(1.65, 1.0 + soCoupling * mu * (mSafe / Math.max(1, lSafe))))
-      : 1.0;
-    polAcc += plm * plm * soFactor;
+    let angProb = plm * plm;
+    if (soMix > 0) {
+      const plmAlt = associatedLegendre(lSafe, mAlt, mu);
+      angProb = (1.0 - soMix) * angProb + soMix * (plmAlt * plmAlt * normAlt);
+    }
+    polAcc += angProb;
     polarCdf[b] = polAcc;
     polarSign[b] = plm >= 0 ? 1.0 : -1.0;
   }
@@ -862,7 +882,8 @@ function getDipolePairPipeline(device) {
 
 function evalRadialArray(Z, n, l, rGrid, orbitalU, rSamples, screening, relativistic) {
   const out = new Float32Array(rSamples.length);
-  const useKs = Array.isArray(rGrid) && rGrid.length >= 32 && orbitalU && orbitalU.length === rGrid.length;
+  const useKs = (Array.isArray(rGrid) || ArrayBuffer.isView(rGrid)) && rGrid.length >= 32
+    && (Array.isArray(orbitalU) || ArrayBuffer.isView(orbitalU)) && orbitalU.length === rGrid.length;
   if (useKs) {
     let cursor = 0;
     for (let b = 0; b < rSamples.length; b += 1) {

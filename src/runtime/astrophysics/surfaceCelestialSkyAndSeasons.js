@@ -393,6 +393,55 @@ export function buildSurfaceTangentBasis({
 }
 
 /**
+ * First-principles orbital seasonal state for any planet/moon in L2/L4 space view:
+ * computes live subsolar declination `sin(delta) = dot(spinPole, toStarUnit)` from
+ * physical `axialObliquityDeg` & `spinAxisLonDeg` (ZERO planet-name hacks, ZERO hardcoded calendar!),
+ * plus spin-aligned tilted sunlight direction so the orbital terminator tilts with obliquity!
+ */
+export function computeOrbitalSeasonalState({
+  bodySpec = {},
+  toStarUnit = [1, 0, 0]
+} = {}) {
+  const isLocked = Boolean(bodySpec?.tidallyLocked);
+  const rawObl = bodySpec?.axialObliquityDeg;
+  const obliquityDeg = isLocked
+    ? 0.0
+    : (Number.isFinite(Number(rawObl)) ? Number(rawObl) : 23.44);
+  const spinLonDeg = Number.isFinite(Number(bodySpec?.spinAxisLonDeg)) ? Number(bodySpec.spinAxisLonDeg) : 90.0;
+  const deg = Math.PI / 180;
+  const obl = obliquityDeg * deg;
+  const lon = spinLonDeg * deg;
+  const pole = norm3([
+    Math.sin(obl) * Math.cos(lon),
+    Math.cos(obl),
+    Math.sin(obl) * Math.sin(lon)
+  ]);
+  const s = norm3(Array.isArray(toStarUnit) && toStarUnit.length >= 3 ? toStarUnit : [1, 0, 0]);
+  const sinDecl = Math.abs(obliquityDeg) < 0.25 ? 0.0 : Math.max(-0.985, Math.min(0.985, dot3(pole, s)));
+  const cosDecl = Math.sqrt(Math.max(0.0, 1.0 - sinDecl * sinDecl));
+  const declDeg = Math.asin(sinDecl) * (180 / Math.PI);
+  const horizLen = Math.hypot(s[0], s[2]);
+  const hx = horizLen > 1e-6 ? s[0] / horizLen : 1.0;
+  const hz = horizLen > 1e-6 ? s[2] / horizLen : 0.0;
+  const tiltedLightDir = norm3([hx * cosDecl, sinDecl, hz * cosDecl]);
+
+  let seasonLabel = 'Equinox';
+  if (isLocked) seasonLabel = 'Tidally Locked';
+  else if (Math.abs(obliquityDeg) < 4.0) seasonLabel = 'Aseasonal';
+  else if (sinDecl > 0.14) seasonLabel = 'N. Summer / S. Winter';
+  else if (sinDecl < -0.14) seasonLabel = 'N. Winter / S. Summer';
+  else seasonLabel = 'Equinox';
+
+  return Object.freeze({
+    obliquityDeg: Number(obliquityDeg.toFixed(2)),
+    sinDecl: Number(sinDecl.toFixed(5)),
+    declDeg: Number(declDeg.toFixed(2)),
+    seasonLabel,
+    tiltedLightDir: Object.freeze(tiltedLightDir)
+  });
+}
+
+/**
  * Exact circle-circle angular occultation fraction `f_occ in [0, 1]` when an occluder
  * disk of angular radius `rOcc` is at angular separation `sep` from a star disk `rStar`.
  */
@@ -672,20 +721,23 @@ export function buildLiveSurfaceCelestialSky({
   // Seasonal insolation anomaly relative to equinox (positive in local summer, negative in local winter!)
   const seasonSignal = Math.sin(latRad) * sinDecl;
   const baseTempK = Number(env.tempK) || 288;
-  // Thermal inertia damped seasonal temperature swing (larger on dry/thin-air worlds, gentler on deep oceans)
-  const thermalSwingK = env.hasLiquidOcean ? 34.0 : 48.0;
-  const seasonalTempK = Math.max(35, baseTempK + seasonSignal * thermalSwingK * 1.18 + (primarySunDir[1] * 6.0));
+  // Physical latitude gradient (equator warm, mid-latitudes temperate, poles cold) + obliquity seasonal swing
+  // (0 deg obliquity -> sinDecl = 0 -> strictly 0 K seasonal swing; 23.4 deg mid-lat Earth crosses 273.15 K cleanly in Winter!)
+  const sinLat = Math.sin(latRad);
+  const latTempOffsetK = -22.0 * (sinLat * sinLat - 0.25);
+  const thermalSwingK = env.hasLiquidOcean ? 62.0 : 88.0;
+  const seasonalTempK = Math.max(35, baseTempK + latTempOffsetK + seasonSignal * thermalSwingK * 1.15 + (primarySunDir[1] * 6.0));
 
   // Physical adiabatic lapse-rate snowline h_snow(t) = (T_sea(t) - T_melt) / Gamma_lapse
   const tMeltK = Number(env.solventMeltTempK) || 273.15;
   const lapseKPerM = Math.max(0.004, Math.min(0.025, (Number(env.gravityMS2) || 9.81) / 1004.0)) * 18.0; // scaled to 40-80 m mountain relief!
-  const snowlineM = Math.max(-12.0, Math.min(120.0, (seasonalTempK - tMeltK) / lapseKPerM + 6.0));
+  const snowlineM = Math.max(-12.0, Math.min(120.0, (seasonalTempK - tMeltK) / lapseKPerM + 5.0));
   // Sea-ice freeze-thaw fraction (smooth freezing below T_melt; >= 0.72 freezes winter seas walkable/drivable!)
   const iceCoverFrac = env.hasLiquidOcean
-    ? Math.max(0, Math.min(1, (tMeltK - seasonalTempK + 2.5) / 14.0))
+    ? Math.max(0, Math.min(1, (tMeltK - seasonalTempK + 2.5) / 12.0))
     : 0.0;
   // Autumn phenology peaks as season cools toward equinox/early winter
-  const autumnShift = Math.max(0, Math.min(1, Math.exp(-Math.pow((seasonSignal + 0.14) / 0.18, 2)) * (Math.abs(Number(focusSpec.axialObliquityDeg) || 0) > 8 ? 1.0 : 0.2)));
+  const autumnShift = Math.max(0, Math.min(1, Math.exp(-Math.pow((seasonSignal + 0.12) / 0.16, 2)) * (Math.abs(Number(focusSpec.axialObliquityDeg) || 0) > 8 ? 1.0 : 0.0)));
 
   let seasonName = 'Equinox';
   if (Math.abs(Number(focusSpec.axialObliquityDeg) || 0) < 4) seasonName = 'Aseasonal';

@@ -686,9 +686,16 @@ fn vs_cloud(
   let stark_lam = u.stark.x;
   let pos_eff = pt.xyz - vec3<f32>(stark_lam * (0.42 + 0.85 * min(1.8, r2_pt)), 0.0, 0.0);
   let view = project_pt(pos_eff);
+  if (view.z < 0.15) {
+    var culled: VsOut;
+    culled.clip_pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    culled.local_uv = vec2<f32>(0.0);
+    culled.color = vec4<f32>(0.0);
+    return culled;
+  }
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
   let fov = 1.95 * min(1.0, aspect);
-  let inv_z = 1.0 / max(0.25, view.z);
+  let inv_z = 1.0 / view.z;
   let cx = view.x * fov * inv_z / aspect;
   let cy = view.y * fov * inv_z;
 

@@ -409,9 +409,10 @@ fn integrate_organic_atoms(@builtin(global_invocation_id) gid: vec3<u32>) {
   let spd_i = length(a.vel_q.xyz);
   let gamma_eff = select(params.gamma_damp, 0.88 + 0.38 * min(4.0, spd_i), is_free_rotor);
   let s0 = f32(i) * 19.31 + f32(params.step_index) * 3.73;
-  let rx = (hash_f(s0 + 1.1) + hash_f(s0 + 2.3) - 1.0) * 1.732;
-  let ry = (hash_f(s0 + 3.7) + hash_f(s0 + 5.1) - 1.0) * 1.732;
-  let rz = (hash_f(s0 + 7.3) + hash_f(s0 + 9.9) - 1.0) * 1.732;
+  // Unit-variance triangular noise: Var(U1 + U2 - 1) = 1/6 -> multiply by sqrt(6) = 2.4494897 for exact Var = 1.0!
+  let rx = (hash_f(s0 + 1.1) + hash_f(s0 + 2.3) - 1.0) * 2.4494897;
+  let ry = (hash_f(s0 + 3.7) + hash_f(s0 + 5.1) - 1.0) * 2.4494897;
+  let rz = (hash_f(s0 + 7.3) + hash_f(s0 + 9.9) - 1.0) * 2.4494897;
   let sigma_v = sqrt(max(0.0, params.temp_k * 0.00018 * gamma_eff * inv_m * dt));
 
   var v = a.vel_q.xyz + f * (inv_m * dt);
@@ -796,6 +797,13 @@ export function createReactiveBondOrderMdSessionWebGpu(device, {
   function setDielectricEr(eps) {
     curEps = Math.max(1.0, Math.min(100.0, Number(eps) || 1.0));
     curQeq = solveQeqCharges(g, { dielectricEr: curEps });
+    if (!disposed && curQeq?.charges) {
+      const qBuf = new Float32Array(1);
+      for (let i = 0; i < n; i += 1) {
+        qBuf[0] = Number(curQeq.charges[i]) || 0.0;
+        device.queue.writeBuffer(atomsBuf, i * 64 + 28, qBuf);
+      }
+    }
   }
   function setReactionProgress(p) { reactProgress = Math.max(0, Math.min(reactMode === 3 ? 1.5 : 1, Number(p) || 0)); }
 

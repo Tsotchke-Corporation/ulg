@@ -240,9 +240,10 @@ fn step_biopolymer_folding(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Langevin Brownian dynamics scaled to THIS organism's native temperature & denaturation threshold t_denature_k!
   let dt = params.dt;
   let s0 = f32(i) * 17.13 + f32(params.step_index) * 4.31;
-  let rx = (hash_p(s0 + 1.1) + hash_p(s0 + 2.7) - 1.0) * 1.732;
-  let ry = (hash_p(s0 + 3.9) + hash_p(s0 + 5.3) - 1.0) * 1.732;
-  let rz = (hash_p(s0 + 7.1) + hash_p(s0 + 8.9) - 1.0) * 1.732;
+  // Unit-variance triangular noise: Var(U1 + U2 - 1) = 1/6 -> multiply by sqrt(6) = 2.4494897 for exact FDT Var = 1.0!
+  let rx = (hash_p(s0 + 1.1) + hash_p(s0 + 2.7) - 1.0) * 2.4494897;
+  let ry = (hash_p(s0 + 3.9) + hash_p(s0 + 5.3) - 1.0) * 2.4494897;
+  let rz = (hash_p(s0 + 7.1) + hash_p(s0 + 8.9) - 1.0) * 2.4494897;
   let t_den = max(110.0, params.t_denature_k);
   let t_scale = 300.0 / max(75.0, params.t_ref_k);
   let t_excess = max(0.0, params.temp_k - t_den) * t_scale;
@@ -331,25 +332,40 @@ fn reduce_biopolymer_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
     }
     i = i + 64u;
   }
-  wg0[tid] = rg2; wg1[tid] = hel_cnt; wg2[tid] = hp_cnt; wg3[tid] = length(e_pocket);
+  wg0[tid] = rg2; wg1[tid] = hel_cnt; wg2[tid] = hp_cnt;
   workgroupBarrier();
   s = 32u;
   loop {
     if (s == 0u) { break; }
     if (tid < s) {
-      wg0[tid] += wg0[tid + s]; wg1[tid] += wg1[tid + s];
-      wg2[tid] += wg2[tid + s]; wg3[tid] += wg3[tid + s];
+      wg0[tid] += wg0[tid + s]; wg1[tid] += wg1[tid + s]; wg2[tid] += wg2[tid + s];
+    }
+    workgroupBarrier();
+    s = s >> 1u;
+  }
+  let rg_tot = wg0[0];
+  let hel_tot = wg1[0];
+  let hp_tot = wg2[0];
+  workgroupBarrier();
+  // Exact 3D vector reduction of E_pocket = sum(E_i) BEFORE taking magnitude |sum(E_i)| so opposite charges properly cancel!
+  wg0[tid] = e_pocket.x; wg1[tid] = e_pocket.y; wg2[tid] = e_pocket.z;
+  workgroupBarrier();
+  s = 32u;
+  loop {
+    if (s == 0u) { break; }
+    if (tid < s) {
+      wg0[tid] += wg0[tid + s]; wg1[tid] += wg1[tid + s]; wg2[tid] += wg2[tid + s];
     }
     workgroupBarrier();
     s = s >> 1u;
   }
   if (tid == 0u) {
-    let rg = sqrt(wg0[0] * inv_n);
-    let hel_frac = wg1[0] / max(1.0, f32(n) - 4.0);
+    let rg = sqrt(rg_tot * inv_n);
+    let hel_frac = hel_tot / max(1.0, f32(n) - 4.0);
     // Compactness gates active-site electrostatic preorganization: unfolded chain loses pocket alignment!
     let compact = clamp(1.0 - smoothstep(2.6, 5.8, rg), 0.0, 1.0);
-    let e_field_norm = wg3[0] * compact;
-    telemetry[0] = vec4<f32>(rg, hel_frac, wg2[0], e_field_norm);
+    let e_field_norm = length(vec3<f32>(wg0[0], wg1[0], wg2[0])) * compact;
+    telemetry[0] = vec4<f32>(rg, hel_frac, hp_tot, e_field_norm);
   }
 }
 `;

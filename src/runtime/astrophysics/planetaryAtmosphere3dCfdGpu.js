@@ -247,15 +247,29 @@ export function deriveAtmosphericColumnProfile(bodySpec = {}, env = null) {
       { id: 'C2H6', name: 'Ethane / Tholins', moleFrac: 0.003, condensable: false }
     ];
   } else if (basePressurePa >= 2e4 && volatileFrac >= 0.015 && baseTempK >= 255 && baseTempK <= 375) {
-    // Temperate liquid-water rocky atmosphere (Earth-like!)
+    // Temperate liquid-water rocky atmosphere: free O2 ONLY when an active oxygenic biosphere is present
+    // (abiotic ocean worlds retain realistic N2 / CO2 / H2O / Ar atmospheres with zero biogenic O2!)
     const h2oFrac = clamp(0.012 + volatileFrac * 0.14, 0.008, 0.038);
-    bulkComposition = [
-      { id: 'N2', name: 'Nitrogen', moleFrac: 0.781 - h2oFrac * 0.78, condensable: false },
-      { id: 'O2', name: 'Oxygen', moleFrac: 0.209 - h2oFrac * 0.21, condensable: false },
-      { id: 'H2O', name: 'Water Vapor', moleFrac: h2oFrac, condensable: true },
-      { id: 'Ar', name: 'Argon', moleFrac: 0.0093, condensable: false },
-      { id: 'CO2', name: 'Carbon Dioxide', moleFrac: 0.00045, condensable: false }
-    ];
+    const hasOxygenicLife = !env?.xenobiology
+      ? (bodySpec.id === 'earth' || (Number(bodySpec.civTechK) || 0) > 0)
+      : (env.xenobiology.biosphereViability >= 0.30 && env.xenobiology.solvent === 'H2O' && (env.xenobiology.zSchemePhotons || 0) >= 2);
+    if (hasOxygenicLife) {
+      bulkComposition = [
+        { id: 'N2', name: 'Nitrogen', moleFrac: 0.781 - h2oFrac * 0.78, condensable: false },
+        { id: 'O2', name: 'Oxygen (Biogenic)', moleFrac: 0.209 - h2oFrac * 0.21, condensable: false },
+        { id: 'H2O', name: 'Water Vapor', moleFrac: h2oFrac, condensable: true },
+        { id: 'Ar', name: 'Argon', moleFrac: 0.0093, condensable: false },
+        { id: 'CO2', name: 'Carbon Dioxide', moleFrac: 0.00045, condensable: false }
+      ];
+    } else {
+      const co2Frac = clamp(0.04 + 0.08 * (1.0 - clamp((baseTempK - 260) / 90, 0, 1)), 0.015, 0.14);
+      bulkComposition = [
+        { id: 'N2', name: 'Nitrogen', moleFrac: Math.max(0.70, 1.0 - h2oFrac - co2Frac - 0.012), condensable: false },
+        { id: 'CO2', name: 'Carbon Dioxide', moleFrac: co2Frac, condensable: false },
+        { id: 'H2O', name: 'Water Vapor', moleFrac: h2oFrac, condensable: true },
+        { id: 'Ar', name: 'Argon', moleFrac: 0.012, condensable: false }
+      ];
+    }
   } else if (basePressurePa >= 20) {
     // Thin dry CO2/N2 rocky atmosphere
     bulkComposition = [
@@ -897,9 +911,12 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
   deck_rgb = mix(deck_rgb, p.deck0_col.rgb, smoothstep(0.55, 0.88, yn));
   let spd = length(v_loc.xyz);
 
+  // Smooth radial edge fade approaching the ±half_xz 3D CFD domain border so clouds/streamers never blink abruptly!
+  let edge_norm = max(abs(px - cx), abs(pz - cz)) / max(1.0, half_xz);
+  let box_edge_fade = 1.0 - smoothstep(0.72, 0.98, edge_norm);
   var col = deck_rgb;
   var sz = 1.8;
-  var live = 1.0;
+  var live = box_edge_fade;
   if (role < 3.5) {
     // 3D Volumetric Cloud Strata Puff: shaded naturally by live solar elevation (dark blue-indigo at midnight, warm gold at dusk, crisp white at noon!)
     let day_sh = smoothstep(-0.14, 0.28, sun_elev);

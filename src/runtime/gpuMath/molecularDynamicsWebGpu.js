@@ -347,8 +347,9 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
   let dFi = unwrapped[i].w;
   let beta = max(params.pot1.y, 0.25);
 
-  var nb_vec: array<vec3<f32>, 12>;
-  var nb_r: array<f32, 12>;
+  var nb_vec: array<vec3<f32>, 16>;
+  var nb_r: array<f32, 16>;
+  var nb_idx: array<u32, 16>;
   var nb_count = 0u;
 
   let next_base = params.cell_cfg.w;
@@ -379,9 +380,10 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
               if (r2 < rcut2 && r2 > 1.0e-8) {
                 let r = sqrt(r2);
                 if (r2 < r_coord_cut2) { coord_i = coord_i + 1u; }
-                if (model == 2u && nb_count < 12u) {
+                if (model == 2u && nb_count < 16u) {
                   nb_vec[nb_count] = -d;
                   nb_r[nb_count] = r;
+                  nb_idx[nb_count] = j;
                   nb_count = nb_count + 1u;
                 }
                 if (sample_rdf) {
@@ -448,9 +450,10 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
       if (r2 >= rcut2 || r2 <= 1.0e-8) { continue; }
       let r = sqrt(r2);
       if (r2 < r_coord_cut2) { coord_i = coord_i + 1u; }
-      if (model == 2u && nb_count < 12u) {
+      if (model == 2u && nb_count < 16u) {
         nb_vec[nb_count] = -d;
         nb_r[nb_count] = r;
+        nb_idx[nb_count] = j;
         nb_count = nb_count + 1u;
       }
       if (sample_rdf) {
@@ -504,35 +507,119 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   }
 
-  // Stillinger-Weber 3-body tetrahedral term when model == 2 (covalent sp3 bonding)
-  if (model == 2u && params.pot0.z > 0.0 && nb_count >= 2u) {
+  // Stillinger-Weber 3-body tetrahedral term when model == 2 (covalent sp3 bonding):
+  //   1. Center-vertex (i) triplets (i, j, k): f_i += grad_j + grad_k + exact triplet virial W_ijk = -r_ij x grad_j - r_ik x grad_k!
+  //   2. Outer-arm gather on neighbor j triplets (j, i, k): f_i -= grad_i(j, i, k) -> exact Newton's 3rd Law (f_i + f_j + f_k == 0)!
+  if (model == 2u && params.pot0.z > 0.0 && nb_count >= 1u) {
     let lambda_sw = params.pot0.z;
     let gamma_sw = max(params.pot1.z, 1.2);
     let a_sw = rcut / sig;
-    for (var a = 0u; a + 1u < nb_count; a = a + 1u) {
+    if (nb_count >= 2u) {
+      for (var a = 0u; a + 1u < nb_count; a = a + 1u) {
+        let ra = nb_r[a] / sig;
+        let da = ra - a_sw;
+        if (da >= -1.0e-3) { continue; }
+        let ea = exp(gamma_sw / da);
+        let ua = nb_vec[a] / nb_r[a];
+        for (var b = a + 1u; b < nb_count; b = b + 1u) {
+          let rb = nb_r[b] / sig;
+          let db = rb - a_sw;
+          if (db >= -1.0e-3) { continue; }
+          let eb = exp(gamma_sw / db);
+          let ub = nb_vec[b] / nb_r[b];
+          let cos_t = clamp(dot(ua, ub), -1.0, 1.0);
+          let diff = cos_t + 0.33333333;
+          let pre = lambda_sw * eps * ea * eb;
+          let u3 = pre * diff * diff;
+          epot_i = epot_i + u3;
+          let d_cos_dj = (ub - ua * cos_t) / nb_r[a];
+          let d_cos_dk = (ua - ub * cos_t) / nb_r[b];
+          let d_ea_dr = -(gamma_sw / (da * da * sig));
+          let d_eb_dr = -(gamma_sw / (db * db * sig));
+          let grad_j = pre * (2.0 * diff * d_cos_dj + diff * diff * d_ea_dr * ua);
+          let grad_k = pre * (2.0 * diff * d_cos_dk + diff * diff * d_eb_dr * ub);
+          fi = fi + grad_j + grad_k;
+          // Exact 3-body virial contribution W_ijk = r_ij * (-grad_j) + r_ik * (-grad_k)
+          vir_v = vir_v - nb_vec[a] * grad_j - nb_vec[b] * grad_k;
+          sxy = sxy - nb_vec[a].x * grad_j.y - nb_vec[b].x * grad_k.y;
+          sxz = sxz - nb_vec[a].x * grad_j.z - nb_vec[b].x * grad_k.z;
+          syz = syz - nb_vec[a].y * grad_j.z - nb_vec[b].y * grad_k.z;
+        }
+      }
+    }
+    // Outer-arm reciprocal forces from every neighbor j acting as central vertex of (j, i, k):
+    for (var a = 0u; a < nb_count; a = a + 1u) {
       let ra = nb_r[a] / sig;
       let da = ra - a_sw;
       if (da >= -1.0e-3) { continue; }
+      let j_idx = nb_idx[a];
+      let pj = pos[j_idx].xyz;
       let ea = exp(gamma_sw / da);
-      let ua = nb_vec[a] / nb_r[a];
-      for (var b = a + 1u; b < nb_count; b = b + 1u) {
-        let rb = nb_r[b] / sig;
-        let db = rb - a_sw;
-        if (db >= -1.0e-3) { continue; }
-        let eb = exp(gamma_sw / db);
-        let ub = nb_vec[b] / nb_r[b];
-        let cos_t = clamp(dot(ua, ub), -1.0, 1.0);
-        let diff = cos_t + 0.33333333;
-        let pre = lambda_sw * eps * ea * eb;
-        let u3 = pre * diff * diff;
-        epot_i = epot_i + u3;
-        let d_cos_dj = (ub - ua * cos_t) / nb_r[a];
-        let d_cos_dk = (ua - ub * cos_t) / nb_r[b];
-        let d_ea_dr = -(gamma_sw / (da * da * sig));
-        let d_eb_dr = -(gamma_sw / (db * db * sig));
-        let grad_j = pre * (2.0 * diff * d_cos_dj + diff * diff * d_ea_dr * ua);
-        let grad_k = pre * (2.0 * diff * d_cos_dk + diff * diff * d_eb_dr * ub);
-        fi = fi + grad_j + grad_k;
+      let u_ji = -nb_vec[a] / nb_r[a]; // unit vector from j -> i
+      let d_ea_dr = -(gamma_sw / (da * da * sig));
+      if (next_base > 0u) {
+        let dims = max(params.cell_cfg.xyz, vec3<u32>(1u));
+        let cj = atom_cell_coord(pj, box_l, dims);
+        let dx_min = select(0i, -1i, dims.x >= 3u);
+        let dx_max = select(i32(dims.x) - 1i, 1i, dims.x >= 3u);
+        let dy_min = select(0i, -1i, dims.y >= 3u);
+        let dy_max = select(i32(dims.y) - 1i, 1i, dims.y >= 3u);
+        let dz_min = select(0i, -1i, dims.z >= 3u);
+        let dz_max = select(i32(dims.z) - 1i, 1i, dims.z >= 3u);
+        for (var dz = dz_min; dz <= dz_max; dz = dz + 1i) {
+          let cz = select(u32(dz), u32((i32(cj.z) + dz + i32(dims.z)) % i32(dims.z)), dims.z >= 3u);
+          for (var dy = dy_min; dy <= dy_max; dy = dy + 1i) {
+            let cy_raw = select(dy, i32(cj.y) + dy, dims.y >= 3u);
+            if (wall_y && (cy_raw < 0i || cy_raw >= i32(dims.y))) { continue; }
+            let cy = select(u32(cy_raw), u32((cy_raw + i32(dims.y)) % i32(dims.y)), !wall_y && dims.y >= 3u);
+            for (var dx = dx_min; dx <= dx_max; dx = dx + 1i) {
+              let cx = select(u32(dx), u32((i32(cj.x) + dx + i32(dims.x)) % i32(dims.x)), dims.x >= 3u);
+              let cid = cell_linear_idx(vec3<u32>(cx, cy, cz), dims);
+              var k = atomicLoad(&cell_grid[cid]);
+              var guard_k = 0u;
+              while (k != EMPTY_CELL_U && guard_k < MAX_CELL_WALK_U) {
+                if (k != j_idx && k != i) {
+                  let r_jk_vec = min_image_cfg(pos[k].xyz - pj, box_l, wall_y);
+                  let r_jk2 = dot(r_jk_vec, r_jk_vec);
+                  if (r_jk2 < rcut2 && r_jk2 > 1.0e-8) {
+                    let r_jk = sqrt(r_jk2);
+                    let db = r_jk / sig - a_sw;
+                    if (db < -1.0e-3) {
+                      let eb = exp(gamma_sw / db);
+                      let u_jk = r_jk_vec / r_jk;
+                      let cos_t = clamp(dot(u_ji, u_jk), -1.0, 1.0);
+                      let diff = cos_t + 0.33333333;
+                      let pre = lambda_sw * eps * ea * eb;
+                      let d_cos_di = (u_jk - u_ji * cos_t) / nb_r[a];
+                      let grad_i = pre * (2.0 * diff * d_cos_di + diff * diff * d_ea_dr * u_ji);
+                      fi = fi - grad_i;
+                    }
+                  }
+                }
+                k = atomicLoad(&cell_grid[next_base + k]);
+                guard_k = guard_k + 1u;
+              }
+            }
+          }
+        }
+      } else {
+        for (var k = 0u; k < n; k = k + 1u) {
+          if (k == j_idx || k == i) { continue; }
+          let r_jk_vec = min_image_cfg(pos[k].xyz - pj, box_l, wall_y);
+          let r_jk2 = dot(r_jk_vec, r_jk_vec);
+          if (r_jk2 >= rcut2 || r_jk2 <= 1.0e-8) { continue; }
+          let r_jk = sqrt(r_jk2);
+          let db = r_jk / sig - a_sw;
+          if (db >= -1.0e-3) { continue; }
+          let eb = exp(gamma_sw / db);
+          let u_jk = r_jk_vec / r_jk;
+          let cos_t = clamp(dot(u_ji, u_jk), -1.0, 1.0);
+          let diff = cos_t + 0.33333333;
+          let pre = lambda_sw * eps * ea * eb;
+          let d_cos_di = (u_jk - u_ji * cos_t) / nb_r[a];
+          let grad_i = pre * (2.0 * diff * d_cos_di + diff * diff * d_ea_dr * u_ji);
+          fi = fi - grad_i;
+        }
       }
     }
   }

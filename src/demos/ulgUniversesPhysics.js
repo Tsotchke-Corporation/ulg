@@ -3015,7 +3015,7 @@ export function createUlgUniversesPhysics(device, {
     // 16 log-spaced central densities spanning WD (1e8..1e12), unstable gap (1e13..1e15), NS (2e17..5e18), BH (>8e18)
     const logRhos = [8.2, 8.8, 9.4, 10.0, 10.6, 11.3, 12.2, 13.5, 15.0, 17.2, 17.6, 17.9, 18.2, 18.5, 18.8, 19.2];
     for (const lr of logRhos) {
-      samples.push({ centralRhoKgM3: Math.pow(10, lr), ye: 0.5 });
+      samples.push({ centralRhoKgM3: Math.pow(10, lr), yElectron: 0.5 });
     }
     tovCurve = await solveRelativisticTovBatchWebGpu(device, samples);
   }
@@ -3070,10 +3070,18 @@ export function createUlgUniversesPhysics(device, {
     const isHydrostaticStar = mpmClasses.includes(stellarPreset);
     if (isHydrostaticStar) {
       // Pass 2 / Phase C Deep LOD Exemplar: True 3D GPU MLS-MPM + Canonical SS Scale-Atlas Multipole Stellar Fusion & Convection!
+      // Forward the active system host star's continuous physical (massSolar, surfaceTempK, metallicity Z) instead of collapsing all stars to 1 M_sun!
+      const hostStarCat = getActiveSystemCatalog()[0] || null;
+      const useHostSpec = !useSolReference && hostStarCat && Number.isFinite(Number(hostStarCat.massSolar))
+        && (stellarPreset === 'main-sequence-star' || stellarPreset === 'blue-supergiant' || stellarPreset === 'red-supergiant' || stellarPreset === 'brown-dwarf');
+      const hostZSolar = Number(activeCausalSystem?.nebulaEnv?.metallicitySolar);
       stellarEngine = createStellarMlsMpmFusionSessionWebGpu(device, {
         count: w.stellarParcels,
         gridN: w.stellarGridN,
         stellarClass: stellarPreset,
+        starMassSolar: useHostSpec ? Number(hostStarCat.massSolar) : undefined,
+        surfaceTempK: useHostSpec && Number.isFinite(Number(hostStarCat.tempK)) ? Number(hostStarCat.tempK) : undefined,
+        xZ0: useHostSpec && Number.isFinite(hostZSolar) ? Math.max(1e-5, Math.min(0.06, 0.014 * hostZSolar)) : undefined,
         boxHalf: 7.5,
         seed: activeSeed,
         label: `ulg-universes-stellar-mpm-${stellarPreset}`
@@ -3231,27 +3239,38 @@ export function createUlgUniversesPhysics(device, {
       getOrBuildAtlas(mantleRes)
     ]);
 
-    const centralP = Math.max(5e9, Math.min(850e9, Number(spec.centralP) || 360e9));
-    const adaptiveRadialStepM = Math.min(35000, Math.max(250, Math.round(((Number(spec.radiusKm) || 6371) * 1000) / 48)));
+    const specRadiusM = Math.max(1e5, (Number(spec.radiusKm) || 6371) * 1000);
+    const specMassKg = Math.max(1e19, (Number(spec.massSolar) || 3.00349e-6) * 1.98847e30);
+    const isGiantInterior = specRadiusM >= 1.6e7 || spec.planetClass === 'gas-giant' || spec.planetClass === 'hot-jupiter' || spec.planetClass === 'ice-giant';
+    const centralP = Math.max(1e8, Math.min(isGiantInterior ? 8e12 : 2e12, Number(spec.centralP) || (isGiantInterior ? 1.5e12 : 360e9)));
+    const surfP = Math.max(1e3, Math.min(1e8, Number(spec.surfacePressurePa) || 1e5));
+    const coreMassFrac = Number.isFinite(Number(spec.coalescedComposition?.feFrac))
+      ? Math.max(0.06, Math.min(0.75, Number(spec.coalescedComposition.feFrac)))
+      : (isGiantInterior ? 0.12 : 0.32);
+    const coreTempK = isGiantInterior ? 14000 : Math.max(1200, Math.min(12000, Math.round(2800 + Math.pow(specMassKg / 5.972e24, 0.35) * 2400)));
+    const mantleTempK = Math.max(400, Math.round(coreTempK * 0.44));
+    const maxR = Math.max(3.5e7, specRadiusM * 2.4);
+    const adaptiveRadialStepM = Math.min(1.8e5, Math.max(250, Math.round(specRadiusM / 56)));
     planetaryResult = await solvePlanetaryInteriorWebGpu(device, {
       centralPressurePa: centralP,
-      surfacePressurePa: 1e5,
+      surfacePressurePa: surfP,
       radialStepM: adaptiveRadialStepM,
-      maxRadiusM: 3.5e7,
-      convergePasses: 3,
+      maxRadiusM: maxR,
+      initialMassKg: specMassKg,
+      convergePasses: 4,
       maxProfileSamples: 128,
       layers: [
-        { name: `${coreRes.bundle.symbol} Core`, cumulativeMassFraction: 0.32, temperatureK: 5200, atlas: coreAtlas },
-        { name: `${mantleRes.bundle.symbol} Mantle`, cumulativeMassFraction: 1.0, temperatureK: 2200, atlas: mantleAtlas }
+        { name: `${coreRes.bundle.symbol} Core`, massFractionTarget: coreMassFrac, tempK: coreTempK, atlas: coreAtlas },
+        { name: `${mantleRes.bundle.symbol} Mantle`, massFractionTarget: Math.max(0.1, 1.0 - coreMassFrac), tempK: mantleTempK, atlas: mantleAtlas }
       ]
     });
 
-    let rCoreNorm = 0.52;
+    let rCoreNorm = Math.max(0.18, Math.min(0.78, Math.cbrt(coreMassFrac * 0.52)));
     const prof = planetaryResult?.profile || [];
-    const totalR = Math.max(1, planetaryResult?.radiusM || spec.radiusKm * 1000);
+    const totalR = Math.max(1, planetaryResult?.radiusM || specRadiusM);
     for (let i = 0; i < prof.length; i += 1) {
       if ((prof[i].layerIndex ?? 0) >= 1) {
-        rCoreNorm = Math.max(0.22, Math.min(0.78, prof[i].radiusM / totalR));
+        rCoreNorm = Math.max(0.18, Math.min(0.82, prof[i].radiusM / totalR));
         break;
       }
     }
@@ -3643,15 +3662,19 @@ export function createUlgUniversesPhysics(device, {
       });
     } else {
       const atom = res.visualData.atom;
-      const orbMatch = (atom.orbitals || []).find((o) => o.n === quantumN && o.l === quantumL && o.u?.length);
+      const rGridKs = atom?.radialGrid?.r || atom?.rGrid || null;
+      const orbIdx = (atom?.orbitals || []).findIndex((o) => o.n === quantumN && o.l === quantumL);
+      const ksOrbWave = orbIdx >= 0
+        ? (atom?.orbitalWavefunctions?.[orbIdx] || atom?.orbitals?.[orbIdx]?.u || null)
+        : null;
       orbitalCloud = sampleAtomicOrbitalCloudWebGpu(device, {
         Z: quantumZ,
         n: quantumN,
         l: quantumL,
         m: quantumM,
         pointCount: quality.orbitalPoints,
-        rGrid: orbMatch ? atom.rGrid : null,
-        orbitalU: orbMatch ? orbMatch.u : null,
+        rGrid: (rGridKs && ksOrbWave && ksOrbWave.length === rGridKs.length) ? rGridKs : null,
+        orbitalU: (rGridKs && ksOrbWave && ksOrbWave.length === rGridKs.length) ? ksOrbWave : null,
         screeningExchange: true,
         relativisticSpinOrbit: quantumRelativistic,
         colorMode: 1,
@@ -3957,7 +3980,9 @@ export function createUlgUniversesPhysics(device, {
             });
           }
           if (solarEngine && planetaryMode !== 'eyeball-locked' && planetaryMode !== 'rogue') {
-            await solarEngine.step({ dtSubYr: 0.000006, substeps: Math.max(1, Math.round(2 * Math.max(0.25, effScale))), readMassive: true });
+            // Smooth symplectic orbital cadence in L4 orbit (~18 s per season at 60 FPS, ~185 substeps per lunar orbit)
+            // so planetary axial-tilt seasons & moons visibly evolve live without needing manual time-warp!
+            await solarEngine.step({ dtSubYr: 0.000055, substeps: Math.max(2, Math.round(4 * Math.max(0.25, effScale))), readMassive: true });
             solarConservation = solarEngine.computeConservationDiagnostics();
             const fSt = solarEngine.getMassiveBodyState64(focusedSolarBodyIndex);
             const sSt = solarEngine.getMassiveBodyState64(0);
@@ -4434,7 +4459,13 @@ export function createUlgUniversesPhysics(device, {
     } else if (stellarMode === 'white-dwarf-tov') {
       if (!tovCurve) await initWhiteDwarfTovCurve();
     } else if (stellarMode === 'black-hole') {
-      if (!kerrJetSession) await initKerrQuasarJet({ spinA: 0.94 });
+      const hostCat0 = getActiveSystemCatalog()[0];
+      const bhMass = Number.isFinite(Number(hostCat0?.massSolar)) && Number(hostCat0.massSolar) > 2.2 && Number(hostCat0.massSolar) < 1e4
+        ? Number(hostCat0.massSolar)
+        : 11.4;
+      if (!kerrJetSession || Math.abs((kerrJetSession.massSolar || 0) - bhMass) > bhMass * 0.5) {
+        await initKerrQuasarJet({ massSolar: bhMass, spinA: 0.92, eddingtonRatio: 0.18 });
+      }
     } else if (!stellarEngine) {
       await initStellarCore();
     }

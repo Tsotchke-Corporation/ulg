@@ -200,7 +200,9 @@ function buildNaphthalene() {
 }
 
 function buildAlanine(mirrorX = false) {
-  const s = mirrorX ? -1 : 1;
+  // CIP stereochemistry: buildAlanine(false) = L-Alanine (S) (positive signed volume!),
+  // buildAlanine(true) = D-Alanine (R) (mirror reflection across X)!
+  const s = mirrorX ? 1 : -1;
   // Chiral alpha-carbon at origin bonded to: -NH2, -COOH, -CH3, -H
   const atoms = [
     { Z: 6, pos: [0.0, 0.0, 0.0] },                 // 0 C_alpha (chiral!)

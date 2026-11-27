@@ -319,32 +319,37 @@ function buildGeneticMonomerGraph({ solvent, dielectricEr, tempK, xnaAlphabetSiz
     });
   }
 
-  // Acidophile H2SO4 -> Sulfonated Aromatic Imidazole-Pyridine XNA Pair (high stability at 332 K, ε_r=101)
+  // Acidophile H2SO4 -> Sulfonated Aromatic Pyridone-Aminopyridine XNA Pair (exact valence: every C<=4, N<=3, O<=2!)
   if (solvent === 'H2SO4') {
     const r = 1.38;
     const left = [];
     for (let i = 0; i < 6; i += 1) {
       const a = (i / 6) * Math.PI * 2;
-      left.push(b.add(i === 1 || i === 5 ? 7 : 6, -2.55 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
+      left.push(b.add(i === 1 ? 7 : 6, -2.55 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
     }
-    for (let i = 0; i < 6; i += 1) b.bond(left[i], left[(i + 1) % 6], i % 2 === 0 ? 2 : 1);
+    // 2-pyridone lactam ring: left[0](C)=O bonded via single bonds to left[1](NH) & left[5](C); conjugated diene on 2=3, 4=5!
+    b.bond(left[0], left[1], 1); b.bond(left[1], left[2], 1); b.bond(left[2], left[3], 2);
+    b.bond(left[3], left[4], 1); b.bond(left[4], left[5], 2); b.bond(left[5], left[0], 1);
+    b.addH(left[1], 0.5, 0.85, 0.0, 1.02);
     const sBack = b.add(16, -5.25, 0.0, 0.0);
     const oS1 = b.add(8, -5.95, 1.18, 0.35);
     const oS2 = b.add(8, -5.95, -1.18, -0.35);
-    b.bond(left[3], sBack, 1); b.bond(sBack, oS1, 2); b.bond(sBack, oS2, 2);
+    const oS3 = b.add(8, -6.55, 0.0, 0.0);
+    b.bond(left[3], sBack, 1); b.bond(sBack, oS1, 2); b.bond(sBack, oS2, 2); b.bond(sBack, oS3, 1);
+    b.addH(oS3, -0.92, 0.0, 0.0, 0.98);
     const oTop = b.add(8, -0.45, 1.05, 0.0);
     b.bond(left[0], oTop, 2);
-    // Complementary aromatic sulfone-amine base on right
+    // Complementary aromatic aminopyridine base on right (exact valence: C=4, N=3!)
     const right = [];
     for (let i = 0; i < 6; i += 1) {
       const a = (i / 6) * Math.PI * 2;
-      right.push(b.add(i === 2 || i === 4 ? 7 : 6, 2.75 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
+      right.push(b.add(i === 3 ? 7 : 6, 2.75 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
     }
-    for (let i = 0; i < 6; i += 1) b.bond(right[i], right[(i + 1) % 6], i % 2 === 1 ? 2 : 1);
+    for (let i = 0; i < 6; i += 1) b.bond(right[i], right[(i + 1) % 6], i % 2 === 0 ? 2 : 1);
     const nDon = b.add(7, 1.15, 1.15, 0.0);
     b.bond(right[2], nDon, 1);
     b.addH(nDon, -0.95, -0.1, 0.0, 1.02);
-    b.addH(right[3], -0.95, 0.0, 0.0);
+    b.addH(nDon, 0.1, 0.96, 0.0, 1.02);
     return b.centerAndBuild({
       id: 'bio-mol-genetic',
       name: `${xnaAlphabetSize}-Base Sulfone-Aromatic Acid XNA Pair`,
@@ -353,44 +358,53 @@ function buildGeneticMonomerGraph({ solvent, dielectricEr, tempK, xnaAlphabetSiz
     });
   }
 
-  // Canonical H-bonded Complementary Heterocycle Base-Pair (DNA/RNA / PNA / TNA / HNA depending on solvent & C/O!)
+  // Canonical H-bonded Complementary Heterocycle Base-Pair (valence-exact 2-pyridone <-> 2-aminopyridine duplex!)
   const r = 1.38;
   const pyr = [];
   for (let i = 0; i < 6; i += 1) {
     const a = (i / 6) * Math.PI * 2;
-    pyr.push(b.add(i === 1 || i === 3 ? 7 : 6, -2.65 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
+    pyr.push(b.add(i === 1 ? 7 : 6, -2.65 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
   }
-  for (let i = 0; i < 6; i += 1) b.bond(pyr[i], pyr[(i + 1) % 6], i % 2 === 0 ? 2 : 1);
+  b.bond(pyr[0], pyr[1], 1); b.bond(pyr[1], pyr[2], 1); b.bond(pyr[2], pyr[3], 2);
+  b.bond(pyr[3], pyr[4], 1); b.bond(pyr[4], pyr[5], 2); b.bond(pyr[5], pyr[0], 1);
+  b.addH(pyr[1], 0.45, 0.88, 0.0, 1.02);
   const oLeft = b.add(8, -0.65, 1.18, 0.0);
   const nLeft = b.add(7, -0.65, -1.18, 0.0);
   b.bond(pyr[0], oLeft, 2); b.bond(pyr[5], nLeft, 1);
   b.addH(nLeft, 0.96, 0.0, 0.0, 1.02); // H-bond donor!
-  // Backbone anchor (Phosphodiester P-O in aqueous H2O, Uncharged Peptide amide N-C=O in scCO2/NH3!)
+  b.addH(nLeft, 0.0, -0.96, 0.0, 1.02);
+  // Backbone anchor on pyr[3] (valence-4 C: double to pyr[2], single to pyr[4], single to backbone!)
   if (solvent === 'CO2-liq' || solvent === 'NH3') {
     const cPep = b.add(6, -5.25, 0.0, 0.0);
     const oPep = b.add(8, -5.95, 1.12, 0.0);
     const nPep = b.add(7, -5.95, -1.15, 0.0);
     b.bond(pyr[3], cPep, 1); b.bond(cPep, oPep, 2); b.bond(cPep, nPep, 1);
     b.addH(nPep, -0.9, -0.3, 0.0, 1.02);
+    b.addH(nPep, 0.1, -0.95, 0.0, 1.02);
   } else {
     const pBack = b.add(15, -5.45, 0.0, 0.0);
     const op1 = b.add(8, -4.15, 0.0, 0.0);
     const op2 = b.add(8, -6.25, 1.15, 0.35);
     const op3 = b.add(8, -6.25, -1.15, -0.35);
-    b.bond(pyr[3], op1, 1); b.bond(op1, pBack, 1); b.bond(pBack, op2, 2); b.bond(pBack, op3, 1);
+    const op4 = b.add(8, -6.65, 0.0, 0.0);
+    b.bond(pyr[3], op1, 1); b.bond(op1, pBack, 1); b.bond(pBack, op2, 2); b.bond(pBack, op3, 1); b.bond(pBack, op4, 1);
     b.addH(op3, -0.85, -0.4, 0.0, 0.98);
+    b.addH(op4, -0.95, 0.1, 0.0, 0.98);
   }
-  // Complementary right base with dual H-bond donors/acceptors!
+  // Complementary right base (exact valence: pur[3]=O lactam with single bonds to pur[2](C-NH2) and pur[4](NH)!)
   const pur = [];
   for (let i = 0; i < 6; i += 1) {
     const a = (i / 6) * Math.PI * 2;
-    pur.push(b.add(i === 2 || i === 4 ? 7 : 6, 2.75 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
+    pur.push(b.add(i === 4 ? 7 : 6, 2.75 + Math.cos(a) * r, Math.sin(a) * r, 0.0));
   }
-  for (let i = 0; i < 6; i += 1) b.bond(pur[i], pur[(i + 1) % 6], i % 2 === 1 ? 2 : 1);
+  b.bond(pur[0], pur[1], 2); b.bond(pur[1], pur[2], 1); b.bond(pur[2], pur[3], 1);
+  b.bond(pur[3], pur[4], 1); b.bond(pur[4], pur[5], 1); b.bond(pur[5], pur[0], 1);
+  b.addH(pur[4], 0.45, -0.88, 0.0, 1.02);
   const nRight = b.add(7, 1.05, 1.18, 0.0);
   const oRight = b.add(8, 1.05, -1.18, 0.0);
   b.bond(pur[2], nRight, 1); b.bond(pur[3], oRight, 2);
   b.addH(nRight, -0.96, 0.0, 0.0, 1.02); // H-bond straight to oLeft!
+  b.addH(nRight, 0.0, 0.96, 0.0, 1.02);
   b.addH(pur[0], 0.95, 0.0, 0.0);
   return b.centerAndBuild({
     id: 'bio-mol-genetic',
@@ -403,7 +417,7 @@ function buildGeneticMonomerGraph({ solvent, dielectricEr, tempK, xnaAlphabetSiz
 // =========================================================================
 // 3. NATIVE METABOLIC ENERGY CURRENCY & REDOX COFACTOR (All-Atom 3D)
 // =========================================================================
-function buildEnergyCofactorGraph({ solvent, tempK, feFrac, deltaGKjMol }) {
+function buildEnergyCofactorGraph({ solvent, dielectricEr = 78.4, tempK, feFrac, deltaGKjMol }) {
   const b = createBuilder();
 
   // Subsurface Hydrothermal Vent or High-Fe World -> [Fe2S2] Iron-Sulfur Ferredoxin Redox Cluster!
@@ -484,21 +498,21 @@ function buildEnergyCofactorGraph({ solvent, tempK, feFrac, deltaGKjMol }) {
   const o23 = b.add(8, 1.35, 0.62, 0.0);
   const p3 = b.add(15, 2.85, 0.0, 0.0);
   b.bond(p1, o12, 1); b.bond(o12, p2, 1); b.bond(p2, o23, 1); b.bond(o23, p3, 1);
-  // Terminal phosphoryl oxygens + coordinated Mg2+ cofactor!
-  const oa = b.add(8, -3.85, -1.25, 0.35); const ob = b.add(8, -3.85, 0.95, -0.65);
+  // Terminal phosphoryl oxygens + coordinated Mg2+ cofactor (valence-exact: Mg coordinates single-bonded P-O- oxygens, P=O stay divalent!)
+  const oa = b.add(8, -3.85, -1.25, 0.35); const ob = b.add(8, -3.85, 0.95, -0.65); const og = b.add(8, -4.45, 0.0, 0.25);
   const oc = b.add(8, -0.15, -1.45, 0.35); const od = b.add(8, -0.15, 0.35, -1.45);
-  const oe = b.add(8, 3.65, -1.18, 0.35); const of = b.add(8, 3.65, 1.05, -0.55);
-  b.bond(p1, oa, 2); b.bond(p1, ob, 1);
-  b.bond(p2, oc, 2); b.bond(p2, od, 1);
-  b.bond(p3, oe, 2); b.bond(p3, of, 1);
-  b.addH(ob, -0.8, 0.4, -0.3, 0.98); b.addH(od, 0.0, 0.4, -0.9, 0.98); b.addH(of, 0.85, 0.4, -0.2, 0.98);
+  const oe = b.add(8, 3.65, -1.18, 0.35); const of = b.add(8, 3.65, 1.05, -0.55); const oh = b.add(8, 4.15, 0.0, -0.25);
+  b.bond(p1, oa, 2); b.bond(p1, ob, 1); b.bond(p1, og, 1);
+  b.bond(p2, od, 2); b.bond(p2, oc, 1);
+  b.bond(p3, of, 2); b.bond(p3, oe, 1); b.bond(p3, oh, 1);
+  b.addH(ob, -0.8, 0.4, -0.3, 0.98); b.addH(og, -0.95, 0.0, 0.2, 0.98); b.addH(oh, 0.92, 0.0, -0.2, 0.98);
   const mg = b.add(12, 1.35, -2.15, 0.55);
   b.bond(oc, mg, 1); b.bond(oe, mg, 1);
   return b.centerAndBuild({
     id: 'bio-mol-energy',
     name: 'Mg²⁺-Triphosphate (ATP Phosphoanhydride Core)',
     role: 'High-Energy Phosphoryl Carrier (~50 kJ/mol)',
-    reason: `Aqueous ε_r=${Math.round(78.4)} screens P-O⁻ repulsion enough for Mg²⁺-stabilized triphosphate hydrolysis near ${Math.round(tempK)} K.`
+    reason: `Polar ε_r=${Number(dielectricEr || 78.4).toFixed(1)} screens P-O⁻ repulsion enough for Mg²⁺-stabilized triphosphate hydrolysis near ${Math.round(tempK)} K.`
   });
 }
 
@@ -583,12 +597,12 @@ function buildPhotopigmentGraph({ solvent, stellarTeffK, redEdgeNm, zSchemePhoto
     const a = (i / 12) * Math.PI * 2;
     ring.push(b.add(6, Math.cos(a) * 3.24, Math.sin(a) * 3.24, 0.0));
   }
-  for (let i = 0; i < 12; i += 1) b.bond(ring[i], ring[(i + 1) % 12], i % 2 === 0 ? 2 : 1);
+  for (let i = 0; i < 12; i += 1) b.bond(ring[i], ring[(i + 1) % 12], (i === 1 || i === 2) ? 1 : (i % 2 === 0 ? 2 : 1));
   b.bond(ns[0], ring[0], 1); b.bond(ns[1], ring[3], 1); b.bond(ns[2], ring[6], 1); b.bond(ns[3], ring[9], 1);
-  // Ketone chromophore substituent tuning optical absorption to host star's red edge!
-  const oKet = b.add(8, 4.42, 0.65, 0.0);
-  b.bond(ring[0], oKet, 2);
-  for (let i = 2; i < 12; i += 3) {
+  // Valence-exact ketone chromophore substituent on ring[2] (single-bonded to ring[1] & ring[3], double-bonded to =O -> exact valence 4!)
+  const oKet = b.add(8, 2.28, 3.92, 0.0);
+  b.bond(ring[2], oKet, 2);
+  for (let i = 5; i < 12; i += 3) {
     const a = (i / 12) * Math.PI * 2;
     b.addH(ring[i], Math.cos(a), Math.sin(a), 0.0);
   }
@@ -714,7 +728,7 @@ export function synthesizeOrganismBiochemistry({
   let eRepolMv = -77.0;
   let eLeakMv = -54.4;
   let vRestMv = -65.0;
-  let q10Rate = clamp(Math.pow(1.85, (T - 288) / 75.0), 0.24, 1.95);
+  let q10Rate = clamp(Math.pow(1.85, (T - 288) / 10.0), 0.12, 3.2);
 
   if (solvent === 'CH4') {
     energyCurrencyName = 'Acetylene-Thioester Cyanide';
@@ -781,7 +795,7 @@ export function synthesizeOrganismBiochemistry({
   // 6. Synthesize 4 REAL 3D All-Atom Environmental Molecular Graphs!
   const molMembrane = buildMembraneAmphiphileGraph({ solvent, dielectricEr: eps, tempK: T, pressurePa: P, cToO, silicateFrac });
   const molGenetic = buildGeneticMonomerGraph({ solvent, dielectricEr: eps, tempK: T, xnaAlphabetSize: alphaSize, xnaBackbone, cToO });
-  const molEnergy = buildEnergyCofactorGraph({ solvent, tempK: T, feFrac, deltaGKjMol });
+  const molEnergy = buildEnergyCofactorGraph({ solvent, dielectricEr: eps, tempK: T, feFrac, deltaGKjMol });
   const molPigment = buildPhotopigmentGraph({ solvent, stellarTeffK, redEdgeNm, zSchemePhotons });
 
   const molecules = Object.freeze({

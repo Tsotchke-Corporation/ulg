@@ -228,12 +228,17 @@ fn solve_planetary_hydrostatic(@builtin(global_invocation_id) gid: vec3<u32>) {
       let rho = eval_res.x;
       pass_min_margin = min(pass_min_margin, eval_res.y);
 
-      // Midpoint RK2 radial hydrostatic step
+      // True Midpoint RK2 radial hydrostatic step: predict (P_mid, m_mid), re-evaluate EOS rho(P_mid)!
       let r_mid = r + 0.5 * dr;
-      let dM = 12.566370614 * r_mid * r_mid * rho * dr;
-      let m_mid = m + 0.5 * dM;
-      let g = select(0.0, (params.g_si * m_mid) / (r_mid * r_mid), r_mid > 1.0);
-      let dP = -rho * g * dr;
+      let dM0 = 12.566370614 * r * r * rho * dr;
+      let m_mid = m + 0.5 * dM0;
+      let g_mid = select(0.0, (params.g_si * m_mid) / (r_mid * r_mid), r_mid > 1.0);
+      let p_mid = max(params.surface_pressure_pa, p_cur - 0.5 * rho * g_mid * dr);
+      let eval_mid = eval_polytope_atlas_bank_2d(&atlas_bank, mat_id, temp_k, p_mid);
+      let rho_mid = select(rho, eval_mid.x, eval_mid.w >= 0.5 && eval_mid.x > 0.0);
+      let dM = 12.566370614 * r_mid * r_mid * rho_mid * dr;
+      let g = select(0.0, (params.g_si * (m + 0.5 * dM)) / (r_mid * r_mid), r_mid > 1.0);
+      let dP = -rho_mid * g * dr;
 
       if (is_last && mid == 0u && cur_samples < params.max_profile_samples && ((s & 1u) == 0u || s < 16u)) {
         profile_out[cur_samples * 2u + 0u] = vec4<f32>(r, p_cur, rho, m);
@@ -297,6 +302,7 @@ export async function solvePlanetaryInteriorWebGpu(device, {
   layers = [],
   radialStepM = 20000,
   maxRadiusM = 1.5e8,
+  initialMassKg = 6e24,
   convergePasses = 3,
   maxProfileSamples = 256,
   autoFitMaxPressurePa = 1e12
@@ -326,10 +332,16 @@ export async function solvePlanetaryInteriorWebGpu(device, {
     if (!packedGpuAtlas) {
       throw new TypeError(`Layer ${i} (${l.name || 'unnamed'}) must provide packedGpuAtlas, atlas, polytopes, or bundle`);
     }
+    const prevCum = i > 0 ? Number(layers[i - 1].cumulativeMassFraction ?? 0) : 0;
+    const rawMassFrac = Number.isFinite(Number(l.massFractionTarget))
+      ? Number(l.massFractionTarget)
+      : (Number.isFinite(Number(l.cumulativeMassFraction))
+        ? Math.max(0.01, Number(l.cumulativeMassFraction) - prevCum)
+        : 1);
     resolvedLayers.push({
       name: l.name || l.bundle?.materialKey || l.atlas?.materialKey || `layer-${i}`,
-      massFractionTarget: Math.max(0, Number(l.massFractionTarget ?? 1)),
-      tempK: Math.max(10, Number(l.tempK ?? 1500)),
+      massFractionTarget: Math.max(0, rawMassFrac),
+      tempK: Math.max(10, Number(l.tempK ?? l.temperatureK ?? 1500)),
       bundle: l.bundle || null,
       packedGpuAtlas,
       materialId: i
@@ -351,7 +363,8 @@ export async function solvePlanetaryInteriorWebGpu(device, {
     layerData.set([cum, resolvedLayers[i].tempK, resolvedLayers[i].materialId, 0], i * 4);
   }
 
-  const modelSpecs = new Float32Array([Number(centralPressurePa), 6e24, 0, 0]);
+  const estMassInit = Math.max(1e18, Number(initialMassKg) || 6e24);
+  const modelSpecs = new Float32Array([Number(centralPressurePa), estMassInit, 0, 0]);
   const pAb = new ArrayBuffer(32);
   new Uint32Array(pAb, 0, 4).set([1, resolvedLayers.length, maxProfileSamples, convergePasses]);
   new Float32Array(pAb, 16, 4).set([Number(surfacePressurePa), Number(radialStepM), Number(maxRadiusM), G_SI]);
@@ -424,6 +437,7 @@ export async function solvePlanetaryInteriorWebGpu(device, {
         densityKgPerM3: profRaw[k + 2],
         massEnclosedKg: profRaw[k + 3],
         gravityMPerS2: profRaw[k + 4],
+        layerIndex: lidx,
         layer: resolvedLayers[lidx].name,
         phaseCode: Math.round(profRaw[k + 6]),
         polytopeHit: profRaw[k + 7] > 0.5

@@ -133,7 +133,8 @@ export function buildOrbital3dProfileTables({
 
   const evalR = (n, l, orbitalU) => {
     const out = new Float32Array(RADIAL_BINS);
-    const useKs = Array.isArray(rGrid) && rGrid.length >= 32 && orbitalU && orbitalU.length === rGrid.length;
+    const useKs = (Array.isArray(rGrid) || ArrayBuffer.isView(rGrid)) && rGrid.length >= 32
+      && (Array.isArray(orbitalU) || ArrayBuffer.isView(orbitalU)) && orbitalU.length === rGrid.length;
     let rExtent = 6.0;
     if (useKs) {
       let tot = 0;

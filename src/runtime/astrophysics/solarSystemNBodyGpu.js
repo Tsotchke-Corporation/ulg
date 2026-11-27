@@ -296,29 +296,32 @@ export function keplerianElementsToCartesian(
   const sqrt1me2 = Math.sqrt(Math.max(1e-12, 1 - e * e));
   const r = aAu * (1 - e * cosE);
 
-  // Perifocal coordinates (x_orb, z_orb in ecliptic plane, y = ecliptic north)
+  // Perifocal coordinates (xOrb, yOrb) mapped via exact right-handed orthogonal transform
+  // from ecliptic (X_ecl, Y_ecl, Z_ecl=North) -> WebGPU (X = X_ecl, Y = Z_ecl=North, Z = -Y_ecl)
+  // so prograde orbits (inc < 90 deg) revolve counter-clockwise viewed from ecliptic North (+Y),
+  // with angular momentum L = r x v pointing along +Y!
   const xOrb = aAu * (cosE - e);
-  const zOrb = aAu * sqrt1me2 * sinE;
+  const yOrb = aAu * sqrt1me2 * sinE;
   const vFac = Math.sqrt(mu * aAu) / Math.max(1e-12, r);
   const vxOrb = -vFac * sinE;
-  const vzOrb = vFac * sqrt1me2 * cosE;
+  const vyOrb = vFac * sqrt1me2 * cosE;
 
   const cO = Math.cos(om); const sO = Math.sin(om);
   const cw = Math.cos(w);  const sw = Math.sin(w);
   const ci = Math.cos(inc); const si = Math.sin(inc);
 
-  // Rotation matrix perifocal (xOrb, zOrb) -> ecliptic (X, Y_north, Z)
+  // Right-handed perifocal (P, Q) -> WebGPU ecliptic (X, Y_north, Z=-Y_ecl)
   const Px = cO * cw - sO * sw * ci;
-  const Pz = sO * cw + cO * sw * ci;
   const Py = sw * si;
+  const Pz = -(sO * cw + cO * sw * ci);
 
   const Qx = -cO * sw - sO * cw * ci;
-  const Qz = -sO * sw + cO * cw * ci;
   const Qy = cw * si;
+  const Qz = -(-sO * sw + cO * cw * ci);
 
   return {
-    pos: [Px * xOrb + Qx * zOrb, Py * xOrb + Qy * zOrb, Pz * xOrb + Qz * zOrb],
-    vel: [Px * vxOrb + Qx * vzOrb, Py * vxOrb + Qy * vzOrb, Pz * vxOrb + Qz * vzOrb]
+    pos: [Px * xOrb + Qx * yOrb, Py * xOrb + Qy * yOrb, Pz * xOrb + Qz * yOrb],
+    vel: [Px * vxOrb + Qx * vyOrb, Py * vxOrb + Qy * vyOrb, Pz * vxOrb + Qz * vyOrb]
   };
 }
 
@@ -413,10 +416,24 @@ export function buildProceduralStarSystemInitialConditions(catalog, {
       vel64[i] = [innerComVel[0] + rel.vel[0], innerComVel[1] + rel.vel[1], innerComVel[2] + rel.vel[2]];
     } else if (spec.parent >= 0 && spec.parent < i) {
       const pIdx = spec.parent;
-      const mu = G_AU_SOLAR_YR * (masses[pIdx] + m);
+      const mParent = masses[pIdx];
+      const mPair = mParent + m;
+      const mu = G_AU_SOLAR_YR * mPair;
       const rel = keplerianElementsToCartesian(spec, mu);
-      pos64[i] = [pos64[pIdx][0] + rel.pos[0], pos64[pIdx][1] + rel.pos[1], pos64[pIdx][2] + rel.pos[2]];
-      vel64[i] = [vel64[pIdx][0] + rel.vel[0], vel64[pIdx][1] + rel.vel[1], vel64[pIdx][2] + rel.vel[2]];
+      if (pIdx >= starCount && mPair > 0 && m > 0) {
+        // Exact planet-satellite mutual barycenter offset (critical for Pluto-Charon & Earth-Moon!)
+        const fParent = -m / mPair;
+        const fSat = mParent / mPair;
+        const baseP = [...pos64[pIdx]];
+        const baseV = [...vel64[pIdx]];
+        pos64[pIdx] = [baseP[0] + rel.pos[0] * fParent, baseP[1] + rel.pos[1] * fParent, baseP[2] + rel.pos[2] * fParent];
+        vel64[pIdx] = [baseV[0] + rel.vel[0] * fParent, baseV[1] + rel.vel[1] * fParent, baseV[2] + rel.vel[2] * fParent];
+        pos64[i] = [baseP[0] + rel.pos[0] * fSat, baseP[1] + rel.pos[1] * fSat, baseP[2] + rel.pos[2] * fSat];
+        vel64[i] = [baseV[0] + rel.vel[0] * fSat, baseV[1] + rel.vel[1] * fSat, baseV[2] + rel.vel[2] * fSat];
+      } else {
+        pos64[i] = [pos64[pIdx][0] + rel.pos[0], pos64[pIdx][1] + rel.pos[1], pos64[pIdx][2] + rel.pos[2]];
+        vel64[i] = [vel64[pIdx][0] + rel.vel[0], vel64[pIdx][1] + rel.vel[1], vel64[pIdx][2] + rel.vel[2]];
+      }
     }
   }
 

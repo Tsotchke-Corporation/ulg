@@ -99,12 +99,16 @@ struct FoldParams {
   pad_u1: u32,
   dt: f32,
   temp_k: f32,
-  eps_hp: f32,          // Hydrophobic H-H attraction strength
+  eps_hp: f32,          // Solvophobic core attraction strength (H-H in polar solvent; P-P in nonpolar CH4/scCO2!)
   eps_hbond: f32,       // Backbone i -> i+4 helical hydrogen-bond strength
   dielectric_er: f32,
   gamma_damp: f32,
   seed_f: f32,
-  pad_f0: f32,
+  solvent_polarity: f32, // +1.0 = polar solvent (H-H collapses inward); -1.0 = nonpolar (P-P & +/- collapse inward!)
+  t_denature_k: f32,     // Organism-specific thermal denaturation temperature (148 K Titan, 360 K Earth, 475 K Venus!)
+  t_ref_k: f32,          // Native habitat reference temperature for Langevin scaling
+  pad_f1: f32,
+  pad_f2: f32,
 };
 
 // 48 bytes per residue bead (matches amphiphile bead render ABI!):
@@ -209,18 +213,21 @@ fn step_biopolymer_folding(@builtin(global_invocation_id) gid: vec3<u32>) {
       f = f + dir * clamp(3.8 * (2.0 * inv6 * inv6 - inv6) / r, 0.0, 28.0);
     }
 
-    // Hydrophobic H-H attraction driving compact globular core formation!
-    if (ci == 0u && cj == 0u && params.eps_hp > 0.01 && r > 1.18 && r < 11.5) {
+    // Solvophobic core attraction:
+    //   Polar solvent (+1):    H-H residues collapse inward into hydrophobic core
+    //   Nonpolar solvent (-1): INVERTED! Polar P-P residues collapse inward while nonpolar H faces CH4/scCO2!
+    let core_cls = select(0u, 1u, params.solvent_polarity < 0.0);
+    if (ci == core_cls && cj == core_cls && params.eps_hp > 0.01 && r > 1.18 && r < 11.5) {
       let u = (r - 1.18) / 10.32;
       let f_hp = -params.eps_hp * 6.8 * sin(u * 3.14159265) * (1.0 - 0.30 * u);
       f = f + dir * f_hp;
     }
 
-    // Screened Debye-Huckel salt-bridge electrostatics (+/- attract, like repel!)
+    // Screened Debye-Huckel salt-bridge electrostatics (+/- attract, like repel! Much stronger in low-eps CH4/scCO2!)
     if (abs(qi * qj) > 0.1 && r < 10.5) {
       let screen = exp(-r * 0.18) / (eps_r * 0.06 + 1.0);
       let f_el = (qi * qj * 10.5 * screen) / (r * r + 0.55);
-      f = f + dir * clamp(f_el, -16.0, 16.0);
+      f = f + dir * clamp(f_el, -18.0, 18.0);
     }
   }
 
@@ -230,15 +237,17 @@ fn step_biopolymer_folding(@builtin(global_invocation_id) gid: vec3<u32>) {
     f = f - (pi / r_com) * (r_com - 12.0) * 1.5;
   }
 
-  // Langevin Brownian dynamics (300 K -> compact native fold; > 650 K -> entropic thermal denaturation!)
+  // Langevin Brownian dynamics scaled to THIS organism's native temperature & denaturation threshold t_denature_k!
   let dt = params.dt;
   let s0 = f32(i) * 17.13 + f32(params.step_index) * 4.31;
   let rx = (hash_p(s0 + 1.1) + hash_p(s0 + 2.7) - 1.0) * 1.732;
   let ry = (hash_p(s0 + 3.9) + hash_p(s0 + 5.3) - 1.0) * 1.732;
   let rz = (hash_p(s0 + 7.1) + hash_p(s0 + 8.9) - 1.0) * 1.732;
-  let t_excess = max(0.0, params.temp_k - 360.0);
-  // Entropic thermal unfolding: k_B T fluctuations scale steeply above native stability temperature
-  let sigma_v = sqrt(max(0.0, (params.temp_k * 0.012 + t_excess * 0.085) * params.gamma_damp * dt));
+  let t_den = max(110.0, params.t_denature_k);
+  let t_scale = 300.0 / max(75.0, params.t_ref_k);
+  let t_excess = max(0.0, params.temp_k - t_den) * t_scale;
+  // Entropic thermal unfolding scales steeply above this organism's true denaturation temp (148K Titan vs 360K Earth vs 475K Venus!)
+  let sigma_v = sqrt(max(0.0, (params.temp_k * t_scale * 0.012 + t_excess * 0.085) * params.gamma_damp * dt));
 
   var v = bi.vel_q.xyz + clamp(f, vec3<f32>(-45.0), vec3<f32>(45.0)) * dt;
   v = v * exp(-params.gamma_damp * dt) + vec3<f32>(rx, ry, rz) * sigma_v;
@@ -306,9 +315,10 @@ fn reduce_biopolymer_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
       let d4 = length(b.pos_t.xyz - res_out[i + 4u].pos_t.xyz);
       if (d4 < 2.25) { hel_cnt = hel_cnt + 1.0; }
     }
-    if (u32(round(b.pos_t.w)) == 0u) {
+    let core_c = select(0u, 1u, params.solvent_polarity < 0.0);
+    if (u32(round(b.pos_t.w)) == core_c) {
       for (var j = i + 3u; j < n; j = j + 1u) {
-        if (u32(round(res_out[j].pos_t.w)) == 0u) {
+        if (u32(round(res_out[j].pos_t.w)) == core_c) {
           let d = length(b.pos_t.xyz - res_out[j].pos_t.xyz);
           if (d < 2.35) { hp_cnt = hp_cnt + 1.0; }
         }
@@ -350,6 +360,9 @@ export function createBiopolymerFoldingSessionWebGpu(device, {
   hydrophobicCoupling = 1.6,
   hBondStrength = 1.25,
   dielectricEr = 78.4,
+  solventPolarity = 1.0,
+  tDenatureK = 360,
+  tRefK = 300,
   seed = 20261125,
   label = 'ulg-bio-folding'
 } = {}) {
@@ -387,21 +400,21 @@ export function createBiopolymerFoldingSessionWebGpu(device, {
     computeBufferBinding(3, 'storage')
   ];
   const stepPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-bio-folding-step.v1',
+    cacheKey: 'ulg-bio-folding-step.v2-polarity',
     label: `${label}-step`,
     code: biopolymerFoldingWgsl,
     entryPoint: 'step_biopolymer_folding',
     bindings
   });
   const telPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-bio-folding-tel.v2-com',
+    cacheKey: 'ulg-bio-folding-tel.v3-polarity',
     label: `${label}-tel`,
     code: biopolymerFoldingWgsl,
     entryPoint: 'reduce_biopolymer_telemetry',
     bindings
   });
 
-  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 48, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bufA = device.createBuffer({ label: `${label}-a`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC | GPU_BUF.COPY_DST });
   const bufB = device.createBuffer({ label: `${label}-b`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC | GPU_BUF.COPY_DST });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
@@ -466,9 +479,13 @@ export function createBiopolymerFoldingSessionWebGpu(device, {
     const dtSafe = Math.max(0.006, Math.min(0.025, Number(dt) || 0.018));
     const seedF = ((seed % 997) * 0.19) + 2.3;
 
-    const ab = new ArrayBuffer(48);
+    const ab = new ArrayBuffer(64);
     new Uint32Array(ab, 0, 4).set([n, stepIndex + sub, 0, 0]);
-    new Float32Array(ab, 16, 8).set([dtSafe, curTempK, curEpsHp, curHBond, curEps, 3.0, seedF, 0]);
+    new Float32Array(ab, 16, 12).set([
+      dtSafe, curTempK, curEpsHp, curHBond,
+      curEps, 3.0, seedF, Number(solventPolarity) < 0 ? -1.0 : 1.0,
+      Math.max(110, Number(tDenatureK) || 360), Math.max(75, Number(tRefK) || 300), 0, 0
+    ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
     const enc = device.createCommandEncoder({ label: `${label}-enc-${stepIndex}` });

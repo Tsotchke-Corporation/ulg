@@ -12,6 +12,7 @@ import {
   solvePhotobiologySpectrum,
   synthesizeWorldEcosystem
 } from './xenobiologyEcologyEngine.js';
+import { synthesizeOrganismBiochemistry } from './organismBiochemistryGenerator.js';
 
 function clamp(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
@@ -297,6 +298,284 @@ export function synthesizeAbductedSpecimenRecord({
   });
 }
 
+/**
+ * Derive 100% organism- and organ-specific biophysical GPU parameters for ALL 5 Bio Lab
+ * cellular/molecular layers (Membranes, Proteome Folding, XNA Replication, Bioenergetics/HH,
+ * and Turing Morphogenesis/Motility) directly from the active living organism (`specimen`)
+ * and clicked anatomical part (`partId`)!
+ * Strictly Star Spec v0.4 compliant — ZERO hardcoded species or planet-name checks!
+ */
+export function deriveOrganismTissueLabParameters(specimen = null, worldProfile = null, {
+  partId = null,
+  partLabel = null,
+  localTempK = null
+} = {}) {
+  const prof = worldProfile || specimen?.profile || deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
+  const sp = specimen || prof.abductedSpecimen || (prof.species || []).find((s) => s.kingdom === 'fauna') || (prof.species || [])[0] || {};
+  const lp = prof.labParams || {};
+  const kingdom = sp.kingdom || sp.kind || 'fauna';
+  const bodyPlan = sp.bodyPlan || 'quadruped-cursorial';
+  const guild = String(sp.trophicGuild || (kingdom === 'flora' ? 'producer' : (kingdom === 'fungi' ? 'decomposer' : 'grazer'))).toLowerCase();
+  const solvent = sp.solvent || prof.solvent || 'H2O';
+  const solventFormula = sp.solventFormula || prof.solventFormula || solvent;
+  const g = Math.max(0.25, Number(sp.gravityMS2 ?? prof.gravityMS2) || 9.81);
+  const rho = Math.max(0, Number(sp.rhoAtmKgM3 ?? prof.rhoAtmKgM3) || 1.22);
+  const uv = clamp(Number(sp.uvFluxNorm ?? prof.uvFluxNorm) || 1.0, 0.05, 8.0);
+  const deltaG = Math.abs(Number(sp.deltaGKjMol ?? prof.redox?.deltaGKjMol ?? -478));
+  const xnaAlpha = Math.max(4, Math.min(12, Math.trunc(Number(sp.xnaAlphabetSize ?? prof.xnaAlphabetSize) || 4)));
+  const xnaBackbone = sp.xnaBackbone || prof.xnaBackbone || 'DNA/RNA';
+  const speciesName = sp.speciesName || 'Native Specimen';
+  const morphClass = sp.morphClass || bodyPlan;
+
+  const rawBaseT = localTempK ?? ((solvent === 'H2O-subsurface' || solvent === 'H2-He-cloud') ? (lp.memTempK ?? 295) : (sp.tempK ?? sp.traits?.tOptK ?? lp.memTempK ?? 288));
+  const baseT = Math.round(clamp(Number(rawBaseT), 75, 720));
+  const pId = String(partId || '').toLowerCase();
+  const organInfo = (sp.anatomicalParts || []).find((p) => p.id === pId) || null;
+  const organLabel = partLabel || organInfo?.label || (kingdom === 'flora' ? 'Vascular Phototrophic Tissue' : (kingdom === 'fungi' ? 'Mycelial Metabolic Core' : 'Whole-Organism Somatic Tissue'));
+  const organTissue = organInfo?.tissue || sp.skeleton || prof.membraneType || 'Biological Matrix';
+
+  // --- LAYER 0B: BOTTOM-UP FIRST-PRINCIPLES ENVIRONMENTAL MOLECULAR BIOCHEMISTRY ---
+  // Synthesizes actual 3D all-atom molecules, inverted vs polar solvophobic polarity,
+  // Bjerrum screening length, thermal denaturation T_denature, solvent-matched XNA enthalpy,
+  // Nernst reversal potentials, and Gray-Scott Turing kinetics strictly from planetary physics!
+  const dielectricEr = Number(prof.dielectricEr ?? lp.foldDielectricEr ?? (solvent === 'CH4' ? 1.7 : (solvent === 'H2SO4' ? 101.0 : 78.4)));
+  const cToO = Number(sp.cToO ?? prof.cToO ?? (solvent === 'CH4' ? 0.92 : 0.55));
+  const feFrac = Number(sp.feFrac ?? prof.feFrac ?? (solvent === 'H2O-subsurface' ? 0.38 : 0.26));
+  const silicateFrac = Number(sp.silicateFrac ?? prof.silicateFrac ?? 0.44);
+  const biochem = synthesizeOrganismBiochemistry({
+    solvent,
+    tempK: baseT,
+    pressurePa: Number(sp.pressurePa ?? prof.pressurePa ?? 101325),
+    gravityMS2: g,
+    dielectricEr,
+    cToO,
+    feFrac,
+    silicateFrac,
+    stellarTeffK: Number(sp.stellarTeffK ?? prof.stellarTeffK ?? 5778),
+    redEdgeNm: Number(prof.photobiology?.redEdgeNm ?? 705),
+    zSchemePhotons: Number(prof.photobiology?.zSchemePhotons ?? 2),
+    uvFluxNorm: uv,
+    xnaAlphabetSize: xnaAlpha,
+    xnaBackbone,
+    deltaGKjMol: -deltaG,
+    kingdom,
+    bodyPlan,
+    organId: pId || 'whole',
+    seed: ((sp.seed ?? prof.seed ?? 20261125) ^ (pId.length * 7919)) >>> 0
+  });
+
+  // --- LAYER 1: CELL MEMBRANE THERMODYNAMICS (Node #20) ---
+  const baseEps = Number(lp.memEpsHp) || (solvent === 'CH4' ? 1.18 : (solvent === 'H2SO4' ? 2.15 : 1.85));
+  const organStiffMod = (pId === 'sail' || pId === 'canopy' || pId === 'limbs') ? 0.16 : (pId === 'torso' ? -0.08 : 0.0);
+  const memEpsHp = Number(clamp(baseEps + organStiffMod + (kingdom === 'flora' ? 0.14 : (kingdom === 'fungi' ? 0.10 : 0.0)), 0.45, 2.85).toFixed(2));
+  const memOsmotic = Number(clamp(
+    bodyPlan === 'aero-gasbag'
+      ? -0.22
+      : (bodyPlan === 'aquatic-swimmer' || solvent === 'H2O-subsurface'
+        ? 0.44
+        : (kingdom === 'flora' ? 0.34 : (kingdom === 'fungi' ? 0.24 : 0.12))),
+    -1.0, 1.0
+  ).toFixed(2));
+  const recommendedMemMode = (pId === 'sail' || pId === 'canopy' || kingdom === 'flora')
+    ? 'lipid-bilayer'
+    : 'protocell-vesicle';
+  const membraneLabel = `${prof.membraneType || 'Amphiphile Bilayer'} (${solventFormula} · ${biochem.isNonpolar ? 'Inverted' : (biochem.isMonolayer ? 'Monolayer' : 'Polar')})`;
+
+  // --- LAYER 2: TISSUE PROTEOME & BIOPOLYMER FOLDING (Node #21) ---
+  // Bottom-up environmentally synthesized 22..44-mer H/P/+/- sequence driven by solvent polarity & ε_r!
+  const baseFasta = biochem.foldSeq || String(sp.fasta || lp.foldSeq || 'HPPHH+PHHPPHH-PPHHPPH+PPH-PHHPPH').replace(/[^HP+\-]/g, '');
+  let proteinName = 'Somatic Structural Catalyst';
+  let recommendedFoldMode = 'amphipathic-helix-bundle';
+  let foldSeq = baseFasta;
+  const isAcidOrHot = solvent === 'H2SO4' || baseT > 340;
+  const isCryo = solvent === 'CH4' || baseT < 150;
+  if (pId === 'head') {
+    proteinName = `${isCryo ? 'Cryo-Inverted ' : (isAcidOrHot ? 'Acid-Stable ' : '')}Photoreceptor / Sensory Opsin`;
+    recommendedFoldMode = 'amphipathic-helix-bundle';
+  } else if (pId === 'torso') {
+    proteinName = kingdom === 'flora'
+      ? 'Vascular Lignin-Proton ATPase'
+      : (kingdom === 'fungi' ? 'Redox Metabolic Dehydrogenase' : `${isAcidOrHot ? 'Acid-Stable ' : (isCryo ? 'Cryo-Core ' : '')}Contractile & Metabolic Core`);
+    recommendedFoldMode = 'globular-hydrophobic-core';
+  } else if (pId === 'limbs') {
+    proteinName = `${isCryo ? 'Cryo-Flexible ' : ''}Locomotor Actomyosin Fiber`;
+    recommendedFoldMode = 'amphipathic-helix-bundle';
+  } else if (pId === 'canopy') {
+    proteinName = `Multi-Photon Reaction Center (${Math.round(prof.stellarTeffK || 5778)} K Star)`;
+    recommendedFoldMode = 'globular-hydrophobic-core';
+  } else if (pId === 'sail' || pId === 'spores') {
+    proteinName = pId === 'spores' ? `${xnaAlpha}-Base XNA Polymerase Core` : 'Thermal Radiator β-Sheet Keratin';
+    recommendedFoldMode = 'beta-hairpin-fold';
+  } else {
+    proteinName = kingdom === 'flora'
+      ? `Photopigment Reaction-Center Fold (${speciesName})`
+      : (kingdom === 'fungi'
+        ? `Chemotrophic Redox Enzyme (${speciesName})`
+        : `${isCryo ? 'Inverted Polar-Core ' : (isAcidOrHot ? 'Acidophile ' : '')}Proteome (${morphClass})`);
+  }
+  const foldEpsHp = Number(clamp((Number(lp.foldEpsHp) || baseEps) + (pId === 'torso' ? 0.14 : 0.0), 0.45, 2.85).toFixed(2));
+  const foldEpsHb = Number(clamp((Number(lp.foldEpsHb) || 1.45) + (isAcidOrHot ? 0.28 : (isCryo ? -0.25 : 0.0)), 0.55, 2.75).toFixed(2));
+
+  // --- LAYER 3: GENOME REPLICATION & EIGEN THRESHOLD (Node #22) ---
+  const atmShield = Math.exp(-Math.min(10, Number(sp.pressurePa ?? prof.pressurePa ?? 101325) / 1.8e5));
+  const evoMu = Number(clamp(0.011 + 0.018 * Math.sqrt(uv) * (0.55 + 0.45 * atmShield) + (baseT > 340 ? 0.015 : 0.0), 0.008, 0.18).toFixed(3));
+  const evoBeta = Number(clamp(
+    guild.includes('predator') ? 3.35 : (kingdom === 'fauna' ? 2.65 : (kingdom === 'fungi' ? 2.10 : 1.90)),
+    1.2, 4.4
+  ).toFixed(2));
+  const evoStrongFrac = Number(clamp(
+    0.34 + ((xnaAlpha - 4) / 8) * 0.24 + clamp((baseT - 150) / 300, 0, 1) * 0.28,
+    0.20, 0.88
+  ).toFixed(2));
+  const genomeLabel = `${xnaAlpha}-Base ${xnaBackbone}`;
+
+  // --- LAYER 4: BIOENERGETICS & EXCITABLE SIGNALING (Node #23) ---
+  const isNeuralPart = pId === 'head' || pId === 'limbs';
+  const hhGNa = Math.round(clamp(
+    kingdom === 'fauna'
+      ? ((guild.includes('predator') || isNeuralPart ? 142 : 112) * (bodyPlan === 'aero-gasbag' ? 0.86 : 1.0))
+      : (kingdom === 'fungi' ? 52 : 38),
+    20, 175
+  ));
+  const hhGK = Math.round(clamp(hhGNa * 0.31, 12, 68));
+  const hhDeltaPsi = Math.round(clamp(75 + (deltaG / 520) * 95 + (kingdom === 'fauna' ? 15 : 0), 70, 210));
+  const hhDeltaPh = Number(clamp(
+    Number(lp.hhDeltaPh) || (solvent === 'H2SO4' ? 1.85 : (solvent === 'CH4' ? 0.45 : 1.05)),
+    0.25, 2.35
+  ).toFixed(2));
+  const recommendedHhMode = (kingdom === 'fauna' && (isNeuralPart || guild.includes('predator')))
+    ? 'excitable-spiral'
+    : 'excitable-pulse';
+  const bioenergeticLabel = `${String(sp.metabolicPathway || prof.redox?.metabolicPathway || 'Redox Chemiosmosis').split('(')[0].trim()} · ΔG=${-Math.round(deltaG)} kJ/mol`;
+
+  // --- LAYER 5: EMBRYONIC MORPHOGENESIS & CELLULAR MOTILITY (Node #24) ---
+  const planSpeedFactor = bodyPlan === 'wing-glider' ? 1.38
+    : (bodyPlan === 'aquatic-swimmer' ? 1.30
+      : (bodyPlan === 'quadruped-cursorial' || bodyPlan === 'biped-strider' ? 1.18
+        : (bodyPlan === 'aero-gasbag' ? 0.88
+          : (kingdom === 'fauna' ? 1.0 : (kingdom === 'fungi' ? 0.48 : 0.36)))));
+  const morphV0 = Number(clamp(1.28 * planSpeedFactor * Math.pow(9.81 / g, 0.18) / (1.0 + 0.08 * rho), 0.25, 2.45).toFixed(2));
+  const morphChemo = Number(clamp(
+    kingdom === 'fauna'
+      ? (guild.includes('predator') ? 3.35 : 2.45)
+      : (kingdom === 'fungi' ? 2.15 : 1.35),
+    0.8, 4.2
+  ).toFixed(2));
+  const c1 = sp.primaryRgb || [0.3, 0.6, 0.4];
+  const c2 = sp.secondaryRgb || [0.4, 0.4, 0.3];
+  const pigmentContrast = Math.hypot(c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]);
+  // Super-critical Turing diffusion ratio D_u / D_v (>= 1.95 required for Gray-Scott Turing bifurcation!)
+  const morphDiffRatio = Number(clamp(1.96 + pigmentContrast * 0.44, 1.95, 2.45).toFixed(2));
+  const recommendedMorphMode = sp.traits?.symmetry === 'radial'
+    ? 'turing-spots'
+    : (kingdom === 'flora' || kingdom === 'fungi' ? 'mitosis-division' : 'turing-labyrinth');
+  const morphLabel = `Embryonic ${morphClass} Patterning (${sp.traits?.symmetry || 'bilateral'})`;
+
+  // Solvent-specific biochemical membrane head/tail visual colors + 3 distinct organ-specific protein FASTA sequences
+  const memHeadRgb = solvent === 'CH4' ? [0.18, 0.86, 0.98]
+    : (solvent === 'H2SO4' ? [0.96, 0.62, 0.14]
+      : (solvent === 'NH3' ? [0.68, 0.44, 0.98]
+        : (solvent === 'H2-He-cloud' ? [0.92, 0.42, 0.78] : [0.20, 0.76, 0.96])));
+  const memTailRgb = solvent === 'CH4' ? [0.46, 0.34, 0.88]
+    : (solvent === 'H2SO4' ? [0.22, 0.82, 0.56]
+      : (solvent === 'NH3' ? [0.24, 0.84, 0.72] : [0.96, 0.78, 0.24]));
+  const organProteins = Object.freeze({
+    'amphipathic-helix-bundle': foldSeq,
+    'globular-hydrophobic-core': `${foldSeq.slice(0, 12)}HHHHHP+-HHHH${foldSeq.slice(-10)}`,
+    'beta-hairpin-fold': `HPHPHPHPP${solvent === 'H2SO4' ? '++HPHPHPH--' : '+-HPHPHPH+-'}HPHPHPH`
+  });
+  const shortSp = speciesName.split(' ')[0] || 'Organism';
+  const mols = biochem.molecules;
+  const modeLabels = Object.freeze({
+    'bio-mol-membrane': { title: mols['bio-mol-membrane'].name.slice(0, 31), tag: mols['bio-mol-membrane'].formula },
+    'bio-mol-genetic': { title: mols['bio-mol-genetic'].name.slice(0, 31), tag: mols['bio-mol-genetic'].formula },
+    'bio-mol-energy': { title: mols['bio-mol-energy'].name.slice(0, 31), tag: mols['bio-mol-energy'].formula },
+    'bio-mol-pigment': { title: mols['bio-mol-pigment'].name.slice(0, 31), tag: mols['bio-mol-pigment'].formula },
+    'protocell-vesicle': { title: `${shortSp} ${biochem.isNonpolar ? 'Inverted' : (biochem.isMonolayer ? 'Monolayer' : solventFormula)} Vesicle`, tag: `${baseT} K` },
+    'lipid-bilayer': { title: `${organLabel.split(' ')[0]} ${biochem.isNonpolar ? 'Azoto-' : ''}Membrane`, tag: `ε_r=${dielectricEr.toFixed(0)}` },
+    'lipid-soup': { title: `${solventFormula} ${biochem.isNonpolar ? 'Reverse' : 'Amphiphile'} MD`, tag: `ε=${memEpsHp}` },
+    'amphipathic-helix-bundle': { title: proteinName.slice(0, 32), tag: `${foldSeq.length}-mer` },
+    'globular-hydrophobic-core': { title: `${shortSp} ${biochem.isNonpolar ? 'Polar-Core' : 'Core'} Enzyme`, tag: `${organProteins['globular-hydrophobic-core'].length}-mer` },
+    'beta-hairpin-fold': { title: `${shortSp} Structural Sheet`, tag: `T_den=${biochem.tDenatureK}K` },
+    'quasispecies-evolution': { title: `${xnaAlpha}-Base ${shortSp} XNA Pool`, tag: `T_m=${Math.round(biochem.xnaTargetTmK)}K` },
+    'excitable-spiral': {
+      title: `${shortSp} ${biochem.channelIons.depolIon}/${biochem.channelIons.repolIon} Wave`,
+      tag: `${biochem.channelIons.eDepolMv > 0 ? '+' : ''}${Math.round(biochem.channelIons.eDepolMv)}mV`
+    },
+    'excitable-pulse': {
+      title: `${shortSp} ${biochem.energyCurrencyName.split(' ')[0]} Pump`,
+      tag: `${biochem.energyCurrencyKjMol} kJ`
+    },
+    'turing-spots': { title: `${shortSp} Dermal Spot Pattern`, tag: `F=${biochem.turingKinetics.feedF}` },
+    'turing-labyrinth': { title: `${shortSp} Body-Plan Stripes`, tag: `k=${biochem.turingKinetics.killK}` },
+    'mitosis-division': { title: `${shortSp} Tissue Mitosis`, tag: `v₀=${morphV0}` }
+  });
+
+  return Object.freeze({
+    speciesName,
+    worldName: sp.worldName || prof.worldName || 'World',
+    kingdom,
+    bodyPlan,
+    morphClass,
+    solvent,
+    solventFormula,
+    dielectricEr: biochem.dielectricEr,
+    solventPolarity: biochem.solventPolarity,
+    isNonpolar: biochem.isNonpolar,
+    isMonolayer: biochem.isMonolayer,
+    bjerrumLengthA: biochem.bjerrumLengthA,
+    tDenatureK: biochem.tDenatureK,
+    xnaAlphabetSize: xnaAlpha,
+    xnaBackbone,
+    xnaDhPerPairKj: biochem.xnaDhPerPairKj,
+    xnaDsPerPairJ: biochem.xnaDsPerPairJ,
+    xnaTargetTmK: biochem.xnaTargetTmK,
+    energyCurrencyName: biochem.energyCurrencyName,
+    energyCurrencyKjMol: biochem.energyCurrencyKjMol,
+    channelIons: biochem.channelIons,
+    turingFeedF: biochem.turingKinetics.feedF,
+    turingKillK: biochem.turingKinetics.killK,
+    molecules: biochem.molecules,
+    biochem,
+    primaryRgb: Object.freeze([c1[0], c1[1], c1[2]]),
+    secondaryRgb: Object.freeze([c2[0], c2[1], c2[2]]),
+    memHeadRgb: Object.freeze(memHeadRgb),
+    memTailRgb: Object.freeze(memTailRgb),
+    organProteins,
+    modeLabels,
+    organId: pId || 'whole',
+    organLabel,
+    organTissue,
+    baseTempK: baseT,
+    memTempK: baseT,
+    memEpsHp,
+    memOsmotic,
+    membraneLabel,
+    recommendedMemMode,
+    foldSeq,
+    foldTempK: baseT,
+    foldEpsHp,
+    foldEpsHb,
+    proteinName,
+    recommendedFoldMode,
+    evoMu,
+    evoBeta,
+    evoStrongFrac,
+    genomeLabel,
+    hhGNa,
+    hhGK,
+    hhDeltaPsi,
+    hhDeltaPh,
+    bioenergeticLabel,
+    recommendedHhMode,
+    morphV0,
+    morphChemo,
+    morphDiffRatio,
+    morphLabel,
+    recommendedMorphMode
+  });
+}
+
 export function buildLifeLabXenobiologyUrl(profile, mode = 'organism-overview', specimen = null) {
   const targetMode = specimen ? 'organism-overview' : (mode || 'organism-overview');
   const q = new URLSearchParams({
@@ -309,6 +588,9 @@ export function buildLifeLabXenobiologyUrl(profile, mode = 'organism-overview', 
     solvent: String(specimen?.solvent || profile?.solvent || 'H2O'),
     teff: String(Math.round(specimen?.stellarTeffK || profile?.stellarTeffK || 5778)),
     uv: String(specimen?.uvFluxNorm || profile?.uvFluxNorm || 1.0),
+    cToO: String(Number(specimen?.cToO ?? profile?.cToO ?? 0.55).toFixed(2)),
+    feFrac: String(Number(specimen?.feFrac ?? profile?.feFrac ?? 0.26).toFixed(2)),
+    siFrac: String(Number(specimen?.silicateFrac ?? profile?.silicateFrac ?? 0.44).toFixed(2)),
     seed: String((specimen?.seed ?? profile?.seed ?? 20261125) >>> 0),
     mode: targetMode
   });
@@ -345,10 +627,13 @@ export function parseXenobiologyFromSearch(search = '') {
   const rho = Number(sp.get('rho')) || 1.22;
   const teff = Number(sp.get('teff')) || 5778;
   const uv = Number(sp.get('uv')) || 1.0;
+  const cToO = Number.isFinite(Number(sp.get('cToO'))) && sp.get('cToO') !== null ? Number(sp.get('cToO')) : 0.55;
+  const feFrac = Number.isFinite(Number(sp.get('feFrac'))) && sp.get('feFrac') !== null ? Number(sp.get('feFrac')) : 0.26;
+  const silicateFrac = Number.isFinite(Number(sp.get('siFrac'))) && sp.get('siFrac') !== null ? Number(sp.get('siFrac')) : 0.44;
   const seed = Number(sp.get('seed')) || 20261125;
   const worldName = sp.get('world') || 'Alien World';
   const hasSolidCrust = solventHint !== 'H2-He-cloud';
-  const baseProfile = deriveXenobiologyProfile({
+  const baseProfileRaw = deriveXenobiologyProfile({
     worldName,
     tempK: T,
     pressurePa: solventHint === 'H2SO4' ? Math.max(P, 1e6) : (solventHint === 'CH4' ? Math.max(P, 1e5) : P),
@@ -359,8 +644,10 @@ export function parseXenobiologyFromSearch(search = '') {
     volatileFrac: solventHint === 'CO2-liq' ? 0.004 : 0.05,
     stellarTeffK: teff,
     uvFluxNorm: uv,
+    cToO,
     seed
   });
+  const baseProfile = Object.freeze({ ...baseProfileRaw, cToO, feFrac, silicateFrac });
   const species = sp.get('species') || '';
   const specimenKind = sp.get('specimenKind') || '';
   const bodyPlan = sp.get('bodyPlan') || '';

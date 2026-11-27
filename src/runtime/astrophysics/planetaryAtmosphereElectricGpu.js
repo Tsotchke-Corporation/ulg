@@ -852,11 +852,15 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
   const wgX = Math.ceil(W / 8);
   const wgY = Math.ceil(H / 8);
 
+  let liveDynamoFieldScale = 1.0;
+
   function writeUniforms(dtSim, sunDir) {
     // Normalize Paschen breakdown threshold to simulation dimensionless electric field scale
     // Low-pressure CO2 worlds (Mars ~22 kV/m) break down at lower E_crit_norm than 1-bar Earth (~260 kV/m)!
     const eCritNorm = Math.max(0.36, Math.min(2.2, Math.pow(phys.eCritVPerM / 2.6e5, 0.45) * 1.10));
     const chargeGain = 2.15;
+    const baseAurStr = phys.dynamo?.auroralStrength ?? 0.65;
+    const effAurStr = Math.max(0.0, Math.min(2.2, baseAurStr * liveDynamoFieldScale));
     const ab = new ArrayBuffer(80);
     new Uint32Array(ab, 0, 4).set([W, H, stepIndex, triboEnabled ? 1 : 0]);
     new Float32Array(ab, 16, 16).set([
@@ -871,7 +875,7 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
       eCritNorm,
       chargeGain,
       phys.dynamo?.auroralLatRad ?? 1.18,
-      phys.dynamo?.auroralStrength ?? 0.65,
+      effAurStr,
       sunDir[0],
       sunDir[1],
       sunDir[2],
@@ -888,9 +892,13 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
     dtSim = 0.045,
     substeps = 2,
     sunDir = [0.65, 0.28, 0.70],
+    dynamoScale = null,
     readTelemetry = true
   } = {}) {
     if (disposed) return lastTelemetry;
+    if (dynamoScale != null && Number.isFinite(Number(dynamoScale))) {
+      liveDynamoFieldScale = Math.max(0.0, Math.min(2.4, Number(dynamoScale)));
+    }
     const nSub = Math.max(1, Math.min(8, Math.trunc(substeps)));
     const dtSafe = Math.max(0.005, Math.min(0.08, Number(dtSim) || 0.045));
     writeUniforms(dtSafe, sunDir);
@@ -959,7 +967,7 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
             activeLightningCells: Math.round(f[5]),
             meanAbsCharge: f[6],
             maxAuroraGlow: f[7],
-            dipoleFieldMicroT: (phys.dynamo?.bEquatorialT || 0) * 1e6,
+            dipoleFieldMicroT: (phys.dynamo?.bEquatorialT || 0) * 1e6 * liveDynamoFieldScale,
             enableTriboelectric: triboEnabled,
             accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
             scientificValidation: false

@@ -69,7 +69,7 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
 
     // ---- 1. L1 SPIRAL GALAXY MULTI-FRAME STABILITY + EMERGENT GPU α-ω DYNAMO ----
     const galSt0 = await page.evaluate(() => window.__ulgUniversesDemo.getState());
-    assert.equal(galSt0.galacticGravityMode, 'webgpu-cic-3dfft-pm+smbh', 'L1 Galaxy must use smooth 32^3 CIC 3D-FFT PM + direct SMBH');
+    assert.equal(galSt0.galacticGravityMode, 'webgpu-schroeder-scale-atlas-multipole', 'L1 Galaxy must use canonical Schroeder Scale-Atlas 3D multipole + NFW Dark Matter Halo + direct SMBH');
     assert.ok(galSt0.galacticDynamoStreamlineFloats > 200, `Expected emergent galactic dynamo streamlines > 200 floats (got ${galSt0.galacticDynamoStreamlineFloats})`);
     assert.ok(galSt0.galacticDynamoMagEnergy > 0, `Expected positive emergent galactic dynamo energy (got ${galSt0.galacticDynamoMagEnergy})`);
     const galDiag0 = await page.evaluate(() => window.__ulgUniversesDemo.readGalaxyDiagnostics());
@@ -97,14 +97,71 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
     assert.ok((galNullSt.galacticDynamoMagEnergy ?? 0) < 1e-6, `Galactic dynamo B0=0 must have 0 magnetic energy (got ${galNullSt.galacticDynamoMagEnergy})`);
     await page.evaluate(() => window.__ulgUniversesDemo.setGalacticB0(0.30));
 
-    // Universal GPU Star Picking + Focus on L1 Galaxy!
-    const pickedStar = await page.evaluate(() => window.__ulgUniversesDemo.pickAtCanvasFraction(0.56, 0.52, { preferGpuMote: true }));
+    // ---- 1B. LONG-HORIZON ALL-12-PRESET GALAXY STABILITY SWEEP (300 STEPS EACH!) ----
+    const galaxySweepPresets = [
+      'disk', 'barred', 'ring', 'lenticular', 'sphere', 'binary',
+      'irregular', 'dwarf-stream', 'globular', 'open-cluster', 'proto', 'coalesce'
+    ];
+    report.galaxySweep = {};
+    for (const gp of galaxySweepPresets) {
+      await page.evaluate(async (presetName) => {
+        await window.__ulgUniversesDemo.initGalaxyPreset(presetName);
+      }, gp);
+      const d0 = await page.evaluate(() => window.__ulgUniversesDemo.readGalaxyDiagnostics());
+      await page.evaluate(async () => {
+        for (let i = 0; i < 300; i += 1) await window.__ulgUniversesDemo.stepOnce();
+      });
+      const d300 = await page.evaluate(() => window.__ulgUniversesDemo.readGalaxyDiagnostics());
+      const ratio3d = d300.meanRadius3d / Math.max(1e-3, d0.meanRadius3d);
+      const isDynamic = gp === 'coalesce' || gp === 'binary' || gp === 'irregular';
+      const minRatio = isDynamic ? 0.42 : 0.72;
+      const maxRatio = isDynamic ? 1.45 : 1.32;
+      const maxEsc = gp === 'binary' ? 0.08 : (isDynamic ? 0.05 : 0.035);
+      assert.ok(
+        ratio3d >= minRatio && ratio3d <= maxRatio,
+        `Galaxy "${gp}" unstable over 300 steps: r3d0=${d0.meanRadius3d.toFixed(2)} -> r3d300=${d300.meanRadius3d.toFixed(2)} (ratio=${ratio3d.toFixed(2)})`
+      );
+      assert.ok(
+        d300.escapedFrac < maxEsc,
+        `Galaxy "${gp}" ejected too many stars over 300 steps: ${(d300.escapedFrac * 100).toFixed(2)}% (limit ${(maxEsc * 100).toFixed(1)}%)`
+      );
+      if (gp !== 'binary') {
+        assert.ok(d300.comDist < 1.25, `Galaxy "${gp}" COM wandered excessively over 300 steps (comDist=${d300.comDist.toFixed(2)})`);
+        assert.ok(d300.smbhDist < 1.60, `Galaxy "${gp}" central core wandered excessively (smbhDist=${d300.smbhDist.toFixed(2)})`);
+      }
+      if (gp === 'disk' || gp === 'barred' || gp === 'sphere' || gp === 'binary' || gp === 'ring') {
+        await snap(page, `03b-galaxy-${gp}-t300`);
+      }
+      report.galaxySweep[gp] = {
+        r0: Number(d0.meanRadius3d.toFixed(2)),
+        r300: Number(d300.meanRadius3d.toFixed(2)),
+        ratio: Number(ratio3d.toFixed(2)),
+        escapedPct: Number((d300.escapedFrac * 100).toFixed(2)),
+        comDist: Number(d300.comDist.toFixed(2)),
+        smbhDist: Number(d300.smbhDist.toFixed(2))
+      };
+    }
+    // Restore default disk galaxy for picking test
+    await page.evaluate(async () => { await window.__ulgUniversesDemo.initGalaxyPreset('disk'); });
+
+    // Universal GPU Star Picking + Real Wheel-Zoom Target Approach on L1 Galaxy (U9)!
+    const pickedStar = await page.evaluate(() => window.__ulgUniversesDemo.pickAtCanvasFraction(0.62, 0.46, { preferGpuMote: true }));
     assert.ok(pickedStar && pickedStar.kind === 'galaxy-star' && pickedStar.index >= 0, `Expected GPU star pick on L1 (got ${JSON.stringify(pickedStar)})`);
     const galInspName = await page.locator('#uv-target-name').textContent();
-    assert.ok(galInspName.includes(`Star #${pickedStar.index}`), `Inspector must show picked GPU star name (got "${galInspName}")`);
-    const galFocused = await page.evaluate(() => window.__ulgUniversesDemo.focusPickedMote({ zoomIn: false }));
-    assert.equal(galFocused, true, 'focusPickedMote must lock onto clicked galaxy star');
-    await snap(page, '04-galaxy-picked-star');
+    assert.ok(galInspName.includes(`#${pickedStar.index}`), `Inspector must show picked GPU star index #${pickedStar.index} (got "${galInspName}")`);
+    // Smoothly approach the picked off-center star using REAL mouse-wheel zoom events!
+    for (let w = 0; w < 14; w += 1) {
+      await page.mouse.move(680, 410);
+      await page.mouse.wheel(0, -140);
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 45)));
+      await page.evaluate(() => window.__ulgUniversesDemo.stepOnce());
+    }
+    const starAfterZoom = await page.evaluate(() => window.__ulgUniversesDemo.getTargetScreenCoords('picked-mote'));
+    assert.ok(
+      starAfterZoom && starAfterZoom.visible && starAfterZoom.dxCenter < 110,
+      `Wheel-zooming toward picked L1 star must smoothly center & approach it (got ${JSON.stringify(starAfterZoom)})`
+    );
+    await snap(page, '04-galaxy-picked-star-zoomed');
 
     report.galaxy = {
       gravityMode: galSt0.galacticGravityMode,
@@ -118,7 +175,10 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
     };
 
     // ---- 2. L3 HYDROSTATIC MAIN-SEQUENCE STAR STABILITY + EMERGENT GPU STELLAR DYNAMO ----
-    await page.evaluate(() => window.__ulgUniversesDemo.setLevel(3, { instant: true }));
+    await page.evaluate(async () => {
+      await window.__ulgUniversesDemo.setUseSolReference?.(true);
+      await window.__ulgUniversesDemo.setLevel(3, { instant: true });
+    });
     await page.evaluate(() => window.__ulgUniversesDemo.setCameraAngles(0.52, 0.34));
     const st0 = await page.evaluate(() => window.__ulgUniversesDemo.getState());
     assert.equal(st0.stellarPreset, 'main-sequence-star', 'L3 default fusion preset must be hydrostatic main-sequence-star');
@@ -196,6 +256,101 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
     const pickedNuc = await page.evaluate(() => window.__ulgUniversesDemo.pickAtCanvasFraction(0.50, 0.50, { preferGpuMote: true }));
     assert.ok(pickedNuc && pickedNuc.kind === 'nucleon', `Expected L7 quantized proton/neutron pick (got ${JSON.stringify(pickedNuc)})`);
     await snap(page, '14-nucleus-picked-nucleon');
+
+    // ---- 5. U13 + U9 PLANET-CLICK RETICLE SYNC & REAL WHEEL-ZOOM TARGET APPROACH ON L2 PLANET (SATURN!) ----
+    await page.evaluate(async () => {
+      await window.__ulgUniversesDemo.setUseSolReference?.(true);
+      await window.__ulgUniversesDemo.setLevel(2, { instant: true });
+      await window.__ulgUniversesDemo.stepOnce();
+    });
+    const satBefore = await page.evaluate(() => {
+      const pre = window.__ulgUniversesDemo.getTargetScreenCoords('saturn');
+      window.__ulgUniversesDemo.selectTarget('saturn');
+      const t0 = window.__ulgUniversesDemo.getTargetScreenCoords('saturn');
+      return { pre, t0 };
+    });
+    assert.ok(satBefore.pre && satBefore.pre.visible && satBefore.pre.dxCenter > 80, `Saturn should start off-center in barycenter L2 view (got ${JSON.stringify(satBefore.pre)})`);
+    // Let the smooth perspective glide run for ~500 ms WITHOUT zooming (U13): reticle MUST glide to dead-center in lockstep with 3D Saturn!
+    for (let g = 0; g < 14; g += 1) {
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 40)));
+      await page.evaluate(() => window.__ulgUniversesDemo.stepOnce());
+    }
+    const satGlided = await page.evaluate(() => window.__ulgUniversesDemo.getTargetScreenCoords('saturn'));
+    assert.ok(
+      satGlided && satGlided.visible && satGlided.dxCenter < 22,
+      `U13: Clicking Saturn must glide its 2D reticle smoothly to center in lockstep with the shifted 3D perspective (before=${JSON.stringify(satBefore.pre)}, glided=${JSON.stringify(satGlided)})`
+    );
+    // Mid-flight L2 check (8 wheel ticks: 12.6 -> ~9.9, still at L2!) must keep Saturn dead-center!
+    for (let w = 0; w < 8; w += 1) {
+      await page.mouse.move(680, 410);
+      await page.mouse.wheel(0, -140);
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 45)));
+      await page.evaluate(() => window.__ulgUniversesDemo.stepOnce());
+    }
+    const satMid = await page.evaluate(() => ({
+      coords: window.__ulgUniversesDemo.getTargetScreenCoords('saturn'),
+      st: window.__ulgUniversesDemo.getState()
+    }));
+    assert.ok(
+      satMid.coords && satMid.coords.visible && satMid.coords.dxCenter < 35,
+      `Mid-flight wheel-zoom toward L2 Saturn must keep Saturn centered cleanly (before=${JSON.stringify(satBefore.pre)}, mid=${JSON.stringify(satMid.coords)}, span=${satMid.st.log10ViewSpanM})`
+    );
+    // Continue scrolling IN (8 more ticks) -> arrives seamlessly into L4 Saturn orbit!
+    for (let w = 0; w < 8; w += 1) {
+      await page.mouse.move(680, 410);
+      await page.mouse.wheel(0, -140);
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 45)));
+      await page.evaluate(() => window.__ulgUniversesDemo.stepOnce());
+    }
+    const satArrived = await page.evaluate(() => window.__ulgUniversesDemo.getState());
+    assert.equal(satArrived.level, 4, `Continued wheel-zoom into Saturn must arrive at L4 (got L${satArrived.level})`);
+    assert.equal(satArrived.focusedSolarBody, 'saturn', `Arrived L4 body must still be Saturn (got ${satArrived.focusedSolarBody})`);
+    report.zoomTargetApproach = {
+      l1StarDxCenter: Number(starAfterZoom.dxCenter.toFixed(1)),
+      l2SaturnBeforeDx: satBefore.pre ? Number(satBefore.pre.dxCenter.toFixed(1)) : null,
+      l2SaturnGlidedDx: Number(satGlided.dxCenter.toFixed(1)),
+      l2SaturnMidDx: Number(satMid.coords.dxCenter.toFixed(1)),
+      l2SaturnArrivedLevel: satArrived.level
+    };
+
+    // ---- 6. U11 DEFAULT BOOT INSIDE COSMIC WEB + PERPETUAL VISIBLE EXPANSION (NEVER FREEZES AT a=1.15!) ----
+    const bootPage = await ctx.newPage();
+    bootPage.on('pageerror', (e) => pageErrors.push(`[boot] ${String(e).slice(0, 300)}`));
+    bootPage.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[boot] ${m.text().slice(0, 300)}`); });
+    await bootPage.goto(`${BASE_URL.replace(/\/$/, '')}/universes.html?quality=med`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await bootPage.waitForFunction(() => Boolean(window.__ulgUniversesDemo?.getState?.()?.ready), null, { timeout: 60_000 });
+    await bootPage.evaluate(() => { document.getElementById('uv-pause-btn')?.click(); });
+    const bootSt0 = await bootPage.evaluate(() => window.__ulgUniversesDemo.getState());
+    assert.equal(bootSt0.level, 0, 'Default boot must start at L0 Cosmic Web');
+    assert.ok(
+      bootSt0.log10ViewSpanM >= 25.0 && bootSt0.log10ViewSpanM <= 25.85,
+      `Default boot must place camera INSIDE the middle of the Cosmic Web (~25.45), got ${bootSt0.log10ViewSpanM}`
+    );
+    const fBoot0 = await snap(bootPage, '15-boot-inside-cosmic-web-t0');
+    // Step 220 frames at elevated timescale so scale factor expands cleanly past old a=1.15 freeze!
+    await bootPage.evaluate(async () => {
+      const ts = document.getElementById('uv-timescale-slider');
+      if (ts) { ts.value = '3.0'; ts.dispatchEvent(new Event('input', { bubbles: true })); }
+      for (let i = 0; i < 220; i += 1) await window.__ulgUniversesDemo.stepOnce();
+    });
+    const bootSt220 = await bootPage.evaluate(() => window.__ulgUniversesDemo.getState());
+    const fBoot220 = await snap(bootPage, '16-boot-cosmic-web-expanded-t220');
+    await bootPage.evaluate(async () => {
+      for (let i = 0; i < 60; i += 1) await window.__ulgUniversesDemo.stepOnce();
+    });
+    const bootSt280 = await bootPage.evaluate(() => window.__ulgUniversesDemo.getState());
+    const expMotion = comparePhysicalPixelPngFrames(fBoot0, fBoot220);
+    assert.ok(bootSt220.cosmoScaleFactorA > 1.18, `Cosmic expansion must NOT freeze at old a=1.15 clamp (got a=${bootSt220.cosmoScaleFactorA})`);
+    assert.ok(bootSt280.cosmoScaleFactorA > bootSt220.cosmoScaleFactorA + 0.05, `Cosmic expansion must continue perpetually past a=1.18 (a220=${bootSt220.cosmoScaleFactorA}, a280=${bootSt280.cosmoScaleFactorA})`);
+    assert.ok(expMotion.changedPixelCount > 12000, `Cosmic web expansion must visibly expand filaments across viewport (changed=${expMotion.changedPixelCount})`);
+    report.cosmicBootAndExpansion = {
+      bootSpan: bootSt0.log10ViewSpanM,
+      a0: Number(bootSt0.cosmoScaleFactorA.toFixed(3)),
+      a220: Number(bootSt220.cosmoScaleFactorA.toFixed(3)),
+      a280: Number(bootSt280.cosmoScaleFactorA.toFixed(3)),
+      changedPx: expMotion.changedPixelCount
+    };
+    await bootPage.close();
 
     const finalSt = await page.evaluate(() => window.__ulgUniversesDemo.getState());
     assert.equal(finalSt.gpuErrorCount, 0, `GPU errors: ${finalSt.gpuErrors.join(' | ')}`);

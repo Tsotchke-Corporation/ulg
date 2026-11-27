@@ -35,6 +35,7 @@ struct CameraUniforms {
   em_sensor: vec4<f32>,  // x = log10LambdaMin [-13..+1], y = log10LambdaMax, z = sensorActive (0|1), w = gain
   em_aux: vec4<f32>,     // x = ambientTempK, y = sunFluxOrEclipse, z = skyOptDepth, w = flags (bit0=skipSurfaceFog, bit1=reversedLogDepth)
   star_light: vec4<f32>, // rgb = linear host-star light spectrum, w = perceptual inverse-square irradiance gain [0.14..1.85]
+  sph_geo: vec4<f32>,    // x = sphGeoW (0=inactive), y = sphGeoH, z = sphGeoSphereIdx, w = seaLevelNorm
 };
 
 // Unified Reversed Logarithmic Depth Buffer [0.1 m .. 10^14 m (~668 AU)]!
@@ -334,7 +335,75 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     col = col + (stars + vec3<f32>(0.045, 0.058, 0.105) * mw_band) * star_vis;
   }
 
-  col = em_sensor_map_rgb(col, mix(2.725, max(50.0, cam.em_aux.x * 0.82), opt_depth * 0.65), sunset_w * 0.3 + sun_halo * 0.4, 0.0, star_vis * 0.12, 0.0);
+  // Live 3D Geodynamo Surface Sky Aurorae ([O I] 557.7 nm emerald -> cyan-teal -> [O I] 630 nm / N2+ violet-crimson curtains)!
+  // Exact 3D spherical thermosphere shell ray-intersection (R_p = 6371 km, h = 105..280 km) so magnetic curtains
+  // arch majestically from 5° above the mountain horizon all the way to zenith at twilight & midnight!
+  // Strictly gated by live geodynamo B-field, atmospheric optical depth, geomagnetic oval latitude, & dark-sky radiance
+  // (0 at high noon in sunlit blue sky, 0 on unmagnetized/vacuum worlds like Moon/Mars!).
+  let aurora_str = clamp(cam.sph_geo.x, 0.0, 2.5);
+  let obs_lat_rad = cam.sph_geo.y;
+  var aur_uv_sig = 0.0;
+  if (aurora_str > 0.005 && opt_depth > 0.03 && dir.y > 0.015) {
+    // True sky-brightness contrast gating: vivid across midnight, dusk, dawn & solar eclipses; washed out by sunlit daytime sky!
+    let dark_vis = clamp(1.0 - smoothstep(-0.04, 0.24, sun_elev) * opt_depth * eclipse_f, 0.0, 1.0);
+    if (dark_vis > 0.01) {
+      let hor_fade = smoothstep(0.015, 0.095, dir.y) * (1.0 - smoothstep(0.92, 0.998, dir.y) * 0.18);
+      let t_aur = cam.cam_pos.w * 0.42;
+      let r_planet_km = 6371.0;
+      // Poleward geomagnetic oval offset (arcs sit closer to zenith at polar latitudes, sweeping dramatically across the lower horizon at mid-latitudes!)
+      let lat_abs = abs(obs_lat_rad);
+      let oval_shift_km = mix(360.0, 75.0, smoothstep(0.35, 1.15, lat_abs));
+      var aur_col = vec3<f32>(0.0);
+      // 8 physical thermospheric emission shells from 105 km (emerald O I 557.7 nm / N2 pink) -> 275 km (crimson/violet O I 630 nm / N2+)
+      for (var k = 0u; k < 8u; k = k + 1u) {
+        let fk = f32(k) / 7.0;
+        let h_km = 105.0 + fk * 170.0;
+        // Exact ray intersection with curved spherical upper-atmosphere shell at radius (R_p + h_km)
+        let b_s = r_planet_km * dir.y;
+        let s_km = -b_s + sqrt(max(1.0, b_s * b_s + 2.0 * r_planet_km * h_km + h_km * h_km));
+        let p_km = dir.xz * s_km;
+        let r_hor_km = length(p_km);
+        let az_km = atan2(p_km.y, p_km.x);
+        // Three sweeping, undulating Birkeland geomagnetic curtains spanning 150..780 km horizontal shell distance
+        // (naturally visible right across 6°..65° elevation above the horizon mountains AND overhead!)
+        let fold_a = sin(az_km * 2.0 + t_aur * 0.48 + fk * 0.22) * 95.0
+          + cos(az_km * 5.0 - t_aur * 0.74 + p_km.x * 0.0045) * 48.0;
+        let d_a = (r_hor_km - (oval_shift_km + 95.0 + fold_a)) / (52.0 + fk * 28.0);
+        let curt_a = exp(-(d_a * d_a));
+
+        let fold_b = cos(az_km * 3.0 - t_aur * 0.56 - fk * 0.18) * 115.0
+          + sin(az_km * 6.0 + t_aur * 0.82 + p_km.y * 0.0042) * 56.0;
+        let d_b = (r_hor_km - (oval_shift_km + 275.0 + fold_b)) / (68.0 + fk * 34.0);
+        let curt_b = exp(-(d_b * d_b));
+
+        let fold_c = sin(az_km * 4.0 + t_aur * 0.38) * 80.0;
+        let d_c = (r_hor_km - (oval_shift_km + 485.0 + fold_c)) / (85.0 + fk * 40.0);
+        let curt_c = exp(-(d_c * d_c)) * 0.72;
+
+        // Crisp vertical magnetic-field-aligned electron precipitation ray striations!
+        let ray_p = az_km * 26.0 + fold_a * 0.032 + t_aur * 1.9;
+        let ray_q = az_km * 15.0 - t_aur * 1.3 + p_km.x * 0.011;
+        let rays = 0.44 + 0.56 * max(0.0, sin(ray_p) * cos(ray_q) * 0.7 + 0.35 * sin(az_km * 41.0 - t_aur * 2.5));
+        let sheet = (curt_a + curt_b * 0.88 + curt_c) * rays;
+
+        // Real upper-atmosphere atomic spectroscopy by altitude h_km:
+        //   105-120 km: pink/magenta N2 lower fringe + electric emerald [O I] 557.7 nm
+        //   120-190 km: bright emerald-cyan [O I] 557.7 nm
+        //   190-275 km: crimson-violet [O I] 630.0 nm & N2+ 427.8 nm upper crown!
+        let c_base = vec3<f32>(0.24, 1.00, 0.52);
+        let c_mid  = vec3<f32>(0.10, 0.90, 0.74);
+        let c_top  = vec3<f32>(0.72, 0.16, 0.94);
+        let slice_c = select(mix(c_mid, c_top, (fk - 0.42) / 0.58), mix(c_base, c_mid, fk / 0.42), fk < 0.42);
+        let alt_w = (1.28 - fk * 0.52) * smoothstep(0.0, 0.18, fk + 0.06);
+        aur_col = aur_col + slice_c * sheet * alt_w * 0.42;
+      }
+      let aur_gain = aurora_str * dark_vis * hor_fade;
+      col = col + aur_col * aur_gain;
+      aur_uv_sig = clamp(length(aur_col) * aur_gain * 0.90, 0.0, 2.0);
+    }
+  }
+
+  col = em_sensor_map_rgb(col, mix(2.725, max(50.0, cam.em_aux.x * 0.82), opt_depth * 0.65), sunset_w * 0.3 + sun_halo * 0.4 + aur_uv_sig * 1.2, aur_uv_sig * 0.25, star_vis * 0.12 + aur_uv_sig * 0.35, 0.0);
   return vec4<f32>(col, 1.0);
 }
 `;
@@ -807,22 +876,67 @@ fn vs_main(
   var streak_len = 0.0;
 
   if (mode == 0u) {
-    // L0: Physical Expanding FLRW 2LPT + TreePM Cosmic Web (16 floats/particle)
-    // extra2.x = FLRW scale factor a(t) in [0.04..1.15]; extra2.y = Big Bang physical expansion flag (0 or 1)!
-    let o = iid * 16u;
-    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
-    let raw_v = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
+    // L0: Full 93-Gly (28,500 Mpc, R_H = 46.5 Gly) Observable-Universe Lightcone Cosmic Web!
+    // Evolves a physically resolved periodic FLRW 2LPT + TreePM box (box_sz = 1,425 Mpc, dx ~ 44 Mpc),
+    // tiled seamlessly via GPU instancing across a 5x5x5 spherical Observable-Universe lightcone (extra2.z = rawCount,
+    // extra2.w = R_H_mpc = 14,250 Mpc) with octahedral tile symmetry (zero repeating stripes) & radial lookback redshift z(r)!
+    let is_sky = world_scale < 0.0;
     let box_sz = max(10.0, cam.extra1.w);
+    let raw_cnt = u32(round(max(0.0, cam.extra2.z)));
+    let obs_rad = max(0.0, cam.extra2.w);
+    let tiled_obs = (raw_cnt > 0u) && (obs_rad > 100.0) && !is_sky;
+
+    var p_idx = iid;
+    var cell_off = vec3<f32>(0.0);
+    var tile_rot_id = 0u;
+    var outer_tile_att = 1.0;
+    if (tiled_obs) {
+      // Distribute ALL instances UNIFORMLY across the 5x5x5 spherical Observable Universe lightcone
+      // (INCLUDING center cell (0,0,0)!) so there is ZERO overexposed white blob in the center!
+      let c_raw = iid % 125u;
+      let tx = i32(c_raw % 5u) - 2;
+      let ty = i32((c_raw / 5u) % 5u) - 2;
+      let tz = i32(c_raw / 25u) - 2;
+      let r2_t = tx * tx + ty * ty + tz * tz;
+      if (r2_t > 5) {
+        var culled_t: VsOut;
+        culled_t.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        culled_t.color = vec4<f32>(0.0);
+        culled_t.uv = vec2<f32>(0.0);
+        return culled_t;
+      }
+      p_idx = ((iid / 125u) * 19u + c_raw * 97u) % raw_cnt;
+      cell_off = vec3<f32>(f32(tx), f32(ty), f32(tz));
+      tile_rot_id = select(c_raw, 0u, r2_t == 0);
+      outer_tile_att = select(select(0.95, 0.86, r2_t >= 2), 0.72, r2_t >= 4);
+    }
+
+    let o = p_idx * 16u;
+    var raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    var raw_v = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
+    if (tiled_obs && tile_rot_id > 0u) {
+      // Deterministic octahedral 3D symmetry per outer lightcone cell -> organic filament network with zero grid repetition!
+      let perm = tile_rot_id % 3u;
+      if (perm == 1u) { raw_p = raw_p.yzx; raw_v = raw_v.yzx; }
+      else if (perm == 2u) { raw_p = raw_p.zxy; raw_v = raw_v.zxy; }
+      if ((tile_rot_id & 1u) != 0u) { raw_p.x = -raw_p.x; raw_v.x = -raw_v.x; }
+      if ((tile_rot_id & 2u) != 0u) { raw_p.y = -raw_p.y; raw_v.y = -raw_v.y; }
+      if ((tile_rot_id & 4u) != 0u) { raw_p.z = -raw_p.z; raw_v.z = -raw_v.z; }
+    }
+    let tile_pitch = select(box_sz, (obs_rad * 2.0) / 5.0, tiled_obs);
+    let obs_pos = select(raw_p, (cell_off + raw_p / box_sz) * tile_pitch, tiled_obs);
+
     let a_scale = select(1.0, max(0.02, cam.extra2.x), cam.extra2.x > 0.001);
     let bb_mode = clamp(cam.extra2.y, 0.0, 1.0);
-    // Physical metric expansion: r_phys(t) = a(t) * x_comoving expands visibly from compact fireball to full Cosmic Web!
-    let a_expand = mix(1.0, clamp(pow(a_scale, 0.72), 0.11, 1.08), bb_mode);
-    let is_sky = world_scale < 0.0;
-    let rel_c = raw_p - cam.extra1.xyz;
+    // Live FLRW metric expansion r_phys(t) = a(t) * x_comoving visible in BOTH Cosmic Web AND Big Bang modes!
+    // Smooth logarithmic continuation beyond a > 2.2 keeps expansion visibly alive forever without emptying the lightcone!
+    let a_web = select(max(0.18, a_scale), 2.2 + 1.45 * log(max(1.0, a_scale / 2.2)), a_scale > 2.2);
+    let a_expand = select(a_web, max(0.05, a_scale), bb_mode > 0.5);
+    let rel_c = obs_pos - cam.extra1.xyz;
     let d_rel_c = length(rel_c);
-    // Smooth observable-horizon spherical survey vignette (eliminates harsh periodic box wall edges!)
-    let r_box = length(raw_p) / box_sz;
-    let sphere_fade = 1.0 - smoothstep(0.32, 0.495, r_box);
+    // Smooth spherical Observable-Universe Particle Horizon vignette at R_H = 46.5 Gly (14,250 Mpc)
+    let r_hor_norm = select(length(raw_p) / max(1.0, box_sz * 0.5), length(obs_pos) / max(1.0, obs_rad), tiled_obs);
+    let sphere_fade = 1.0 - smoothstep(0.84, 1.0, r_hor_norm);
     if (sphere_fade < 0.01 || (is_sky && d_rel_c < 2.0)) {
       var culled0: VsOut;
       culled0.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
@@ -834,16 +948,27 @@ fn vs_main(
     let rho = clamp(raw_f32[o + 7u], 0.04, 1.0);
     let is_baryon = raw_f32[o + 12u] > 0.5;
     let col_void = vec3<f32>(0.14, 0.18, 0.62);
-    let col_fil = vec3<f32>(0.18, 0.64, 1.0);
-    let col_node = vec3<f32>(1.0, 0.72, 0.28);
-    var c_dm = mix(col_void, col_fil, smoothstep(0.08, 0.56, rho));
-    c_dm = mix(c_dm, col_node, smoothstep(0.60, 0.96, rho));
-    let c_bar = mix(vec3<f32>(0.94, 0.38, 0.22), vec3<f32>(1.0, 0.80, 0.36), smoothstep(0.18, 0.90, rho));
+    let col_fil = vec3<f32>(0.18, 0.66, 1.0);
+    let col_node = vec3<f32>(1.0, 0.74, 0.28);
+    var c_dm = mix(col_void, col_fil, smoothstep(0.08, 0.54, rho));
+    c_dm = mix(c_dm, col_node, smoothstep(0.58, 0.95, rho));
+    let c_bar = mix(vec3<f32>(0.94, 0.40, 0.22), vec3<f32>(1.0, 0.82, 0.36), smoothstep(0.18, 0.90, rho));
     let sky_att = select(1.0, clamp(42.0 / (16.0 + d_rel_c), 0.35, 1.85), is_sky);
-    var web_col = select(c_dm, c_bar, is_baryon) * (0.78 + 1.05 * pow(rho, 0.90));
+    var web_col = select(c_dm, c_bar, is_baryon) * (0.80 + 1.05 * pow(rho, 0.90));
+
+    // Radial cosmological lookback redshift z(r) across the 93-Gly Observable Lightcone!
+    //   Local z~0 (center): vivid sapphire/cyan filaments -> Cosmic Noon z~1-3 (mid): amber-gold
+    //   -> Cosmic Dawn z~6-10 (outer): crimson-violet -> Planck CMB Horizon Shell (r -> R_H): glowing amber-microwave rim!
+    if (tiled_obs && bb_mode < 0.5) {
+      let mid_z = smoothstep(0.32, 0.72, r_hor_norm);
+      let deep_z = smoothstep(0.68, 0.95, r_hor_norm);
+      let cmb_rim = smoothstep(0.88, 0.99, r_hor_norm);
+      web_col = mix(web_col, web_col * vec3<f32>(1.18, 0.92, 0.74), mid_z * 0.55);
+      web_col = mix(web_col, vec3<f32>(0.98, 0.36, 0.46) * (0.55 + 0.85 * rho), deep_z * 0.52);
+      web_col = mix(web_col, vec3<f32>(1.25, 0.68, 0.24) * (0.70 + 0.60 * rho), cmb_rim * 0.62);
+    }
 
     // Continuous FLRW Big Bang fireball blackbody shift T(z) = 2.7255 / a(t):
-    //   a < 0.10: blinding blue-white primordial plasma -> a ~ 0.18: golden recombination -> a ~ 0.38: crimson cosmic dawn -> present web!
     if (bb_mode > 0.5 && !is_sky) {
       let early_w = 1.0 - smoothstep(0.08, 0.58, a_scale);
       let hot_plasma = vec3<f32>(0.82, 0.94, 1.45);
@@ -855,9 +980,8 @@ fn vs_main(
     }
 
     col = web_col;
-    pt_size = pt_size_base * (0.56 + 0.92 * pow(rho, 0.85)) * select(1.0, 0.68 + 0.52 * sky_att, is_sky);
-    alpha = alpha_gain * (0.28 + 0.72 * pow(rho, 0.92)) * sphere_fade * sky_att;
-    // Pass 2 L0 Visual LOD: soft volumetric DM filament clouds + velocity-aligned infall streaks!
+    pt_size = pt_size_base * (0.54 + 0.92 * pow(rho, 0.85)) * select(1.0, 0.68 + 0.52 * sky_att, is_sky) * select(1.0, 1.12, tiled_obs && tile_rot_id > 0u);
+    alpha = alpha_gain * (0.28 + 0.72 * pow(rho, 0.92)) * sphere_fade * sky_att * outer_tile_att;
     if (!is_sky) {
       let v_mag = length(raw_v);
       if (bb_mode < 0.5 && v_mag > 0.65 && (iid & 3u) == 0u) {
@@ -866,8 +990,8 @@ fn vs_main(
         shape = 2.0;
       } else if (!is_baryon && rho > 0.42 && (iid & 1u) == 0u) {
         shape = 1.0;
-        pt_size = pt_size * 1.55;
-        alpha = alpha * 0.62;
+        pt_size = pt_size * 1.48;
+        alpha = alpha * 0.58;
       }
     }
   } else if (mode == 1u) {
@@ -1042,6 +1166,58 @@ fn vs_main(
     col = select(c_neg, c_pos, pos_phase) * (0.70 + 0.95 * mag);
     pt_size = pt_size_base * (0.72 + 0.55 * mag);
     alpha = alpha_gain * (0.30 + 0.70 * mag);
+  } else if (mode == 13u) {
+    // Mode 13: Crisp Pinpoint Hypervelocity Planetesimal Impactors & Molten Shock Sparks around Volumetric 3D SPH Protoplanet!
+    // (When Live Volumetric Protoplanet is active, heavy interior bulk is ray-marched directly from the 3D SPH grid,
+    //  so Mode 13 only renders fiery incoming LHB impactors & sparkling incandescent ejecta — ZERO giant polka dots!)
+    let o = iid * 16u;
+    let act = raw_f32[o + 15u];
+    let sp = raw_f32[o + 8u];
+    let shock = raw_f32[o + 11u];
+    let only_impactors = cam.extra1.w > 0.5;
+    let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    let raw_v = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
+    let r_p13 = length(raw_p);
+    // During live volumetric protoplanet rendering, ONLY show fiery incoming space impactor meteor streaks
+    // outside the crust (species == 3 && r >= 1.00) — volumetric Mode 1 already renders all 3D interior & shock glows!
+    if (act < 0.5 || (only_impactors && (abs(sp - 3.0) > 0.35 || r_p13 < 1.00))) {
+      var culled13: VsOut;
+      culled13.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+      culled13.color = vec4<f32>(0.0);
+      culled13.uv = vec2<f32>(0.0);
+      return culled13;
+    }
+    p_world = cam.extra1.xyz + raw_p * world_scale;
+    let temp_n = clamp(raw_f32[o + 7u], 0.0, 1.0);
+    let thick = raw_f32[o + 10u];
+    let v_mag13 = length(raw_v);
+    if (abs(sp - 3.0) < 0.3) {
+      // Blazing velocity-stretched hypervelocity LHB planetesimal meteor streak!
+      col = vec3<f32>(1.0, 0.86, 0.42) * (1.55 + shock * 0.5);
+      pt_size = pt_size_base * 0.58;
+      if (v_mag13 > 0.15) {
+        streak_axis = raw_v / v_mag13;
+        streak_len = clamp(pt_size * (2.6 + v_mag13 * 1.4), pt_size * 1.8, pt_size * 6.5);
+        shape = 2.0;
+      }
+    } else if (shock >= 0.25) {
+      // Glowing white-orange impact shock spark
+      col = mix(vec3<f32>(1.0, 0.45, 0.08), vec3<f32>(1.0, 0.94, 0.66), clamp(shock * 0.65, 0.0, 1.0)) * 1.4;
+      pt_size = pt_size_base * 0.44;
+    } else if (sp < 0.5) {
+      col = mix(vec3<f32>(1.0, 0.62, 0.14), vec3<f32>(1.0, 0.94, 0.68), temp_n);
+      pt_size = pt_size_base * 0.52;
+    } else if (abs(sp - 1.0) < 0.3) {
+      col = mix(vec3<f32>(0.54, 0.18, 0.10), vec3<f32>(1.0, 0.44, 0.10), temp_n);
+      pt_size = pt_size_base * 0.46;
+    } else if (abs(sp - 2.0) < 0.3) {
+      col = mix(vec3<f32>(0.26, 0.58, 0.34), vec3<f32>(0.84, 0.78, 0.64), clamp(thick * 0.8, 0.0, 1.0));
+      pt_size = pt_size_base * 0.48;
+    } else {
+      col = vec3<f32>(0.14, 0.58, 0.96);
+      pt_size = pt_size_base * 0.42;
+    }
+    alpha = alpha_gain * select(0.55, 0.95, abs(sp - 3.0) < 0.3 || shock >= 0.25);
   } else if (mode == 12u) {
     // Mode 12: Rescaled Parent L5 Crystal Lattice Skybox enveloping the L6 Quantum Atom (4 floats/atom: x,y,z,w)!
     let o = iid * 4u;
@@ -1100,7 +1276,8 @@ fn vs_main(
     pt_size = pt_size_base * (0.58 + 0.82 * dens_f + 0.75 * jet_f);
     alpha = alpha_gain * (0.26 + 0.56 * dens_f + 0.62 * jet_f);
   } else if (mode == 6u) {
-    // Mode 6: L2 Protoplanetary Accretion Disk Pebbles (warm silicate dust inside snow line, icy sapphire outside!)
+    // Mode 6: L2 Volumetric Swirling Protoplanetary Accretion Disk (velocity-aligned Keplerian spiral streaks +
+    // soft translucent nebula gas mist + shock-heated glowing protoplanet cores — ZERO grainy static dots!)
     let o = iid * 16u;
     let is_live = raw_f32[o + 15u];
     if (is_live < 0.5 || raw_f32[o + 3u] <= 0.0) {
@@ -1111,14 +1288,49 @@ fn vs_main(
       return culled6;
     }
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
-    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let raw_v = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
+    let r_au6 = max(0.02, raw_f32[o + 11u]);
+    let r_xz6 = max(1e-4, length(raw_p.xz));
+    // Continuous radial morphism from log-radial disk overview (blend=0) -> exact 1:1 physical linear AU (blend=1)!
+    let au_blend = clamp(cam.extra1.w, 0.0, 1.0);
+    let au_scale = max(0.0, cam.extra2.x);
+    let r_log_w = r_xz6 * world_scale;
+    let r_lin_w = r_au6 * au_scale;
+    let r_eff_w = select(r_log_w, mix(r_log_w, r_lin_w, au_blend), au_scale > 1e-6);
+    let xz_dir = raw_p.xz / r_xz6;
+    let y_eff_w = raw_p.y * (r_eff_w / r_xz6);
+    p_world = vec3<f32>(xz_dir.x * r_eff_w, y_eff_w, xz_dir.y * r_eff_w) - cam.extra1.xyz;
     let temp_k = raw_f32[o + 8u];
     let ice_f = clamp(raw_f32[o + 9u], 0.0, 1.0);
-    let hot_inner = mix(vec3<f32>(0.92, 0.52, 0.24), vec3<f32>(1.0, 0.82, 0.48), clamp((temp_k - 220.0) / 360.0, 0.0, 1.0));
-    let icy_outer = vec3<f32>(0.48, 0.80, 1.0);
-    col = mix(hot_inner, icy_outer, ice_f);
-    pt_size = pt_size_base * (0.78 + 0.45 * ice_f);
-    alpha = alpha_gain * (0.48 + 0.36 * (1.0 - ice_f * 0.35));
+    let gas_env = clamp(raw_f32[o + 10u], 0.0, 1.0);
+    let r_vis6 = length(raw_p.xz);
+    let hot_t = clamp((temp_k - 180.0) / 720.0, 0.0, 1.0);
+    let shock_flare = smoothstep(550.0, 1350.0, temp_k);
+    // Warm incandescent silicate/Fe inner nebula -> pearl-turquoise snow-line mist -> deep sapphire-violet Kuiper haze
+    let inner_col = mix(vec3<f32>(0.88, 0.36, 0.12), vec3<f32>(1.0, 0.84, 0.46), hot_t);
+    let snow_col = vec3<f32>(0.42, 0.84, 1.0);
+    let outer_col = mix(vec3<f32>(0.18, 0.42, 0.88), vec3<f32>(0.54, 0.78, 1.0), smoothstep(0.9, 5.2, r_vis6));
+    var neb_col = mix(inner_col, mix(snow_col, outer_col, smoothstep(0.35, 0.92, ice_f)), smoothstep(0.08, 0.82, ice_f));
+    neb_col = mix(neb_col, vec3<f32>(1.0, 0.95, 0.78) * 1.45, shock_flare * 0.65 + gas_env * 0.35);
+    col = neb_col;
+    let v_mag6 = length(raw_v);
+    let is_mist = (iid & 3u) == 0u;
+    if (is_mist) {
+      // Soft luminous translucent volumetric gas/dust cloud layer weaving spiral arms together!
+      shape = 1.0;
+      pt_size = pt_size_base * (3.2 + 1.8 * ice_f);
+      alpha = alpha_gain * (0.095 + 0.08 * (1.0 - ice_f * 0.35) + 0.08 * shock_flare);
+    } else if (v_mag6 > 0.25) {
+      // Fine silky velocity-aligned Keplerian plasma & pebble orbital streams!
+      shape = 2.0;
+      streak_axis = raw_v / v_mag6;
+      pt_size = pt_size_base * (0.50 + 0.32 * shock_flare);
+      streak_len = clamp(pt_size * (3.6 + v_mag6 * 0.72), pt_size * 2.8, pt_size * 7.2);
+      alpha = alpha_gain * (0.16 + 0.22 * shock_flare + 0.14 * (1.0 - ice_f * 0.35));
+    } else {
+      pt_size = pt_size_base * 0.62;
+      alpha = alpha_gain * 0.22;
+    }
   } else if (mode == 7u) {
     // Mode 7: Relativistic Kerr/BZ Jet (real camera-angle Doppler beaming!), Magnetar Flares/Pulsar Beams, & BNS Kilonova r-Process Ejecta!
     let o = iid * 16u;
@@ -1184,8 +1396,10 @@ fn vs_main(
       return culled8;
     }
     let raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
+    let raw_v8 = vec3<f32>(raw_f32[o + 4u], raw_f32[o + 5u], raw_f32[o + 6u]);
     let sp_tag = raw_f32[o + 3u];
-    p_world = (raw_p - cam.extra1.xyz) * world_scale;
+    let is_comet_tail = cam.extra1.w > 0.5;
+    p_world = select((raw_p - cam.extra1.xyz) * world_scale, cam.extra1.xyz + raw_p * world_scale, is_comet_tail);
     let ha = clamp(raw_f32[o + 8u], 0.0, 2.0);
     let o3 = clamp(raw_f32[o + 9u], 0.0, 2.0);
     let s2_dust = clamp(raw_f32[o + 10u], 0.0, 2.0);
@@ -1196,7 +1410,29 @@ fn vs_main(
     let c_s2 = vec3<f32>(1.0, 0.72, 0.28) * s2_dust;
     let tot = max(0.12, ha + o3 + s2_dust);
     col = (c_ha + c_o3 + c_s2) * (0.95 / pow(tot, 0.28));
-    if (sp_tag > 3.5) {
+    if (is_comet_tail) {
+      // Crisp Rosetta-style velocity-stretched sublimation gas & dust tail filaments (ZERO bokeh dots over nucleus!)
+      let r_com = length(raw_p);
+      let nuc_clear = smoothstep(0.32, 0.88, r_com);
+      let v8_mag = length(raw_v8);
+      if (nuc_clear < 0.03) {
+        var culled8c: VsOut;
+        culled8c.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        culled8c.color = vec4<f32>(0.0);
+        culled8c.uv = vec2<f32>(0.0);
+        return culled8c;
+      }
+      if (v8_mag > 0.15) {
+        shape = 2.0;
+        streak_axis = raw_v8 / v8_mag;
+        pt_size = pt_size_base * (0.55 + 0.55 * min(1.2, tot));
+        streak_len = clamp(pt_size * (4.5 + v8_mag * 1.4), pt_size * 3.5, pt_size * 10.0);
+      } else {
+        shape = 1.0;
+        pt_size = pt_size_base * 1.1;
+      }
+      alpha = alpha_gain * nuc_clear * clamp(0.14 + 0.34 * min(1.4, tot), 0.03, 0.65);
+    } else if (sp_tag > 3.5) {
       // Embedded protostars & Herbig-Haro jets veiled in optical dust, blazing in JWST IR!
       let vis_veil = mix(0.24, 1.95, ir_pierce8);
       col = mix(vec3<f32>(1.0, 0.34, 0.16), vec3<f32>(1.0, 0.88, 0.56), ir_pierce8) * vis_veil;
@@ -1555,6 +1791,9 @@ struct SphereInstance {
 // Zero-copy live GPU Planetary Baroclinic Atmosphere + Triboelectric Lightning + Aurora + CFD Flow grid!
 // 3 vec4 per cell: [i*3+0]=em0(rhoQ, phi, eMag, flash), [i*3+1]=vis(cloud, dust, lightningGlow, auroraEnv), [i*3+2]=cfd_flow(uEast, vNorth, vort, tAnom)
 @group(0) @binding(2) var<storage, read> atmo_em_grid: array<vec4<f32>>;
+// Zero-copy live GPU 3D SPH Planetary Genesis Spherical Geology Map (W x H):
+//   vec4(elevNorm [-1..1], crustComp [0..1], thermalVolc [0..1], moistureRiver [0..1])
+@group(0) @binding(3) var<storage, read> sph_geology_grid: array<vec4<f32>>;
 
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
@@ -1602,8 +1841,9 @@ fn vs_main(
   let pinpoint_w = 1.0 - smoothstep(min_glint_frac * 0.55, min_glint_frac * 2.2, app_frac);
   let min_world_half = dist * cam.cam_up.w * min_glint_frac;
 
-  let halo_inflate = select(1.24, 1.54, kind == 0u || kind == 5u);
-  let base_inflate = radius * select(1.54, halo_inflate, dist > radius * 2.6);
+  let disp_pad = max(0.0, sp.sp_info.w) * 1.40;
+  let halo_inflate = max(select(1.24, 1.54, kind == 0u || kind == 5u), 1.08 + disp_pad);
+  let base_inflate = radius * select(max(1.54, 1.15 + disp_pad), halo_inflate, dist > radius * 2.6);
   let inflate = max(base_inflate, select(0.0, min_world_half, kind <= 4u));
   let world_quad = center + to_cam * min(radius * 0.15, dist * 0.05) + right * (uv.x * inflate) + up * (uv.y * inflate);
 
@@ -1652,6 +1892,30 @@ fn sample_live_atmo_vis(n_hit: vec3<f32>, w_u: u32, h_u: u32) -> vec4<f32> {
 
 fn sample_live_atmo_flow(n_hit: vec3<f32>, w_u: u32, h_u: u32) -> vec4<f32> {
   return sample_live_atmo_slot(n_hit, w_u, h_u, 2u);
+}
+
+fn sample_sph_geology(n_hit: vec3<f32>, w_u: u32, h_u: u32) -> vec4<f32> {
+  let lon = atan2(n_hit.z, n_hit.x);
+  let lat = asin(clamp(n_hit.y, -1.0, 1.0));
+  let u = fract(lon / 6.28318530718 + 0.5);
+  let v = clamp(0.5 - lat / 3.14159265359, 0.0, 0.9999);
+  let gx = u * f32(w_u) - 0.5;
+  let gy = v * f32(h_u) - 0.5;
+  let x0 = i32(floor(gx));
+  let y0 = i32(floor(gy));
+  let fx = fract(gx);
+  let fy = fract(gy);
+  let wi = i32(w_u);
+  let hi = i32(h_u);
+  let ix0 = u32(((x0 % wi) + wi) % wi);
+  let ix1 = u32((((x0 + 1) % wi) + wi) % wi);
+  let iy0 = u32(clamp(y0, 0, hi - 1));
+  let iy1 = u32(clamp(y0 + 1, 0, hi - 1));
+  let c00 = sph_geology_grid[iy0 * w_u + ix0];
+  let c10 = sph_geology_grid[iy0 * w_u + ix1];
+  let c01 = sph_geology_grid[iy1 * w_u + ix0];
+  let c11 = sph_geology_grid[iy1 * w_u + ix1];
+  return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
 }
 
 fn hash3(p_in: vec3<f32>) -> f32 {
@@ -1718,10 +1982,116 @@ fn fs_main(in: VsOut) -> FsOut {
   let disc_n = r_n * r_n - dot(perp_n, perp_n);
 
   let kind = u32(round(in.color0.w));
-  let light_dir = normalize(cam.extra1.xyz);
+  // Per-body radial star illumination when cam.extra1.w > 0.5 (L2 multi-planet view: cam.extra1.xyz = live host star world pos!),
+  // or directional host-star vector when cam.extra1.w <= 0.5 (L4 orbital / surface sky view)!
+  let to_star_l = cam.extra1.xyz - in.center;
+  let light_dir = select(
+    normalize(cam.extra1.xyz),
+    normalize(to_star_l),
+    cam.extra1.w > 0.5 && length(to_star_l) > 1e-4
+  );
   let cut_active = in.params.z;
 
-  if (disc_n < 0.0) {
+  // True 3D Ray-Marched SPH Surface Displacement & Rotational Oblateness (NEVER featureless perfect spheres!):
+  //   sp_info.w > 0 -> 3D SPH topographic / irregular asteroid relief amplitude disp_amp (0.045..0.28)
+  //   sp_info.w < 0 -> Rotational equatorial oblateness f = -sp_info.w on fast-spinning gas/ice giants
+  let live_sph_any = (cam.sph_geo.x > 1.5) && (in.inst_id == u32(round(cam.sph_geo.z))) && (cut_active < 0.5)
+    && (kind == 1u || kind == 3u || kind == 4u || kind == 7u);
+  let disp_amp = select(0.0, clamp(in.sp_info.w, 0.0, 0.56), live_sph_any && in.sp_info.w > 0.002);
+  let oblate_f = select(0.0, clamp(-in.sp_info.w, 0.0, 0.16), !live_sph_any && in.sp_info.w < -0.002 && (kind == 2u || kind == 3u));
+
+  var hit_override = false;
+  var t_hit_n = 0.0;
+  var p_hit_n_disp = vec3<f32>(0.0);
+  var n_hit_geom = vec3<f32>(0.0, 1.0, 0.0);
+
+  if (disp_amp > 0.002) {
+    let r_bound = r_n * (1.0 + disp_amp * 1.12);
+    let r_floor = r_n * max(0.32, 1.0 - disp_amp * 1.06);
+    let disc_b = r_bound * r_bound - dot(perp_n, perp_n);
+    if (disc_b >= 0.0) {
+      let sq_b = sqrt(disc_b);
+      let t_enter = max(1.0e-7, -b_n - sq_b);
+      let t_exit = -b_n + sq_b;
+      if (t_exit > t_enter) {
+        let disc_f = r_floor * r_floor - dot(perp_n, perp_n);
+        let t_f_ent = select(t_exit, -b_n - sqrt(max(0.0, disc_f)), disc_f >= 0.0);
+        let t_end = select(t_exit, min(t_exit, t_f_ent), disc_f >= 0.0 && t_f_ent > t_enter);
+        let gw_m = u32(round(cam.sph_geo.x));
+        let gh_m = u32(round(cam.sph_geo.y));
+        let has_ocean_g = (kind == 1u || kind == 4u) && (cam.sph_geo.w > -1.2);
+        let sea_lvl_g = select(-1.5, cam.sph_geo.w, has_ocean_g);
+        var t_prev = t_enter;
+        var t_lo = t_enter;
+        var t_hi = t_end;
+        var found_s = false;
+        // 56 steps on dramatically displaced bilobed comets/asteroids (eliminates cylindrical stepping holes!)
+        let n_march = select(24u, 56u, disp_amp > 0.10);
+        for (var ms = 1u; ms <= n_march; ms = ms + 1u) {
+          let t_cur = mix(t_enter, t_end, f32(ms) / f32(n_march));
+          let p_cur = ro_n + rd * t_cur;
+          let r_cur = length(p_cur);
+          let d_cur = p_cur / max(1e-7, r_cur);
+          let e_raw = sample_sph_geology(d_cur, gw_m, gh_m).x;
+          let e_g = select(e_raw, max(e_raw, sea_lvl_g), has_ocean_g);
+          let r_surf = r_n * (1.0 + disp_amp * e_g);
+          if (r_cur <= r_surf) {
+            t_lo = t_prev;
+            t_hi = t_cur;
+            found_s = true;
+            break;
+          }
+          t_prev = t_cur;
+        }
+        if (!found_s && disc_f >= 0.0 && t_f_ent > t_enter) {
+          t_lo = t_prev;
+          t_hi = t_end;
+          found_s = true;
+        }
+        if (found_s) {
+          for (var bs = 0u; bs < 6u; bs = bs + 1u) {
+            let t_mid = 0.5 * (t_lo + t_hi);
+            let p_mid = ro_n + rd * t_mid;
+            let r_mid = length(p_mid);
+            let d_mid = p_mid / max(1e-7, r_mid);
+            let e_m = sample_sph_geology(d_mid, gw_m, gh_m).x;
+            let e_mg = select(e_m, max(e_m, sea_lvl_g), has_ocean_g);
+            let r_sm = r_n * (1.0 + disp_amp * e_mg);
+            if (r_mid <= r_sm) { t_hi = t_mid; } else { t_lo = t_mid; }
+          }
+          t_hit_n = 0.5 * (t_lo + t_hi);
+          p_hit_n_disp = ro_n + rd * t_hit_n;
+          n_hit_geom = normalize(p_hit_n_disp);
+          hit_override = true;
+        }
+      }
+    }
+  } else if (oblate_f > 0.002) {
+    let inv_y = 1.0 / (1.0 - oblate_f);
+    let ro_o = vec3<f32>(ro_n.x, ro_n.y * inv_y, ro_n.z);
+    let rd_o_raw = vec3<f32>(rd.x, rd.y * inv_y, rd.z);
+    let rd_o_len = length(rd_o_raw);
+    let rd_o = rd_o_raw / max(1e-7, rd_o_len);
+    let b_o = dot(ro_o, rd_o);
+    let perp_o = ro_o - rd_o * b_o;
+    let disc_o = r_n * r_n - dot(perp_o, perp_o);
+    if (disc_o >= 0.0) {
+      let sq_o = sqrt(disc_o);
+      var t_o = -b_o - sq_o;
+      if (t_o < 1.0e-7) { t_o = -b_o + sq_o; }
+      if (t_o >= 1.0e-7) {
+        t_hit_n = t_o / max(1e-7, rd_o_len);
+        p_hit_n_disp = ro_n + rd * t_hit_n;
+        let p_o = ro_o + rd_o * t_o;
+        n_hit_geom = normalize(vec3<f32>(p_o.x, p_o.y * inv_y, p_o.z));
+        hit_override = true;
+      }
+    }
+  }
+
+  let use_custom_hit = (disp_amp > 0.002) || (oblate_f > 0.002);
+  let missed_body = select((disc_n < 0.0), !hit_override, use_custom_hit);
+  if (missed_body) {
     // 1. Sub-pixel astronomical pinpoint glint when true physical disk is < ~2.5 px at AU distances
     if (in.pinpoint_w > 0.02) {
       let q2 = dot(in.quad_uv, in.quad_uv);
@@ -1796,14 +2166,22 @@ fn fs_main(in: VsOut) -> FsOut {
     discard;
   }
 
-  let sqrt_dn = sqrt(disc_n);
-  var t_hit_n = -b_n - sqrt_dn;
-  if (t_hit_n < 1.0e-7) { t_hit_n = -b_n + sqrt_dn; }
-  if (t_hit_n < 1.0e-7) { discard; }
-  var t_hit = t_hit_n * ro_len;
-
-  var p_hit = (ro_n + rd * t_hit_n) * ro_len;
-  var n_hit = normalize(ro_n + rd * t_hit_n);
+  var t_hit = 0.0;
+  var p_hit = vec3<f32>(0.0);
+  var n_hit = vec3<f32>(0.0, 1.0, 0.0);
+  if (hit_override) {
+    t_hit = t_hit_n * ro_len;
+    p_hit = p_hit_n_disp * ro_len;
+    n_hit = n_hit_geom;
+  } else {
+    let sqrt_dn = sqrt(max(0.0, disc_n));
+    t_hit_n = -b_n - sqrt_dn;
+    if (t_hit_n < 1.0e-7) { t_hit_n = -b_n + sqrt_dn; }
+    if (t_hit_n < 1.0e-7) { discard; }
+    t_hit = t_hit_n * ro_len;
+    p_hit = (ro_n + rd * t_hit_n) * ro_len;
+    n_hit = normalize(ro_n + rd * t_hit_n);
+  }
   var is_interior = false;
 
   // True 3D Cutaway Plane intersection when user enables L4 Planetary Interior Cutaway
@@ -1853,7 +2231,32 @@ fn fs_main(in: VsOut) -> FsOut {
   let view_dir = -rd;
   let ndv = max(0.0, dot(n_hit, view_dir));
   let raw_ndl = dot(n_hit, light_dir);
-  let ndl = max(0.0, raw_ndl);
+  // Analytical Ring-on-Planet Shadow (Cassini + Encke divisions cast directly onto Saturn / Uranus cloud tops!)
+  // Packed when !hasSphGeo && focusedRing: cam.sph_geo = (ringN.x, ringN.y, ringN.z, sphereIdx), cam.extra0.zw = (rInRatio, rOutRatio)
+  var ring_on_planet_sh = 1.0;
+  if (cam.sph_geo.x <= 1.5 && cam.extra0.w > 1.05 && in.inst_id == u32(round(cam.sph_geo.w)) && raw_ndl > -0.02) {
+    let r_n_sh = normalize(cam.sph_geo.xyz);
+    let denom_rs = dot(light_dir, r_n_sh);
+    if (abs(denom_rs) > 1e-4) {
+      let t_rs = -dot(p_hit, r_n_sh) / denom_rs;
+      if (t_rs > 0.0) {
+        let q_rs = p_hit + light_dir * t_rs;
+        let rq_ratio = length(q_rs) / max(1e-5, r);
+        let r_in_rat = max(1.05, cam.extra0.z);
+        let r_out_rat = max(r_in_rat + 0.05, cam.extra0.w);
+        if (rq_ratio >= r_in_rat && rq_ratio <= r_out_rat) {
+          let u_rs = clamp((rq_ratio - r_in_rat) / max(1e-4, r_out_rat - r_in_rat), 0.0, 1.0);
+          let c_rs = (u_rs - 0.60) * 32.0;
+          let e_rs = (u_rs - 0.88) * 55.0;
+          let tau_rs = smoothstep(0.0, 0.06, u_rs) * (1.0 - smoothstep(0.94, 1.0, u_rs))
+            * (1.0 - 0.88 * exp(-(c_rs * c_rs))) * (1.0 - 0.60 * exp(-(e_rs * e_rs)))
+            * (0.74 + 0.26 * sin(u_rs * 76.0) * cos(u_rs * 27.0));
+          ring_on_planet_sh = clamp(1.0 - tau_rs * 0.82, 0.14, 1.0);
+        }
+      }
+    }
+  }
+  let ndl = max(0.0, raw_ndl) * ring_on_planet_sh;
   let soft_term = smoothstep(-0.08, 0.14, raw_ndl);
   // Real host-star spectral color & inverse-square irradiance attenuation (cam.star_light)!
   let star_rgb = cam.star_light.rgb;
@@ -1937,7 +2340,7 @@ fn fs_main(in: VsOut) -> FsOut {
       av2 = sample_live_atmo_vis(n_hit, aw, ah);
       let cfd2 = sample_live_atmo_flow(n_hit, aw, ah);
       let east2 = normalize(vec3<f32>(-n_hit.z, 0.0, n_hit.x) + vec3<f32>(1e-5, 0.0, 0.0));
-      let north2 = cross(n_hit, east2);
+      let north2 = cross(east2, n_hit);
       flow_3d = east2 * cfd2.x + north2 * cfd2.y;
       vort2 = cfd2.z;
       t_anom2 = cfd2.w;
@@ -2000,71 +2403,206 @@ fn fs_main(in: VsOut) -> FsOut {
     let sunset = vec3<f32>(0.95, 0.44, 0.16) * term_sunset * 0.14 * star_dir_l;
     col = base * (vec3<f32>(0.03) + star_dir_l * (0.04 + 0.98 * ndl) * soft_term) + sunset + atm * (vec3<f32>(0.03) + star_dir_l * (0.14 + 0.86 * ndl)) + em_fx;
   } else if (kind == 1u || kind == 4u) {
-    // Photorealistic Terrestrial / Ocean / Mars / Mercury world with 5-octave FBM continents, analytical micro-normal relief, bathymetry, polar caps, night-side city lights & live CFD clouds!
-    let elev = fbm5(n_hit * 3.4 + seed_v);
-    let detail = fbm5(n_hit * 14.0 + seed_v * 1.7);
-    let has_ocean = in.color1.b > in.color1.r + 0.14;
+    // Terrestrial / Ocean / Mars / Mercury / Carbon World:
+    // Driven zero-copy by ULG's 3D GPU SPH Planetary Genesis spherical geology map when active
+    // (real differentiated continents, subduction mountain chains, craters & eroded river basins — ZERO Perlin blobs!),
+    // with distant multi-body fallback for tiny un-focused background planets in L2.
+    let live_sph_geo = cam.sph_geo.x > 1.5 && in.inst_id == u32(round(cam.sph_geo.z));
+    let has_ocean = select(in.color1.b > in.color1.r + 0.14, cam.sph_geo.w > -1.2, live_sph_geo);
     var surf = in.color0.rgb;
     var water_spec = 0.0;
     var bump_strength = 0.0;
     var is_land_hab = 0.0;
+    var em_volc = vec3<f32>(0.0);
+    var elev_center = 0.5;
+    var detail = 0.5;
 
-    if (has_ocean) {
-      let sea_lvl = 0.51;
-      if (elev < sea_lvl) {
-        let depth_f = clamp((sea_lvl - elev) / 0.26, 0.0, 1.0);
-        // Turquoise shallow continental shelf transitioning smoothly into deep sapphire abyss!
-        let shelf = mix(vec3<f32>(0.10, 0.62, 0.76), vec3<f32>(0.06, 0.36, 0.64), smoothstep(0.0, 0.22, depth_f));
-        surf = mix(shelf, in.color1.rgb * 0.68, smoothstep(0.16, 0.95, depth_f));
-        water_spec = spec * 0.74;
+    if (live_sph_geo) {
+      let gw = u32(round(cam.sph_geo.x));
+      let gh = u32(round(cam.sph_geo.y));
+      let g0 = sample_sph_geology(n_hit, gw, gh);
+      let elev_sph = g0.x;      // [-1..1] true SPH differentiated crust elevation
+      let crust_comp = g0.y;    // [0..1] basalt/ejecta -> felsic granite / orogenic peak
+      let thermal_v = g0.z;     // [0..1] mantle plume heat / rift volcanism / impact melt
+      let moist_r = g0.w;       // [0..1] hydraulic moisture & carved river valleys
+      // Continuous post-SPH thermal cooling (cool_heat in [0..1] passed in cam.extra0.z):
+      //   As a newly differentiated world radiates heat away (T^4), primordial lava fissures dim smoothly
+      //   from molten orange -> cherry red -> basalt, steam rains out filling oceans from the lowest basins up,
+      //   and temperate biomes & polar ice caps emerge naturally (ZERO 1-frame snap!).
+      let cool_heat = clamp(cam.extra0.z, 0.0, 1.0);
+      let rainout_f = 1.0 - smoothstep(0.14, 0.78, cool_heat);
+      let bio_cool_f = 1.0 - smoothstep(0.05, 0.44, cool_heat);
+      let sea_lvl_base = select(-1.5, cam.sph_geo.w, has_ocean);
+      let sea_lvl = select(-1.5, sea_lvl_base - (1.0 - rainout_f) * 0.62, has_ocean);
+      elev_center = elev_sph;
+      // Subtle micro-grain (< 3%) ONLY for sub-texel rock crispness (never alters continents!)
+      let micro_g = vnoise3(n_hit * 36.0 + seed_v) * 0.06;
+      // Sharp tectonic crust-cooling magma fissures (high exponent = crisp thin lava veins between dark obsidian plates!)
+      let cool_crack = pow(clamp(1.0 - abs(fbm5(n_hit * 8.0 + seed_v) * 2.0 - 1.0), 0.0, 1.0), 5.5);
+
+      if (has_ocean) {
+        if (elev_sph < sea_lvl) {
+          let depth_f = clamp((sea_lvl - elev_sph) / 0.56, 0.0, 1.0);
+          // Crisp narrow coastal aquamarine shelf dropping cleanly into deep royal-sapphire abyssal oceans!
+          let shelf = mix(vec3<f32>(0.08, 0.56, 0.72), vec3<f32>(0.03, 0.24, 0.54), smoothstep(0.0, 0.11, depth_f));
+          let abyss = in.color1.rgb * vec3<f32>(0.36, 0.48, 0.70);
+          surf = mix(shelf, abyss, smoothstep(0.08, 0.72, depth_f));
+          // Subtle mid-ocean ridge bathymetry shimmer
+          surf = mix(surf, vec3<f32>(0.08, 0.32, 0.58), thermal_v * 0.20 * (1.0 - depth_f * 0.5));
+          water_spec = spec * 0.88;
+        } else {
+          let h_land = clamp((elev_sph - sea_lvl) / max(0.32, 0.90 - sea_lvl), 0.0, 1.0);
+          let sand_coast = vec3<f32>(0.72, 0.65, 0.46);
+          let desert = vec3<f32>(0.70, 0.56, 0.34);
+          let savanna = vec3<f32>(0.40, 0.49, 0.22);
+          let lush_forest = mix(vec3<f32>(0.09, 0.34, 0.13), in.color0.rgb * 1.15, 0.38);
+          let mtn_rock = mix(vec3<f32>(0.36, 0.33, 0.30), vec3<f32>(0.54, 0.51, 0.47), crust_comp);
+          let raw_basalt = mix(vec3<f32>(0.10, 0.09, 0.10), vec3<f32>(0.24, 0.20, 0.18), crust_comp);
+          // Rich multi-biome vegetation driven directly by GPU Hadley-cell & watershed moisture (NASA Blue Marble palette!)
+          let humid_w = clamp(moist_r * 1.10 - h_land * 0.24 + micro_g * 0.7, 0.0, 1.0);
+          var bio_col = mix(desert, savanna, smoothstep(0.18, 0.42, humid_w));
+          bio_col = mix(bio_col, lush_forest, smoothstep(0.38, 0.68, humid_w));
+          bio_col = mix(raw_basalt, bio_col, bio_cool_f);
+          // Thin sandy coastline rim right above sea level
+          surf = mix(mix(raw_basalt, sand_coast, rainout_f), bio_col, smoothstep(0.0, 0.045, h_land));
+          // Subtle deep-sapphire dendritic river threads only in peak MFD valley bottoms (ZERO neon turquoise blotches!)
+          let river_v = smoothstep(0.91, 0.96, moist_r) * (1.0 - smoothstep(0.14, 0.40, h_land)) * rainout_f;
+          surf = mix(surf, vec3<f32>(0.04, 0.24, 0.48), river_v * 0.62);
+          surf = mix(surf, mix(raw_basalt, mtn_rock, bio_cool_f), smoothstep(0.42, 0.74, h_land + crust_comp * 0.14));
+          surf = mix(surf, vec3<f32>(0.94, 0.97, 1.00), smoothstep(0.68, 0.88, h_land) * bio_cool_f);
+          bump_strength = 0.42 + 0.68 * h_land;
+          is_land_hab = (1.0 - smoothstep(0.30, 0.72, h_land)) * (1.0 - smoothstep(0.58, 0.84, abs(n_hit.y))) * bio_cool_f;
+          // Active subduction/rift volcanic glow + continuous cooling crust magma fissures during late planetary genesis!
+          let rift_cool = cool_heat * clamp(cool_crack * 1.15 + max(0.0, thermal_v - 0.55) * 0.55, 0.0, 1.0);
+          if (thermal_v > 0.78 || rift_cool > 0.24) {
+            let v_glow = max(smoothstep(0.78, 0.98, thermal_v), smoothstep(0.24, 0.85, rift_cool));
+            let cool_lava_c = mix(vec3<f32>(0.72, 0.12, 0.015), vec3<f32>(0.98, 0.38, 0.05), clamp(cool_heat * 0.8 + thermal_v * 0.3, 0.0, 1.0));
+            em_volc = cool_lava_c * v_glow * (0.85 + 0.55 * cool_heat);
+            em_temp_k = mix(em_temp_k, 1450.0, v_glow);
+          }
+        }
+        let polar = smoothstep(0.77, 0.91, abs(n_hit.y) + elev_sph * 0.08 + micro_g) * bio_cool_f;
+        surf = mix(surf, vec3<f32>(0.92, 0.96, 1.00), polar);
+        bump_strength = bump_strength * (1.0 - polar * 0.72);
+        is_land_hab = is_land_hab * (1.0 - polar);
       } else {
-        let h_land = clamp((elev - sea_lvl) / 0.32, 0.0, 1.0);
-        let desert = vec3<f32>(0.68, 0.58, 0.38);
-        let mtn = vec3<f32>(0.48, 0.46, 0.44);
-        let arid = smoothstep(0.25, 0.72, detail) * (1.0 - abs(n_hit.y));
-        surf = mix(in.color0.rgb * (0.75 + 0.45 * detail), desert, arid * 0.55);
-        surf = mix(surf, mtn, smoothstep(0.42, 0.85, h_land));
-        surf = mix(surf, vec3<f32>(0.92, 0.95, 0.98), smoothstep(0.76, 0.95, h_land));
-        bump_strength = 0.32 + 0.58 * h_land;
-        is_land_hab = (1.0 - smoothstep(0.28, 0.68, h_land)) * (1.0 - smoothstep(0.55, 0.82, abs(n_hit.y)));
+        // Stagnant-lid cratered / arid / iron / carbon / sulfur-volcanic worlds driven directly by SPH geology!
+        let h_n = clamp(elev_sph * 0.5 + 0.5, 0.0, 1.0);
+        let mare_col = in.color1.rgb * 0.76;
+        let high_col = in.color0.rgb * (0.86 + 0.24 * crust_comp + micro_g);
+        surf = mix(mare_col, high_col, smoothstep(0.24, 0.76, h_n + crust_comp * 0.18));
+        surf = mix(surf, vec3<f32>(0.10, 0.08, 0.09), cool_heat * 0.65);
+        let ejecta_bright = smoothstep(0.30, 0.44, crust_comp) * (1.0 - smoothstep(0.46, 0.62, crust_comp));
+        surf = mix(surf, min(vec3<f32>(1.0), in.color0.rgb * 1.24), ejecta_bright * 0.32 * bio_cool_f);
+        let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + micro_g) * bio_cool_f;
+        surf = mix(surf, vec3<f32>(0.88, 0.91, 0.95), polar * select(0.0, 0.85, in.color1.w > 0.12));
+        let is_sulfur_volc = (in.color0.r > 0.85 && in.color0.g > 0.72 && in.color0.b < 0.45 && in.color1.w < 0.05);
+        let dry_cool_rift = cool_heat * clamp(cool_crack * 1.15 + max(0.0, thermal_v - 0.58) * 0.45, 0.0, 1.0);
+        if (is_sulfur_volc) {
+          let caldera = smoothstep(0.26, 0.42, thermal_v + micro_g * 1.4);
+          let lava_spot = smoothstep(0.34, 0.44, thermal_v);
+          surf = mix(surf, vec3<f32>(0.12, 0.09, 0.08), caldera * 0.85);
+          em_volc = vec3<f32>(1.0, 0.38, 0.06) * lava_spot * 2.2;
+          em_temp_k = mix(em_temp_k, 1480.0, lava_spot);
+        } else if (thermal_v > 0.76 || dry_cool_rift > 0.24) {
+          let v_glow = max(smoothstep(0.76, 0.96, thermal_v), smoothstep(0.24, 0.85, dry_cool_rift));
+          surf = mix(surf, vec3<f32>(0.09, 0.07, 0.07), v_glow * 0.65);
+          em_volc = mix(vec3<f32>(0.76, 0.14, 0.015), vec3<f32>(0.98, 0.36, 0.04), cool_heat) * v_glow * (0.95 + 0.45 * cool_heat);
+          em_temp_k = mix(em_temp_k, 1450.0, v_glow);
+        }
+        bump_strength = 0.52;
+        is_land_hab = (1.0 - smoothstep(0.55, 0.82, abs(n_hit.y))) * 0.65 * bio_cool_f;
       }
-      // Polar ice caps
-      let polar = smoothstep(0.76, 0.90, abs(n_hit.y) + (detail - 0.5) * 0.14);
-      surf = mix(surf, vec3<f32>(0.90, 0.94, 0.98), polar);
-      bump_strength = bump_strength * (1.0 - polar * 0.75);
-      is_land_hab = is_land_hab * (1.0 - polar);
     } else {
-      // Rocky / Mars / Mercury / Sulfur-Volcanic Io world with craters, highlands & tidal volcanic calderas!
-      let crater = smoothstep(0.32, 0.68, detail);
-      surf = mix(in.color1.rgb, in.color0.rgb, clamp(elev * 1.15 - 0.1 + 0.25 * crater, 0.0, 1.0));
-      let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + (detail - 0.5) * 0.08);
-      surf = mix(surf, vec3<f32>(0.88, 0.90, 0.94), polar * select(0.0, 0.85, in.color1.w > 0.12));
-      // Tidally heated sulfur-crust volcanic calderas (driven strictly by sulfur reflectance & vacuum, zero body names!)
-      let is_sulfur_volc = (in.color0.r > 0.85 && in.color0.g > 0.72 && in.color0.b < 0.45 && in.color1.w < 0.05);
-      if (is_sulfur_volc) {
-        let cald_n = fbm5(n_hit * 19.0 + seed_v * 2.1);
-        let caldera = smoothstep(0.74, 0.86, cald_n);
-        let lava_spot = smoothstep(0.82, 0.90, cald_n);
-        surf = mix(surf, vec3<f32>(0.12, 0.09, 0.08), caldera * 0.85);
-        surf = surf + vec3<f32>(1.0, 0.38, 0.06) * lava_spot * 2.2;
-        em_temp_k = mix(em_temp_k, 1480.0, lava_spot);
+      // Lightweight fallback for distant non-focused planets in L2 system view
+      let elev = fbm5(n_hit * 3.4 + seed_v);
+      detail = fbm5(n_hit * 14.0 + seed_v * 1.7);
+      elev_center = elev;
+      if (has_ocean) {
+        let sea_lvl = 0.51;
+        if (elev < sea_lvl) {
+          let depth_f = clamp((sea_lvl - elev) / 0.26, 0.0, 1.0);
+          let shelf = mix(vec3<f32>(0.10, 0.62, 0.76), vec3<f32>(0.06, 0.36, 0.64), smoothstep(0.0, 0.22, depth_f));
+          surf = mix(shelf, in.color1.rgb * 0.68, smoothstep(0.16, 0.95, depth_f));
+          water_spec = spec * 0.74;
+        } else {
+          let h_land = clamp((elev - sea_lvl) / 0.32, 0.0, 1.0);
+          let desert = vec3<f32>(0.68, 0.58, 0.38);
+          let mtn = vec3<f32>(0.48, 0.46, 0.44);
+          let arid = smoothstep(0.25, 0.72, detail) * (1.0 - abs(n_hit.y));
+          surf = mix(in.color0.rgb * (0.75 + 0.45 * detail), desert, arid * 0.55);
+          surf = mix(surf, mtn, smoothstep(0.42, 0.85, h_land));
+          surf = mix(surf, vec3<f32>(0.92, 0.95, 0.98), smoothstep(0.76, 0.95, h_land));
+          bump_strength = 0.32 + 0.58 * h_land;
+          is_land_hab = (1.0 - smoothstep(0.28, 0.68, h_land)) * (1.0 - smoothstep(0.55, 0.82, abs(n_hit.y)));
+        }
+        let polar = smoothstep(0.76, 0.90, abs(n_hit.y) + (detail - 0.5) * 0.14);
+        surf = mix(surf, vec3<f32>(0.90, 0.94, 0.98), polar);
+        bump_strength = bump_strength * (1.0 - polar * 0.75);
+        is_land_hab = is_land_hab * (1.0 - polar);
+      } else {
+        let crater = smoothstep(0.32, 0.68, detail);
+        surf = mix(in.color1.rgb, in.color0.rgb, clamp(elev * 1.15 - 0.1 + 0.25 * crater, 0.0, 1.0));
+        let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + (detail - 0.5) * 0.08);
+        surf = mix(surf, vec3<f32>(0.88, 0.90, 0.94), polar * select(0.0, 0.85, in.color1.w > 0.12));
+        let is_sulfur_volc = (in.color0.r > 0.85 && in.color0.g > 0.72 && in.color0.b < 0.45 && in.color1.w < 0.05);
+        if (is_sulfur_volc) {
+          let cald_n = fbm5(n_hit * 19.0 + seed_v * 2.1);
+          let caldera = smoothstep(0.74, 0.86, cald_n);
+          let lava_spot = smoothstep(0.82, 0.90, cald_n);
+          surf = mix(surf, vec3<f32>(0.12, 0.09, 0.08), caldera * 0.85);
+          em_volc = vec3<f32>(1.0, 0.38, 0.06) * lava_spot * 2.2;
+          em_temp_k = mix(em_temp_k, 1480.0, lava_spot);
+        }
+        bump_strength = 0.58;
+        is_land_hab = (1.0 - smoothstep(0.55, 0.82, abs(n_hit.y))) * 0.65;
       }
-      bump_strength = 0.58;
-      is_land_hab = (1.0 - smoothstep(0.55, 0.82, abs(n_hit.y))) * 0.65;
     }
 
-    // Analytical tangent-space FBM topographic relief normal for crisp sunlit mountain/crater shading!
+    // Crisp 1-texel central-difference topographic relief normal + 4-step horizon self-shadowing (ZERO blurry bumps!)
     var ndl_relief = ndl;
     if (bump_strength > 0.01) {
       let up_ref = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
       let t1 = normalize(cross(up_ref, n_hit));
       let t2 = cross(n_hit, t1);
-      let eps_b = 0.014;
-      let e1 = fbm5(normalize(n_hit + t1 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t1 * eps_b) * 14.0 + seed_v * 1.7);
-      let e2 = fbm5(normalize(n_hit + t2 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t2 * eps_b) * 14.0 + seed_v * 1.7);
-      let e0 = elev + 0.24 * detail;
-      let n_relief = normalize(n_hit + (t1 * (e0 - e1) + t2 * (e0 - e2)) * (bump_strength * 5.2));
-      ndl_relief = max(0.0, dot(n_relief, light_dir));
+      if (live_sph_geo) {
+        let gw = u32(round(cam.sph_geo.x));
+        let gh = u32(round(cam.sph_geo.y));
+        let eps_g = 3.14159265 / max(64.0, f32(gh));
+        let e1p = sample_sph_geology(normalize(n_hit + t1 * eps_g), gw, gh).x;
+        let e1m = sample_sph_geology(normalize(n_hit - t1 * eps_g), gw, gh).x;
+        let e2p = sample_sph_geology(normalize(n_hit + t2 * eps_g), gw, gh).x;
+        let e2m = sample_sph_geology(normalize(n_hit - t2 * eps_g), gw, gh).x;
+        let relief_gain = bump_strength * select(2.45, 3.6, disp_amp > 0.10);
+        let n_relief = normalize(n_hit + (t1 * (e1m - e1p) + t2 * (e2m - e2p)) * relief_gain);
+        ndl_relief = max(0.0, dot(n_relief, light_dir));
+        // Real 4-step topographic self-shadowing across mountain cordilleras, canyons & crater rims!
+        if (disp_amp > 0.005 && raw_ndl > -0.04 && raw_ndl < 0.65) {
+          let l_tang = light_dir - n_hit * raw_ndl;
+          let lt_len = length(l_tang);
+          if (lt_len > 1e-4) {
+            let l_dir_t = l_tang / lt_len;
+            let tan_alt = max(0.0, raw_ndl) / lt_len;
+            var topo_sh = 1.0;
+            for (var sh = 1u; sh <= 4u; sh = sh + 1u) {
+              let d_ang = f32(sh) * 0.011;
+              let e_sh = sample_sph_geology(normalize(n_hit + l_dir_t * d_ang), gw, gh).x;
+              let dh_sh = (e_sh - elev_center) * disp_amp;
+              if (dh_sh > d_ang * tan_alt + 0.0005) {
+                topo_sh = min(topo_sh, clamp(1.0 - (dh_sh - d_ang * tan_alt) * 24.0, 0.28, 1.0));
+              }
+            }
+            ndl_relief = ndl_relief * topo_sh;
+          }
+        }
+      } else {
+        let eps_b = 0.014;
+        let e1 = fbm5(normalize(n_hit + t1 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t1 * eps_b) * 14.0 + seed_v * 1.7);
+        let e2 = fbm5(normalize(n_hit + t2 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t2 * eps_b) * 14.0 + seed_v * 1.7);
+        let e0 = elev_center + 0.24 * detail;
+        let n_relief = normalize(n_hit + (t1 * (e0 - e1) + t2 * (e0 - e2)) * (bump_strength * 5.2));
+        ndl_relief = max(0.0, dot(n_relief, light_dir));
+      }
     }
 
     // Live zero-copy GPU baroclinic CFD clouds (flow-map advected!), dust storms, Paschen lightning, & smooth 3D aurorae!
@@ -2079,7 +2617,7 @@ fn fs_main(in: VsOut) -> FsOut {
       let av = sample_live_atmo_vis(n_hit, aw, ah);
       let cfd = sample_live_atmo_flow(n_hit, aw, ah);
       let east1 = normalize(vec3<f32>(-n_hit.z, 0.0, n_hit.x) + vec3<f32>(1e-5, 0.0, 0.0));
-      let north1 = cross(n_hit, east1);
+      let north1 = cross(east1, n_hit);
       let flow1 = east1 * cfd.x + north1 * cfd.y;
       let ph0 = fract(cam.cam_pos.w * 0.14);
       let ph1 = fract(ph0 + 0.5);
@@ -2134,34 +2672,76 @@ fn fs_main(in: VsOut) -> FsOut {
     }
 
     let ndl_eff = mix(ndl_relief, ndl, cloud_cover * 0.85);
-    let rayleigh = mix(vec3<f32>(0.78, 0.50, 0.30), vec3<f32>(0.30, 0.68, 1.0), select(0.25, 1.0, has_ocean));
-    let atm = rayleigh * fresnel * in.color1.w * 0.98;
+    let cool_atm_h = select(0.0, clamp(cam.extra0.z, 0.0, 1.0), live_sph_geo);
+    let rayleigh_base = mix(vec3<f32>(0.78, 0.50, 0.30), vec3<f32>(0.30, 0.68, 1.0), select(0.25, 1.0, has_ocean));
+    let rayleigh = mix(rayleigh_base, vec3<f32>(1.0, 0.44, 0.14), cool_atm_h * 0.82);
+    let atm = rayleigh * fresnel * max(in.color1.w, cool_atm_h * 0.68) * 0.98;
     let sunset = mix(vec3<f32>(0.98, 0.44, 0.14), vec3<f32>(1.0, 0.52, 0.18), select(0.0, 1.0, has_ocean)) * term_sunset * (0.16 + 0.24 * cloud_cover + 0.25 * fresnel) * star_dir_l;
-    col = surf * (vec3<f32>(0.028) + star_dir_l * (0.03 + 0.98 * ndl_eff) * soft_term) + sunset + star_dir_l * water_spec * ndl + atm * (vec3<f32>(0.03) + star_dir_l * (0.14 + 0.86 * ndl)) + em_lightning + em_aurora + em_cities;
+    col = surf * (vec3<f32>(0.028) + star_dir_l * (0.03 + 0.98 * ndl_eff) * soft_term) + sunset + star_dir_l * water_spec * ndl + atm * (vec3<f32>(0.03) + star_dir_l * (0.14 + 0.86 * ndl)) + em_lightning + em_aurora + em_cities + em_volc;
   } else if (kind == 3u) {
     // Cratered Moon / Icy World / Atmospheric Ice Giant (Uranus & Neptune):
     // Gate rocky crater relief strictly on airless moons (atm < 0.28) so Ice Giants have silky atmospheric methane bands!
     let crater_w = 1.0 - smoothstep(0.08, 0.28, in.color1.w);
-    let n1 = fbm5(n_hit * 6.0 + seed_v);
-    let n2 = fbm5(n_hit * 18.0 - seed_v);
+    let live_sph3 = cam.sph_geo.x > 1.5 && in.inst_id == u32(round(cam.sph_geo.z));
     let up_r3 = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
     let t1_3 = normalize(cross(up_r3, n_hit));
     let t2_3 = cross(n_hit, t1_3);
-    let c_x = fbm5(normalize(n_hit + t1_3 * 0.012) * 18.0 - seed_v);
-    let c_y = fbm5(normalize(n_hit + t2_3 * 0.012) * 18.0 - seed_v);
-    let n_crater = normalize(n_hit + (t1_3 * (n2 - c_x) + t2_3 * (n2 - c_y)) * (2.4 * crater_w));
-    let ndl_c = max(0.0, dot(n_crater, light_dir));
-    // Smooth methane zonal bands for atmospheric Ice Giants vs cratered terrain contrast for airless moons
-    let ig_band = 0.5 + 0.32 * sin(n_hit.y * 14.0 + n1 * 1.4) + 0.18 * fbm5(n_hit * vec3<f32>(3.0, 11.0, 3.0) + seed_v);
-    let rocky_mix = clamp(0.2 + 0.7 * n1 + 0.25 * n2, 0.0, 1.0);
-    var base = mix(in.color1.rgb, in.color0.rgb, mix(clamp(ig_band, 0.18, 0.92), rocky_mix, crater_w));
-    // Cryogenic tidal-flexure tectonic lineae / tiger-stripe ice fractures on bright airless icy moons!
-    if (in.color0.b > 0.68 && in.color1.w < 0.12) {
-      let l1 = abs(fbm5(n_hit * 8.5 + seed_v) - 0.5);
-      let l2 = abs(fbm5(n_hit * 13.5 - seed_v * 1.6) - 0.5);
-      let crack = max(1.0 - smoothstep(0.008, 0.032, l1), 1.0 - smoothstep(0.008, 0.028, l2));
-      let stain_col = mix(vec3<f32>(0.54, 0.30, 0.20), vec3<f32>(0.36, 0.72, 0.96), smoothstep(0.88, 0.96, in.color0.b));
-      base = mix(base, stain_col, crack * 0.62);
+    var ndl_c = ndl;
+    var base = in.color0.rgb;
+    if (live_sph3) {
+      let gw3 = u32(round(cam.sph_geo.x));
+      let gh3 = u32(round(cam.sph_geo.y));
+      let eps3 = 3.14159265 / max(64.0, f32(gh3));
+      let g3 = sample_sph_geology(n_hit, gw3, gh3);
+      let g3xp = sample_sph_geology(normalize(n_hit + t1_3 * eps3), gw3, gh3).x;
+      let g3xm = sample_sph_geology(normalize(n_hit - t1_3 * eps3), gw3, gh3).x;
+      let g3yp = sample_sph_geology(normalize(n_hit + t2_3 * eps3), gw3, gh3).x;
+      let g3ym = sample_sph_geology(normalize(n_hit - t2_3 * eps3), gw3, gh3).x;
+      let relief3 = select(2.8 * max(0.35, crater_w), 3.4, disp_amp > 0.10);
+      let n_crater = normalize(n_hit + (t1_3 * (g3xm - g3xp) + t2_3 * (g3ym - g3yp)) * relief3);
+      ndl_c = max(0.0, dot(n_crater, light_dir));
+      if (disp_amp > 0.005 && raw_ndl > -0.04 && raw_ndl < 0.72) {
+        let l_tang3 = light_dir - n_hit * raw_ndl;
+        let lt_len3 = length(l_tang3);
+        if (lt_len3 > 1e-4) {
+          let l_dir3 = l_tang3 / lt_len3;
+          let tan_alt3 = max(0.0, raw_ndl) / lt_len3;
+          var sh3 = 1.0;
+          for (var s3 = 1u; s3 <= 4u; s3 = s3 + 1u) {
+            let da3 = f32(s3) * 0.014;
+            let e_s3 = sample_sph_geology(normalize(n_hit + l_dir3 * da3), gw3, gh3).x;
+            let dh3 = (e_s3 - g3.x) * disp_amp;
+            if (dh3 > da3 * tan_alt3 + 0.0006) {
+              sh3 = min(sh3, clamp(1.0 - (dh3 - da3 * tan_alt3) * 26.0, 0.22, 1.0));
+            }
+          }
+          ndl_c = ndl_c * sh3;
+        }
+      }
+      base = mix(in.color1.rgb, in.color0.rgb, clamp(g3.x * 0.55 + 0.45 + g3.y * 0.25, 0.0, 1.0));
+      // Cryo-tectonic rifts & subsurface-ocean tidal plumes driven by live SPH thermal channel!
+      if (g3.z > 0.36) {
+        let rift_c = smoothstep(0.36, 0.80, g3.z);
+        let stain_col = mix(vec3<f32>(0.54, 0.30, 0.20), vec3<f32>(0.34, 0.78, 0.98), smoothstep(0.84, 0.95, in.color0.b));
+        base = mix(base, stain_col, rift_c * 0.72);
+      }
+    } else {
+      let n1 = fbm5(n_hit * 6.0 + seed_v);
+      let n2 = fbm5(n_hit * 18.0 - seed_v);
+      let c_x = fbm5(normalize(n_hit + t1_3 * 0.012) * 18.0 - seed_v);
+      let c_y = fbm5(normalize(n_hit + t2_3 * 0.012) * 18.0 - seed_v);
+      let n_crater = normalize(n_hit + (t1_3 * (n2 - c_x) + t2_3 * (n2 - c_y)) * (2.4 * crater_w));
+      ndl_c = max(0.0, dot(n_crater, light_dir));
+      let ig_band = 0.5 + 0.32 * sin(n_hit.y * 14.0 + n1 * 1.4) + 0.18 * fbm5(n_hit * vec3<f32>(3.0, 11.0, 3.0) + seed_v);
+      let rocky_mix = clamp(0.2 + 0.7 * n1 + 0.25 * n2, 0.0, 1.0);
+      base = mix(in.color1.rgb, in.color0.rgb, mix(clamp(ig_band, 0.18, 0.92), rocky_mix, crater_w));
+      if (in.color0.b > 0.68 && in.color1.w < 0.12) {
+        let l1 = abs(fbm5(n_hit * 8.5 + seed_v) - 0.5);
+        let l2 = abs(fbm5(n_hit * 13.5 - seed_v * 1.6) - 0.5);
+        let crack = max(1.0 - smoothstep(0.008, 0.032, l1), 1.0 - smoothstep(0.008, 0.028, l2));
+        let stain_col = mix(vec3<f32>(0.54, 0.30, 0.20), vec3<f32>(0.36, 0.72, 0.96), smoothstep(0.88, 0.96, in.color0.b));
+        base = mix(base, stain_col, crack * 0.62);
+      }
     }
     var em_ice = vec3<f32>(0.0);
     if (cam.extra2.w > 0.5 && in.inst_id == u32(round(cam.extra2.z))) {
@@ -2170,7 +2750,7 @@ fn fs_main(in: VsOut) -> FsOut {
       let av = sample_live_atmo_vis(n_hit, aw, ah);
       let cfd3 = sample_live_atmo_flow(n_hit, aw, ah);
       let east3 = normalize(vec3<f32>(-n_hit.z, 0.0, n_hit.x) + vec3<f32>(1e-5, 0.0, 0.0));
-      let north3 = cross(n_hit, east3);
+      let north3 = cross(east3, n_hit);
       let flow3 = east3 * cfd3.x + north3 * cfd3.y;
       let ph0 = fract(cam.cam_pos.w * 0.16);
       let ph1 = fract(ph0 + 0.5);
@@ -2202,12 +2782,21 @@ fn fs_main(in: VsOut) -> FsOut {
       col = base * (0.3 + 0.75 * ndl) + vec3<f32>(1.0) * spec * 0.65;
     }
   } else if (kind == 7u) {
-    // Kind 7: Incandescent Hadean Magma Ocean World (dark cooled basalt plates rifted by glowing molten lava cracks!)
-    let crust = fbm5(n_hit * 4.2 + seed_v);
-    let cracks = fbm5(n_hit * 13.5 - seed_v * 1.4);
-    let rift = smoothstep(0.46, 0.64, abs(crust - 0.50) * -2.0 + 0.72 + (cracks - 0.5) * 0.35);
-    let basalt = mix(vec3<f32>(0.10, 0.08, 0.09), vec3<f32>(0.24, 0.16, 0.14), cracks);
-    let lava = mix(vec3<f32>(0.96, 0.22, 0.04), vec3<f32>(1.0, 0.86, 0.32), smoothstep(0.45, 0.95, rift));
+    // Kind 7: Incandescent Hadean Magma Ocean World driven by live SPH mantle convection plumes & thin basalt rafts!
+    let live_sph7 = cam.sph_geo.x > 1.5 && in.inst_id == u32(round(cam.sph_geo.z));
+    var rift = 0.5;
+    var basalt = vec3<f32>(0.14, 0.10, 0.10);
+    if (live_sph7) {
+      let g7 = sample_sph_geology(n_hit, u32(round(cam.sph_geo.x)), u32(round(cam.sph_geo.y)));
+      rift = clamp(g7.z * 1.15 - g7.y * 0.45, 0.0, 1.0);
+      basalt = mix(vec3<f32>(0.09, 0.07, 0.08), vec3<f32>(0.26, 0.18, 0.15), g7.y);
+    } else {
+      let crust = fbm5(n_hit * 4.2 + seed_v);
+      let cracks = fbm5(n_hit * 13.5 - seed_v * 1.4);
+      rift = smoothstep(0.46, 0.64, abs(crust - 0.50) * -2.0 + 0.72 + (cracks - 0.5) * 0.35);
+      basalt = mix(vec3<f32>(0.10, 0.08, 0.09), vec3<f32>(0.24, 0.16, 0.14), cracks);
+    }
+    let lava = mix(vec3<f32>(0.96, 0.22, 0.04), vec3<f32>(1.0, 0.86, 0.32), smoothstep(0.35, 0.92, rift));
     let atm = vec3<f32>(1.0, 0.48, 0.18) * fresnel * in.color1.w * 0.9;
     col = basalt * (vec3<f32>(0.04) + star_dir_l * (0.06 + 0.85 * ndl) * soft_term) + lava * rift * 1.65 + atm * (vec3<f32>(0.08) + star_dir_l * (0.30 + 0.65 * ndl));
     em_temp_k = mix(850.0, 2200.0, rift);
@@ -2341,6 +2930,7 @@ struct DiskInstance {
   center_r_in: vec4<f32>,
   normal_r_out: vec4<f32>,
   color_kind: vec4<f32>,
+  shadow_info: vec4<f32>, // x = planet_radius, y = oblate_f, z = pad, w = pad
 };
 
 @group(0) @binding(0) var<uniform> cam: CameraUniforms;
@@ -2354,6 +2944,8 @@ struct VsOut {
   @location(3) color_kind: vec4<f32>,
   @location(4) world_pos: vec3<f32>,
   @location(5) center: vec3<f32>,
+  @location(6) ring_n: vec3<f32>,
+  @location(7) shadow_info: vec2<f32>,
 };
 
 @vertex
@@ -2382,6 +2974,8 @@ fn vs_main(
   out.color_kind = d.color_kind;
   out.world_pos = world_pos;
   out.center = d.center_r_in.xyz;
+  out.ring_n = n;
+  out.shadow_info = d.shadow_info.xy;
   return out;
 }
 
@@ -2425,20 +3019,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let encke = 1.0 - 0.60 * exp(-(e_x * e_x));
     let ringlets = 0.72 + 0.28 * sin(u * 76.0) * cos(u * 27.0);
     let fade = smoothstep(0.0, 0.08, u) * (1.0 - smoothstep(0.92, 1.0, u));
-    // Analytical planet cylinder shadow cast onto back half of ring plane!
+    // Analytical oblate-spheroid planet shadow cast onto back half of ring plane (true deep Cassini umbra!)
     let rel_p = in.world_pos - in.center;
-    let ldir = normalize(cam.extra1.xyz);
+    let to_star_r = cam.extra1.xyz - in.center;
+    let ldir = select(
+      normalize(cam.extra1.xyz),
+      normalize(to_star_r),
+      cam.extra1.w > 0.5 && length(to_star_r) > 1e-4
+    );
     let view_r = normalize(cam.cam_pos.xyz - in.world_pos);
+    let n_r = normalize(in.ring_n);
+    let planet_r = select(in.r_in * 0.78, in.shadow_info.x, in.shadow_info.x > 1e-4);
+    let oblate_r = clamp(in.shadow_info.y, 0.0, 0.16);
     let along = dot(rel_p, ldir);
-    let perp_r = length(rel_p - ldir * along);
-    let planet_r = in.r_in * 0.76;
-    let ring_shadow = select(1.0, smoothstep(planet_r * 0.92, planet_r * 1.08, perp_r) * 0.88 + 0.12, along < 0.0);
-    // Physical Henyey-Greenstein forward/back phase scattering for icy ring particles (g = 0.42)!
+    let perp_v = rel_p - ldir * along;
+    // Account for planetary oblateness along the spin/ring normal axis when testing eclipse umbra
+    let perp_pole = dot(perp_v, n_r);
+    let perp_eq = perp_v - n_r * perp_pole;
+    let inv_pole = 1.0 / max(0.80, 1.0 - oblate_r);
+    let perp_r = sqrt(dot(perp_eq, perp_eq) + (perp_pole * inv_pole) * (perp_pole * inv_pole));
+    // True pitch-dark planetary umbra (0.02 ambient bounce, retiring the 12% glowing floor!)
+    let ring_shadow = select(1.0, smoothstep(planet_r * 0.96, planet_r * 1.04, perp_r) * 0.98 + 0.02, along < 0.0);
+    // Physical icy water-frost regolith back-scattering Henyey-Greenstein phase (g = -0.35!) + Seeliger opposition surge + solar incidence obliquity!
     let cos_phase = dot(-view_r, ldir);
-    let g_hg = 0.42;
+    let g_hg = -0.35;
     let hg_phase = (1.0 - g_hg * g_hg) / max(0.22, pow(max(0.15, 1.0 + g_hg * g_hg - 2.0 * g_hg * cos_phase), 1.5));
-    let opp_surge = 1.0 + 0.28 * pow(max(0.0, dot(view_r, ldir)), 8.0);
-    let phase_gain = clamp(0.68 + 0.34 * hg_phase * opp_surge, 0.55, 1.55);
+    let opp_surge = 1.0 + 0.34 * pow(max(0.0, dot(view_r, ldir)), 8.0);
+    let sun_obliq = clamp(0.26 + 0.74 * abs(dot(n_r, ldir)), 0.24, 1.0);
+    let phase_gain = clamp((0.62 + 0.38 * hg_phase * opp_surge) * sun_obliq, 0.25, 1.65);
     let alpha = clamp(fade * cassini * encke * ringlets * 0.76, 0.0, 0.88);
     let ring_star_l = cam.star_light.rgb * clamp(cam.star_light.w, 0.16, 1.85);
     var ring_c = in.color_kind.rgb * (0.85 + 0.25 * ringlets) * ring_shadow * phase_gain * ring_star_l;
@@ -2583,6 +3191,401 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let alpha = clamp((1.0 - trans) * alpha_mul, 0.0, 0.82);
   if (alpha < 0.004) { discard; }
   return vec4<f32>(accum * alpha_mul, alpha);
+}
+`;
+
+// True Zero-Copy 3D Volumetric Radiative-Transfer Ray-Marcher for Live GPU Grids:
+//   mode 0 = L3 3D MLS-MPM Stellar Core & Boiling Convective Photosphere (gridStateBuf: 3 vec4/cell)
+//   mode 1 = L4 3D Multi-Material SPH Differentiating Protoplanet (gridValBuf: 2 vec4/cell)
+const ASTRO_VOL_WGSL = /* wgsl */ `
+${CAMERA_WGSL}
+${EM_SENSOR_WGSL}
+
+@group(0) @binding(0) var<uniform> cam: CameraUniforms;
+@group(0) @binding(1) var<storage, read> vol_grid: array<vec4<f32>>;
+
+struct VsOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+  var pts = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(3.0, -1.0),
+    vec2<f32>(-1.0, 3.0)
+  );
+  var out: VsOut;
+  out.pos = vec4<f32>(pts[vid], 0.0, 1.0);
+  out.ndc = pts[vid];
+  return out;
+}
+
+fn av_hash3(p: vec3<f32>) -> f32 {
+  let q = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
+  let q2 = q + dot(q, q.yxz + 33.33);
+  return fract((q2.x + q2.y) * q2.z);
+}
+
+fn av_noise3(p: vec3<f32>) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let n000 = av_hash3(i + vec3<f32>(0.0, 0.0, 0.0));
+  let n100 = av_hash3(i + vec3<f32>(1.0, 0.0, 0.0));
+  let n010 = av_hash3(i + vec3<f32>(0.0, 1.0, 0.0));
+  let n110 = av_hash3(i + vec3<f32>(1.0, 1.0, 0.0));
+  let n001 = av_hash3(i + vec3<f32>(0.0, 0.0, 1.0));
+  let n101 = av_hash3(i + vec3<f32>(1.0, 0.0, 1.0));
+  let n011 = av_hash3(i + vec3<f32>(0.0, 1.0, 1.0));
+  let n111 = av_hash3(i + vec3<f32>(1.0, 1.0, 1.0));
+  return mix(
+    mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+    mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y),
+    u.z
+  );
+}
+
+fn sample_grid_trilin(p_unit: vec3<f32>, dim: u32, stride: u32, slot: u32) -> vec4<f32> {
+  let d = f32(dim);
+  let g = clamp((p_unit * 0.5 + 0.5) * (d - 1.0), vec3<f32>(0.0), vec3<f32>(d - 1.001));
+  let i0 = vec3<u32>(floor(g));
+  let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(dim - 1u));
+  let f = fract(g);
+  let c000 = vol_grid[((i0.z * dim + i0.y) * dim + i0.x) * stride + slot];
+  let c100 = vol_grid[((i0.z * dim + i0.y) * dim + i1.x) * stride + slot];
+  let c010 = vol_grid[((i0.z * dim + i1.y) * dim + i0.x) * stride + slot];
+  let c110 = vol_grid[((i0.z * dim + i1.y) * dim + i1.x) * stride + slot];
+  let c001 = vol_grid[((i1.z * dim + i0.y) * dim + i0.x) * stride + slot];
+  let c101 = vol_grid[((i1.z * dim + i0.y) * dim + i1.x) * stride + slot];
+  let c011 = vol_grid[((i1.z * dim + i1.y) * dim + i0.x) * stride + slot];
+  let c111 = vol_grid[((i1.z * dim + i1.y) * dim + i1.x) * stride + slot];
+  return mix(
+    mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y),
+    mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y),
+    f.z
+  );
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+  let dim = u32(round(cam.extra0.x));
+  let box_r = max(0.05, cam.extra0.y);
+  let mode = u32(round(cam.extra0.z));
+  let alpha_mul = clamp(cam.extra0.w, 0.0, 1.0);
+  if (dim < 8u || alpha_mul < 0.01) { discard; }
+
+  let center_w = cam.extra1.xyz;
+  let param_a = cam.extra1.w;
+  let fov = cam.cam_up.w;
+  let aspect = cam.cam_right.w;
+  let ro = (cam.cam_pos.xyz - center_w) / box_r;
+  let rd = normalize(
+    cam.cam_fwd.xyz
+    + cam.cam_right.xyz * (in.ndc.x * aspect * fov)
+    + cam.cam_up.xyz * (in.ndc.y * fov)
+  );
+
+  // Bounding sphere intersection inside unit cube (radius 1.0) for zero cube-corner seams
+  let b_s = dot(ro, rd);
+  let c_s = dot(ro, ro) - 1.0;
+  let disc = b_s * b_s - c_s;
+  if (disc <= 0.0) { discard; }
+  let sq = sqrt(disc);
+  let t_enter = max(0.0, -b_s - sq);
+  let t_exit = -b_s + sq;
+  if (t_exit <= t_enter) { discard; }
+
+  let steps = 64u;
+  let dt = (t_exit - t_enter) / f32(steps);
+  let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
+  let time_s = cam.extra2.z;
+  var accum = vec3<f32>(0.0);
+  var trans = 1.0;
+
+  if (mode == 0u) {
+    // MODE 0: LIVE 3D MLS-MPM STELLAR ENGINE — 100% PHYSICALLY OPAQUE OPTICAL PHOTOSPHERE +
+    // TRUE WAVELENGTH-DEPENDENT EM RADIATIVE TRANSFER (EUV Loops / X-Ray & Gamma Nuclear Core Transparency / IR / Radio) +
+    // OPTIONAL OPTICAL OCTANT CORE CUTAWAY (cam.extra2.y > 0.5)!
+    let teff_log = clamp(param_a, 3.0, 5.1);
+    let r_star_u = clamp(cam.extra2.x, 0.45, 0.92);
+    let cutaway_on = cam.extra2.y > 0.5;
+    let gen_f = cam.extra2.w;
+    let em_active = cam.em_sensor.z > 0.5;
+    let mid_log_lam = 0.5 * (cam.em_sensor.x + cam.em_sensor.y);
+    // Physical wavelength-dependent bound-free envelope opacity:
+    //   - Optical & IR: tau >> 1 (100% physically opaque photosphere — ZERO see-through background stars!)
+    //   - EUV (log10 lam ~ -8..-6.9): optically thick chromosphere + blazing hot magnetic flare corona!
+    //   - X-Ray & Gamma (log10 lam < -8.0): bound-free opacity drops ~lam^3, peeling the outer plasma open to reveal the live nuclear fusion heart!
+    let xray_peel = select(0.0, 1.0 - smoothstep(-9.1, -7.5, mid_log_lam), em_active);
+    let euv_band = select(0.0, smoothstep(-8.8, -8.2, mid_log_lam) * (1.0 - smoothstep(-7.2, -6.7, mid_log_lam)), em_active);
+    let ir_band = select(0.0, smoothstep(-6.0, -5.0, mid_log_lam) * (1.0 - smoothstep(-3.4, -2.6, mid_log_lam)), em_active);
+    let radio_band = select(0.0, smoothstep(-3.3, -2.1, mid_log_lam), em_active);
+
+    let c_bd = vec3<f32>(0.74, 0.14, 0.26);
+    let c_rsg = vec3<f32>(1.00, 0.24, 0.04);
+    let c_sun = vec3<f32>(1.00, 0.62, 0.12);
+    let c_pop2 = vec3<f32>(0.42, 0.76, 1.00);
+    let c_pop3 = vec3<f32>(0.22, 0.58, 1.00);
+    var phot_base = mix(c_bd, c_rsg, smoothstep(3.05, 3.48, teff_log));
+    phot_base = mix(phot_base, c_sun, smoothstep(3.52, 3.82, teff_log));
+    phot_base = mix(phot_base, c_pop2, smoothstep(3.84, 4.12, teff_log));
+    phot_base = mix(phot_base, c_pop3, smoothstep(4.20, 4.78, teff_log));
+    let lane_col = phot_base * vec3<f32>(0.24, 0.14, 0.20) + vec3<f32>(0.02, 0.06, 0.16) * smoothstep(3.85, 4.5, teff_log);
+    let crest_col = mix(phot_base * 1.48, vec3<f32>(1.0, 0.96, 0.86), 0.36);
+    let core_nuc_col = select(
+      select(vec3<f32>(1.00, 0.84, 0.36), vec3<f32>(0.54, 0.88, 1.00), gen_f < 2.5),
+      vec3<f32>(0.52, 0.40, 1.00),
+      gen_f < 1.5
+    );
+    var hit_opaque = false;
+    var core_xr_acc = 0.0;
+    var flare_uv_acc = 0.0;
+
+    for (var s = 0u; s < steps; s = s + 1u) {
+      let t = t_enter + (f32(s) + ign) * dt;
+      let p = ro + rd * t;
+      let r = length(p);
+      if (r >= 0.99) { continue; }
+      let r_norm = r / r_star_u;
+      // Optional Optical Octant Cutaway exposes live convective/radiative zones + blazing nuclear fusion heart!
+      let in_cut_octant = cutaway_on && p.x > 0.0 && p.y > 0.0 && p.z > 0.0 && r_norm < 0.99;
+      if (in_cut_octant) { continue; }
+
+      let g0 = sample_grid_trilin(p, dim, 3u, 0u);
+      let g1 = sample_grid_trilin(p, dim, 3u, 1u);
+      let g2 = sample_grid_trilin(p, dim, 3u, 2u);
+      let m_rho = g0.w;
+      if (m_rho < 1e-4 && r_norm > 0.96) { continue; }
+      let eps_tot = g1.z;
+      let n_rad = p / max(1e-4, r);
+      let v_rad = dot(g0.xyz, n_rad);
+
+      // High-contrast 3D boiling convective granulation & sunspot magnetic pores advected by live MPM velocity!
+      let gran_p = p * 10.5 - g0.xyz * 0.28 + vec3<f32>(time_s * 0.14, -time_s * 0.09, time_s * 0.11);
+      let n1 = av_noise3(gran_p);
+      let n2 = av_noise3(gran_p * 2.15 + vec3<f32>(4.1, -2.7, 3.3));
+      let n3 = av_noise3(gran_p * 4.4 - vec3<f32>(1.9, 5.2, -3.8));
+      let raw_cell = n1 * 0.52 + n2 * 0.32 + n3 * 0.16 + v_rad * 0.16;
+      let ridge_cell = 1.0 - abs(raw_cell * 2.0 - 1.0);
+      let gran_hi = pow(clamp(ridge_cell, 0.0, 1.0), 2.0);
+      // Magnetic active-region dark sunspot umbrae (cool in optical, blazing bright in EUV/X-Ray!)
+      let spot_n = av_noise3(p * 3.8 + vec3<f32>(2.3, -1.7, 4.1));
+      let sunspot = smoothstep(0.73, 0.85, spot_n) * (1.0 - smoothstep(0.65, 0.90, abs(n_rad.y)));
+
+      let dens_sc = clamp(pow(max(1e-4, m_rho) * pow(f32(dim) / 24.0, 3.0) * 6.8, 0.58), 0.15, 2.4);
+      let mu_limb = abs(dot(n_rad, -rd));
+      let limb_dark = 0.30 + 0.70 * pow(max(0.0, mu_limb), 0.58);
+
+      // 1. PHYSICALLY OPAQUE PHOTOSPHERIC SHELL (r_norm <= 0.935) when NOT peeled open by X-Ray/Gamma!
+      //    If viewing a cutaway interior face (near p.x==0 / p.y==0 / p.z==0 inside the star), reveal concentric
+      //    interior convective -> radiative -> nuclear-burning strata cleanly!
+      if (r_norm <= 0.935) {
+        let is_cut_face = cutaway_on && (
+          (p.x > -0.04 && p.y > -0.02 && p.z > -0.02)
+          || (p.y > -0.04 && p.x > -0.02 && p.z > -0.02)
+          || (p.z > -0.04 && p.x > -0.02 && p.y > -0.02)
+        );
+        let core_w = (1.0 - smoothstep(0.20, 0.44, r_norm)) * (0.65 + smoothstep(0.05, 8.0, eps_tot) * 0.95);
+        let nuc_turb = 0.78 + 0.38 * av_noise3(p * 14.0 - vec3<f32>(time_s * 0.45));
+        let core_emit = mix(core_nuc_col, vec3<f32>(0.98, 0.99, 1.0), smoothstep(0.42, 0.95, 1.0 - r_norm * 2.1) * 0.52)
+          * (1.15 + smoothstep(0.2, 16.0, eps_tot + g2.z * 2.0 + g2.y) * 0.95) * nuc_turb;
+
+        if (xray_peel < 0.18) {
+          // OPAQUE OPTICAL / IR / EUV SURFACE OR CUTAWAY FACE (100% ZERO SEE-THROUGH!)
+          var surf_c = mix(lane_col, crest_col, gran_hi) * limb_dark;
+          surf_c = mix(surf_c, surf_c * 0.24, sunspot * (1.0 - euv_band));
+          // Active magnetic plage / EUV coronal brightening over active sunspot regions!
+          surf_c = surf_c + vec3<f32>(0.45, 0.85, 1.0) * (sunspot * 1.45 + gran_hi * 0.45) * euv_band;
+          surf_c = mix(surf_c, mix(vec3<f32>(0.65, 0.12, 0.02), vec3<f32>(1.0, 0.65, 0.20), gran_hi) * limb_dark, ir_band * 0.65);
+          if (is_cut_face && r_norm < 0.88) {
+            // Concentric stellar interior: boiling outer convective zone -> warm radiative zone -> blazing nuclear core!
+            let rad_col = mix(phot_base * 1.35, vec3<f32>(1.0, 0.92, 0.72), 0.42) * (0.72 + 0.35 * n2);
+            let conv_col = mix(lane_col * 1.1, crest_col * 1.15, gran_hi);
+            var interior_c = mix(rad_col, conv_col, smoothstep(0.62, 0.76, r_norm));
+            interior_c = mix(interior_c, core_emit * 1.35, 1.0 - smoothstep(0.24, 0.44, r_norm));
+            // Crisp radial zone-boundary lines at core & tachocline!
+            let dtacho = (r_norm - 0.68) / 0.018;
+            let tacho = exp(-(dtacho * dtacho)) * 0.45;
+            let dcore = (r_norm - 0.36) / 0.018;
+            let core_ring = exp(-(dcore * dcore)) * 0.55;
+            surf_c = interior_c + vec3<f32>(1.0, 0.95, 0.85) * (tacho + core_ring);
+          }
+          accum = accum + trans * surf_c;
+          trans = 0.0;
+          hit_opaque = true;
+          break;
+        } else {
+          // X-RAY / GAMMA-RAY HIGH-ENERGY TRANSPARENCY: outer photosphere becomes ghostly optically thin
+          // indigo-violet plasma while the blazing live GPU thermonuclear fusion core glows brightly inside!
+          let env_opac = mix(5.5, 0.18, xray_peel);
+          let rim_shell = pow(max(0.0, 1.0 - mu_limb), 1.8) * smoothstep(0.62, 0.93, r_norm);
+          let phot_ghost = vec3<f32>(0.14, 0.18, 0.58) * (0.14 + 0.55 * rim_shell) * (0.55 + 0.45 * gran_hi);
+          let flare_knot = vec3<f32>(0.24, 0.78, 1.0) * sunspot * 0.75 * smoothstep(0.75, 0.93, r_norm);
+          let core_tight = (1.0 - smoothstep(0.14, 0.38, r_norm)) * (0.75 + smoothstep(0.05, 10.0, eps_tot + g2.z) * 1.15);
+          let sigma_x = (dens_sc * env_opac * 0.28 + core_tight * 2.4) * dt;
+          let emit_x = (phot_ghost * dens_sc * 0.55 + flare_knot + core_emit * core_tight * 2.6) * dt;
+          accum = accum + trans * emit_x;
+          core_xr_acc = core_xr_acc + trans * core_tight * dt * 2.2;
+          flare_uv_acc = flare_uv_acc + trans * (sunspot * 0.8 + rim_shell * 0.25) * dt;
+          trans = trans * exp(-sigma_x);
+          if (trans < 0.03) { break; }
+          continue;
+        }
+      }
+
+      // 2. TRANSLUCENT CHROMOSPHERIC SPICULES, PROMINENCES & CORONA (r_norm > 0.935)
+      let dchrom = (r_norm - 0.96) / 0.055;
+      let chromo_w = exp(-(dchrom * dchrom));
+      let corona_w = smoothstep(0.92, 1.02, r_norm) * (1.0 - smoothstep(1.02, 1.32, r_norm));
+      let flare_arch = pow(clamp(av_noise3(p * 6.5 - vec3<f32>(time_s * 0.25, time_s * 0.18, 0.0)), 0.0, 1.0), 2.4);
+      let chromo_emit = mix(phot_base, vec3<f32>(1.0, 0.42, 0.16), select(0.58, 0.10, teff_log > 3.95))
+        * (0.55 + 0.85 * gran_hi) * (1.0 + 1.5 * euv_band + 0.35 * xray_peel);
+      let cor_emit = mix(phot_base, vec3<f32>(0.48, 0.84, 1.0), 0.42 + 0.45 * (euv_band + radio_band))
+        * (0.35 + 1.15 * flare_arch) * (0.42 + 1.45 * euv_band + 1.25 * radio_band + 0.22 * xray_peel);
+      let sigma_c = (chromo_w * dens_sc * 1.1 + corona_w * 0.18) * dt;
+      let emit_c = (chromo_emit * chromo_w * dens_sc * 1.15 + cor_emit * corona_w * 0.42) * dt;
+      accum = accum + trans * emit_c;
+      flare_uv_acc = flare_uv_acc + trans * (chromo_w * 0.45 + flare_arch * corona_w * 0.55) * dt;
+      trans = trans * exp(-sigma_c);
+      if (trans < 0.02) { break; }
+    }
+    if (em_active) {
+      let em_t = pow(10.0, teff_log);
+      if (xray_peel > 0.25) {
+        // True Chandra X-Ray / Fermi Gamma radiograph: crisp translucent indigo outer shell + blazing sapphire-white fusion heart!
+        let xr_core = clamp(core_xr_acc * 1.35, 0.0, 2.2);
+        let xr_rim = clamp(length(accum) * 0.65, 0.0, 1.2);
+        accum = vec3<f32>(0.10, 0.18, 0.55) * xr_rim
+          + vec3<f32>(0.36, 0.82, 1.00) * flare_uv_acc * 0.85
+          + mix(core_nuc_col, vec3<f32>(0.92, 0.98, 1.0), clamp(xr_core * 0.55, 0.0, 0.82)) * (xr_core * 1.35);
+      } else {
+        let uv_s = clamp(flare_uv_acc * 1.4 + 0.35 * euv_band, 0.0, 1.6);
+        let rad_s = clamp(length(accum) * (0.35 + 0.9 * radio_band), 0.0, 1.6);
+        accum = em_sensor_map_rgb(accum, em_t, uv_s, core_xr_acc * 0.8, rad_s, 0.0);
+      }
+    }
+    let alpha = select(clamp((1.0 - trans) * alpha_mul, 0.0, 0.98), alpha_mul, hit_opaque);
+    if (alpha < 0.004) { discard; }
+    return vec4<f32>(accum * alpha_mul, alpha);
+  } else {
+    // MODE 1: MLS-MPM-GRADE HYBRID 3D DENSITY-ISOSURFACE + ∇ρ NORMALS + MOLTEN RIFT PROTOPLANET!
+    // Solidifies cooling obsidian/silicate crust plates with crisp 3D finite-difference ∇ρ surface-normal lighting
+    // & specular reflections at 60 FPS (zero Marching Cubes overhead!), while early phases & Cutaway (extra2.y > 0.5)
+    // expose the incandescent sinking Fe-Ni metallic core & churning crimson mantle plumes!
+    let age_f = clamp(param_a, 0.0, 1.0);
+    let has_ocean = cam.extra2.x > 0.5;
+    let cutaway_on = cam.extra2.y > 0.5;
+    let is_magma = cam.extra2.w > 0.5;
+    let l_dir_raw = cam.sph_geo.xyz;
+    let l_dir = select(normalize(vec3<f32>(0.65, 0.45, 0.60)), normalize(l_dir_raw), length(l_dir_raw) > 0.05);
+    let h_fd = 2.0 / max(12.0, f32(dim));
+    // Crisp 3D density isosurface threshold across ALL eras, physically contracting from +4% molten thermal
+    // inflation in Era 1 (1.04 R_p) down to EXACT 1.000 R_p before the age_f = 0.45 crossfade onto LIT_SPHERE_WGSL
+    // (eliminating ANY size disparity across 5K..57K SPH parcels & 32^3..64^3 grids!)
+    let iso_thresh = mix(0.11, 0.09, age_f);
+    let r_surf_lim = mix(1.04, 1.000, smoothstep(0.0, 0.45, age_f));
+    let atm_outer_lim = r_surf_lim + mix(0.16, 0.06, age_f);
+    var hit_solid = false;
+
+    for (var s = 0u; s < steps; s = s + 1u) {
+      let t = t_enter + (f32(s) + ign) * dt;
+      let p = ro + rd * t;
+      let r = length(p);
+      if (r >= 0.99) { continue; }
+      let r_body = r * 1.55;
+      if (r_body > atm_outer_lim) { continue; }
+      if (cutaway_on && p.x > 0.0 && p.y > 0.0 && p.z > 0.0 && r_body < 1.05) { continue; }
+
+      let g0 = sample_grid_trilin(p, dim, 2u, 0u);
+      let dens = g0.x;
+      if (dens < 0.012 && r_body > r_surf_lim * 0.97) { continue; }
+      let g1 = sample_grid_trilin(p, dim, 2u, 1u);
+      let temp_n = clamp(g1.x, 0.0, 1.0);
+      let rho0 = g1.y;
+      let shock = clamp(g1.w, 0.0, 2.0);
+      let n_rad = p / max(1e-4, r);
+
+      // Advected 3D basalt plate & incandescent tectonic magma-rift cracks!
+      let q_p = p * 11.5 - g0.yzw * 0.35 + vec3<f32>(time_s * 0.04);
+      let n_a = av_noise3(q_p);
+      let n_b = av_noise3(q_p * 2.3 + vec3<f32>(3.7, -2.1, 1.5));
+      let n_c = av_noise3(q_p * 4.8 - vec3<f32>(1.4, 3.3, -2.7));
+      let tex = n_a * 0.54 + n_b * 0.30 + n_c * 0.16;
+      let crack = pow(clamp(1.0 - abs(n_a * 2.0 - 1.0), 0.0, 1.0), 2.5);
+      // Cooled basaltic slag rafts floating on the boiling Era-1/Era-2 magma ocean!
+      let slag_plate = smoothstep(0.42 - age_f * 0.28, 0.68 - age_f * 0.24, n_a * 0.7 + n_b * 0.3);
+
+      let is_core = smoothstep(5.2, 6.8, rho0) * (1.0 - smoothstep(0.24, 0.50, r_body));
+      let is_outer_shell = smoothstep(0.66, 0.88, r_body);
+      let is_crust = max(1.0 - smoothstep(2.65, 3.30, rho0), is_outer_shell * (0.42 + 0.58 * age_f));
+      let is_water = (1.0 - smoothstep(1.35, 2.15, rho0)) * select(0.0, 1.0, has_ocean);
+
+      // MLS-MPM-GRADE 3D DENSITY-ISOSURFACE HIT (PIXEL-MATCHED TO LIT_SPHERE_WGSL RADIUS 1.000 R_p!):
+      // Sharp 6-tap finite-difference ∇ρ surface normal + high-frequency magma/basalt micro-bump + glossy specular + Fresnel rim!
+      let r_relief = r_surf_lim + (tex - 0.5) * 0.022;
+      if (r_body <= r_relief && (dens > iso_thresh || r_body <= r_surf_lim * 0.985)) {
+        let gx_p = sample_grid_trilin(p + vec3<f32>(h_fd, 0.0, 0.0), dim, 2u, 0u).x;
+        let gx_m = sample_grid_trilin(p - vec3<f32>(h_fd, 0.0, 0.0), dim, 2u, 0u).x;
+        let gy_p = sample_grid_trilin(p + vec3<f32>(0.0, h_fd, 0.0), dim, 2u, 0u).x;
+        let gy_m = sample_grid_trilin(p - vec3<f32>(0.0, h_fd, 0.0), dim, 2u, 0u).x;
+        let gz_p = sample_grid_trilin(p + vec3<f32>(0.0, 0.0, h_fd), dim, 2u, 0u).x;
+        let gz_m = sample_grid_trilin(p - vec3<f32>(0.0, 0.0, h_fd), dim, 2u, 0u).x;
+        let grad_rho = vec3<f32>(gx_p - gx_m, gy_p - gy_m, gz_p - gz_m);
+        let grad_l = length(grad_rho);
+        let n_fd = select(n_rad, -grad_rho / grad_l, grad_l > 1e-4);
+        // Physical 3D surface micro-relief normal from advected crust/wave turbulence
+        let bump_n = vec3<f32>(n_a - 0.5, n_b - 0.5, n_c - 0.5) * 0.36;
+        let n_iso = normalize(mix(n_rad, n_fd, 0.70) + bump_n);
+        let ndl = max(0.0, dot(n_iso, l_dir));
+        let ndv = max(0.0, dot(n_iso, -rd));
+        let half_v = normalize(l_dir - rd);
+        let spec_pow = select(36.0, 76.0, is_water > 0.35 || slag_plate < 0.35 || is_magma);
+        let spec = pow(max(0.0, dot(n_iso, half_v)), spec_pow) * (0.34 + 0.58 * max(is_water, 1.0 - slag_plate));
+        let fres = pow(max(0.0, 1.0 - ndv), 3.2);
+
+        let core_c = mix(vec3<f32>(1.0, 0.62, 0.12), vec3<f32>(1.0, 0.94, 0.72), 0.45 + 0.55 * tex) * 1.85;
+        // Deep volcanic crimson-ember magma ocean + bright glowing lava fissures contrasting against dark obsidian slag!
+        let magma_c = mix(vec3<f32>(0.10, 0.012, 0.008), vec3<f32>(0.96, 0.26, 0.025), pow(clamp(crack * 0.68 + temp_n * 0.28 + (1.0 - slag_plate) * 0.28, 0.0, 1.0), 1.55))
+          * (0.48 + 0.85 * crack) + vec3<f32>(1.0, 0.56, 0.14) * pow(crack, 3.0) * 0.72;
+        // Cooled obsidian / basaltic tectonic plates with realistic directional lighting & specular sheen!
+        let rock_albedo = mix(vec3<f32>(0.042, 0.038, 0.048), vec3<f32>(0.24, 0.34, 0.20), select(0.06, 0.68, has_ocean) * age_f);
+        let water_albedo = vec3<f32>(0.05, 0.30, 0.68);
+        let base_albedo = mix(rock_albedo, water_albedo, is_water * age_f * 0.78);
+        let lit_crust = base_albedo * (0.10 + 0.96 * ndl) + vec3<f32>(1.0, 0.88, 0.74) * spec * (0.30 + 0.65 * ndl);
+        let rift_glow = vec3<f32>(0.98, 0.30, 0.03) * pow(crack, 1.65) * (0.95 + 1.05 * temp_n) * select(1.0, 1.75, is_magma) * (1.12 - 0.52 * age_f);
+        let crust_blend = clamp(slag_plate * (0.64 + 0.36 * age_f) * select(1.0, 0.45, is_magma), 0.0, 1.0);
+        var iso_c = mix(magma_c + vec3<f32>(1.0, 0.52, 0.22) * spec * 0.36, lit_crust + rift_glow, crust_blend);
+        iso_c = mix(iso_c, core_c, is_core);
+        // Glowing atmospheric volcanic vapor / steam Fresnel rim!
+        let rim_c = select(vec3<f32>(1.0, 0.38, 0.10), vec3<f32>(0.34, 0.68, 1.0), has_ocean && age_f > 0.45);
+        iso_c = iso_c + rim_c * fres * (0.48 + 0.34 * ndl) + vec3<f32>(1.0, 0.86, 0.50) * shock * 0.95;
+
+        accum = accum + trans * iso_c;
+        trans = 0.0;
+        hit_solid = true;
+        break;
+      }
+
+      // Outer tenuous silicate-vapor & steam impact atmosphere outside the solid/liquid isosurface
+      // (confined to physical atmospheric scale height & fading cleanly during late cooling crossfade!)
+      let atm_h_fade = 1.0 - smoothstep(r_surf_lim, atm_outer_lim, r_body);
+      let vapor_col = select(vec3<f32>(0.95, 0.36, 0.08), vec3<f32>(0.42, 0.72, 1.0), has_ocean && age_f > 0.5);
+      let dens_sc = clamp(dens * 1.4, 0.0, 0.28) * atm_h_fade * (1.0 - smoothstep(0.45, 0.90, age_f));
+      let sigma = dens_sc * 0.42 * dt;
+      let emit = (vapor_col * dens_sc * 0.52 + vec3<f32>(1.0, 0.84, 0.45) * shock * atm_h_fade * 0.65) * dt;
+      accum = accum + trans * emit;
+      trans = trans * exp(-sigma);
+      if (trans < 0.03) { break; }
+    }
+    if (cam.em_sensor.z > 0.5) {
+      accum = em_sensor_map_rgb(accum, mix(2800.0, 450.0, age_f), 0.18, 0.05, 0.15, 0.0);
+    }
+    let alpha = select(clamp((1.0 - trans) * alpha_mul, 0.0, 0.98), alpha_mul, hit_solid);
+    if (alpha < 0.004) { discard; }
+    return vec4<f32>(accum * alpha_mul, alpha);
+  }
 }
 `;
 
@@ -2773,17 +3776,18 @@ export function createUlgUniversesRenderer(device, canvas) {
   let bloomTexB = null;
   let bloomViewB = null;
 
-  // Dedicated 224-byte CameraUniforms buffers (incl. EM Sensor, Host Starlight Spectrum & Space-Mesh buffer!)
-  const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  // Dedicated 240-byte CameraUniforms buffers (incl. EM Sensor, Host Starlight Spectrum, SPH Geology & Space-Mesh!)
+  const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const MAX_CLOUD_SLOTS = 4;
   const cloudCamBufs = Array.from({ length: MAX_CLOUD_SLOTS }, (_, idx) => device.createBuffer({
     label: `uv-cam-cloud-${idx}`,
-    size: 224,
+    size: 240,
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   }));
-  const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const floraCamBuf = device.createBuffer({ label: 'uv-cam-flora', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const spaceMeshCamBuf = device.createBuffer({ label: 'uv-cam-space-mesh', size: 224, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const astroVolCamBuf = device.createBuffer({ label: 'uv-cam-astro-vol', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const floraCamBuf = device.createBuffer({ label: 'uv-cam-flora', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const spaceMeshCamBuf = device.createBuffer({ label: 'uv-cam-space-mesh', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const postUniformBuf = device.createBuffer({ label: 'uv-post-uniform', size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bloomExtractUniformBuf = device.createBuffer({ label: 'uv-bloom-extract-u', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bloomBlurUniformBuf = device.createBuffer({ label: 'uv-bloom-blur-u', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
@@ -2792,7 +3796,7 @@ export function createUlgUniversesRenderer(device, canvas) {
   const MAX_SPHERES = 320; // Supports up to U-238 (238 nucleons) + planets/moons/stars! (80 B/sphere)
   const sphereBuf = device.createBuffer({ label: 'uv-spheres', size: MAX_SPHERES * 80, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const MAX_DISKS = 16;
-  const diskBuf = device.createBuffer({ label: 'uv-disks', size: MAX_DISKS * 48, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
+  const diskBuf = device.createBuffer({ label: 'uv-disks', size: MAX_DISKS * 64, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const MAX_LINE_VERTS = 24576;
   const lineBuf = device.createBuffer({ label: 'uv-lines', size: MAX_LINE_VERTS * 28, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
   const MAX_COSMIC_VERTS = 16384;
@@ -3001,20 +4005,28 @@ export function createUlgUniversesRenderer(device, canvas) {
     depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'greater-equal' }
   });
   const dummyAtmoBuf = device.createBuffer({ label: 'uv-dummy-atmo-em', size: 96, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
+  const dummySphGeoBuf = device.createBuffer({ label: 'uv-dummy-sph-geo', size: 64, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const sphereBgCache = new WeakMap();
-  function getLitSphereBindGroup(atmoBuf) {
-    const buf = atmoBuf || dummyAtmoBuf;
-    let bg = sphereBgCache.get(buf);
+  function getLitSphereBindGroup(atmoBuf, sphGeoBuf = null) {
+    const aBuf = atmoBuf || dummyAtmoBuf;
+    const gBuf = sphGeoBuf || dummySphGeoBuf;
+    let subMap = sphereBgCache.get(aBuf);
+    if (!subMap) {
+      subMap = new WeakMap();
+      sphereBgCache.set(aBuf, subMap);
+    }
+    let bg = subMap.get(gBuf);
     if (!bg) {
       bg = device.createBindGroup({
         layout: litSpherePipe.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: camBuf } },
           { binding: 1, resource: { buffer: sphereBuf } },
-          { binding: 2, resource: { buffer: buf } }
+          { binding: 2, resource: { buffer: aBuf } },
+          { binding: 3, resource: { buffer: gBuf } }
         ]
       });
-      sphereBgCache.set(buf, bg);
+      subMap.set(gBuf, bg);
     }
     return bg;
   }
@@ -3126,6 +4138,41 @@ export function createUlgUniversesRenderer(device, canvas) {
       { binding: 1, resource: { buffer: nuclearVolBuf } }
     ]
   });
+
+  const astroVolMod = mkMod('uv-astro-vol', ASTRO_VOL_WGSL);
+  const astroVolPipe = device.createRenderPipeline({
+    label: 'uv-astro-vol-pipe',
+    layout: 'auto',
+    vertex: { module: astroVolMod, entryPoint: 'vs_main' },
+    fragment: {
+      module: astroVolMod,
+      entryPoint: 'fs_main',
+      targets: [{
+        format: sceneFormat,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+        }
+      }]
+    },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'always' }
+  });
+  const astroVolBgCache = new WeakMap();
+  function getAstroVolBindGroup(gridBuf) {
+    let bg = astroVolBgCache.get(gridBuf);
+    if (!bg) {
+      bg = device.createBindGroup({
+        layout: astroVolPipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: astroVolCamBuf } },
+          { binding: 1, resource: { buffer: gridBuf } }
+        ]
+      });
+      astroVolBgCache.set(gridBuf, bg);
+    }
+    return bg;
+  }
 
   const bloomMod = mkMod('uv-bloom', BLOOM_WGSL);
   const bloomPipe = device.createRenderPipeline({
@@ -3277,13 +4324,13 @@ export function createUlgUniversesRenderer(device, canvas) {
     device.queue.writeBuffer(nuclearVolBuf, 0, volumeData);
   }
 
-  const camData = new Float32Array(56);
+  const camData = new Float32Array(60);
   const postData = new Float32Array(16);
   const sphereStaging = new Float32Array(MAX_SPHERES * 20);
-  const diskStaging = new Float32Array(MAX_DISKS * 12);
+  const diskStaging = new Float32Array(MAX_DISKS * 16);
   const lineStaging = new Float32Array(MAX_LINE_VERTS * 7);
 
-  function writeCam(targetBuf, camera, extra0, extra1, extra2, emSensorVec = null, emAuxVec = null, starLightVec = null) {
+  function writeCam(targetBuf, camera, extra0, extra1, extra2, emSensorVec = null, emAuxVec = null, starLightVec = null, sphGeoVec = null) {
     camData.set(camera.viewProj, 0);
     camData.set([camera.pos[0], camera.pos[1], camera.pos[2], camera.timeSec || 0], 16);
     camData.set([camera.right[0], camera.right[1], camera.right[2], camera.aspect], 20);
@@ -3295,6 +4342,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     camData.set(emSensorVec || [-6.42, -6.12, 0.0, 1.0], 44);
     camData.set(emAuxVec || [288.0, 1.0, 0.0, 0.0], 48);
     camData.set(starLightVec || [1.0, 0.97, 0.92, 1.0], 52);
+    camData.set(sphGeoVec || [0, 0, -1, -1.5], 56);
     device.queue.writeBuffer(targetBuf, 0, camData);
   }
 
@@ -3303,14 +4351,19 @@ export function createUlgUniversesRenderer(device, canvas) {
     particleClouds = [],  // Up to 4 simultaneous zero-copy GPU clouds for seamless cross-scale zoom!
     spheres = null,
     atmoEm = null,        // Optional zero-copy live GPU spherical baroclinic + triboelectric EM + CFD flow buffer!
+    sphGeology = null,    // Optional zero-copy live GPU 3D SPH Planetary Genesis spherical geology map!
     surfaceScene = null,  // Optional live GPU Planetary Surface Terrain + Boulders + Flora + Rover/Drone/UFO + Translucent FX!
     cosmicMeshes = null,  // Optional `{ opaque: Float32Array, fx: Float32Array }` for 3D UFO/Remote UFOs/Probes in space!
     lightDir = [0.6, 0.75, 0.55],
+    lightIsPoint = false, // True in L2 multi-planet view -> `lightDir` holds live host-star world pos for radial per-body illumination!
+    coolingHeat = 0.0,    // Continuous post-SPH planetary cooling ramp [0..1] for focused SPH globe
+    ringShadow = null,    // Optional `{ normal, rInRatio, rOutRatio, sphereIndex }` casting ring shadows onto focused ringed planet!
     starLight = [1.0, 0.97, 0.92, 1.0], // Physical linear host-star RGB + perceptual inverse-square irradiance gain!
     mdCloud = null,
     disks = null,
     lines = null,
     nuclearVol = null,
+    astroVol = null,      // Optional zero-copy live 3D volumetric ray-marched MLS-MPM Star (mode 0) or SPH Protoplanet (mode 1)!
     emSensor = null,      // Optional `{ log10LambdaMin, log10LambdaMax, active, gain }` full-spectrum EM sensor window!
     post = {},
     stereoSbs = false,    // Optional Side-by-Side Stereo VR Preview split-eye post/viewport pass
@@ -3366,7 +4419,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       diskCount = Math.min(MAX_DISKS, disks.length);
       for (let i = 0; i < diskCount; i += 1) {
         const d = disks[i];
-        const o = i * 12;
+        const o = i * 16;
         diskStaging[o + 0] = d.center[0];
         diskStaging[o + 1] = d.center[1];
         diskStaging[o + 2] = d.center[2];
@@ -3379,8 +4432,12 @@ export function createUlgUniversesRenderer(device, canvas) {
         diskStaging[o + 9] = d.color?.[1] ?? 0.85;
         diskStaging[o + 10] = d.color?.[2] ?? 0.72;
         diskStaging[o + 11] = d.kind ?? 0;
+        diskStaging[o + 12] = Number(d.planetRadius) || 0;
+        diskStaging[o + 13] = Number(d.oblateF) || 0;
+        diskStaging[o + 14] = 0;
+        diskStaging[o + 15] = 0;
       }
-      device.queue.writeBuffer(diskBuf, 0, diskStaging.subarray(0, diskCount * 12));
+      device.queue.writeBuffer(diskBuf, 0, diskStaging.subarray(0, diskCount * 16));
     }
 
     let lineVertCount = 0;
@@ -3406,18 +4463,28 @@ export function createUlgUniversesRenderer(device, canvas) {
     const activeClouds = (particleClouds || []).filter((c) => c && c.buffer && c.count > 0).slice(0, MAX_CLOUD_SLOTS);
     const hasLiveParentBackdrop = activeClouds.some((c) => c.isBackdrop);
     const hasAtmo = Boolean(atmoEm && atmoEm.buffer && atmoEm.width > 0 && atmoEm.height > 0);
+    const hasSphGeo = Boolean(sphGeology && sphGeology.buffer && sphGeology.width > 0 && sphGeology.height > 0);
+    const hasRingSh = Boolean(!hasSphGeo && ringShadow && ringShadow.rOutRatio > 1.05);
+    const sphGeoVec = hasSphGeo
+      ? [sphGeology.width, sphGeology.height, sphGeology.sphereIndex ?? 0, Number.isFinite(sphGeology.seaLevelNorm) ? sphGeology.seaLevelNorm : -0.05]
+      : (hasRingSh
+        ? [ringShadow.normal[0], ringShadow.normal[1], ringShadow.normal[2], ringShadow.sphereIndex ?? 0]
+        : [0, 0, -1, -1.5]);
+    const camExtra0Z = hasRingSh ? Number(ringShadow.rInRatio) : Math.max(0, Math.min(1, Number(coolingHeat) || 0));
+    const camExtra0W = hasRingSh ? Number(ringShadow.rOutRatio) : 0;
     const starLightVec = (Array.isArray(starLight) && starLight.length >= 4)
       ? [Number(starLight[0]) || 1.0, Number(starLight[1]) || 0.97, Number(starLight[2]) || 0.92, Number(starLight[3]) || 1.0]
       : [1.0, 0.97, 0.92, 1.0];
     writeCam(
       camBuf,
       camera,
-      [camera.level || 0, hasLiveParentBackdrop ? 1.0 : 0.0, 0, 0],
-      [lightDir[0], lightDir[1], lightDir[2], 0],
+      [camera.level || 0, hasLiveParentBackdrop ? 1.0 : 0.0, camExtra0Z, camExtra0W],
+      [lightDir[0], lightDir[1], lightDir[2], lightIsPoint ? 1.0 : 0.0],
       hasAtmo ? [atmoEm.width, atmoEm.height, atmoEm.sphereIndex ?? 0, 1.0] : [1, 1, -1, 0.0],
       emSensorVec,
       baseEmAux,
-      starLightVec
+      starLightVec,
+      sphGeoVec
     );
     // Dedicated clean space-mesh camera uniform (sky_hor=0, opt_depth=0, isMagma=0, flags=1 skipping aerial fog!)
     // Fixes UFO metallic/neon-yellow fog bleed when hovering in space at L0..L4!
@@ -3451,6 +4518,12 @@ export function createUlgUniversesRenderer(device, canvas) {
       const env = surfaceScene.env;
       const ld = surfaceScene.lightDir || lightDir;
       const curvInv2R = env.hasSolidCrust ? (1.0 / (2.0 * (env.tinyPlanetCurvatureRadiusM || 2800.0))) : 0.0;
+      const surfAuroraVec = [
+        Number(surfaceScene.auroraStrength) || 0.0,
+        Number(surfaceScene.observerLatRad) || 0.0,
+        Number(surfaceScene.dynamoMicroT) || 0.0,
+        0.0
+      ];
       writeCam(
         auxCamBuf,
         camera,
@@ -3459,7 +4532,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         [env.skyHorizonRgb[0], env.skyHorizonRgb[1], env.skyHorizonRgb[2], env.isMagmaOcean ? 1.0 : 0.0],
         emSensorVec,
         baseEmAux,
-        starLightVec
+        starLightVec,
+        surfAuroraVec
       );
       const fp = surfaceScene.focusPos || camera.pos;
       writeCam(
@@ -3493,6 +4567,21 @@ export function createUlgUniversesRenderer(device, canvas) {
         emSensorVec,
         baseEmAux,
         starLightVec
+      );
+    }
+
+    if (astroVol && astroVol.buffer && astroVol.dim >= 8) {
+      const avL = astroVol.lightDir || lightDir;
+      writeCam(
+        astroVolCamBuf,
+        camera,
+        [astroVol.dim, astroVol.boxRadius || 6.0, astroVol.mode || 0, astroVol.alphaMul ?? 1.0],
+        [astroVol.center?.[0] || 0, astroVol.center?.[1] || 0, astroVol.center?.[2] || 0, astroVol.paramA ?? 3.76],
+        astroVol.extra2 || [0.72, 0.0, post.timeSec ?? 0, 3.0],
+        emSensorVec,
+        baseEmAux,
+        starLightVec,
+        [avL[0], avL[1], avL[2], 0]
       );
     }
 
@@ -3549,7 +4638,7 @@ export function createUlgUniversesRenderer(device, canvas) {
         // with Reversed-Z depth testing so real mountains occlude setting suns & moons eclipse suns!
         if (sphereCount > 0) {
           pass.setPipeline(litSpherePipe);
-          pass.setBindGroup(0, getLitSphereBindGroup(hasAtmo ? atmoEm.buffer : null));
+          pass.setBindGroup(0, getLitSphereBindGroup(hasAtmo ? atmoEm.buffer : null, hasSphGeo ? sphGeology.buffer : null));
           pass.draw(6, sphereCount, 0, 0);
         }
         if (diskCount > 0) {
@@ -3609,7 +4698,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       if (!(surfaceScene && surfaceScene.env)) {
         if (sphereCount > 0) {
           pass.setPipeline(litSpherePipe);
-          pass.setBindGroup(0, getLitSphereBindGroup(hasAtmo ? atmoEm.buffer : null));
+          pass.setBindGroup(0, getLitSphereBindGroup(hasAtmo ? atmoEm.buffer : null, hasSphGeo ? sphGeology.buffer : null));
           pass.draw(6, sphereCount, 0, 0);
         }
         if (diskCount > 0) {
@@ -3623,6 +4712,12 @@ export function createUlgUniversesRenderer(device, canvas) {
         pass.setPipeline(mdSpherePipe);
         pass.setBindGroup(0, getMdBindGroup(mdCloud.positionsBuffer, mdCloud.velocitiesBuffer));
         pass.draw(6, mdCloud.count, 0, 0);
+      }
+
+      if (astroVol && astroVol.buffer && astroVol.dim >= 8) {
+        pass.setPipeline(astroVolPipe);
+        pass.setBindGroup(0, getAstroVolBindGroup(astroVol.buffer));
+        pass.draw(3, 1, 0, 0);
       }
 
       if (!surfaceScene && cosmicOpaqueCount > 0) {
@@ -3719,9 +4814,9 @@ export function createUlgUniversesRenderer(device, canvas) {
     bloomTexA?.destroy();
     bloomTexB?.destroy();
     for (const b of [
-      camBuf, ...cloudCamBufs, auxCamBuf, spaceMeshCamBuf, postUniformBuf,
+      camBuf, ...cloudCamBufs, auxCamBuf, astroVolCamBuf, spaceMeshCamBuf, postUniformBuf,
       bloomExtractUniformBuf, bloomBlurUniformBuf,
-      sphereBuf, dummyAtmoBuf, diskBuf, lineBuf, cosmicMeshBuf, cosmicFxBuf, nuclearVolBuf
+      sphereBuf, dummyAtmoBuf, dummySphGeoBuf, diskBuf, lineBuf, cosmicMeshBuf, cosmicFxBuf, nuclearVolBuf
     ]) {
       try { b.destroy(); } catch {}
     }

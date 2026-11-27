@@ -72,15 +72,45 @@
 
       .acc-group {
         background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-        overflow: hidden; flex-shrink: 0; transition: border-color 0.14s ease;
+        overflow: hidden; flex: 0 0 auto; flex-shrink: 0; min-height: 33px;
+        display: flex; flex-direction: column; transition: border-color 0.14s ease;
       }
       .acc-group.active-group { border-color: rgba(52, 211, 153, 0.70); box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.14); }
       .acc-header {
         width: 100%; background: transparent; border: none; color: var(--text);
-        padding: 7px 9px; min-height: 31px; font-size: 11px; font-weight: 700; cursor: pointer;
+        padding: 7px 9px; min-height: 32px; font-size: 11px; font-weight: 700; cursor: pointer;
         display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;
-        flex-shrink: 0;
+        flex: 0 0 auto; flex-shrink: 0; line-height: 1.25;
       }
+      .acc-title-wrap { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+      .acc-sub-org {
+        font-size: 9px; font-weight: 600; color: #6ee7b7; font-family: ui-monospace, monospace;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .hud-top-stack {
+        position: absolute; top: 10px; left: 10px; right: 10px; z-index: 18;
+        display: flex; flex-direction: column; align-items: flex-start; gap: 6px; pointer-events: none;
+      }
+      .organism-source-banner {
+        display: none; align-items: center; gap: 8px; max-width: min(520px, 100%);
+        pointer-events: auto;
+        background: rgba(6, 22, 20, 0.92); border: 1px solid rgba(52, 211, 153, 0.58);
+        border-radius: 999px; padding: 4px 7px 4px 11px; backdrop-filter: blur(8px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+      }
+      .organism-source-banner.visible { display: inline-flex; }
+      .organism-source-text {
+        font-size: 10.5px; font-weight: 700; color: #ecfdf5;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+      }
+      .organism-source-text em { color: #34d399; font-style: italic; }
+      .organism-source-text small { color: #93c5fd; font-family: ui-monospace, monospace; font-weight: 600; }
+      .organism-back-btn {
+        flex-shrink: 0; background: rgba(52, 211, 153, 0.24); border: 1px solid rgba(52, 211, 153, 0.65);
+        color: #ffffff; border-radius: 999px; padding: 3px 9px; font-size: 10px; font-weight: 800;
+        cursor: pointer; white-space: nowrap;
+      }
+      .organism-back-btn:hover { background: rgba(52, 211, 153, 0.42); }
       .acc-header:hover { background: rgba(52, 211, 153, 0.10); }
       .acc-group.active-group > .acc-header { background: rgba(52, 211, 153, 0.16); color: #fff; }
       .acc-header-right { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
@@ -153,7 +183,7 @@
       .pick-card-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 800; color: #facc15; }
       .pick-card-meta { font-family: ui-monospace, monospace; font-size: 10px; color: #e2e8f0; line-height: 1.4; }
       .hud-top-left {
-        position: absolute; top: 10px; left: 10px; max-width: 400px; pointer-events: none; z-index: 16;
+        max-width: min(420px, 100%); pointer-events: none;
         background: rgba(6, 14, 22, 0.82); border: 1px solid rgba(52, 211, 153, 0.30);
         border-radius: 8px; padding: 7px 10px; backdrop-filter: blur(8px);
       }
@@ -296,8 +326,10 @@
         .hdr-btn .hdr-lbl { display: none; }
         .hdr-btn { padding: 4px 8px; min-width: 30px; }
         .specimen-pill .pill-tag { display: none; }
-        .hud-top-left { top: 6px; left: 8px; right: 8px; max-width: calc(100% - 16px); padding: 5px 8px; }
+        .hud-top-stack { top: 6px; left: 8px; right: 8px; gap: 4px; }
+        .hud-top-left { max-width: 100%; padding: 5px 8px; }
         .hud-sub { display: none; }
+        .organism-source-banner { max-width: 100%; border-radius: 10px; padding: 4px 7px; }
       }
     </style>
   </head>
@@ -384,52 +416,62 @@
           <div id="xeno-world-summary" style="font-size:9.5px;color:var(--muted);line-height:1.35;">Select a planetary environment or beam a specimen from ULG Universes to inspect it live in the Bio Vivarium.</div>
         </div>
 
-        <div class="acc-group" data-group="vivarium">
-          <button class="acc-header" type="button" aria-expanded="false"><span>0. Specimen Vivarium &amp; Organism</span><span class="acc-header-right"><span class="acc-count">1</span><span class="acc-chev">▸</span></span></button>
+        <div class="acc-group open active-group" data-group="vivarium">
+          <button class="acc-header" type="button" aria-expanded="true"><span class="acc-title-wrap"><span>0. Active Organism (Bio-Aquarium)</span><span class="acc-sub-org" id="sub-viv-org">Macroscopic Host · Click any organ to zoom</span></span><span class="acc-header-right"><span class="acc-count">1</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
-            <button class="mode-btn" data-mode="organism-overview" type="button"><span>🫧 Interactive Bio-Aquarium</span><small>Click Parts</small></button>
+            <button class="mode-btn active" data-mode="organism-overview" type="button"><span>🫧 Interactive Bio-Aquarium</span><small>Click Parts</small></button>
           </div>
         </div>
 
-        <div class="acc-group open active-group" data-group="membranes">
-          <button class="acc-header" type="button" aria-expanded="true"><span>1. Amphiphile Self-Assembly &amp; Protocells</span><span class="acc-header-right"><span class="acc-count">3</span><span class="acc-chev">▸</span></span></button>
+        <div class="acc-group" data-group="molecules">
+          <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>0B. Native Environmental Chemistry</span><span class="acc-sub-org" id="sub-mol-org">All-atom GPU MD · QEq + Hückel π-MO</span></span><span class="acc-header-right"><span class="acc-count">4</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
-            <button class="mode-btn active" data-mode="lipid-soup" type="button"><span>Spontaneous Micelle Soup</span><small>ε_hp MD</small></button>
-            <button class="mode-btn" data-mode="protocell-vesicle" type="button"><span>3D Protocell Vesicle</span><small>Bilayer Shell</small></button>
-            <button class="mode-btn" data-mode="lipid-bilayer" type="button"><span>Fluid Lipid Bilayer</span><small>Membrane</small></button>
+            <button class="mode-btn" data-mode="bio-mol-membrane" type="button"><span>Native Membrane Amphiphile</span><small>All-Atom</small></button>
+            <button class="mode-btn" data-mode="bio-mol-genetic" type="button"><span>Native XNA Genetic Base-Pair</span><small>H-Bond</small></button>
+            <button class="mode-btn" data-mode="bio-mol-energy" type="button"><span>Native Redox / Energy Cofactor</span><small>QEq MD</small></button>
+            <button class="mode-btn" data-mode="bio-mol-pigment" type="button"><span>Native Starlight Photopigment</span><small>π-MO</small></button>
+          </div>
+        </div>
+
+        <div class="acc-group" data-group="membranes">
+          <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>1. Organism Cell Membrane</span><span class="acc-sub-org" id="sub-mem-org">Derived from active organism</span></span><span class="acc-header-right"><span class="acc-count">3</span><span class="acc-chev">▸</span></span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="protocell-vesicle" type="button"><span>3D Organism Cell Vesicle</span><small>Bilayer Shell</small></button>
+            <button class="mode-btn" data-mode="lipid-bilayer" type="button"><span>Tissue Fluid Membrane Patch</span><small>Bilayer</small></button>
+            <button class="mode-btn" data-mode="lipid-soup" type="button"><span>Self-Assembly in Native Solvent</span><small>ε_hp MD</small></button>
           </div>
         </div>
 
         <div class="acc-group" data-group="folding">
-          <button class="acc-header" type="button" aria-expanded="false"><span>2. Biopolymer Folding &amp; Catalysis</span><span class="acc-header-right"><span class="acc-count">3</span><span class="acc-chev">▸</span></span></button>
+          <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>2. Organism Tissue Proteome</span><span class="acc-sub-org" id="sub-fold-org">Derived from active organism</span></span><span class="acc-header-right"><span class="acc-count">3</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
-            <button class="mode-btn" data-mode="amphipathic-helix-bundle" type="button"><span>Helix-Turn-Helix Catalyst</span><small>36-mer</small></button>
-            <button class="mode-btn" data-mode="globular-hydrophobic-core" type="button"><span>Globular Hydrophobic Core</span><small>44-mer</small></button>
-            <button class="mode-btn" data-mode="beta-hairpin-fold" type="button"><span>Antiparallel Hairpin</span><small>28-mer</small></button>
+            <button class="mode-btn" data-mode="amphipathic-helix-bundle" type="button"><span>Organism Helix / Receptor Fold</span><small>Organ FASTA</small></button>
+            <button class="mode-btn" data-mode="globular-hydrophobic-core" type="button"><span>Metabolic Core Globule</span><small>Enzyme Core</small></button>
+            <button class="mode-btn" data-mode="beta-hairpin-fold" type="button"><span>Structural β-Sheet / Keratin</span><small>Hairpin</small></button>
           </div>
         </div>
 
         <div class="acc-group" data-group="evolution">
-          <button class="acc-header" type="button" aria-expanded="false"><span>3. Template Replication &amp; Eigen</span><span class="acc-header-right"><span class="acc-count">1</span><span class="acc-chev">▸</span></span></button>
+          <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>3. Organism XNA Genome &amp; Eigen</span><span class="acc-sub-org" id="sub-evo-org">Derived from active organism</span></span><span class="acc-header-right"><span class="acc-count">1</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
-            <button class="mode-btn" data-mode="quasispecies-evolution" type="button"><span>Quasispecies &amp; Duplex T_m</span><small>1,024 GPU</small></button>
+            <button class="mode-btn" data-mode="quasispecies-evolution" type="button"><span>XNA Quasispecies &amp; Duplex T_m</span><small>1,024 GPU</small></button>
           </div>
         </div>
 
         <div class="acc-group" data-group="bioenergetics">
-          <button class="acc-header" type="button" aria-expanded="false"><span>4. Chemiosmosis &amp; Excitable Cells</span><span class="acc-header-right"><span class="acc-count">2</span><span class="acc-chev">▸</span></span></button>
+          <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>4. Organism Bioenergetics &amp; Nerves</span><span class="acc-sub-org" id="sub-hh-org">Derived from active organism</span></span><span class="acc-header-right"><span class="acc-count">2</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
-            <button class="mode-btn" data-mode="excitable-spiral" type="button"><span>HH Action-Potential Spirals</span><small>128² + ATP</small></button>
-            <button class="mode-btn" data-mode="excitable-pulse" type="button"><span>Pacemaker Pulse Ring</span><small>128² HH</small></button>
+            <button class="mode-btn" data-mode="excitable-spiral" type="button"><span>Neural / Tissue Spike Spirals</span><small>128² + ATP</small></button>
+            <button class="mode-btn" data-mode="excitable-pulse" type="button"><span>Metabolic Pacemaker Pulse</span><small>128² HH</small></button>
           </div>
         </div>
 
         <div class="acc-group" data-group="morphogenesis">
-          <button class="acc-header" type="button" aria-expanded="false"><span>5. Turing Morphogenesis &amp; Active</span><span class="acc-header-right"><span class="acc-count">3</span><span class="acc-chev">▸</span></span></button>
+          <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>5. Organism Morphogenesis &amp; Cells</span><span class="acc-sub-org" id="sub-morph-org">Derived from active organism</span></span><span class="acc-header-right"><span class="acc-count">3</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
-            <button class="mode-btn" data-mode="turing-spots" type="button"><span>Turing Spots + Chemotaxis</span><small>2K Agents</small></button>
-            <button class="mode-btn" data-mode="turing-labyrinth" type="button"><span>Embryonic Labyrinth Stripes</span><small>2K Agents</small></button>
-            <button class="mode-btn" data-mode="mitosis-division" type="button"><span>Self-Dividing Droplets</span><small>Mitosis RD</small></button>
+            <button class="mode-btn" data-mode="turing-spots" type="button"><span>Dermal Pigment Spots + Cells</span><small>2K Agents</small></button>
+            <button class="mode-btn" data-mode="turing-labyrinth" type="button"><span>Embryonic Body-Plan Stripes</span><small>2K Agents</small></button>
+            <button class="mode-btn" data-mode="mitosis-division" type="button"><span>Cellular Mitosis &amp; Growth</span><small>Mitosis RD</small></button>
           </div>
         </div>
 
@@ -459,6 +501,35 @@
           <div class="btn-row">
             <button class="sm-btn gold" id="btn-viv-biopsy-jump" type="button" style="display:none;">🔬 Inspect Tissue in GPU Lab →</button>
             <button class="sm-btn" id="btn-viv-reset" type="button">↺ Calm Reset</button>
+          </div>
+          <div class="ctrl-row" style="margin-top:2px;">
+            <div class="ctrl-head"><span>Zoom Into This Organism's Physics</span><b id="val-viv-organ-src">Whole Body</b></div>
+            <div class="btn-row" id="viv-scale-zoom-row">
+              <button class="sm-btn gold" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="molecule" type="button">⚛ Chemistry</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="membrane" type="button">🧫 Membrane</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="fold" type="button">🧬 Protein</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="evo" type="button">🧪 XNA</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="hh" type="button">⚡ Nerves</button>
+              <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="morph" type="button">🌀 Embryo</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="ctrl-molecule" class="card" style="display:none;">
+          <h3><span>Environmental Molecular MD</span><b id="val-mol-formula">—</b></h3>
+          <div id="mol-synthesis-reason" style="font-size:9.5px;color:#d1fae5;background:rgba(4,12,20,0.72);border:1px solid rgba(52,211,153,0.28);border-radius:6px;padding:6px 7px;line-height:1.38;">Synthesized bottom-up from planetary temperature, dielectric ε_r, elemental C/O &amp; host starlight.</div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Habitat Temperature T</span><b id="val-mol-temp">288 K</b></div>
+            <input id="sl-mol-temp" type="range" min="70" max="650" step="5" value="288" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Solvent Dielectric ε_r</span><b id="val-mol-eps">78.4</b></div>
+            <input id="sl-mol-eps" type="range" min="1.2" max="105" step="0.5" value="78.4" />
+          </div>
+          <div class="btn-row">
+            <button class="sm-btn" id="btn-mol-esp" type="button">⚡ QEq ESP</button>
+            <button class="sm-btn active" id="btn-mol-pi" type="button">⚛ π-MO Cloud</button>
+            <button class="sm-btn" id="btn-mol-rep" type="button">Ball &amp; Stick</button>
           </div>
         </div>
 
@@ -599,9 +670,15 @@
       <main class="stage-wrap">
         <canvas id="life-canvas"></canvas>
         <div id="pick-reticle" class="pick-reticle"></div>
-        <div class="hud-top-left">
-          <div id="hud-title" class="hud-title">Amphiphile Spontaneous Self-Assembly</div>
-          <p id="hud-sub" class="hud-sub">Click any lipid, residue, replicator, or swimmer to inspect live WebGPU state · Drag to orbit</p>
+        <div class="hud-top-stack">
+          <div id="organism-source-banner" class="organism-source-banner" aria-live="polite">
+            <span id="organism-source-text" class="organism-source-text">🧬 Organism Specimen Source</span>
+            <button id="btn-back-to-organism" class="organism-back-btn" type="button">🫧 Back to Organism</button>
+          </div>
+          <div class="hud-top-left">
+            <div id="hud-title" class="hud-title">Interactive Organism Bio-Aquarium</div>
+            <p id="hud-sub" class="hud-sub">Click any organ on the living specimen to inspect, probe, heat, or zoom straight into its live cellular &amp; molecular GPU physics</p>
+          </div>
         </div>
         <div class="hud-bottom">
           <div class="hud-badge-bar">

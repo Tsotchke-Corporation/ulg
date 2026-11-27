@@ -54,7 +54,7 @@ const PEERCOMPUTE_SCHEDULER_PROFILE = Object.freeze({
   snapshotHz: 20,
   keepaliveMs: 1500,
   snapshotsRequireAuthority: false,
-  reliableEventTypes: ['ufo-hit', 'ufo-missile', 'ufo-crater-stamp', 'ufo-leave']
+  reliableEventTypes: ['ufo-hit', 'ufo-missile', 'ufo-crater-stamp', 'ufo-leave', 'cosmic-cache-put']
 });
 
 function getPeerIdFromMultiaddr(addr) {
@@ -166,6 +166,7 @@ export function createUfoMultiplayerMesh({
   onWeaponHitLocal = null,
   onRemoteMissile = null,
   onRemoteCraterStamp = null,
+  onRemoteCosmicCacheEntry = null,
   onStateChange = null
 } = {}) {
   const selfId = peerId || `ufo-${Math.random().toString(36).slice(2, 8)}`;
@@ -256,6 +257,10 @@ export function createUfoMultiplayerMesh({
     } else if (msg.type === 'ufo-crater-stamp' && msg.from) {
       if (typeof onRemoteCraterStamp === 'function') {
         onRemoteCraterStamp(msg.stamp, msg.from);
+      }
+    } else if (msg.type === 'cosmic-cache-put' && msg.from && msg.entry) {
+      if (typeof onRemoteCosmicCacheEntry === 'function') {
+        onRemoteCosmicCacheEntry(msg.entry, msg.from);
       }
     } else if ((msg.type === 'ufo-leave' || msg.type === 'peer-disconnect') && (msg.from || msg.peerId)) {
       remotePeers.delete(msg.from || msg.peerId);
@@ -517,6 +522,11 @@ export function createUfoMultiplayerMesh({
     return sendPacket({ type: 'ufo-crater-stamp', stamp }, { reliable: true });
   }
 
+  function broadcastCosmicCacheEntry(entry) {
+    if (!connected || !entry || !entry.key) return false;
+    return sendPacket({ type: 'cosmic-cache-put', entry }, { reliable: true });
+  }
+
   function getAllRemotePeers() {
     const now = Date.now();
     const out = [];
@@ -578,6 +588,7 @@ export function createUfoMultiplayerMesh({
     sendWeaponHit,
     broadcastMissileLaunch,
     broadcastCraterStamp,
+    broadcastCosmicCacheEntry,
     getAllRemotePeers,
     getRemotePeersForContext,
     getStatus,

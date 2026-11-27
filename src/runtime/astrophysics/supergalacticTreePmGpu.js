@@ -386,7 +386,7 @@ fn cic_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
   //   (b) uniform -mean_mass_cell peculiar background at EVERY cell center (including empty voids!)
   if (params.short_range_r_s > 0.0) {
     let r_s = params.short_range_r_s;
-    let r_cut = 2.0 * r_s;
+    let r_cut = 3.6 * r_s;
     let r_cut2 = r_cut * r_cut;
     let eps2 = (0.55 * cell_len) * (0.55 * cell_len);
     for (var oz: i32 = -1; oz <= 1; oz = oz + 1) {
@@ -480,9 +480,13 @@ fn cic_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
   let a = max(0.01, params.a_scale);
   let h_a = max(0.05, params.h_a);
   let da = params.da;
-  let kick_fac = da / (a * a * h_a);
+  // Exact canonical FLRW comoving momentum kick dp/da = -grad_x(Phi) / (a * H(a))
+  // (note grav_pref = 1.5 * Omega_m / a already carries the 1/a Poisson scale factor!)
+  let kick_fac = da / (a * h_a);
   let a_mid = a + 0.5 * da;
-  let drift_fac = da / (a_mid * a_mid * a_mid * h_a);
+  let omega_l = max(0.0, 1.0 - params.omega_m);
+  let h_mid = sqrt(max(0.0025, params.omega_m / (a_mid * a_mid * a_mid) + omega_l));
+  let drift_fac = da / (a_mid * a_mid * a_mid * h_mid);
 
   let v_sync = select(pt.vel_rho.xyz, pt.vel_rho.xyz + acc * (0.5 * params.prev_kick_fac), params.step_index > 0u);
   let v_half = v_sync + acc * (0.5 * kick_fac);
@@ -795,7 +799,8 @@ export async function buildZeldovichCosmologyICsWebGpu(device, {
   const hInit = friedmannHOverH0(aInit, { omegaM, omegaLambda });
   const growthRate = Math.pow(omegaM / (aInit ** 3 * hInit * hInit), 0.55);
   const vPref = aInit * aInit * hInit * growthRate;
-  const kEq = (2 * Math.PI / L) * 2.5;
+  const dkBox = (2 * Math.PI) / Math.max(1e-3, L);
+  const kEq = Math.max(dkBox * 1.5, Math.min(0.0103, dkBox * Math.max(2.5, fftGridN * 0.22)));
 
   const ws = createFft3dWorkspaceWebGpu(device, fftGridN);
   const totalFft = ws.total;
@@ -1034,7 +1039,8 @@ export async function build2LptCosmologyICsWebGpu(device, {
   const f2 = 2.0 * Math.pow(Math.max(1e-4, omegaMA), 6 / 11);
   const vPref1 = aInit * aInit * hInit * f1;
   const vPref2 = aInit * aInit * hInit * f2;
-  const kEq = (2 * Math.PI / L) * 2.5;
+  const dkBox = (2 * Math.PI) / Math.max(1e-3, L);
+  const kEq = Math.max(dkBox * 1.5, Math.min(0.0103, dkBox * Math.max(2.5, fftGridN * 0.22)));
 
   const ws = createFft3dWorkspaceWebGpu(device, fftGridN);
   const M = ws.n;
@@ -1322,7 +1328,8 @@ export function buildZeldovichCosmologyICs({
     return (s + 0.5) / 4294967296;
   };
   const modes = [];
-  const kEq = (2 * Math.PI / L) * 2.5;
+  const dkBoxHost = (2 * Math.PI) / Math.max(1e-3, L);
+  const kEq = Math.max(dkBoxHost * 1.5, Math.min(0.0103, dkBoxHost * Math.max(2.5, n * 0.22)));
   for (let kx = -3; kx <= 3; kx += 1) {
     for (let ky = -3; ky <= 3; ky += 1) {
       for (let kz = -3; kz <= 3; kz += 1) {
@@ -1501,7 +1508,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   if (ic.data.byteLength > 0) {
     device.queue.writeBuffer(particleBuf, 0, ic.data);
   }
-  const cicBuf = device.createBuffer({ size: gridTotal * 4, usage: GPU_BUFFER_USAGE.STORAGE });
+  const cicBuf = device.createBuffer({ size: gridTotal * 4, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const forceGridBuf = device.createBuffer({ size: gridTotal * 16, usage: GPU_BUFFER_USAGE.STORAGE });
   // 20 vec4<f32> = 320 bytes: [0]=gridStats, [1]=particleStats, [2..17]=16 P(k) bins, [18..19]=tileMultipole
   const telemetryBytes = 20 * 16;
@@ -1544,7 +1551,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   let initialLowKPower = null;
   let tileBoundsQuery = { xMin: -0.5 * boxLengthMpc, xMax: 0.5 * boxLengthMpc };
 
-  const writeUniforms = (customTileBounds = null) => {
+  const writeUniforms = (customTileBounds = null, stepDa = da) => {
     const tb = customTileBounds || tileBoundsQuery;
     const hA = friedmannHOverH0(aScale, { omegaM, omegaLambda });
     const gravPref = 1.5 * omegaM / Math.max(0.01, aScale);
@@ -1553,7 +1560,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     new Float32Array(ab, 16, 12).set([
       boxLengthMpc,
       aScale,
-      da,
+      stepDa,
       hA,
       omegaM,
       gravPref,
@@ -1565,7 +1572,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
       0
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
-    return { hA, gravPref };
+    return { hA, gravPref, stepDa };
   };
 
   /**
@@ -1595,10 +1602,13 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   let lastTelemetry = null;
   let disposed = false;
 
-  async function step({ readTelemetry = true } = {}) {
+  async function step({ readTelemetry = true, daOverride = null } = {}) {
     if (disposed) return lastTelemetry;
-    const { hA } = writeUniforms();
-    const curKickFac = da / (Math.max(0.01, aScale) ** 2 * Math.max(0.05, hA));
+    const effDa = (daOverride != null && Number.isFinite(Number(daOverride)) && Number(daOverride) > 0)
+      ? Math.max(1e-5, Math.min(0.25, Number(daOverride)))
+      : da;
+    const { hA } = writeUniforms(null, effDa);
+    const curKickFac = effDa / (Math.max(0.01, aScale) * Math.max(0.05, hA));
 
     // ALL TreePM stages fused into ONE single CommandEncoder & ONE queue.submit!
     //   1. Clear -> CIC Deposit -> Prepare Poisson RHS
@@ -1653,7 +1663,8 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     lastSubmitsPerStep = 1;
 
     prevKickFac = curKickFac;
-    aScale = Math.min(1.5, aScale + da);
+    // Unbounded continuous FLRW expansion into the future Λ-dominated accelerating era (never dead-stops!)
+    aScale = Math.min(1e6, aScale + effDa);
     stepIndex += 1;
 
     if (!doRead) return readTelemetry ? lastTelemetry : null;
@@ -1789,6 +1800,115 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     });
   }
 
+  /**
+   * Extract genuine GPU-coalesced dark-matter+baryon Cosmic Web halo peaks, filament bridges,
+   * and void edges directly from the live 3D CIC density field (`cicBuf`), computing true
+   * 3D comoving coordinates, overdensity `delta = rho / rho_bar`, and local tidal-shear spin
+   * parameter `spinLambda` so L1 galaxies emerge causally from the expanding FLRW Cosmic Web!
+   */
+  async function extractLiveCosmicHalos({ maxHalos = 7 } = {}) {
+    if (disposed) return [];
+    const bytes = gridTotal * 4;
+    const stg = device.createBuffer({ label: 'ulg-cosmo-halo-read', size: bytes, usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
+    let raw = null;
+    try {
+      const enc = device.createCommandEncoder({ label: 'ulg-cosmo-halo-extract' });
+      enc.copyBufferToBuffer(cicBuf, 0, stg, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await stg.mapAsync(GPU_BUFFER_USAGE.MAP_READ);
+      if (!disposed) {
+        raw = new Int32Array(stg.getMappedRange(0, bytes)).slice();
+      }
+      try { stg.unmap(); } catch {}
+    } catch {
+      raw = null;
+    } finally {
+      try { stg.destroy(); } catch {}
+    }
+    if (!raw || raw.length < gridTotal) return [];
+
+    let sum = 0;
+    for (let i = 0; i < gridTotal; i += 1) sum += Math.max(0, raw[i]);
+    const meanVal = Math.max(1e-6, sum / gridTotal);
+    const n = gridN;
+    const wrap = (v) => ((v % n) + n) % n;
+    const at = (x, y, z) => Math.max(0, raw[(wrap(z) * n + wrap(y)) * n + wrap(x)]);
+
+    const peaks = [];
+    let bestFilament = null;
+    let bestVoidEdge = null;
+
+    for (let iz = 0; iz < n; iz += 1) {
+      for (let iy = 0; iy < n; iy += 1) {
+        for (let ix = 0; ix < n; ix += 1) {
+          const v = at(ix, iy, iz);
+          const delta = v / meanVal;
+          // Track real filament bridge (~1.25..1.95x mean) and void-edge (~0.35..0.68x mean) sites
+          if (!bestFilament && delta >= 1.25 && delta <= 1.85 && ((ix + iy + iz) & 3) === 1) {
+            bestFilament = { ix, iy, iz, delta, v };
+          }
+          if (!bestVoidEdge && delta >= 0.35 && delta <= 0.66 && ((ix * 3 + iy * 5 + iz) & 7) === 3) {
+            bestVoidEdge = { ix, iy, iz, delta, v };
+          }
+          if (delta < 1.35) continue;
+          // Check 6-face + 12-edge local peak condition
+          const xp = at(ix + 1, iy, iz); const xm = at(ix - 1, iy, iz);
+          const yp = at(ix, iy + 1, iz); const ym = at(ix, iy - 1, iz);
+          const zp = at(ix, iy, iz + 1); const zm = at(ix, iy, iz - 1);
+          if (v < xp || v < xm || v < yp || v < ym || v < zp || v < zm) continue;
+          // Local 3D tidal-shear Hessian anisotropy -> dimensionless Peebles spin proxy lambda in [0.015 .. 0.12]
+          const dxx = Math.abs(xp + xm - 2 * v);
+          const dyy = Math.abs(yp + ym - 2 * v);
+          const dzz = Math.abs(zp + zm - 2 * v);
+          const aniso = (Math.abs(dxx - dyy) + Math.abs(dyy - dzz) + Math.abs(dzz - dxx)) / Math.max(1e-3, dxx + dyy + dzz + v * 0.25);
+          const spinLambda = Math.max(0.015, Math.min(0.125, 0.022 + aniso * 0.095));
+          peaks.push({ ix, iy, iz, delta, spinLambda });
+        }
+      }
+    }
+    peaks.sort((a, b) => b.delta - a.delta);
+
+    const chosen = [];
+    const minSepCells = Math.max(2.5, n * 0.14);
+    for (const p of peaks) {
+      if (chosen.length >= Math.max(1, maxHalos - 2)) break;
+      const tooClose = chosen.some((c) => Math.hypot(c.ix - p.ix, c.iy - p.iy, c.iz - p.iz) < minSepCells);
+      if (!tooClose) chosen.push(p);
+    }
+    if (bestFilament && chosen.length < maxHalos) {
+      chosen.push({ ...bestFilament, spinLambda: 0.082 });
+    }
+    if (bestVoidEdge && chosen.length < maxHalos) {
+      chosen.push({ ...bestVoidEdge, spinLambda: 0.042 });
+    }
+    while (chosen.length < maxHalos && peaks.length > chosen.length) {
+      const next = peaks.find((p) => !chosen.includes(p));
+      if (!next) break;
+      chosen.push(next);
+    }
+
+    const zNow = Math.max(0, 1 / Math.max(0.02, aScale) - 1);
+    return chosen.slice(0, maxHalos).map((h, idx) => {
+      const ux = ((h.ix + 0.5) / n) - 0.5;
+      const uy = ((h.iy + 0.5) / n) - 0.5;
+      const uz = ((h.iz + 0.5) / n) - 0.5;
+      const posMpc = [ux * boxLengthMpc, uy * boxLengthMpc, uz * boxLengthMpc];
+      const haloMassSolar = Number((1.1e11 * Math.pow(Math.max(0.25, h.delta), 1.65)).toExponential(2));
+      return Object.freeze({
+        index: idx,
+        gridCoords: Object.freeze([h.ix, h.iy, h.iz]),
+        posMpc: Object.freeze(posMpc),
+        posNorm: Object.freeze([ux, uy, uz]),
+        overdensity: Number(h.delta.toFixed(3)),
+        spinLambda: Number((h.spinLambda ?? 0.055).toFixed(4)),
+        haloMassSolar,
+        scaleFactorA: Number(aScale.toFixed(4)),
+        redshiftZ: Number(zNow.toFixed(3)),
+        gpuCoalesced: true
+      });
+    });
+  }
+
   return Object.freeze({
     schema: ULG_SUPERGALACTIC_TREEPM_SCHEMA,
     icBackend: ic.icBackend || 'host-zeldovich-low-k',
@@ -1804,6 +1924,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     step,
     readParticlesSnapshot,
     readTileMultipoleSummary,
+    extractLiveCosmicHalos,
     getState: () => ({ aScale, redshiftZ: Math.max(0, 1 / aScale - 1), stepIndex, submitsPerStep: lastSubmitsPerStep, remoteTileCount }),
     destroy() {
       if (disposed) return;

@@ -920,16 +920,26 @@ export function createVivariumOrganismController(specimen, profile) {
         hh: 'excitable-spiral',
         morph: 'turing-spots'
       };
+      const friendlyLayerByKey = {
+        membrane: 'Cell Membrane Bilayer',
+        fold: 'Tissue Protein Folding',
+        evo: `${sp.xnaAlphabetSize || 4}-Base XNA Genome`,
+        hh: 'Excitable Bioenergetics',
+        morph: 'Embryonic Morphogenesis'
+      };
       const targetLayer = partInfo.biopsyLayer || 'fold';
+      const layerLabel = friendlyLayerByKey[targetLayer] || 'Tissue Protein Folding';
       biopsyAction = Object.freeze({
         partId,
         partLabel: partInfo.label,
+        tissue: partInfo.tissue,
         targetLayer,
+        layerLabel,
         targetMode: targetModeByLayer[targetLayer] || 'amphipathic-helix-bundle',
         tissueTempK: Math.round(state.localTissueTempK),
         fasta: sp.fasta
       });
-      reactionText = `💉 Biopsy extracted from ${partInfo.label}! Ready to inspect live cellular/molecular physics in Layer (${biopsyAction.targetMode}).`;
+      reactionText = `💉 Biopsy extracted from ${partInfo.label}! Ready to zoom into ${sp.speciesName}'s live GPU ${layerLabel} (${Math.round(state.localTissueTempK)} K).`;
       beamFx = { from: [0, 2.6, 2.4], to: hitPos, rgb: [0.32, 1.0, 0.68], ttl: 0.75 };
     }
 

@@ -649,7 +649,10 @@ export function createTidalRocheDisruptionSessionWebGpu(device, {
     const pass = enc.beginComputePass({ label: `${label}-pass` });
     pass.setBindGroup(0, bg);
     pass.setPipeline(stepPipe.pipeline);
-    pass.dispatchWorkgroups(wg);
+    // Synchronize GPU particle stepping with all `nSub` orbital substeps in ONE submit!
+    for (let s = 0; s < nSub; s += 1) {
+      pass.dispatchWorkgroups(wg);
+    }
     pass.setPipeline(telPipe.pipeline);
     pass.dispatchWorkgroups(1);
     pass.end();

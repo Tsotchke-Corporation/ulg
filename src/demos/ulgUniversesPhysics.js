@@ -72,6 +72,21 @@ import {
   createProtoplanetaryDiskFormationSessionWebGpu
 } from '../runtime/astrophysics/protoplanetaryDiskFormationGpu.js';
 import {
+  createNebularSystemCoalescenceSessionWebGpu,
+  registerNebularSystemCoalescenceModule,
+  runNebularSystemCoalescenceBurstWebGpu
+} from '../runtime/astrophysics/nebularSystemCoalescenceGpu.js';
+import {
+  createPlanetaryGenesisSphSessionWebGpu,
+  evaluatePlanetaryGenesisSphActivation,
+  registerPlanetaryGenesisSphModule
+} from '../runtime/astrophysics/planetaryGenesisSphGpu.js';
+import {
+  createCosmicLineageRootCache,
+  decodeFloat32Quantized,
+  encodeFloat32Quantized
+} from '../runtime/astrophysics/cosmicLineageRootCache.js';
+import {
   createPlanetaryAtmosphereElectricSessionWebGpu,
   deriveFluidElectrodynamicsState
 } from '../runtime/astrophysics/planetaryAtmosphereElectricGpu.js';
@@ -132,6 +147,9 @@ import {
   createRelaySignalingTransport,
   startLiveClientDerivationPeerMesh
 } from '../services/clientDerivationPeers.js';
+import {
+  buildPeerComputeSimulationProfile
+} from '../runtime/astrophysics/peercomputeSimulationScaler.js';
 import { QUALITY_PRESETS, UNIVERSES_ELEMENT_CHOICES } from './ulgUniversesDocs.js';
 
 export function mulberry32(seed) {
@@ -147,7 +165,7 @@ export function mulberry32(seed) {
 
 const GALAXY_MORPHOLOGIES = [
   'disk', 'barred', 'ring', 'lenticular', 'irregular', 'open-cluster',
-  'binary', 'sphere', 'proto', 'dwarf-stream', 'globular'
+  'binary', 'sphere', 'proto', 'dwarf-stream', 'globular', 'coalesce'
 ];
 const GALAXY_PREFIXES = ['NGC', 'M', 'IC', 'UGC', 'ARP', 'PGC'];
 
@@ -329,13 +347,104 @@ export function computeScaleAdaptiveTimeDilation(log10SpanM, {
  * Exact enclosed mass `M_enc(r)` sets equilibrium circular speeds so the spiral galaxy
  * rotates organically for hundreds of GPU steps without exploding or collapsing into bars!
  */
+/**
+ * Classify a cosmological L0 halo's physical parameters `(delta, lambda, f_gas, z, seed)`
+ * into one of 6 research-grounded galactic collapse initial-condition regimes:
+ *   1. Dekel & Birnboim (2006) / Dekel+ (2009) Cold Filamentary Stream Accretion
+ *   2. Toomre & Toomre (1972) / Hopkins+ (2009) Major / Minor Merger (incl. Bullseye Ring Impact)
+ *   3. Jing & Suto (2002) / Naab+ (2007) Triaxial Multi-Subhalo Violent Relaxation (Elliptical)
+ *   4. Mo, Mao & White (1998) / Yurin & Springel (2014 GalIC) High-Spin Disk & Bar/Spiral Instability
+ *   5. Low-Overdensity Void Asymmetric Dwarf & Wrapping Tidal Stream Assembly
+ *   6. M51-Style Tidal Group Disk + Infalling Dwarf Satellite Perturber
+ */
+export function describeCosmologicalGalaxyIcRegime(galaxyEnv = null, seed = 825) {
+  const rand = mulberry32((Number(seed) ^ 0x51a7c01a) >>> 0);
+  const delta = Math.max(0.2, Math.min(10.0, Number(galaxyEnv?.localOverdensity) || (0.5 + rand() * 2.4)));
+  const spinL = Math.max(0.006, Math.min(0.18, Number(galaxyEnv?.tidalSpinLambda) || (0.015 + rand() * 0.085)));
+  const fGas = Math.max(0.02, Math.min(0.88, Number(galaxyEnv?.gasFraction) || (0.10 + rand() * 0.60)));
+  const zRed = Number.isFinite(Number(galaxyEnv?.redshiftZ)) ? Number(galaxyEnv.redshiftZ) : 0.0;
+  const morphHint = String(galaxyEnv?.morphology || '');
+
+  // Continuous 3D cosmic tidal-torque orientation vector (unique per halo!)
+  const tiltX = (rand() - 0.5) * 1.15;
+  const tiltZ = (rand() - 0.5) * 0.95;
+
+  if (zRed >= 1.2 || fGas >= 0.44 || morphHint === 'proto') {
+    const nStreams = 3 + (rand() < 0.35 ? 1 : 0);
+    return Object.freeze({
+      id: 'cold-streams',
+      isMerger: false,
+      label: `Dekel Cold-Stream Accretion (${nStreams} filaments · f_gas=${fGas.toFixed(2)})`,
+      delta, spinL, fGas, zRed, tiltX, tiltZ, nStreams
+    });
+  }
+  if (morphHint === 'ring' || (delta >= 1.60 && (morphHint === 'binary' || rand() < 0.44))) {
+    const massRatio = Number((0.28 + rand() * 0.72).toFixed(2));
+    const impactParam = morphHint === 'ring'
+      ? Number((0.03 + rand() * 0.06).toFixed(2))
+      : Number((0.05 + rand() * 0.50).toFixed(2));
+    const isBullseye = impactParam < 0.12;
+    const isPrograde = rand() < 0.62;
+    return Object.freeze({
+      id: isBullseye ? 'bullseye-ring-impact' : 'toomre-merger',
+      isMerger: true,
+      label: isBullseye
+        ? `Bullseye Polar Ring Impact (μ=1:${(1 / massRatio).toFixed(1)} · b=${impactParam} R_vir)`
+        : `Toomre ${isPrograde ? 'Prograde' : 'Retrograde'} Merger (μ=1:${(1 / massRatio).toFixed(1)} · b=${impactParam} R_vir)`,
+      delta, spinL, fGas, zRed, tiltX, tiltZ, massRatio, impactParam, isPrograde
+    });
+  }
+  if ((delta >= 1.75 && spinL < 0.048) || morphHint === 'sphere') {
+    const nSubhalos = 4 + Math.floor(rand() * 3);
+    const ba = Number((0.64 + rand() * 0.24).toFixed(2));
+    const ca = Number((0.46 + rand() * 0.22).toFixed(2));
+    return Object.freeze({
+      id: 'triaxial-relaxation',
+      isMerger: false,
+      label: `Triaxial ${nSubhalos}-Subhalo Violent Relaxation (λ=${spinL.toFixed(3)} · b/a=${ba})`,
+      delta, spinL, fGas, zRed, tiltX, tiltZ, nSubhalos, ba, ca
+    });
+  }
+  if (delta < 0.72 || morphHint === 'globular' || morphHint === 'dwarf-stream' || morphHint === 'irregular') {
+    const nClumps = 5 + Math.floor(rand() * 4);
+    return Object.freeze({
+      id: 'void-dwarf-assembly',
+      isMerger: false,
+      label: `Void Asymmetric Dwarf & Tidal Stream (${nClumps} clumps · δ=${delta.toFixed(2)})`,
+      delta, spinL, fGas, zRed, tiltX, tiltZ, nClumps
+    });
+  }
+  if (spinL >= 0.050 || morphHint === 'barred' || morphHint === 'disk') {
+    const barUnstable = morphHint === 'barred' || (spinL < 0.068 && rand() < 0.45);
+    const armMode = barUnstable ? 2 : (2 + Math.floor(rand() * 3));
+    return Object.freeze({
+      id: barUnstable ? 'mmw-bar-instability' : 'mmw-high-spin-disk',
+      isMerger: false,
+      label: barUnstable
+        ? `MMW / GalIC Bar-Unstable Disk Collapse (λ=${spinL.toFixed(3)} · m=2 bar)`
+        : `MMW High-Spin Cooling Disk (λ=${spinL.toFixed(3)} · m=${armMode} spiral mode)`,
+      delta, spinL, fGas, zRed, tiltX, tiltZ, armMode, barUnstable
+    });
+  }
+  return Object.freeze({
+    id: 'group-tidal-satellite',
+    isMerger: false,
+    label: `Group Disk + Infalling Satellite Perturber (δ=${delta.toFixed(2)} · λ=${spinL.toFixed(3)})`,
+    delta, spinL, fGas, zRed, tiltX, tiltZ, armMode: 2 + (rand() < 0.5 ? 1 : 0)
+  });
+}
+
 export function createRealisticSpiralGalaxyBodies({
   count = 32768,
   preset = 'disk',
   seed = 825,
   gravity = 1.0,
-  softening = 0.28,
-  centerOffset = [0, 0, 0]
+  softening = 0.65,
+  centerOffset = [0, 0, 0],
+  galaxyEnv = null,
+  dmHaloMass = 2800.0,
+  dmScaleRadius = 6.8,
+  dmConcentration = 8.8
 } = {}) {
   const n = Math.max(256, Math.min(262144, Math.floor(count)));
   const bodies = new Float32Array(n * 8);
@@ -348,21 +457,31 @@ export function createRealisticSpiralGalaxyBodies({
   const ox = Number(centerOffset?.[0]) || 0;
   const oy = Number(centerOffset?.[1]) || 0;
   const oz = Number(centerOffset?.[2]) || 0;
+  const dmExtM = Math.max(0, Number(dmHaloMass) || 0);
+  const dmExtRs = Math.max(1.5, Number(dmScaleRadius) || 6.8);
+  const dmExtC = Math.max(3.0, Number(dmConcentration) || 8.8);
+  const dmExtNorm = Math.max(1e-4, Math.log(1 + dmExtC) - dmExtC / (1 + dmExtC));
+  const dmExtSoft2 = 1.60 * 1.60;
+  const evalExtNfwAccel = (r, mScale = 1.0) => {
+    if (dmExtM * mScale <= 1e-4) return 0;
+    const rSafe = Math.sqrt(r * r + dmExtSoft2);
+    const x = rSafe / dmExtRs;
+    const mEnc = (dmExtM * mScale) * Math.max(0, Math.log(1 + x) - x / (1 + x)) / dmExtNorm;
+    return (gravity * mEnc * r) / (rSafe * rSafe * rSafe);
+  };
 
-  const populateSingleGalaxy = (start, end, cx, cy, cz, cvx, cvy, cvz, tiltX, tiltZ, scaleR = 1.0) => {
+  const populateSingleGalaxy = (start, end, cx, cy, cz, cvx, cvy, cvz, tiltX, tiltZ, scaleR = 1.0, dmScale = 1.0) => {
     const subN = end - start;
-    // Balanced-mass flat-rotation galaxy tuned for smooth 32^3 CIC 3D-FFT PM + exact direct SMBH:
-    //   - DM halo gets 36% of particles -> m_dm / m_disk <= 2.3 (eliminates two-body disk heating!)
-    //   - Effective circular speed matched to smooth mesh potential + Toomre Q >= 1.5 epicyclic stability!
+    // Physically calibrated baryon + dark-matter galaxy matched 1-to-1 to live GPU (SS Multipole + NFW + SMBH):
     const mSmbh = 44.0 * scaleR;
     const mBulgeTotal = 135.0 * scaleR;
     const mDiskTotal = 290.0 * scaleR;
-    const mDmTotal = 780.0 * scaleR;
+    const mDmTotal = 620.0 * scaleR;
     const aBulge = 1.25 * scaleR;
     const rDisk = 3.2 * scaleR;
-    const aDm = 7.4 * scaleR;
-    const meshSoft = 1.05 * scaleR;
-    const smbhSoft = 0.72 * scaleR;
+    const aDm = 7.2 * scaleR;
+    const meshSoft = 0.95 * scaleR;
+    const smbhSoft = 0.75 * scaleR;
 
     const enclosedAccel = (r) => {
       const rSafe = Math.max(0.15 * scaleR, r);
@@ -373,7 +492,8 @@ export function createRealisticSpiralGalaxyBodies({
       const md = mDiskTotal * (1 - (1 + x) * Math.exp(-x));
       const mdm = mDmTotal * (rSafe * rSafe) / ((rSafe + aDm) * (rSafe + aDm));
       const aMesh = (gravity * (mb + md + mdm) * rSafe) / (rEff * rEff * rEff);
-      return aSmbh + aMesh;
+      const aNfw = evalExtNfwAccel(rSafe, dmScale);
+      return aSmbh + aMesh + aNfw;
     };
     const vCircAt = (r) => Math.sqrt(Math.max(0, r * enclosedAccel(r)));
 
@@ -493,8 +613,13 @@ export function createRealisticSpiralGalaxyBodies({
 
   if (preset === 'binary') {
     const half = n >> 1;
-    populateSingleGalaxy(0, half, -5.8, 0.9, -1.5, 1.35, -0.22, 1.05, 0.35, 0.18, 0.68);
-    populateSingleGalaxy(half, n, 5.8, -0.9, 1.5, -1.35, 0.22, -1.05, -0.42, -0.25, 0.68);
+    // Bound elliptical Toomre merger orbit matched to mutual (NFW + stellar) halo attraction!
+    const sepB = 12.0;
+    const mEffPair = Math.max(900, dmExtM * 0.65 + 750);
+    const vOrbPair = Math.sqrt((gravity * mEffPair) / sepB) * 0.44;
+    const vInPair = vOrbPair * 0.34;
+    populateSingleGalaxy(0, half, -5.8, 0.7, -1.6, vInPair, -0.25, vOrbPair, 0.35, 0.18, 0.68, 1.0);
+    populateSingleGalaxy(half, n, 5.8, -0.7, 1.6, -vInPair, 0.25, -vOrbPair, -0.42, -0.25, 0.68, 0.85);
   } else if (preset === 'barred') {
     // Grand-Design Barred Spiral (SBb/SBc): secular m=2 central stellar bar + 2 logarithmic spiral arms from bar tips!
     populateSingleGalaxy(0, n, 0, 0, 0, 0, 0, 0, 0, 0, 1.0);
@@ -793,8 +918,343 @@ export function createRealisticSpiralGalaxyBodies({
         0.04 + Math.min(0.30, (r / 10.0) * 0.26)
       ], i * 8);
     }
+  } else if (preset === 'coalesce') {
+    // Research-Grounded Cosmological Protogalactic Halo Initial Conditions!
+    // Driven strictly by the L0 cosmic halo's (delta, spinLambda, gasFraction, redshiftZ, seed) —
+    // ZERO identical template across halos!
+    const ic = describeCosmologicalGalaxyIcRegime(galaxyEnv, seed);
+    const cTx = Math.cos(ic.tiltX); const sTx = Math.sin(ic.tiltX);
+    const cTz = Math.cos(ic.tiltZ); const sTz = Math.sin(ic.tiltZ);
+    const rotIc = (x, y, z) => {
+      const y1 = y * cTx - z * sTx;
+      const z1 = y * sTx + z * cTx;
+      return [x * cTz - y1 * sTz, x * sTz + y1 * cTz, z1];
+    };
+
+    if (ic.id === 'toomre-merger' || ic.id === 'bullseye-ring-impact') {
+      // Toomre & Toomre (1972) / Hopkins+ (2009) Major/Minor Merger OR Bullseye Polar Ring Impact!
+      const mu = ic.massRatio || 0.72;
+      const n1 = Math.max(256, Math.min(n - 256, Math.floor(n / (1 + mu))));
+      const sep = ic.id === 'bullseye-ring-impact' ? 10.5 : (11.2 + rand() * 3.8);
+      const bOff = sep * (ic.impactParam || 0.28);
+      const vApproach = ic.id === 'bullseye-ring-impact' ? 2.85 : (1.55 + rand() * 0.65);
+      const signOrb = ic.isPrograde ? 1.0 : -1.0;
+      const rSc1 = 0.76;
+      const rSc2 = Math.max(0.42, 0.76 * Math.pow(mu, 0.36));
+      if (ic.id === 'bullseye-ring-impact') {
+        // Primary flat disk + dense bullet companion plunging vertically through center (Cartwheel genesis!)
+        populateSingleGalaxy(0, n1, 0, -1.2, 0, 0, 0.35, 0, ic.tiltX * 0.45, ic.tiltZ * 0.45, rSc1);
+        populateSingleGalaxy(n1, n, bOff * 0.6, sep * 0.78, bOff * 0.4, -0.25, -vApproach, -0.15, 1.15, -0.45, rSc2);
+      } else {
+        // Grazing prograde/retrograde encounter with unique mutual disk tilts!
+        const x1 = -sep * 0.5 * (mu / (1 + mu));
+        const x2 = sep * 0.5 * (1 / (1 + mu));
+        const z1 = -bOff * 0.5;
+        const z2 = bOff * 0.5;
+        const v1x = vApproach * (mu / (1 + mu));
+        const v2x = -vApproach * (1 / (1 + mu));
+        const v1z = signOrb * (0.95 + rand() * 0.45) * (mu / (1 + mu));
+        const v2z = -signOrb * (0.95 + rand() * 0.45) * (1 / (1 + mu));
+        populateSingleGalaxy(0, n1, x1, 0.8, z1, v1x, -0.18, v1z, ic.tiltX, ic.tiltZ, rSc1);
+        populateSingleGalaxy(n1, n, x2, -0.8, z2, v2x, 0.18, v2z, -ic.tiltX * 0.8 + 0.55, -ic.tiltZ * 0.7 - 0.35, rSc2);
+      }
+    } else if (ic.id === 'cold-streams') {
+      // Dekel & Birnboim (2006) / Dekel+ (2009): 3-4 narrow cold cosmic-web filaments feeding a clumpy high-z starburst core!
+      const nDm = Math.floor((n - 1) * 0.30);
+      bodies.set([ox, oy, oz, 28.0, 0, 0, 0, 0.08], 0);
+      let c = 1;
+      for (let i = 0; i < nDm && c < n; i += 1, c += 1) {
+        const u = Math.max(0.01, Math.min(0.88, rand()));
+        const r = Math.min(18.5, 7.2 * Math.sqrt(u) / Math.max(0.08, 1 - Math.sqrt(u)));
+        const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+        const sig = Math.sqrt((gravity * 860.0) / Math.hypot(r, 1.8)) * 0.50;
+        bodies.set([r * sy * Math.cos(th) + ox, r * cy * 0.82 + oy, r * sy * Math.sin(th) + oz, 780.0 / nDm, gauss() * sig, gauss() * sig, gauss() * sig, -1.0], c * 8);
+      }
+      const nStreams = ic.nStreams || 3;
+      const streamDirs = Array.from({ length: nStreams }, (_, sIdx) => {
+        const ang = (sIdx / nStreams) * Math.PI * 2 + (rand() - 0.5) * 0.55;
+        const elev = (rand() - 0.5) * 0.72;
+        return [Math.cos(ang) * Math.cos(elev), Math.sin(elev), Math.sin(ang) * Math.cos(elev)];
+      });
+      const nBary = n - c;
+      const nCore = Math.floor(nBary * 0.24);
+      const mEach = 440.0 / Math.max(1, nBary);
+      for (let k = 0; c < n; c += 1, k += 1) {
+        let lx; let ly; let lz; let lvx; let lvy; let lvz; let pop;
+        if (k < nCore) {
+          // Luminous central Hernquist proto-bulge / nuclear core anchored at the dark-matter halo center!
+          const u = Math.max(0.002, Math.min(0.86, rand()));
+          const rCore = Math.min(3.2, 0.92 * Math.sqrt(u) / Math.max(0.12, 1 - Math.sqrt(u)));
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+          lx = rCore * sy * Math.cos(th);
+          ly = rCore * cy * 0.68;
+          lz = rCore * sy * Math.sin(th);
+          const vC = Math.sqrt((gravity * 1150.0) / Math.hypot(rCore, 0.85));
+          lvx = -Math.sin(th) * vC * 0.58 + gauss() * 1.1;
+          lvy = gauss() * 0.95;
+          lvz = Math.cos(th) * vC * 0.58 + gauss() * 1.1;
+          pop = 0.02 + Math.min(0.24, rCore * 0.08 + rand() * 0.05);
+        } else if (rand() < 0.62) {
+          const sd = streamDirs[k % nStreams];
+          const sDist = 1.6 + Math.pow(rand(), 0.82) * 14.2;
+          const tubeR = 0.55 + sDist * 0.075;
+          const bOff = 0.65 + ic.spinL * 14.0; // Impact offset delivers real angular momentum from filament torque!
+          const tangX = -sd[2]; const tangZ = sd[0];
+          const tLen = Math.hypot(tangX, tangZ) || 1;
+          lx = sd[0] * sDist + (tangX / tLen) * bOff + gauss() * tubeR;
+          ly = sd[1] * sDist + gauss() * tubeR * 0.75;
+          lz = sd[2] * sDist + (tangZ / tLen) * bOff + gauss() * tubeR;
+          const vIn = Math.sqrt((gravity * 640.0) / Math.hypot(sDist, 2.0)) * 0.78;
+          lvx = -sd[0] * vIn + (tangX / tLen) * (vIn * 0.24) + gauss() * 0.45;
+          lvy = -sd[1] * vIn + gauss() * 0.40;
+          lvz = -sd[2] * vIn + (tangZ / tLen) * (vIn * 0.24) + gauss() * 0.45;
+          pop = rand() < 0.42 ? (0.82 + rand() * 0.22) : (0.50 + rand() * 0.30);
+        } else {
+          // Turbulent Jeans-unstable proto-disk & giant OB clumps at filament intersection
+          const rr = 0.5 + Math.pow(rand(), 0.65) * 4.8;
+          const th = rand() * Math.PI * 2;
+          lx = Math.cos(th) * rr;
+          ly = gauss() * (0.65 + 0.14 * rr);
+          lz = Math.sin(th) * rr;
+          const vC = Math.sqrt((gravity * 820.0) / Math.hypot(rr, 1.0));
+          lvx = -Math.sin(th) * vC * 0.68 + gauss() * 1.15;
+          lvy = gauss() * 0.95;
+          lvz = Math.cos(th) * vC * 0.68 + gauss() * 1.15;
+          pop = rand() < 0.35 ? (0.84 + rand() * 0.20) : (0.36 + rand() * 0.38);
+        }
+        const pR = rotIc(lx, ly, lz);
+        const vR = rotIc(lvx, lvy, lvz);
+        bodies.set([pR[0] + ox, pR[1] + oy, pR[2] + oz, mEach, vR[0], vR[1], vR[2], pop], c * 8);
+      }
+    } else if (ic.id === 'triaxial-relaxation') {
+      // Jing & Suto (2002) / Naab+ (2007): Low-spin triaxial multi-subhalo violent relaxation around a luminous central elliptical core!
+      const nDm = Math.floor((n - 1) * 0.32);
+      bodies.set([ox, oy, oz, 72.0, 0, 0, 0, 0.05], 0);
+      let c = 1;
+      for (let i = 0; i < nDm && c < n; i += 1, c += 1) {
+        const u = Math.max(0.01, Math.min(0.88, rand()));
+        const r = Math.min(18.0, 7.0 * Math.sqrt(u) / Math.max(0.08, 1 - Math.sqrt(u)));
+        const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+        const sig = Math.sqrt((gravity * 1200.0) / Math.hypot(r, 1.8)) * 0.55;
+        const pR = rotIc(r * sy * Math.cos(th), r * cy * (ic.ca || 0.62), r * sy * Math.sin(th) * (ic.ba || 0.78));
+        bodies.set([pR[0] + ox, pR[1] + oy, pR[2] + oz, 960.0 / nDm, gauss() * sig, gauss() * sig, gauss() * sig, -1.0], c * 8);
+      }
+      const nSub = ic.nSubhalos || 5;
+      const subCenters = Array.from({ length: nSub }, (_, s) => {
+        const a = (s / nSub) * Math.PI * 2 + rand() * 0.65;
+        const rS = 3.8 + rand() * 5.8;
+        const yS = (rand() - 0.5) * 4.2;
+        return { pos: [Math.cos(a) * rS, yS, Math.sin(a) * rS], rad: 1.3 + rand() * 1.2 };
+      });
+      const nBary = n - c;
+      const nCore = Math.floor(nBary * 0.32);
+      const mEach = 560.0 / Math.max(1, nBary);
+      for (let k = 0; c < n; c += 1, k += 1) {
+        let lx; let ly; let lz; let lvx; let lvy; let lvz; let pop;
+        if (k < nCore) {
+          // Dense luminous central Hernquist elliptical core (de Vaucouleurs R^(1/4) profile) at halo center!
+          const u = Math.max(0.002, Math.min(0.88, rand()));
+          const rc = Math.min(4.8, 1.35 * Math.sqrt(u) / Math.max(0.10, 1 - Math.sqrt(u)));
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+          lx = rc * sy * Math.cos(th);
+          ly = rc * cy * (ic.ca || 0.65);
+          lz = rc * sy * Math.sin(th) * (ic.ba || 0.80);
+          const sig = Math.sqrt((gravity * 1350.0) / Math.hypot(rc, 1.1)) * 0.42;
+          lvx = gauss() * sig; lvy = gauss() * sig; lvz = gauss() * sig;
+          pop = 0.02 + Math.min(0.22, (rc / 4.8) * 0.18 + rand() * 0.04);
+        } else {
+          const sub = subCenters[k % nSub];
+          const u = Math.max(0.005, Math.min(0.90, rand()));
+          const rl = Math.min(sub.rad * 2.1, sub.rad * 0.65 * Math.sqrt(u) / Math.max(0.10, 1 - Math.sqrt(u)));
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+          lx = sub.pos[0] + rl * sy * Math.cos(th);
+          ly = sub.pos[1] + rl * cy * 0.8;
+          lz = sub.pos[2] + rl * sy * Math.sin(th);
+          const rTot = Math.max(1.0, Math.hypot(lx, ly, lz));
+          // Strongly radial sub-virial infall + tiny spin -> violent relaxation merges subhalos into the core!
+          const vIn = Math.sqrt((gravity * 1100.0) / Math.hypot(rTot, 1.8)) * 0.44;
+          const vSpin = vIn * (0.12 + ic.spinL * 3.5);
+          lvx = -(lx / rTot) * vIn - (lz / rTot) * vSpin + gauss() * 1.15;
+          lvy = -(ly / rTot) * vIn + gauss() * 1.05;
+          lvz = -(lz / rTot) * vIn + (lx / rTot) * vSpin + gauss() * 1.15;
+          pop = 0.04 + Math.min(0.32, (rl / (sub.rad * 2.2)) * 0.28 + rand() * 0.08);
+        }
+        const pR = rotIc(lx, ly, lz);
+        const vR = rotIc(lvx, lvy, lvz);
+        bodies.set([pR[0] + ox, pR[1] + oy, pR[2] + oz, mEach, vR[0], vR[1], vR[2], pop], c * 8);
+      }
+    } else if (ic.id === 'void-dwarf-assembly') {
+      // Low-overdensity Void Asymmetric Dwarf & Wrapping Satellite Tidal Stream Assembly!
+      const nDm = Math.floor((n - 1) * 0.28);
+      bodies.set([ox, oy, oz, 24.0, 0, 0, 0, 0.14], 0);
+      let c = 1;
+      for (let i = 0; i < nDm && c < n; i += 1, c += 1) {
+        const u = Math.max(0.01, Math.min(0.88, rand()));
+        const r = Math.min(14.5, 5.4 * Math.sqrt(u) / Math.max(0.09, 1 - Math.sqrt(u)));
+        const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+        bodies.set([r * sy * Math.cos(th) + ox, r * cy + oy, r * sy * Math.sin(th) + oz, 480.0 / nDm, gauss() * 2.1, gauss() * 2.1, gauss() * 2.1, -1.0], c * 8);
+      }
+      const nClumps = ic.nClumps || 6;
+      const clumps = Array.from({ length: nClumps }, (_, j) => {
+        const a = rand() * Math.PI * 2;
+        const rr = 1.4 + rand() * 5.2;
+        return [Math.cos(a) * rr, (rand() - 0.5) * 2.0, Math.sin(a) * rr];
+      });
+      const nBary = n - c;
+      const nCore = Math.floor(nBary * 0.22);
+      const mEach = 280.0 / Math.max(1, nBary);
+      for (let k = 0; c < n; c += 1, k += 1) {
+        let lx; let ly; let lz; let lvx; let lvy; let lvz; let pop;
+        if (k < nCore) {
+          const u = Math.max(0.002, Math.min(0.86, rand()));
+          const rc = Math.min(2.6, 0.85 * Math.sqrt(u) / Math.max(0.12, 1 - Math.sqrt(u)));
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+          lx = rc * sy * Math.cos(th); ly = rc * cy * 0.72; lz = rc * sy * Math.sin(th);
+          const vC = Math.sqrt((gravity * 720.0) / Math.hypot(rc, 0.9));
+          lvx = -Math.sin(th) * vC * 0.45 + gauss() * 0.95; lvy = gauss() * 0.85; lvz = Math.cos(th) * vC * 0.45 + gauss() * 0.95;
+          pop = 0.08 + rand() * 0.24;
+        } else if ((k % 4) === 0) {
+          // Wrapping tidal accretion arc
+          const sf = rand();
+          const ang = -0.6 + sf * Math.PI * 1.9;
+          const rArc = 6.2 + Math.sin(ang * 1.4) * 2.2;
+          lx = Math.cos(ang) * rArc + gauss() * 0.55;
+          ly = Math.sin(ang) * rArc * 0.62 + gauss() * 0.55;
+          lz = Math.sin(ang + 0.9) * rArc * 0.52 + gauss() * 0.55;
+          const vS = Math.sqrt((gravity * 480.0) / Math.max(1.5, Math.hypot(lx, ly, lz)));
+          lvx = -Math.sin(ang) * vS * 0.72 + gauss() * 0.4;
+          lvy = Math.cos(ang) * vS * 0.45 + gauss() * 0.4;
+          lvz = Math.cos(ang + 0.9) * vS * 0.38 + gauss() * 0.4;
+          pop = 0.42 + rand() * 0.36;
+        } else {
+          const cl = clumps[k % nClumps];
+          const rr = Math.pow(rand(), 0.55) * 2.4;
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+          lx = cl[0] + rr * sy * Math.cos(th);
+          ly = cl[1] + rr * cy * 0.72;
+          lz = cl[2] + rr * sy * Math.sin(th);
+          const rc = Math.max(0.6, Math.hypot(lx, lz));
+          const vRot = Math.sqrt((gravity * 300.0) / Math.hypot(rc, 1.4)) * (0.45 + ic.spinL * 4.5);
+          lvx = (-lz / rc) * vRot + gauss() * 1.25;
+          lvy = gauss() * 0.95;
+          lvz = (lx / rc) * vRot + gauss() * 1.25;
+          pop = rand() < 0.28 ? (0.82 + rand() * 0.22) : (0.34 + rand() * 0.42);
+        }
+        const pR = rotIc(lx, ly, lz);
+        const vR = rotIc(lvx, lvy, lvz);
+        bodies.set([pR[0] + ox, pR[1] + oy, pR[2] + oz, mEach, vR[0], vR[1], vR[2], pop], c * 8);
+      }
+    } else {
+      // Mo, Mao & White (1998) / Yurin & Springel (2014 GalIC) High-Spin Cooling Disk (Bar-Unstable OR Multi-Arm Spiral)
+      // OR Group Disk + Infalling Tidal Satellite Perturber (M51-style)!
+      const isSat = ic.id === 'group-tidal-satellite';
+      const nDm = Math.floor((n - 1) * 0.34);
+      const rScaleSpin = Math.max(0.68, Math.min(1.38, 0.58 + ic.spinL * 10.5)); // MMW R_d ~ lambda * R_vir!
+      const armM = ic.armMode || 2;
+      const twistSign = rand() < 0.5 ? 1.0 : -1.0;
+      const pitchK = 0.24 + rand() * 0.36;
+      const phase0 = rand() * Math.PI * 2;
+      bodies.set([ox, oy, oz, 36.0, 0, 0, 0, 0.06], 0);
+      let c = 1;
+      for (let i = 0; i < nDm && c < n; i += 1, c += 1) {
+        const u = Math.max(0.01, Math.min(0.90, rand()));
+        const r = Math.min(18.5, 7.4 * Math.sqrt(u) / Math.max(0.08, 1 - Math.sqrt(u)));
+        const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+        const sig = Math.sqrt((gravity * 840.0) / Math.hypot(r, 1.8)) * 0.50;
+        bodies.set([r * sy * Math.cos(th) + ox, r * cy + oy, r * sy * Math.sin(th) + oz, 780.0 / nDm, gauss() * sig, gauss() * sig, gauss() * sig, -1.0], c * 8);
+      }
+      const nBary = n - c;
+      const nCore = Math.floor(nBary * 0.22);
+      const nSat = isSat ? Math.floor(nBary * 0.14) : 0;
+      const satPos = [8.2 * rScaleSpin, 2.1, -3.6 * rScaleSpin];
+      const mEach = 440.0 / Math.max(1, nBary);
+      for (let k = 0; c < n; c += 1, k += 1) {
+        let lx; let ly; let lz; let lvx; let lvy; let lvz; let pop;
+        if (k < nCore) {
+          // Dense luminous central Hernquist Galactic Bulge / Core!
+          const u = Math.max(0.002, Math.min(0.86, rand()));
+          const rc = Math.min(3.0 * rScaleSpin, 0.95 * rScaleSpin * Math.sqrt(u) / Math.max(0.11, 1 - Math.sqrt(u)));
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+          lx = rc * sy * Math.cos(th); ly = rc * cy * 0.58; lz = rc * sy * Math.sin(th);
+          const vC = Math.sqrt((gravity * 1250.0) / Math.hypot(rc, 0.85));
+          lvx = -Math.sin(th) * vC * 0.62 * twistSign + gauss() * 0.95;
+          lvy = gauss() * 0.78;
+          lvz = Math.cos(th) * vC * 0.62 * twistSign + gauss() * 0.95;
+          pop = 0.02 + Math.min(0.22, (rc / (3.0 * rScaleSpin)) * 0.18 + rand() * 0.04);
+        } else if (k < nCore + nSat) {
+          // Infalling M51-style satellite perturber exciting dramatic tidal grand-design arms!
+          const rr = Math.pow(rand(), 0.65) * 1.55;
+          const cy = 2 * rand() - 1; const sy = Math.sqrt(Math.max(0, 1 - cy * cy)); const th = rand() * Math.PI * 2;
+          lx = satPos[0] + rr * sy * Math.cos(th);
+          ly = satPos[1] + rr * cy * 0.7;
+          lz = satPos[2] + rr * sy * Math.sin(th);
+          lvx = -1.65 + gauss() * 0.55;
+          lvy = -0.65 + gauss() * 0.45;
+          lvz = 3.15 + gauss() * 0.55;
+          pop = 0.12 + rand() * 0.28;
+        } else {
+          const rRaw = (0.9 + Math.pow(rand(), 0.62) * 11.4) * rScaleSpin;
+          const th = rand() * Math.PI * 2;
+          const mPert = ic.barUnstable
+            ? (1.0 + 0.26 * Math.cos(2.0 * (th - phase0)) * Math.exp(-rRaw / (4.8 * rScaleSpin)))
+            : (1.0 + 0.20 * Math.cos(armM * (th - phase0) - twistSign * rRaw * pitchK));
+          const r = Math.min(14.5, rRaw * mPert);
+          const zThick = (ic.barUnstable ? 0.55 : 0.95) * (0.65 + 0.16 * r);
+          lx = Math.cos(th) * r;
+          ly = (rand() - 0.5) * 2.0 * zThick;
+          lz = Math.sin(th) * r;
+          const vCirc = Math.sqrt((gravity * (290 + 780 * r * r / ((r + 7.4) ** 2))) / Math.hypot(r, 1.2));
+          const vRotFrac = Math.max(0.62, Math.min(0.98, 0.66 + ic.spinL * 4.0));
+          const vTan = vCirc * vRotFrac * twistSign;
+          const vIn = -vCirc * (ic.barUnstable ? 0.22 : 0.14);
+          lvx = Math.cos(th) * vIn - Math.sin(th) * vTan + gauss() * (ic.barUnstable ? 0.42 : 0.58);
+          lvy = -ly * 0.22 + gauss() * 0.42;
+          lvz = Math.sin(th) * vIn + Math.cos(th) * vTan + gauss() * (ic.barUnstable ? 0.42 : 0.58);
+          const isOldBulge = r < 2.2 * rScaleSpin && rand() < 0.58;
+          const isNursery = !isOldBulge && rand() < (0.14 + ic.fGas * 0.42);
+          pop = isOldBulge ? (0.04 + rand() * 0.22) : (isNursery ? (0.80 + rand() * 0.24) : (0.34 + rand() * 0.42));
+        }
+        const pR = rotIc(lx, ly, lz);
+        const vR = rotIc(lvx, lvy, lvz);
+        bodies.set([pR[0] + ox, pR[1] + oy, pR[2] + oz, mEach, vR[0], vR[1], vR[2], pop], c * 8);
+      }
+    }
   } else {
     populateSingleGalaxy(0, n, 0, 0, 0, 0, 0, 0, 0, 0, 1.0);
+  }
+
+  // Exact Center-of-Mass & Zero-Momentum Rest-Frame Initialization across ALL 12 galaxy morphologies:
+  // eliminates asymmetric subhalo / merger / random-draw initial COM offset & linear momentum drift!
+  {
+    let mTot = 0;
+    let cx = 0; let cy = 0; let cz = 0;
+    let vx = 0; let vy = 0; let vz = 0;
+    for (let i = 0; i < n; i += 1) {
+      const o = i * 8;
+      const m = bodies[o + 3];
+      if (m > 0) {
+        mTot += m;
+        cx += (bodies[o] - ox) * m;
+        cy += (bodies[o + 1] - oy) * m;
+        cz += (bodies[o + 2] - oz) * m;
+        vx += bodies[o + 4] * m;
+        vy += bodies[o + 5] * m;
+        vz += bodies[o + 6] * m;
+      }
+    }
+    if (mTot > 1e-6) {
+      cx /= mTot; cy /= mTot; cz /= mTot;
+      vx /= mTot; vy /= mTot; vz /= mTot;
+      for (let i = 0; i < n; i += 1) {
+        const o = i * 8;
+        bodies[o] -= cx;
+        bodies[o + 1] -= cy;
+        bodies[o + 2] -= cz;
+        bodies[o + 4] -= vx;
+        bodies[o + 5] -= vy;
+        bodies[o + 6] -= vz;
+      }
+    }
   }
 
   return bodies;
@@ -885,15 +1345,27 @@ export function buildEmissionLinesForContext(level, target, elementBundle) {
 
 export function createUlgUniversesPhysics(device, {
   seed = 20261125,
-  qualityId = 'med',
+  qualityId = 'auto',
+  capabilityProfile = null,
+  rawCapabilities = null,
   initialElementZ = 26
 } = {}) {
   let universeSeed = seed >>> 0;
-  let quality = QUALITY_PRESETS[qualityId] || QUALITY_PRESETS.med;
+  let qualityMode = (qualityId === 'auto' || QUALITY_PRESETS[qualityId]) ? qualityId : 'auto';
+  const baseCapabilities = rawCapabilities || capabilityProfile?.capabilities || null;
+  let activeCapabilityProfile = capabilityProfile
+    || buildPeerComputeSimulationProfile(baseCapabilities || {}, { device, qualityMode });
+  let quality = QUALITY_PRESETS[activeCapabilityProfile.qualityId] || QUALITY_PRESETS.med;
+  const getWorkloads = () => activeCapabilityProfile.workloads;
 
   const artifactCache = new ArtifactCache();
   const closureRegistry = new ClosureRegistry({ artifactCache });
+  // Root-node multiscale cache (Memory + OPFS/IndexedDB + PeerCompute P2P sync) so computed
+  // L0 halos, L2 coalesced star systems, and L4 SPH geologies never need redundant re-simulation!
+  const rootLineageCache = createCosmicLineageRootCache();
   registerAllTopDownLawModules(defaultSimulationModuleRegistry);
+  registerPlanetaryGenesisSphModule(defaultSimulationModuleRegistry);
+  registerNebularSystemCoalescenceModule(defaultSimulationModuleRegistry);
   const bundleCache = new Map();
   const planetaryAtlasCache = new Map();
 
@@ -1024,6 +1496,7 @@ export function createUlgUniversesPhysics(device, {
   let cosmoTelemetry = null;
   let cosmoFirstPk = null;
   let cosmoTargets = [];
+  let cosmoFocusMpc = [0, 0, 0];
   let cosmoBigBangMode = false;
   let cosmoBaryonSession = null;
   let cosmoBaryonTelemetry = null;
@@ -1035,6 +1508,7 @@ export function createUlgUniversesPhysics(device, {
   let galacticDynamoStreamlines = new Float32Array(0);
   let galacticB0 = 0.30;
   let galaxyPreset = 'disk';
+  let galaxyIcRegimeLabel = 'MMW Equilibrium Spiral Disk';
   let galaxyMetallicity = 1.0;
   let ismCoolingAnchors = null;
   let galaxyTargets = [];
@@ -1055,6 +1529,8 @@ export function createUlgUniversesPhysics(device, {
   let protoplanetarySession = null;
   let protoplanetaryTelemetry = null;
   let protoplanetaryGasDrag = true;
+  let nebularCoalescenceSession = null;
+  let nebularCoalescenceTelemetry = null;
   let kerrJetSession = null;
   let kerrJetTelemetry = null;
   let kerrSpinA = 0.94;
@@ -1080,6 +1556,7 @@ export function createUlgUniversesPhysics(device, {
   let stellarLaneEmden = null;
   let stellarClosureRef = null;
   let stellarTimeAccel = 2.0;
+  let stellarCutaway = false;
   let stellarMode = 'fusion'; // 'fusion' | 'nebular-mhd' | 'h2-pillars' | 'planetary-nebula' | 'snr-pwn' | 'pulsar' | 'magnetar' | 'white-dwarf-tov'
   let nebulaMhdSession = null;
   let nebulaMhdTelemetry = null;
@@ -1104,7 +1581,97 @@ export function createUlgUniversesPhysics(device, {
   let planetaryAtmoSession = null;
   let planetaryAtmoTelemetry = null;
   let planetaryTriboelectric = true;
+  let planetaryGenesisSphSession = null;
+  let planetaryGenesisSphTelemetry = null;
+  let planetaryGenesisLiveForm = false;
+  let planetaryCoolingHeat = 0.0; // Continuous post-SPH surface cooling ramp (1.0 incandescent magma -> 0.0 cooled equilibrium world!)
+  let planetaryDynamoSession = null;
+  let planetaryDynamoTelemetry = null;
+  let planetaryDynamoStreamlines = new Float32Array(0);
+  let planetarySecularTick = 0;
+  let activeGenesisStage = null;
+  let lastGenesisEvent = null;
+  let lastSupernovaYields = null;
   let cryoPlumeSession = null;
+
+  function getActiveGenesisPublicState() {
+    if (!activeGenesisStage) return null;
+    const elapsedSec = Math.max(0.1, (Date.now() - (activeGenesisStage.startedMs || Date.now())) / 1000);
+    const prog = Math.max(0, Math.min(1, Number(activeGenesisStage.progress) || 0));
+    const etaSec = prog > 0.03 ? Math.max(0, Math.round(elapsedSec * (1 - prog) / prog)) : null;
+    return Object.freeze({
+      level: activeGenesisStage.level,
+      stage: activeGenesisStage.stage,
+      title: activeGenesisStage.title,
+      entityName: activeGenesisStage.entityName,
+      detail: activeGenesisStage.detail,
+      step: activeGenesisStage.step,
+      targetSteps: activeGenesisStage.targetSteps,
+      progress: prog,
+      etaSec,
+      tier: activeCapabilityProfile.tier,
+      cacheKey: activeGenesisStage.cacheKey,
+      skipLabel: activeGenesisStage.skipLabel || '⏩ Finish Now'
+    });
+  }
+
+  function buildPlanetSphCacheKey(spec, idx, dimsStr) {
+    return rootLineageCache.buildKey('l4-sph-geo-v11-pc-ss', {
+      seed: universeSeed,
+      epochId: cosmicEpochId,
+      systemId: useSolReference ? 'sol' : (activeCausalSystem?.systemId || 'sys'),
+      bodyId: spec?.id || `b${idx}`,
+      mode: planetaryMode,
+      dims: dimsStr
+    });
+  }
+
+  function buildProvisionalCoalescingSystem(starSys, snowLineAu, rMinStableAu, rMaxStableAu) {
+    const stars = Array.isArray(starSys?.stars) && starSys.stars.length
+      ? starSys.stars
+      : [{ id: 'star-0', name: 'Host Star', massSolar: 1.0, luminositySolar: 1.0, radiusSolar: 1.0, teffK: 5778, spectralClass: 'G2V', color0: [1.0, 0.94, 0.78], color1: [1.0, 0.62, 0.24] }];
+    const starCatalog = stars.map((st, sIdx) => ({
+      id: st.id || `star-${sIdx}`,
+      name: st.name || `${starSys?.systemName || 'Proto-System'} ${sIdx === 0 ? 'A' : 'B'}`,
+      subtitle: `${st.spectralClass || 'Main-Sequence'} · Coalescing Protoplanetary Disk (L = ${Number(st.luminositySolar || 1).toFixed(2)} L☉)`,
+      isStar: true,
+      starIndex: sIdx,
+      parent: -1,
+      aAu: Number(st.orbitAu) || 0,
+      ecc: Number(st.ecc) || 0,
+      incDeg: 0,
+      massSolar: Number(st.massSolar) || 1.0,
+      luminositySolar: Number(st.luminositySolar) || 1.0,
+      radiusKm: Math.max(20000, (Number(st.radiusSolar) || 1.0) * 695700),
+      tempK: Number(st.teffK) || 5778,
+      kind: 0,
+      atm: 0,
+      color0: Array.isArray(st.color0) ? st.color0 : [1.0, 0.94, 0.78],
+      color1: Array.isArray(st.color1) ? st.color1 : [1.0, 0.62, 0.24],
+      spectralClass: st.spectralClass || 'G2V',
+      composition: `H/He Fusion Star · Nebular Disk Snow Line ${Number(snowLineAu || 2.7).toFixed(2)} AU`
+    }));
+    return Object.freeze({
+      systemId: starSys?.systemId || `proto-${activeStarSite.starIndex ?? 0}`,
+      systemName: starSys?.systemName || `Proto-System #${activeStarSite.starIndex ?? 0}`,
+      architecture: starSys?.architecture || (stars.length > 1 ? 'binary' : 'single'),
+      starSystem: starSys,
+      starCount: stars.length,
+      planetCount: 0,
+      hasEarthLike: false,
+      gpuCoalesced: false,
+      coalescingLive: true,
+      recommendedL3Regime: 'fusion',
+      condensationFrontsAu: Object.freeze({
+        rSnowLineAu: Number(Number(snowLineAu || 2.7).toFixed(2)),
+        rMinStableAu: Number(Number(rMinStableAu || 0.14).toFixed(3)),
+        rMaxStableAu: Number(Number(rMaxStableAu || 28.0).toFixed(2)),
+        rHzInnerAu: Number((0.95 * Math.sqrt(Math.max(1e-4, stars[0].luminositySolar || 1))).toFixed(2)),
+        rHzOuterAu: Number((1.67 * Math.sqrt(Math.max(1e-4, stars[0].luminositySolar || 1))).toFixed(2))
+      }),
+      catalog: Object.freeze(starCatalog)
+    });
+  }
   let cryoPlumeTelemetry = null;
 
   // Planetary Surface View (TinyPlanetControls + 6-Wheel Jump-Rocket Mars Rover + Atmospheric Drone + OPFS Crater Persistence!)
@@ -1184,6 +1751,7 @@ export function createUlgUniversesPhysics(device, {
 
   let busy = false;
   let disposed = false;
+  let nebularSettleBlend = 0.0;
 
   async function getElementBundle(Z, { massNumberA = null, relativistic = true, returnOrbitalWavefunctions = true } = {}) {
     const zSafe = Math.max(1, Math.min(118, Math.trunc(Number(Z) || 26)));
@@ -1212,29 +1780,33 @@ export function createUlgUniversesPhysics(device, {
       cosmoSession = null;
     }
     cosmoBigBangMode = Boolean(bigBang);
+    cosmoFocusMpc = [0, 0, 0];
     const activeSeed = (seedOverride ?? universeSeed) >>> 0;
-    const aStart = cosmoBigBangMode ? 0.045 : 0.16;
-    const daStep = cosmoBigBangMode ? 0.011 : 0.0085;
-    // Extend the FLRW 2LPT + TreePM Cosmic Web across the full 28,500 Mpc (93.0 Gly = 8.8e26 m) Observable Universe!
+    const aStart = cosmoBigBangMode ? 0.045 : 0.52;
+    const daStep = cosmoBigBangMode ? 0.0085 : 0.0012;
+    // Run the periodic FLRW 2LPT + TreePM Cosmic Web at filament-resolving 1,425 Mpc (~4.65 Gly/tile, dx ~ 44 Mpc),
+    // tiled seamlessly across the full 28,500 Mpc (93.0 Gly = 8.8e26 m) Observable Universe Lightcone sphere!
+    const COSMO_TILE_MPC = 1425.0;
     const OBSERVABLE_UNIVERSE_MPC = 28500.0;
+    const w = getWorkloads();
     const gpuIc = await build2LptCosmologyICsWebGpu(device, {
-      gridPerSide: quality.cosmoGridPerSide,
-      fftGridN: quality.cosmoFftN,
-      boxLengthMpc: OBSERVABLE_UNIVERSE_MPC,
+      gridPerSide: w.cosmoGridPerSide,
+      fftGridN: w.cosmoFftN,
+      boxLengthMpc: COSMO_TILE_MPC,
       aInit: aStart,
       amplitude: cosmoBigBangMode ? 0.28 : 0.44,
       seed: activeSeed
     });
     const nextCosmo = createSupergalacticTreePmSessionWebGpu(device, {
-      gridPerSide: quality.cosmoGridPerSide,
-      pmGridN: quality.cosmoFftN,
-      boxLengthMpc: OBSERVABLE_UNIVERSE_MPC,
+      gridPerSide: w.cosmoGridPerSide,
+      pmGridN: w.cosmoFftN,
+      boxLengthMpc: COSMO_TILE_MPC,
       aInit: aStart,
       da: daStep,
       initialConditions: gpuIc
     });
     cosmoFirstPk = null;
-    const warmSteps = cosmoBigBangMode ? 1 : 6;
+    const warmSteps = cosmoBigBangMode ? 1 : 4;
     for (let w = 0; w < warmSteps; w += 1) {
       cosmoTelemetry = await nextCosmo.step({ readTelemetry: w === 0 || w === warmSteps - 1 });
       if (w === 0 && cosmoTelemetry?.powerSpectrumPk?.kBins?.length) {
@@ -1257,41 +1829,119 @@ export function createUlgUniversesPhysics(device, {
       sphere: 'Cluster-Core Giant Elliptical (E2)',
       proto: 'High-z Clumpy Starburst Protogalaxy',
       'dwarf-stream': 'Void Dwarf & Tidal Stream',
-      globular: 'Core-Collapsed Globular Cluster (GC)'
+      globular: 'Core-Collapsed Globular Cluster (GC)',
+      coalesce: 'Collapsing Protogalactic Halo'
     };
-    const rand = mulberry32(activeSeed ^ 0x51f15e);
-    cosmoTargets = Array.from({ length: 7 }, (_, i) => {
-      const morph = GALAXY_MORPHOLOGIES[i % GALAXY_MORPHOLOGIES.length];
-      const prefix = GALAXY_PREFIXES[Math.floor(rand() * GALAXY_PREFIXES.length)];
-      const num = 1000 + Math.floor(rand() * 8900);
-      // Span cluster 0 near local Laniakea hub and clusters 1..6 across the 93 Gly Observable Universe!
-      const spread = i === 0 ? 2200.0 : 9600.0;
-      const xMpc = (rand() - 0.5) * 2 * spread;
-      const yMpc = (rand() - 0.5) * 1.4 * spread;
-      const zMpc = (rand() - 0.5) * 2 * spread;
-      const zMet = Number((morph === 'globular' ? 0.08 + rand() * 0.14 : (0.55 + rand() * 1.15)).toFixed(2));
-      return {
-        id: `cluster-${i}`,
-        level: 0,
-        name: `${prefix}-${num} ${morph === 'globular' ? 'Halo Cluster' : 'Supercluster'}`,
-        subtitle: `${MORPH_LABELS[morph] || 'Spiral Galaxy'} · Z=${zMet} Z☉`,
-        posMpc: [xMpc, yMpc, zMpc],
-        pos: [xMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC), yMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC), zMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC)],
-        radius: 1.0,
-        morphology: morph,
-        metallicity: zMet,
-        massLabel: morph === 'globular' ? `${(2.0 + rand() * 6.5).toFixed(1)}×10⁵ M☉` : `${(1.2 + rand() * 6.5).toFixed(2)}×10¹² M☉`,
-        tempK: morph === 'sphere' || morph === 'globular' ? 4200 + Math.round(rand() * 1200) : 6500 + Math.round(rand() * 4500),
-        composition: morph === 'globular'
-          ? `Ancient Pop II Stars · H 74.8% · He 25.1% · [Fe/H] ≈ -1.6`
-          : `DM 84% · H 12% · He 3.8% · Met ${(0.2 * zMet).toFixed(2)}%`,
-        nextLevel: 1
-      };
+
+    function buildTargetsFromLiveHalos(liveHalos, seedVal) {
+      const rand = mulberry32(seedVal ^ 0x51f15e);
+      // Lightcone pitch maps the central periodic box (1,425 Mpc) into the inner super-volume (5,700 Mpc) of the 93 Gly sphere
+      const lightconePitchScale = (OBSERVABLE_UNIVERSE_MPC / 5.0) / COSMO_TILE_MPC;
+      if (Array.isArray(liveHalos) && liveHalos.length > 0) {
+        return liveHalos.map((h, i) => {
+          const obsPosMpc = [
+            h.posMpc[0] * lightconePitchScale,
+            h.posMpc[1] * lightconePitchScale,
+            h.posMpc[2] * lightconePitchScale
+          ];
+          const gEnv = deriveGalaxyEnvironmentFromCosmicContext({
+            cosmicEpoch,
+            regionPosMpc: obsPosMpc,
+            localOverdensity: h.overdensity,
+            tidalSpinLambda: h.spinLambda,
+            gpuCoalescedHalo: true,
+            seed: (seedVal ^ Math.imul(i + 1, 2654435761)) >>> 0
+          });
+          const morph = gEnv.morphology;
+          const prefix = GALAXY_PREFIXES[Math.floor(rand() * GALAXY_PREFIXES.length)];
+          const num = 1000 + Math.floor(rand() * 8900);
+          const zMet = Number(gEnv.meanMetallicitySolar.toFixed(2));
+          const massT = (h.haloMassSolar / 1e12);
+          return {
+            id: `cluster-${i}`,
+            level: 0,
+            name: `${prefix}-${num} ${h.overdensity > 2.2 ? 'Node Cluster' : (h.overdensity < 0.7 ? 'Void Halo' : 'Filament Group')}`,
+            subtitle: `GPU Halo δ=${h.overdensity.toFixed(2)} · λ=${h.spinLambda.toFixed(3)} · M=${Math.max(0.2, massT).toFixed(2)}×10¹² M☉ · ⏳ Unsimulated`,
+            posMpc: obsPosMpc,
+            pos: [obsPosMpc[0] * (16.0 / OBSERVABLE_UNIVERSE_MPC), obsPosMpc[1] * (16.0 / OBSERVABLE_UNIVERSE_MPC), obsPosMpc[2] * (16.0 / OBSERVABLE_UNIVERSE_MPC)],
+            radius: 1.0,
+            overdensity: h.overdensity,
+            spinLambda: h.spinLambda,
+            gpuCoalescedHalo: true,
+            galaxyEnv: gEnv,
+            morphology: morph,
+            metallicity: zMet,
+            massLabel: morph === 'globular'
+              ? `${(2.0 + rand() * 6.5).toFixed(1)}×10⁵ M☉`
+              : `${Math.max(0.2, massT).toFixed(2)}×10¹² M☉`,
+            tempK: morph === 'sphere' || morph === 'globular' ? 4200 + Math.round(rand() * 1200) : 6500 + Math.round(rand() * 4500),
+            composition: `FLRW TreePM Halo (δ=${h.overdensity.toFixed(2)}, λ=${h.spinLambda.toFixed(3)}) — Zoom in to collapse galaxy on GPU`,
+            nextLevel: 1
+          };
+        });
+      }
+      return Array.from({ length: 7 }, (_, i) => {
+        const morph = GALAXY_MORPHOLOGIES[i % (GALAXY_MORPHOLOGIES.length - 1)];
+        const prefix = GALAXY_PREFIXES[Math.floor(rand() * GALAXY_PREFIXES.length)];
+        const num = 1000 + Math.floor(rand() * 8900);
+        const spread = i === 0 ? 2200.0 : 9600.0;
+        const xMpc = (rand() - 0.5) * 2 * spread;
+        const yMpc = (rand() - 0.5) * 1.4 * spread;
+        const zMpc = (rand() - 0.5) * 2 * spread;
+        const zMet = Number((morph === 'globular' ? 0.08 + rand() * 0.14 : (0.55 + rand() * 1.15)).toFixed(2));
+        return {
+          id: `cluster-${i}`,
+          level: 0,
+          name: `${prefix}-${num} ${morph === 'globular' ? 'Halo Cluster' : 'Supercluster'}`,
+          subtitle: `${MORPH_LABELS[morph] || 'Spiral Galaxy'} · Z=${zMet} Z☉`,
+          posMpc: [xMpc, yMpc, zMpc],
+          pos: [xMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC), yMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC), zMpc * (16.0 / OBSERVABLE_UNIVERSE_MPC)],
+          radius: 1.0,
+          morphology: morph,
+          metallicity: zMet,
+          massLabel: morph === 'globular' ? `${(2.0 + rand() * 6.5).toFixed(1)}×10⁵ M☉` : `${(1.2 + rand() * 6.5).toFixed(2)}×10¹² M☉`,
+          tempK: morph === 'sphere' || morph === 'globular' ? 4200 + Math.round(rand() * 1200) : 6500 + Math.round(rand() * 4500),
+          composition: morph === 'globular'
+            ? `Ancient Pop II Stars · H 74.8% · He 25.1% · [Fe/H] ≈ -1.6`
+            : `DM 84% · H 12% · He 3.8% · Met ${(0.2 * zMet).toFixed(2)}%`,
+          nextLevel: 1
+        };
+      });
+    }
+
+    // Check Root Cosmic Lineage Cache first so revisiting/reloading this seed+epoch skips redundant extraction!
+    const haloCacheKey = rootLineageCache.buildKey('l0-halos', {
+      seed: activeSeed,
+      epochId: cosmicEpochId,
+      mode: cosmoBigBangMode ? 'bb' : 'web'
     });
+    let liveHalos = await rootLineageCache.get(haloCacheKey, { bypassCache: Boolean(bigBang) });
+    if (!Array.isArray(liveHalos) || liveHalos.length === 0) {
+      try {
+        liveHalos = await nextCosmo.extractLiveCosmicHalos({ maxHalos: 7 });
+      } catch {
+        liveHalos = [];
+      }
+      if (liveHalos.length > 0) {
+        await rootLineageCache.set(haloCacheKey, liveHalos, { persist: true, broadcast: true });
+      }
+    }
+    cosmoTargets = buildTargetsFromLiveHalos(liveHalos, activeSeed);
+    // Align root galaxy environment with the #1 coalesced GPU cosmic-web halo!
+    if (cosmoTargets[0]?.galaxyEnv) {
+      activeGalaxyEnv = cosmoTargets[0].galaxyEnv;
+    }
   }
 
   // ---- L1: Smooth 32^3 CIC 3D-FFT Particle-Mesh Spiral Galaxy + Live Emergent GPU 3D α-ω Dynamo ----
-  async function initGalaxy({ preset = null, metallicity = null, galaxyEnvOverride = null, seedOverride = null } = {}) {
+  async function initGalaxy({
+    preset = null,
+    metallicity = null,
+    galaxyEnvOverride = null,
+    seedOverride = null,
+    observeLive = false,
+    bypassCache = false
+  } = {}) {
     if (galaxyEnvOverride) {
       activeGalaxyEnv = galaxyEnvOverride;
     } else if (preset || metallicity != null) {
@@ -1302,7 +1952,18 @@ export function createUlgUniversesPhysics(device, {
         baseFeH: Math.log10(Math.max(1e-4, metallicity != null ? Number(metallicity) : activeGalaxyEnv.meanMetallicitySolar))
       });
     }
-    galaxyPreset = GALAXY_MORPHOLOGIES.includes(preset || activeGalaxyEnv.morphology) ? (preset || activeGalaxyEnv.morphology) : 'disk';
+    const regPos = activeGalaxyEnv?.regionPosMpc || [0, 0, 0];
+    const galCacheKey = rootLineageCache.buildKey('l1-galaxy', {
+      seed: universeSeed,
+      epochId: cosmicEpochId,
+      galaxyKey: `${Math.round((regPos[0] || 0) / 25)}_${Math.round((regPos[1] || 0) / 25)}_${Math.round((regPos[2] || 0) / 25)}`
+    });
+    const cachedGal = bypassCache ? null : await rootLineageCache.get(galCacheKey);
+    const runLiveCollapse = Boolean(observeLive && !cachedGal && !preset);
+    const targetMorphology = GALAXY_MORPHOLOGIES.includes(preset || cachedGal?.morphology || activeGalaxyEnv.morphology)
+      ? (preset || cachedGal?.morphology || activeGalaxyEnv.morphology)
+      : 'disk';
+    galaxyPreset = runLiveCollapse ? 'coalesce' : targetMorphology;
     galaxyMetallicity = Math.max(0.01, Math.min(3.0, Number(metallicity ?? activeGalaxyEnv.meanMetallicitySolar) || 1.0));
     if (galaxyEngine) {
       galaxyEngine.dispose();
@@ -1315,25 +1976,98 @@ export function createUlgUniversesPhysics(device, {
     if (!ismCoolingAnchors) {
       ismCoolingAnchors = await deriveGate1IsmCoolingAnchorsWebGpu(device);
     }
-    const activeSeed = ((seedOverride ?? universeSeed) + 825) >>> 0;
+    const activeSeed = ((seedOverride ?? (activeGalaxyEnv?.seed || universeSeed)) + 825) >>> 0;
+    const w = getWorkloads();
+    const icRegime = galaxyPreset === 'coalesce'
+      ? describeCosmologicalGalaxyIcRegime(activeGalaxyEnv, activeSeed)
+      : null;
+    galaxyIcRegimeLabel = icRegime ? icRegime.label : (activeGalaxyEnv?.morphologyLabel || galaxyPreset);
+    const deltaHalo = Math.max(0.25, Math.min(4.5, Number(activeGalaxyEnv?.localOverdensity ?? activeGalaxyEnv?.overdensity) || 1.0));
+    const dmHaloMass = (galaxyPreset === 'globular' || galaxyPreset === 'open-cluster')
+      ? 0.0
+      : (galaxyPreset === 'irregular'
+        ? 900.0
+        : (galaxyPreset === 'binary'
+          ? 1850.0
+          : (galaxyPreset === 'sphere'
+            ? Math.round(2800.0 + deltaHalo * 900.0)
+            : Math.round(2400.0 + deltaHalo * 900.0))));
+    const dmScaleRadius = galaxyPreset === 'sphere' ? 5.6 : (galaxyPreset === 'irregular' ? 5.2 : 6.8);
+    const dmConcentration = galaxyPreset === 'sphere' ? 10.2 : 8.8;
+    const dmSecondaryMass = galaxyPreset === 'binary' ? 1580.0 : (icRegime?.isMerger ? dmHaloMass * (icRegime.massRatio || 0.72) : 0.0);
+
     const bodies0 = createRealisticSpiralGalaxyBodies({
-      count: quality.galaxyStars,
+      count: w.galaxyStars,
       preset: galaxyPreset,
-      seed: activeSeed
+      seed: activeSeed,
+      galaxyEnv: activeGalaxyEnv,
+      dmHaloMass,
+      dmScaleRadius,
+      dmConcentration
     });
+
+    const tiltToNormal = (tx, tz) => {
+      const cTx = Math.cos(tx); const sTx = Math.sin(tx);
+      const cTz = Math.cos(tz); const sTz = Math.sin(tz);
+      // Matches rot(0, 1, 0): y1 = cTx, z1 = sTx -> [-sTz * cTx, cTz * cTx, sTx]
+      return [-sTz * cTx, cTz * cTx, sTx];
+    };
+    let diskNormal = [0, 1, 0];
+    let diskNormalSecondary = [0, 1, 0];
+    if (galaxyPreset === 'lenticular') diskNormal = tiltToNormal(0.26, 0.0);
+    else if (galaxyPreset === 'proto') diskNormal = tiltToNormal(0.22, -0.14);
+    else if (galaxyPreset === 'dwarf-stream') diskNormal = tiltToNormal(0.14, 0.08);
+    else if (galaxyPreset === 'binary') {
+      diskNormal = tiltToNormal(0.35, 0.18);
+      diskNormalSecondary = tiltToNormal(-0.42, -0.25);
+    } else if (galaxyPreset === 'coalesce' && icRegime) {
+      if (icRegime.id === 'bullseye-ring-impact') {
+        diskNormal = tiltToNormal(icRegime.tiltX * 0.45, icRegime.tiltZ * 0.45);
+        diskNormalSecondary = tiltToNormal(1.15, -0.45);
+      } else {
+        diskNormal = tiltToNormal(icRegime.tiltX || 0, icRegime.tiltZ || 0);
+        diskNormalSecondary = tiltToNormal(-(icRegime.tiltX || 0) * 0.8 + 0.55, -(icRegime.tiltZ || 0) * 0.7 - 0.35);
+      }
+    }
+
+    const secondSmbhIdx = galaxyPreset === 'binary'
+      ? (w.galaxyStars >> 1)
+      : (icRegime?.isMerger
+        ? Math.max(256, Math.min(w.galaxyStars - 256, Math.floor(w.galaxyStars / (1 + (icRegime.massRatio || 0.72)))))
+        : 0);
     galaxyEngine = createGalacticParticleMeshEngineWebGpu({
       device,
       initialBodies: bodies0,
       gridN: 32,
-      boxSize: 48.0,
-      secondSmbhIndex: galaxyPreset === 'binary' ? (quality.galaxyStars >> 1) : 0,
-      smbhSoftening: 0.72,
-      label: `ulg-universes-galaxy-pm-${quality.galaxyStars}`
+      boxSize: 36.0,
+      secondSmbhIndex: secondSmbhIdx,
+      smbhSoftening: 0.75,
+      dmHaloMass,
+      dmSecondaryMass,
+      dmScaleRadius,
+      dmConcentration,
+      diskNormal,
+      diskNormalSecondary,
+      label: `ulg-universes-galaxy-ss-nfw-${w.galaxyStars}`
     });
-    if (['disk', 'barred', 'ring', 'lenticular', 'proto', 'sphere', 'globular'].includes(galaxyPreset)) {
-      await galaxyEngine.calibrateEquilibrium({ gravity: 1.0, softening: 0.35 });
-    }
-    await galaxyEngine.step({ dt: 0.008, substeps: 2, gravity: 1.0, softening: 0.35, readback: false });
+    // Universal 3D GPU equilibrium calibration across ALL 12 galaxy morphologies:
+    //   mode 0 = 3D Tilted Toomre Disk (disk, barred, ring, lenticular, proto, dwarf-stream)
+    //   mode 1 = 3D Hernquist/King Jeans Spheroid (sphere, globular, open-cluster, irregular)
+    //   mode 2 = Bound Sub-Virial Cosmological Collapse (coalesce single)
+    //   mode 3 = Dual-Rest-Frame Binary Merger (binary, coalesce merger)
+    const calMode = secondSmbhIdx > 0
+      ? 3
+      : (galaxyPreset === 'coalesce'
+        ? 2
+        : (['sphere', 'globular', 'open-cluster', 'irregular'].includes(galaxyPreset) ? 1 : 0));
+    await galaxyEngine.calibrateEquilibrium({
+      gravity: 1.0,
+      softening: 0.65,
+      virialScale: calMode === 2 ? 0.82 : (calMode === 3 ? 0.98 : 1.0),
+      calMode,
+      preserveBar: galaxyPreset === 'barred'
+    });
+    await galaxyEngine.step({ dt: runLiveCollapse ? 0.0044 : 0.0044, substeps: 2, gravity: 1.0, softening: 0.65, readback: false });
 
     // Coupled live GPU 24^3 3D α-ω Galactic Dynamo driven strictly by live GPU galaxy particle velocities!
     galacticDynamoSession = createEmergent3dDynamoFieldWebGpu(device, {
@@ -1352,11 +2086,59 @@ export function createUlgUniversesPhysics(device, {
       particleBuffer: galaxyEngine.getResidentBuffer(),
       particleCount: galaxyEngine.count,
       dt: 0.040,
-      substeps: 8,
+      substeps: runLiveCollapse ? 2 : 8,
       readTelemetry: true,
       readBField: true
     });
     galacticDynamoStreamlines = galacticDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.30 });
+
+    if (runLiveCollapse) {
+      const entityName = activeGalaxyEnv?.morphologyLabel || 'Cosmic-Web Halo';
+      activeGenesisStage = {
+        level: 1,
+        stage: 'l1-galaxy-collapse',
+        title: `Collapsing Protogalactic Halo (${activeCapabilityProfile.tier.toUpperCase()})`,
+        entityName,
+        detail: `${galaxyIcRegimeLabel} · SS 3D Multipole + NFW Dark Matter Halo + α–ω Dynamo · ${w.galaxyStars.toLocaleString()} stars+DM`,
+        step: 2,
+        targetSteps: w.l1TargetSteps,
+        progress: 2 / Math.max(1, w.l1TargetSteps),
+        cacheKey: galCacheKey,
+        skipLabel: '⏩ Settle Galaxy Now',
+        startedMs: Date.now(),
+        _meta: { targetMorphology, activeSeed, galCacheKey, entityName, icLabel: galaxyIcRegimeLabel }
+      };
+      lastGenesisEvent = Object.freeze({
+        kind: 'genesis-started',
+        level: 1,
+        stage: 'l1-galaxy-collapse',
+        label: entityName,
+        source: 'live-gpu',
+        timestampMs: Date.now()
+      });
+    } else {
+      if (activeGenesisStage?.level === 1) activeGenesisStage = null;
+      if (cachedGal && !bypassCache) {
+        lastGenesisEvent = Object.freeze({
+          kind: 'cache-hit',
+          level: 1,
+          stage: 'l1-galaxy-collapse',
+          label: cachedGal.morphologyLabel || galaxyPreset,
+          source: 'root-cache',
+          timestampMs: Date.now()
+        });
+      } else {
+        // Record this collapsed halo galaxy in the Root Cosmic Lineage Cache so L0 knows it has been simulated!
+        void rootLineageCache.set(galCacheKey, {
+          morphology: galaxyPreset,
+          morphologyLabel: activeGalaxyEnv?.morphologyLabel || galaxyPreset,
+          meanMetallicitySolar: galaxyMetallicity,
+          baseFeH: activeGalaxyEnv?.baseFeH ?? Math.log10(Math.max(1e-4, galaxyMetallicity)),
+          gasFraction: activeGalaxyEnv?.gasFraction ?? 0.22,
+          starCount: w.galaxyStars
+        }, { persist: true, broadcast: true });
+      }
+    }
 
     galaxyFocusPos = [4.8, 0.04, 2.1];
     // Only the central SMBH (`Sgr-ULG*` at [0,0,0]) is a stationary galactic landmark;
@@ -1417,11 +2199,16 @@ export function createUlgUniversesPhysics(device, {
     starSite = null,
     solReference = null,
     forceMultiplicity = null,
-    forceExoticStage = null
+    forceExoticStage = null,
+    observeLive = false,
+    bypassCache = false
   } = {}) {
     if (solarEngine) {
       solarEngine.dispose();
       solarEngine = null;
+    }
+    if (activeGenesisStage && activeGenesisStage.level >= 2) {
+      activeGenesisStage = null;
     }
     if (typeof solReference === 'boolean') useSolReference = solReference;
     if (starSite) {
@@ -1445,7 +2232,117 @@ export function createUlgUniversesPhysics(device, {
         forceMultiplicity,
         forceExoticStage: forceExoticStage ?? activeStarSite.forceExoticStage ?? null
       });
-      activeCausalSystem = synthesizeNebularPlanetarySystem(starSys, { seedOverride: activeSeed });
+      // Check Root Cosmic Lineage Cache first; on miss:
+      // - Interactive approach/click (`observeLive: true`): run live observable GPU nebular coalescence ON SCREEN!
+      // - Programmatic/test path (`observeLive: false`): run 1-submit GPU burst + cache immediately.
+      const nebCacheKey = rootLineageCache.buildKey('l2-nebular', {
+        seed: activeSeed,
+        epochId: cosmicEpochId,
+        galaxyKey: activeGalaxyEnv?.seed || 0,
+        starKey: `${activeStarSite.starIndex}_${forceMultiplicity || 0}_${forceExoticStage || ''}`
+      });
+      let gpuDisk = bypassCache ? null : await rootLineageCache.get(nebCacheKey);
+      if (!gpuDisk && observeLive && !(forceExoticStage ?? activeStarSite.forceExoticStage)) {
+        if (protoplanetarySession) { protoplanetarySession.dispose(); protoplanetarySession = null; }
+        if (nebularCoalescenceSession) { nebularCoalescenceSession.dispose(); nebularCoalescenceSession = null; }
+        const stars = starSys?.stars || [{ massSolar: 1.0, luminositySolar: 1.0, radiusSolar: 1.0, spectralClass: 'G2V' }];
+        const isCircumbinary = starSys?.architecture === 'binary-p-type' || starSys?.architecture === 'hierarchical-trinary';
+        const hostMassSolar = isCircumbinary ? (stars[0].massSolar + (stars[1]?.massSolar || 0)) : stars[0].massSolar;
+        const hostLumSolar = isCircumbinary ? (stars[0].luminositySolar + (stars[1]?.luminositySolar || 0)) : stars[0].luminositySolar;
+        const sqrtL = Math.sqrt(Math.max(1e-4, hostLumSolar));
+        const rMinStableAu = Math.max(0.06, 0.085 * sqrtL * 1.15, (stars[0].radiusSolar || 1.0) * 0.00465 * 6.0);
+        const rMaxStableAu = Math.min(38.0, Math.max(6.0, 26.0 * Math.pow(Math.max(0.08, hostMassSolar), 0.35)));
+        const neb = starSys?.nebulaEnv || {};
+        const w = getWorkloads();
+        const pebCount = w.nebularParcels;
+        const nextCoalesce = createNebularSystemCoalescenceSessionWebGpu(device, {
+          starMassSolar: hostMassSolar,
+          starLuminositySolar: hostLumSolar,
+          metallicitySolar: neb.metallicitySolar ?? 1.0,
+          cToO: neb.cToO ?? 0.55,
+          gasFraction: activeGalaxyEnv?.gasFraction ?? 0.24,
+          rMinStableAu,
+          rMaxStableAu,
+          parcelCount: pebCount,
+          radialBins: w.nebularRadialBins,
+          enableGasDrag: protoplanetaryGasDrag,
+          seed: (activeSeed ^ 0x4eb01a) >>> 0,
+          label: `ulg-universes-nebular-live-${activeStarSite.starIndex ?? 0}`
+        });
+        nebularCoalescenceTelemetry = await nextCoalesce.step({ dt: 0.024, substeps: 32, gravityCadence: w.l2GravityCadence || 4, readTelemetry: true, readAnnuli: true });
+        nebularCoalescenceSession = nextCoalesce;
+        activeCausalSystem = buildProvisionalCoalescingSystem(starSys, nextCoalesce.snowLineAu, rMinStableAu, rMaxStableAu);
+        focusedSolarBodyIndex = 0;
+        planetaryBodyIndex = 0;
+        planetaryResult = null;
+        solarMode = 'formation';
+        const st0 = stars[0];
+        const lumStr = hostLumSolar >= 0.05 ? Number(hostLumSolar).toFixed(2) : Number(hostLumSolar).toExponential(1);
+        const specTag = st0.spectralType || st0.spectralClass || st0.classLabel || 'Star';
+        const entityName = `${starSys.systemName || `Star #${activeStarSite.starIndex ?? 0}`} (${specTag} · ${lumStr} L☉)`;
+        activeGenesisStage = {
+          level: 2,
+          stage: 'l2-nebular-coalescence',
+          title: `Coalescing Star System Nebula (SS Multipole · ${activeCapabilityProfile.tier.toUpperCase()})`,
+          entityName,
+          detail: `Collapsing protoplanetary disk (${pebCount.toLocaleString()} parcels · Snow Line ${nextCoalesce.snowLineAu.toFixed(2)} AU) — density waves forming (worlds not yet settled)`,
+          step: nextCoalesce.stepIndex,
+          targetSteps: w.l2TargetSteps,
+          progress: Math.min(1, nextCoalesce.stepIndex / Math.max(1, w.l2TargetSteps)),
+          cacheKey: nebCacheKey,
+          skipLabel: '⏩ Fast-Forward SPH Settling',
+          startedMs: Date.now(),
+          _meta: { starSys, activeSeed, nebCacheKey }
+        };
+        nebularSettleBlend = 0.0;
+        lastGenesisEvent = Object.freeze({
+          kind: 'genesis-started',
+          level: 2,
+          stage: 'l2-nebular-coalescence',
+          label: entityName,
+          source: 'live-gpu',
+          timestampMs: Date.now()
+        });
+        return;
+      }
+      if (gpuDisk) {
+        lastGenesisEvent = Object.freeze({
+          kind: 'cache-hit',
+          level: 2,
+          stage: 'l2-nebular-coalescence',
+          label: starSys.systemName || `Star #${activeStarSite.starIndex ?? 0}`,
+          source: 'root-cache',
+          timestampMs: Date.now()
+        });
+      } else {
+        try {
+          const w = getWorkloads();
+          gpuDisk = await runNebularSystemCoalescenceBurstWebGpu(device, starSys, {
+            parcelCount: w.nebularParcels,
+            radialBins: w.nebularRadialBins,
+            substeps: w.l2BurstSubsteps,
+            seedOverride: activeSeed
+          });
+          if (gpuDisk) {
+            await rootLineageCache.set(nebCacheKey, gpuDisk, { persist: true, broadcast: true });
+          }
+        } catch {
+          gpuDisk = null;
+        }
+      }
+      activeCausalSystem = synthesizeNebularPlanetarySystem(starSys, {
+        seedOverride: activeSeed,
+        gpuCoalescedDisk: gpuDisk
+      });
+    } else {
+      lastGenesisEvent = Object.freeze({
+        kind: 'cache-hit',
+        level: 2,
+        stage: 'l2-nebular-coalescence',
+        label: 'Sol Reference System',
+        source: 'sol-reference',
+        timestampMs: Date.now()
+      });
     }
     const cat = getActiveSystemCatalog();
     // Preserve explicit star focus (`focusedSolarBodyIndex === 0`, e.g., flying directly from L0/L1 into L3 Star/MHD!)
@@ -1453,6 +2350,7 @@ export function createUlgUniversesPhysics(device, {
     const keepStarFocus = focusedSolarBodyIndex === 0 && !starSite && typeof solReference !== 'boolean';
     focusedSolarBodyIndex = keepStarFocus ? 0 : (useSolReference ? 3 : getDefaultPlanetIndex(cat));
     planetaryBodyIndex = keepStarFocus ? getDefaultPlanetIndex(cat) : focusedSolarBodyIndex;
+    solarMode = 'nbody';
     solarEngine = createSolarSystemNBodyEngineWebGpu(device, {
       catalog: cat,
       beltZoneAu: useSolReference ? null : activeCausalSystem?.beltZoneAu,
@@ -1507,13 +2405,19 @@ export function createUlgUniversesPhysics(device, {
     disposeSession(radWindL2Session); radWindL2Session = null; radWindL2Telemetry = null; radWindL2Mode = null;
     disposeSession(tidalRocheSession); tidalRocheSession = null; tidalRocheTelemetry = null; tidalRocheMode = null;
     disposeSession(protoplanetarySession); protoplanetarySession = null; protoplanetaryTelemetry = null;
+    disposeSession(nebularCoalescenceSession); nebularCoalescenceSession = null; nebularCoalescenceTelemetry = null;
     disposeSession(nebulaMhdSession); nebulaMhdSession = null; nebulaMhdTelemetry = null; nebulaMhdStreamlines = null;
     disposeSession(radWindL3Session); radWindL3Session = null; radWindL3Telemetry = null; radWindL3Mode = null;
     disposeSession(magnetosphereSession); magnetosphereSession = null; magnetosphereTelemetry = null; magnetosphereMode = null; magnetosphereFieldLines = null;
+    disposeSession(planetaryGenesisSphSession); planetaryGenesisSphSession = null; planetaryGenesisSphTelemetry = null; planetaryGenesisLiveForm = false;
+    disposeSession(planetaryDynamoSession); planetaryDynamoSession = null; planetaryDynamoTelemetry = null; planetaryDynamoStreamlines = new Float32Array(0);
     disposeSession(cryoPlumeSession); cryoPlumeSession = null; cryoPlumeTelemetry = null;
     disposeSession(smbhEngine); smbhEngine = null; smbhBodies = null;
     planetaryResult = null;
     planetaryAtmoState = null;
+    if (activeGenesisStage && activeGenesisStage.level >= 2) {
+      activeGenesisStage = null;
+    }
     if (resetModes) {
       galaxyBranch = 'solar-system';
       solarMode = 'nbody';
@@ -1523,7 +2427,16 @@ export function createUlgUniversesPhysics(device, {
     }
   }
 
-  async function selectCausalStarSite({ posGal, popTag = 0.5, starIndex = 0, forceMultiplicity = null, forceExoticStage = null, seedOverride = null } = {}) {
+  async function selectCausalStarSite({
+    posGal,
+    popTag = 0.5,
+    starIndex = 0,
+    forceMultiplicity = null,
+    forceExoticStage = null,
+    seedOverride = null,
+    observeLive = false,
+    bypassCache = false
+  } = {}) {
     unloadStarSystemRegimes({ resetModes: true });
     activeStarSite = {
       posGal: Array.isArray(posGal) ? [...posGal] : [...activeStarSite.posGal],
@@ -1533,7 +2446,7 @@ export function createUlgUniversesPhysics(device, {
     };
     galaxyFocusPos = [...activeStarSite.posGal];
     useSolReference = false;
-    await initSolarSystem({ starSite: activeStarSite, forceMultiplicity, forceExoticStage, seedOverride });
+    await initSolarSystem({ starSite: activeStarSite, forceMultiplicity, forceExoticStage, seedOverride, observeLive, bypassCache });
     // Cascade primary host star properties cleanly down into L3 stellar regime (preserving Pulsar/Magnetar/BH/WD/Supergiant!)
     const star0 = activeCausalSystem?.catalog?.[0] || activeCausalSystem?.starSystem?.stars?.[0];
     if (star0) {
@@ -1545,7 +2458,7 @@ export function createUlgUniversesPhysics(device, {
     return activeCausalSystem;
   }
 
-  async function sampleNewGalacticSector({ forceMultiplicity = null } = {}) {
+  async function sampleNewGalacticSector({ forceMultiplicity = null, observeLive = false } = {}) {
     const nextIdx = (activeStarSite.starIndex || 0) + 1;
     const rRand = mulberry32((universeSeed ^ (nextIdx * 1103515245)) >>> 0);
     const r = 0.8 + Math.pow(rRand(), 0.72) * 8.2;
@@ -1556,7 +2469,8 @@ export function createUlgUniversesPhysics(device, {
       posGal: [Math.cos(th) * r, zH, Math.sin(th) * r],
       popTag: pop,
       starIndex: nextIdx,
-      forceMultiplicity
+      forceMultiplicity,
+      observeLive
     });
   }
 
@@ -1567,23 +2481,260 @@ export function createUlgUniversesPhysics(device, {
     return getActiveSystemCatalog();
   }
 
-  // ---- L2 Formation Mode: Protoplanetary Disk + Snow Line + Particle-Rigid Planetesimals ----
+  // ---- L2 Formation Mode: Whole-System GPU Nebular Coalescence + Protoplanetary Accretion Disk ----
   async function initProtoplanetaryDisk({ seedOverride = null } = {}) {
     if (protoplanetarySession) {
       protoplanetarySession.dispose();
       protoplanetarySession = null;
     }
+    if (nebularCoalescenceSession) {
+      nebularCoalescenceSession.dispose();
+      nebularCoalescenceSession = null;
+    }
     const activeSeed = ((seedOverride ?? universeSeed) + 773) >>> 0;
-    const pebCount = Math.min(4096, Math.max(1536, (quality.solarAsteroids || 512) * 4));
+    const starSys = activeCausalSystem?.starSystem || null;
+    const st0 = starSys?.stars?.[0] || { massSolar: 1.0, luminositySolar: 1.0 };
+    const neb = starSys?.nebulaEnv || { metallicitySolar: 1.0, cToO: 0.55 };
+    const fronts = activeCausalSystem?.condensationFrontsAu || { rMinStableAu: 0.14, rMaxStableAu: 28.0 };
+    const w = getWorkloads();
+    const pebCount = w.nebularParcels;
+    const nextCoalesce = createNebularSystemCoalescenceSessionWebGpu(device, {
+      starMassSolar: st0.massSolar || 1.0,
+      starLuminositySolar: st0.luminositySolar || 1.0,
+      metallicitySolar: neb.metallicitySolar ?? 1.0,
+      cToO: neb.cToO ?? 0.55,
+      gasFraction: activeGalaxyEnv?.gasFraction ?? 0.24,
+      rMinStableAu: fronts.rMinStableAu || 0.14,
+      rMaxStableAu: fronts.rMaxStableAu || 28.0,
+      parcelCount: pebCount,
+      radialBins: w.nebularRadialBins,
+      enableGasDrag: protoplanetaryGasDrag,
+      seed: activeSeed,
+      label: 'ulg-universes-nebular-coalesce'
+    });
+    nebularCoalescenceTelemetry = await nextCoalesce.step({ dt: 0.024, substeps: 32, gravityCadence: w.l2GravityCadence || 4, readTelemetry: true, readAnnuli: true });
+    nebularCoalescenceSession = nextCoalesce;
+
     const nextDisk = createProtoplanetaryDiskFormationSessionWebGpu(device, {
-      pebbleCount: pebCount,
+      pebbleCount: Math.min(8192, Math.max(1536, Math.round(w.nebularParcels * 0.4))),
       embryoCount: 18,
+      starLuminositySolar: st0.luminositySolar || 1.0,
       enableGasDrag: protoplanetaryGasDrag,
       seed: activeSeed,
       label: 'ulg-universes-protoplanetary-disk'
     });
     protoplanetaryTelemetry = await nextDisk.step({ dt: 0.018, substeps: 3, readTelemetry: true });
     protoplanetarySession = nextDisk;
+  }
+
+  async function finalizeL1GalaxyGenesisInternal(fastFinish = false) {
+    const stage = activeGenesisStage;
+    if (!stage || stage.stage !== 'l1-galaxy-collapse') return null;
+    const meta = stage._meta || {};
+    const w = getWorkloads();
+    if (fastFinish && galaxyEngine) {
+      let rem = Math.max(0, Math.min(36, (stage.targetSteps || w.l1TargetSteps) - (stage.step || 0)));
+      while (rem > 0) {
+        const chunk = Math.min(12, rem);
+        rem -= chunk;
+        await galaxyEngine.step({ dt: 0.0085, substeps: chunk, gravity: 1.0, softening: 0.35, readback: false });
+      }
+      if (galacticDynamoSession) {
+        galacticDynamoTelemetry = await galacticDynamoSession.step({
+          particleBuffer: galaxyEngine.getResidentBuffer(),
+          particleCount: galaxyEngine.count,
+          dt: 0.036,
+          substeps: 4,
+          readTelemetry: true,
+          readBField: true
+        });
+        galacticDynamoStreamlines = galacticDynamoSession.buildStreamlines({ worldScale: 1.0, alpha: 0.30 });
+      }
+    }
+    const cacheKey = meta.galCacheKey || stage.cacheKey;
+    const settledMorph = meta.targetMorphology || activeGalaxyEnv?.morphology || 'disk';
+    if (cacheKey) {
+      await rootLineageCache.set(cacheKey, {
+        morphology: settledMorph,
+        morphologyLabel: activeGalaxyEnv?.morphologyLabel || settledMorph,
+        meanMetallicitySolar: galaxyMetallicity,
+        baseFeH: activeGalaxyEnv?.baseFeH ?? Math.log10(Math.max(1e-4, galaxyMetallicity)),
+        gasFraction: activeGalaxyEnv?.gasFraction ?? 0.22,
+        starCount: galaxyEngine?.count || w.galaxyStars
+      }, { persist: true, broadcast: true });
+    }
+    activeGenesisStage = null;
+    lastGenesisEvent = Object.freeze({
+      kind: 'genesis-complete',
+      level: 1,
+      stage: 'l1-galaxy-collapse',
+      label: meta.entityName || activeGalaxyEnv?.morphologyLabel || 'Galaxy',
+      detail: `${(galaxyEngine?.count || w.galaxyStars).toLocaleString()} stars collapsed & cached`,
+      source: 'live-gpu',
+      timestampMs: Date.now()
+    });
+    return lastGenesisEvent;
+  }
+
+  async function finalizeL2NebularGenesisInternal() {
+    const stage = activeGenesisStage;
+    const meta = stage?.stage === 'l2-nebular-coalescence' ? (stage._meta || {}) : {};
+    const w = getWorkloads();
+    if (!nebularCoalescenceSession) await initProtoplanetaryDisk();
+    const curSteps = nebularCoalescenceSession?.stepIndex || 0;
+    const remSub = curSteps < w.l2BurstSubsteps ? Math.max(24, w.l2BurstSubsteps - curSteps) : 8;
+    const disk = await nebularCoalescenceSession.coalesceSystemBurst({ substeps: remSub, chunkSize: 96, gravityCadence: 6, dt: 0.024 });
+    const activeSeed = meta.activeSeed ?? ((universeSeed + 409) >>> 0);
+    const starSys = meta.starSys || activeCausalSystem?.starSystem || deriveStarSystemFromGalacticLocation({
+      cosmicEpoch,
+      galaxyEnv: activeGalaxyEnv,
+      starPosGal: activeStarSite.posGal,
+      popTag: activeStarSite.popTag,
+      starIndex: activeStarSite.starIndex,
+      seed: activeSeed
+    });
+    const fullDisk = Object.freeze({ ...disk, telemetry: nebularCoalescenceSession.getTelemetry() });
+    const nebCacheKey = meta.nebCacheKey || rootLineageCache.buildKey('l2-nebular', {
+      seed: activeSeed,
+      epochId: cosmicEpochId,
+      galaxyKey: activeGalaxyEnv?.seed || 0,
+      starKey: `${activeStarSite.starIndex}_0_${activeStarSite.forceExoticStage || ''}`
+    });
+    await rootLineageCache.set(nebCacheKey, fullDisk, { persist: true, broadcast: true });
+    useSolReference = false;
+    activeCausalSystem = synthesizeNebularPlanetarySystem(starSys, {
+      seedOverride: activeSeed,
+      gpuCoalescedDisk: fullDisk
+    });
+    const cat = getActiveSystemCatalog();
+    focusedSolarBodyIndex = getDefaultPlanetIndex(cat);
+    planetaryBodyIndex = focusedSolarBodyIndex;
+    if (solarEngine) { solarEngine.dispose(); solarEngine = null; }
+    solarEngine = createSolarSystemNBodyEngineWebGpu(device, {
+      catalog: cat,
+      beltZoneAu: activeCausalSystem?.beltZoneAu,
+      asteroidCount: quality.solarAsteroids,
+      seed: activeSeed,
+      label: `ulg-universes-crystallized-${activeCausalSystem?.systemId || 'sys'}`
+    });
+    await solarEngine.step({ dtSubYr: 0.000035, substeps: 4, readMassive: true });
+    solarConservation0 = solarEngine.computeConservationDiagnostics();
+    solarConservation = solarConservation0;
+    planetaryResult = null;
+    solarMode = 'nbody';
+    // Keep the settled GPU nebular disk gently photoevaporating over ~6s inside the live N-body view
+    // so there is ZERO abrupt visual cut from swirling SPH nebula -> mature orbiting planetary system!
+    nebularSettleBlend = 1.0;
+    const star0 = activeCausalSystem?.catalog?.[0] || activeCausalSystem?.starSystem?.stars?.[0];
+    if (star0) {
+      await syncStellarRegimeForStar(star0, {
+        recommendedL3Regime: activeCausalSystem?.recommendedL3Regime,
+        initializeNow: false
+      });
+    }
+    if (activeGenesisStage?.stage === 'l2-nebular-coalescence') activeGenesisStage = null;
+    lastGenesisEvent = Object.freeze({
+      kind: 'genesis-complete',
+      level: 2,
+      stage: 'l2-nebular-coalescence',
+      label: activeCausalSystem?.systemName || 'Star System',
+      detail: `${activeCausalSystem?.planetCount || 0} worlds crystallized & cached`,
+      source: 'live-gpu',
+      timestampMs: Date.now()
+    });
+    return activeCausalSystem;
+  }
+
+  async function finalizeL4PlanetarySphGenesisInternal() {
+    const stage = activeGenesisStage;
+    const meta = stage?.stage === 'l4-planetary-sph' ? (stage._meta || {}) : {};
+    const w = getWorkloads();
+    if (!planetaryGenesisSphSession) {
+      if (activeGenesisStage?.stage === 'l4-planetary-sph') activeGenesisStage = null;
+      return null;
+    }
+    const curSteps = planetaryGenesisSphSession.stepIndex || 0;
+    const remSub = curSteps < w.l4BurstSubsteps ? Math.max(6, w.l4BurstSubsteps - curSteps) : 2;
+    planetaryGenesisSphTelemetry = await planetaryGenesisSphSession.stepBurst({
+      totalSubsteps: remSub,
+      chunkSize: 24,
+      dt: 0.028,
+      erosionPasses: w.sphErosionPasses,
+      readTelemetry: true
+    });
+    const snapF32 = await planetaryGenesisSphSession.exportGeologyMapSnapshot();
+    const cat = getActiveSystemCatalog();
+    const spec = cat[planetaryBodyIndex] || REAL_SOLAR_SYSTEM_CATALOG[3];
+    const sphCacheKey = meta.sphCacheKey || buildPlanetSphCacheKey(
+      spec,
+      planetaryBodyIndex,
+      `${planetaryGenesisSphSession.mapWidth}x${planetaryGenesisSphSession.mapHeight}x${planetaryGenesisSphSession.gridN}`
+    );
+    if (snapF32) {
+      const packedGeo = encodeFloat32Quantized(snapF32, 8000.0);
+      if (packedGeo) {
+        await rootLineageCache.set(sphCacheKey, {
+          packedGeo,
+          telemetry: planetaryGenesisSphTelemetry
+        }, { persist: true, broadcast: false });
+      }
+    }
+    // Keep a continuous post-formation thermal cooling ramp instead of snapping hot SPH -> cold world in 1 frame!
+    // If genesis ran live on screen, surface lava fissures cool & steam condenses smoothly into oceans over ~5-6 seconds.
+    const wasLiveForm = Boolean(planetaryGenesisLiveForm);
+    planetaryGenesisLiveForm = false;
+    planetaryCoolingHeat = wasLiveForm ? Math.max(planetaryCoolingHeat, 0.52) : 0.0;
+    if (activeGenesisStage?.stage === 'l4-planetary-sph') activeGenesisStage = null;
+    lastGenesisEvent = Object.freeze({
+      kind: 'genesis-complete',
+      level: 4,
+      stage: 'l4-planetary-sph',
+      label: meta.specName || spec?.name || 'World',
+      detail: `Differentiated (${Math.round(planetaryGenesisSphTelemetry?.geoTimeMyr || 0)} Myr) & cached`,
+      source: 'live-gpu',
+      timestampMs: Date.now()
+    });
+    return planetaryGenesisSphTelemetry;
+  }
+
+  async function finalizeActiveGenesis() {
+    if (!activeGenesisStage) return { finalized: false, stage: null, event: lastGenesisEvent };
+    let guard = 0;
+    while (busy && guard < 120) {
+      guard += 1;
+      await new Promise((r) => setTimeout(r, 4));
+    }
+    if (!activeGenesisStage) return { finalized: true, stage: null, event: lastGenesisEvent };
+    const stName = activeGenesisStage.stage;
+    busy = true;
+    try {
+      if (stName === 'l1-galaxy-collapse') await finalizeL1GalaxyGenesisInternal(true);
+      else if (stName === 'l2-nebular-coalescence') await finalizeL2NebularGenesisInternal();
+      else if (stName === 'l4-planetary-sph') await finalizeL4PlanetarySphGenesisInternal();
+      else activeGenesisStage = null;
+    } finally {
+      busy = false;
+    }
+    return { finalized: true, stage: stName, event: lastGenesisEvent };
+  }
+
+  async function crystallizeCoalescedSystem() {
+    let guard = 0;
+    while (busy && guard < 120) {
+      guard += 1;
+      await new Promise((r) => setTimeout(r, 4));
+    }
+    busy = true;
+    try {
+      return await finalizeL2NebularGenesisInternal();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function triggerGalaxyCoalescence({ seedOverride = null } = {}) {
+    await initGalaxy({ galaxyEnvOverride: activeGalaxyEnv, seedOverride, observeLive: true, bypassCache: true });
+    return activeGalaxyEnv;
   }
 
   // ---- L3 MHD Mode: 3D Self-Gravitating Resistive MHD Nebular Collapse & Bipolar Jets ----
@@ -1689,26 +2840,67 @@ export function createUlgUniversesPhysics(device, {
     relBinarySession = next;
   }
 
+  // Helper: compute live heliocentric sunDir (body -> Sun), 3D orbital velocity unit vector, and r_AU for any comet/planet!
+  function computeLiveCometSolarVectors(bodyIdx = planetaryBodyIndex) {
+    if (!solarEngine) {
+      return { sourceDir: [0.76, 0.24, 0.60], orbVelDir: [-0.62, 0.0, 0.78], sunDistAu: 1.0, sublimationDrive: 1.35 };
+    }
+    const cat = solarEngine.catalog || getActiveSystemCatalog();
+    const safeIdx = Math.max(0, Math.min(cat.length - 1, bodyIdx));
+    const bSt = solarEngine.getMassiveBodyState64(safeIdx);
+    const sSt = solarEngine.getMassiveBodyState64(0);
+    const dx = sSt.posAu[0] - bSt.posAu[0];
+    const dy = sSt.posAu[1] - bSt.posAu[1];
+    const dz = sSt.posAu[2] - bSt.posAu[2];
+    const rAu = Math.max(0.18, Math.hypot(dx, dy, dz));
+    const sourceDir = [dx / rAu, dy / rAu, dz / rAu];
+    const vx = (bSt.velAuYr?.[0] || 0) - (sSt.velAuYr?.[0] || 0);
+    const vy = (bSt.velAuYr?.[1] || 0) - (sSt.velAuYr?.[1] || 0);
+    const vz = (bSt.velAuYr?.[2] || 0) - (sSt.velAuYr?.[2] || 0);
+    const vLen = Math.hypot(vx, vy, vz);
+    const orbVelDir = vLen > 1e-6 ? [vx / vLen, vy / vLen, vz / vLen] : [-sourceDir[2], 0, sourceDir[0]];
+    const subl = Math.max(0.65, Math.min(2.6, 1.45 / Math.pow(Math.max(0.35, rAu), 0.55)));
+    return { sourceDir, orbVelDir, sunDistAu: rAu, sublimationDrive: subl };
+  }
+
   // ---- L2 Wave-2 Radiative Outflow Regimes: Active Dual-Tail Comet & Hot-Jupiter XUV Photoevaporation ----
-  async function initRadiativeWindL2(mode = 'comet-tails') {
+  async function initRadiativeWindL2(mode = 'comet-tails', { bodyIndex = null } = {}) {
     const prev = radWindL2Session;
     radWindL2Session = null;
     if (prev) prev.dispose();
     radWindL2Mode = mode;
     const isComet = mode === 'comet-tails';
+    const liveVecs = (isComet && bodyIndex != null && solarEngine)
+      ? computeLiveCometSolarVectors(bodyIndex)
+      : {
+        sourceDir: isComet ? [0.76, 0.24, 0.60] : [0.82, 0.14, 0.55],
+        orbVelDir: isComet ? [-0.62, 0.0, 0.78] : [-0.55, 0.0, 0.83],
+        sunDistAu: isComet ? 1.0 : 0.045,
+        sublimationDrive: isComet ? 1.35 : 1.45
+      };
     const next = createRadiativePhotoionizationWindSessionWebGpu(device, {
       regime: isComet ? 'comet-dual-tail' : 'hot-jupiter-xuv',
       uvFlux: isComet ? 1.45 : 2.35,
       radBeta: isComet ? 0.95 : 0.72,
       windSpeed: isComet ? 2.25 : 1.95,
-      sublimationDrive: isComet ? 1.35 : 1.45,
-      sourceDir: isComet ? [0.76, 0.24, 0.60] : [0.82, 0.14, 0.55],
+      sublimationDrive: liveVecs.sublimationDrive,
+      sourceDir: liveVecs.sourceDir,
+      orbVelDir: liveVecs.orbVelDir,
+      sunDistAu: liveVecs.sunDistAu,
       particleCount: quality.id === 'low' ? 3072 : 5120,
       seed: (universeSeed ^ (isComet ? 0xc03e7 : 0x40710)) >>> 0,
       label: `ulg-universes-radl2-${mode}`
     });
     for (let w = 0; w < 8; w += 1) {
-      radWindL2Telemetry = await next.step({ dt: 0.04, substeps: 3, readTelemetry: w === 7 });
+      radWindL2Telemetry = await next.step({
+        dt: 0.04,
+        substeps: 3,
+        sourceDir: liveVecs.sourceDir,
+        orbVelDir: liveVecs.orbVelDir,
+        sublimationDrive: liveVecs.sublimationDrive,
+        sunDistAu: liveVecs.sunDistAu,
+        readTelemetry: w === 7
+      });
     }
     radWindL2Session = next;
   }
@@ -1848,9 +3040,17 @@ export function createUlgUniversesPhysics(device, {
     cryoPlumeSession = next;
   }
 
-  // ---- L3: Hydrostatic Main-Sequence / Supergiant / AGB / Brown-Dwarf 3D MLS-MPM Fusion + Live 3D Stellar Dynamo ----
+  // ---- L3: Hydrostatic 1st-Gen Pop III / 2nd-Gen Pop II / 3rd-Gen Pop I 3D MLS-MPM Fusion + SS Multipole Gravity ----
   async function initStellarCore({ preset = stellarPreset, seedOverride = null } = {}) {
-    const mpmClasses = ['main-sequence-star', 'blue-supergiant', 'red-supergiant', 'agb-carbon', 'brown-dwarf'];
+    const mpmClasses = [
+      'pop3-first-gen',
+      'pop2-second-gen',
+      'main-sequence-star',
+      'blue-supergiant',
+      'red-supergiant',
+      'agb-carbon',
+      'brown-dwarf'
+    ];
     const allPresets = [...mpmClasses, 'solar-nebula', 'massive-supernova', 'binary-nursery'];
     stellarPreset = allPresets.includes(preset) ? preset : 'main-sequence-star';
     if (stellarEngine) {
@@ -1866,21 +3066,23 @@ export function createUlgUniversesPhysics(device, {
       stellarClosureRef = reg.ref;
     }
     const activeSeed = ((seedOverride ?? universeSeed) + 1939) >>> 0;
+    const w = getWorkloads();
     const isHydrostaticStar = mpmClasses.includes(stellarPreset);
     if (isHydrostaticStar) {
-      // Pass 2 / Phase C Deep LOD Exemplar: True 3D GPU MLS-MPM Compressible Self-Gravitating Stellar Fusion & Convection!
+      // Pass 2 / Phase C Deep LOD Exemplar: True 3D GPU MLS-MPM + Canonical SS Scale-Atlas Multipole Stellar Fusion & Convection!
       stellarEngine = createStellarMlsMpmFusionSessionWebGpu(device, {
-        count: Math.min(8192, Math.max(2048, quality.stellarParticles)),
+        count: w.stellarParcels,
+        gridN: w.stellarGridN,
         stellarClass: stellarPreset,
         boxHalf: 7.5,
         seed: activeSeed,
         label: `ulg-universes-stellar-mpm-${stellarPreset}`
       });
-      for (let w = 0; w < 4; w += 1) {
+      for (let wStep = 0; wStep < 6; wStep += 1) {
         stellarTelemetry = await stellarEngine.step({
           dt: 0.015,
           timeAccel: stellarTimeAccel,
-          readTelemetry: w === 3
+          readTelemetry: wStep === 5
         });
       }
     } else {
@@ -1942,8 +3144,48 @@ export function createUlgUniversesPhysics(device, {
     stellarLaneEmden = le;
   }
 
+  /**
+   * Detonate the currently fused L3 stellar core (e.g. 1st-Gen Pop III -> 2nd-Gen Pop II,
+   * or 2nd-Gen Pop II -> 3rd-Gen Pop I), read its REAL GPU-synthesized CNO & α/Fe yields,
+   * enrich the local galactic ISM, and launch live L2 GPU Nebular Coalescence for the next generation!
+   */
+  async function detonateCoreSeedNextGeneration() {
+    if (!stellarEngine || typeof stellarEngine.exportSupernovaYields !== 'function') {
+      await initStellarCore({ preset: 'pop3-first-gen' });
+    }
+    const yields = stellarEngine.exportSupernovaYields();
+    lastSupernovaYields = yields;
+    activeGalaxyEnv = Object.freeze({
+      ...activeGalaxyEnv,
+      meanMetallicitySolar: yields.metallicitySolar,
+      baseFeH: yields.feH,
+      baseCO: yields.cToO,
+      alphaOverFe: yields.alphaOverFe,
+      seededBySupernova: yields
+    });
+    const nextStarIdx = ((activeStarSite.starIndex || 0) + 1) >>> 0;
+    const nextPopTag = yields.nextGeneration === 2 ? 0.14 : 0.62;
+    const sys = await selectCausalStarSite({
+      posGal: activeStarSite.posGal,
+      popTag: nextPopTag,
+      starIndex: nextStarIdx,
+      observeLive: true,
+      bypassCache: true
+    });
+    if (activeGenesisStage?.stage === 'l2-nebular-coalescence') {
+      const genTag = yields.nextGeneration === 2 ? '2nd-Gen Pop II (α-rich)' : '3rd-Gen Pop I (Metal-Rich)';
+      activeGenesisStage.title = `Supernova Yields → Coalescing ${genTag} Nebula`;
+      activeGenesisStage.detail = `Seeded from Gen-${yields.progenitorGeneration} core (CNO ${(yields.fusedXCNO * 100).toFixed(3)}%, α/Fe ${(yields.fusedXAlphaFe * 100).toFixed(3)}%, [Fe/H]=${yields.feH.toFixed(2)}) · ${activeGenesisStage.detail}`;
+    }
+    return {
+      yields,
+      system: sys,
+      stage: getActiveGenesisPublicState()
+    };
+  }
+
   // ---- L4: Planetary Hydrostatic Interior (Inline WGSL Polytope Atlas) ----
-  async function initPlanetaryInterior({ bodyIndex = planetaryBodyIndex } = {}) {
+  async function initPlanetaryInterior({ bodyIndex = planetaryBodyIndex, observeLive = false, bypassCache = false } = {}) {
     const cat = getActiveSystemCatalog();
     let idx = Math.max(0, Math.min(cat.length - 1, Math.trunc(Number(bodyIndex) ?? planetaryBodyIndex)));
     if (cat[idx]?.isStar || idx === 0) {
@@ -1951,6 +3193,9 @@ export function createUlgUniversesPhysics(device, {
       if (alt > 0) idx = alt;
     }
     planetaryBodyIndex = idx;
+    if (activeGenesisStage?.level === 4) {
+      activeGenesisStage = null;
+    }
     const spec = cat[idx] || REAL_SOLAR_SYSTEM_CATALOG[3];
     const zCore = spec.coreZ || 26;
     const zMantle = spec.mantleZ || 14;
@@ -1987,10 +3232,11 @@ export function createUlgUniversesPhysics(device, {
     ]);
 
     const centralP = Math.max(5e9, Math.min(850e9, Number(spec.centralP) || 360e9));
+    const adaptiveRadialStepM = Math.min(35000, Math.max(250, Math.round(((Number(spec.radiusKm) || 6371) * 1000) / 48)));
     planetaryResult = await solvePlanetaryInteriorWebGpu(device, {
       centralPressurePa: centralP,
       surfacePressurePa: 1e5,
-      radialStepM: 35000,
+      radialStepM: adaptiveRadialStepM,
       maxRadiusM: 3.5e7,
       convergePasses: 3,
       maxProfileSamples: 128,
@@ -2096,6 +3342,192 @@ export function createUlgUniversesPhysics(device, {
       }
       planetaryAtmoSession = nextAtmo;
     }
+
+    // 3D Multi-Material WebGPU SPH Planetary/Moon/Asteroid/Comet Genesis (ZERO Perlin Continents!):
+    // Runs on EVERY solid-crust body (< 16,000 km) seeded from its GPU-coalesced material fractions!
+    if (planetaryGenesisSphSession) {
+      planetaryGenesisSphSession.dispose();
+      planetaryGenesisSphSession = null;
+      planetaryGenesisSphTelemetry = null;
+    }
+    if (planetaryDynamoSession) {
+      planetaryDynamoSession.dispose();
+      planetaryDynamoSession = null;
+      planetaryDynamoTelemetry = null;
+      planetaryDynamoStreamlines = new Float32Array(0);
+    }
+    planetaryGenesisLiveForm = false;
+    planetaryCoolingHeat = 0.0;
+    planetarySecularTick = 0;
+    const sphAct = evaluatePlanetaryGenesisSphActivation(spec);
+    if (sphAct.active) {
+      const w = getWorkloads();
+      const sphW = w.sphMapWidth;
+      const sphH = w.sphMapHeight;
+      const sphGridN = w.sphGridN;
+      const nextSph = createPlanetaryGenesisSphSessionWebGpu(device, spec, {
+        nebulaEnv: useSolReference ? null : activeCausalSystem?.starSystem?.nebulaEnv,
+        planetaryAtmoState,
+        planetaryMode,
+        systemAgeGyr: useSolReference ? 4.57 : (activeCausalSystem?.starSystem?.systemAgeGyr ?? 4.5),
+        parcelCount: w.sphParcels,
+        gridN: sphGridN,
+        mapWidth: sphW,
+        mapHeight: sphH,
+        targetSteps: observeLive ? w.l4TargetSteps : w.l4BurstSubsteps,
+        seed: (universeSeed ^ (idx * 2654435761 + (spec.id?.length || 3) * 131)) >>> 0,
+        label: `ulg-universes-sph-genesis-${spec.id || idx}`
+      });
+      const sphCacheKey = buildPlanetSphCacheKey(spec, idx, `${sphW}x${sphH}x${sphGridN}`);
+      const cachedSph = bypassCache ? null : await rootLineageCache.get(sphCacheKey);
+      const cachedGeoF32 = cachedSph?.packedGeo ? decodeFloat32Quantized(cachedSph.packedGeo) : null;
+      if (cachedGeoF32 && nextSph.hydrateGeologyMapSnapshot(cachedGeoF32, cachedSph.telemetry)) {
+        planetaryGenesisSphTelemetry = nextSph.getTelemetry();
+        planetaryGenesisLiveForm = false;
+        lastGenesisEvent = Object.freeze({
+          kind: 'cache-hit',
+          level: 4,
+          stage: 'l4-planetary-sph',
+          label: spec.name || `World #${idx}`,
+          source: 'root-cache',
+          timestampMs: Date.now()
+        });
+      } else if (observeLive) {
+        // Live Observable 3D GPU SPH + SS Multipole Planetary Differentiation right on screen!
+        // Warm-start 12 substeps so the 3D volumetric grid (Fe core + magma mantle) renders richly on frame 1!
+        planetaryGenesisSphTelemetry = await nextSph.step({
+          dt: 0.028,
+          substeps: 12,
+          updateSurfaceMap: true,
+          erosionPasses: 4,
+          readTelemetry: true
+        });
+        planetaryGenesisLiveForm = true;
+        planetaryCoolingHeat = 1.0;
+        activeGenesisStage = {
+          level: 4,
+          stage: 'l4-planetary-sph',
+          title: `Differentiating World via 3D SPH + SS Multipole (${activeCapabilityProfile.tier.toUpperCase()})`,
+          entityName: spec.name || `World #${idx}`,
+          detail: `Era 1: Iron Catastrophe · Core r=${(planetaryGenesisSphTelemetry?.coreMeanR || 0.5).toFixed(2)} · Crust r=${(planetaryGenesisSphTelemetry?.felsicMeanR || 0.7).toFixed(2)} · ${nextSph.parcelCount.toLocaleString()} SPH · ${nextSph.gridN}³ · ${sphW}×${sphH}`,
+          step: nextSph.stepIndex,
+          targetSteps: w.l4TargetSteps,
+          progress: Math.min(1, nextSph.stepIndex / Math.max(1, w.l4TargetSteps)),
+          cacheKey: sphCacheKey,
+          skipLabel: '⏩ Finish Formation',
+          startedMs: Date.now(),
+          _meta: { sphCacheKey, bodyIndex: idx, specName: spec.name || `World #${idx}` }
+        };
+        lastGenesisEvent = Object.freeze({
+          kind: 'genesis-started',
+          level: 4,
+          stage: 'l4-planetary-sph',
+          label: spec.name || `World #${idx}`,
+          source: 'live-gpu',
+          timestampMs: Date.now()
+        });
+      } else {
+        planetaryGenesisSphTelemetry = await nextSph.stepBurst({
+          totalSubsteps: w.l4BurstSubsteps,
+          chunkSize: 24,
+          dt: 0.028,
+          erosionPasses: w.sphErosionPasses,
+          readTelemetry: true
+        });
+        const snapF32 = await nextSph.exportGeologyMapSnapshot();
+        if (snapF32) {
+          const packedGeo = encodeFloat32Quantized(snapF32, 8000.0);
+          if (packedGeo) {
+            void rootLineageCache.set(sphCacheKey, {
+              packedGeo,
+              telemetry: planetaryGenesisSphTelemetry
+            }, { persist: true, broadcast: false });
+          }
+        }
+      }
+      planetaryGenesisSphSession = nextSph;
+      // Coupled Live 3D GPU Planetary Geodynamo driven STRICTLY by the live convecting Fe-Ni SPH core!
+      // Exact Star Spec null limit: non-conducting/dead cores (`bEqT <= 1e-7`) produce zero magnetic field!
+      const bEqT = Number(planetaryAtmoState?.dynamo?.bEquatorialT) || 0;
+      const dynActive = Boolean(bEqT > 1e-7 && !nextSph.genesisParams?.isMinorBody);
+      const bSeedPlan = dynActive ? Math.max(0.12, Math.min(0.65, Math.sqrt(Math.max(1e-7, bEqT) / 3.0e-5) * 0.34)) : 0.0;
+      if (bSeedPlan > 1e-6) {
+        const nextPlanDyn = createEmergent3dDynamoFieldWebGpu(device, {
+          gridN: 16,
+          boxSize: 3.3,
+          strideFloats: 16,
+          geometry: 'planetary',
+          initialB0: bSeedPlan,
+          alphaAmp: 0.24 * Math.max(0.35, Math.min(1.6, nextSph.genesisParams?.rotationOmegaNorm || 1.0)),
+          etaRes: 0.055,
+          bSat: 0.92,
+          velScale: 0.65,
+          label: `ulg-universes-planetary-geodynamo-${spec.id || idx}`
+        });
+        planetaryDynamoTelemetry = await nextPlanDyn.step({
+          particleBuffer: nextSph.getResidentParcelsBuffer(),
+          particleCount: nextSph.parcelCount,
+          dt: 0.045,
+          substeps: 6,
+          readTelemetry: true,
+          readBField: true
+        });
+        planetaryDynamoStreamlines = nextPlanDyn.buildStreamlines({ worldScale: 1.0, alpha: 0.42 });
+        planetaryDynamoSession = nextPlanDyn;
+      }
+    }
+    // Zooming into an active Comet triggers live solar-flux sublimation outgassing jets aligned strictly anti-solar!
+    if (spec.isComet) {
+      await initRadiativeWindL2('comet-tails', { bodyIndex: idx });
+    }
+  }
+
+  function setPlanetaryGenesisLiveForm(enabled) {
+    planetaryGenesisLiveForm = Boolean(enabled);
+    if (!planetaryGenesisLiveForm && activeGenesisStage?.stage === 'l4-planetary-sph') {
+      activeGenesisStage = null;
+    }
+    return planetaryGenesisLiveForm;
+  }
+
+  async function triggerPlanetSphGenesisReplay() {
+    if (!planetaryGenesisSphSession) {
+      await initPlanetaryInterior({ bodyIndex: planetaryBodyIndex, observeLive: true, bypassCache: true });
+      return planetaryGenesisSphTelemetry;
+    }
+    const w = getWorkloads();
+    const cat = getActiveSystemCatalog();
+    const spec = cat[planetaryBodyIndex] || REAL_SOLAR_SYSTEM_CATALOG[3];
+    const sphCacheKey = buildPlanetSphCacheKey(
+      spec,
+      planetaryBodyIndex,
+      `${planetaryGenesisSphSession.mapWidth}x${planetaryGenesisSphSession.mapHeight}x${planetaryGenesisSphSession.gridN}`
+    );
+    planetaryGenesisSphSession.resetToProtoplanet();
+    planetaryGenesisLiveForm = true;
+    planetaryCoolingHeat = 1.0;
+    planetaryGenesisSphTelemetry = await planetaryGenesisSphSession.step({
+      dt: 0.028,
+      substeps: 12,
+      updateSurfaceMap: true,
+      erosionPasses: 4,
+      readTelemetry: true
+    });
+    activeGenesisStage = {
+      level: 4,
+      stage: 'l4-planetary-sph',
+      title: `Differentiating World via 3D SPH + SS Multipole (${activeCapabilityProfile.tier.toUpperCase()})`,
+      entityName: spec?.name || `World #${planetaryBodyIndex}`,
+      detail: `Age ${Math.round(planetaryGenesisSphTelemetry?.geoTimeMyr || 0)} Myr · Core r=${(planetaryGenesisSphTelemetry?.coreMeanR || 0.5).toFixed(2)} · Crust r=${(planetaryGenesisSphTelemetry?.felsicMeanR || 0.7).toFixed(2)} · ${planetaryGenesisSphSession.parcelCount.toLocaleString()} SPH`,
+      step: planetaryGenesisSphSession.stepIndex,
+      targetSteps: w.l4TargetSteps,
+      progress: Math.min(1, planetaryGenesisSphSession.stepIndex / Math.max(1, w.l4TargetSteps)),
+      cacheKey: sphCacheKey,
+      skipLabel: '⏩ Finish Formation',
+      startedMs: Date.now(),
+      _meta: { sphCacheKey, bodyIndex: planetaryBodyIndex, specName: spec?.name || `World #${planetaryBodyIndex}` }
+    };
+    return planetaryGenesisSphTelemetry;
   }
 
   // ---- L5: Crystal & Fluid Molecular Dynamics ----
@@ -2263,17 +3695,20 @@ export function createUlgUniversesPhysics(device, {
             readTelemetry: true
           });
         } else if (cosmoSession) {
-          // Gently decelerate cosmic evolution once a(t) reaches present epoch (~1.0) so web stays crisp!
+          // Perpetual visible FLRW cosmic expansion through present epoch into dark-energy Λ domination (NEVER dead-stops!)
           const aCur = cosmoSession.getState().aScale;
-          if (aCur < 1.15) {
-            cosmoTelemetry = await cosmoSession.step({ readTelemetry: true });
-          }
+          const baseDlnA = cosmoBigBangMode ? 0.011 : 0.0016;
+          const taper = 1.0 / (1.0 + 0.30 * Math.max(0, aCur - 1.6));
+          const daDyn = Math.max(0.00018, aCur * baseDlnA * taper * Math.max(0.15, Math.min(3.0, effScale)));
+          cosmoTelemetry = await cosmoSession.step({ daOverride: daDyn, readTelemetry: true });
         }
       } else if (activeLevel === 1 && galaxyEngine) {
-        // Calm, dynamically stable galactic orbital evolution (prevents rapid artificial spiral winding!)
         const galEng = galaxyEngine;
-        const dt = 0.0018 * Math.max(0.08, Math.min(3.0, effScale));
-        await galEng.step({ dt, substeps: 1, gravity: 1.0, softening: 0.35, readback: false });
+        const wL1 = getWorkloads();
+        const isLiveGalGenesis = activeGenesisStage?.stage === 'l1-galaxy-collapse';
+        const dt = (isLiveGalGenesis ? 0.0048 : 0.0022) * Math.max(0.08, Math.min(3.0, effScale));
+        const substeps = isLiveGalGenesis ? Math.max(2, wL1.l1SubstepsPerFrame || 2) : 1;
+        await galEng.step({ dt, substeps, gravity: 1.0, softening: 0.65, readback: false });
         const dyn = galacticDynamoSession;
         if (dyn && galEng === galaxyEngine) {
           const readB = (galEng.stepIndex % 4) === 0;
@@ -2292,15 +3727,63 @@ export function createUlgUniversesPhysics(device, {
             }
           }
         }
+        if (isLiveGalGenesis && activeGenesisStage?.stage === 'l1-galaxy-collapse') {
+          activeGenesisStage.step = Math.min(activeGenesisStage.targetSteps, (activeGenesisStage.step || 0) + substeps);
+          activeGenesisStage.progress = activeGenesisStage.step / Math.max(1, activeGenesisStage.targetSteps);
+          const magE = Number(galacticDynamoTelemetry?.magneticEnergy || 0).toFixed(2);
+          activeGenesisStage.detail = `Step ${activeGenesisStage.step}/${activeGenesisStage.targetSteps} · ${galEng.count.toLocaleString()} stars collapsing · Dynamo E_B=${magE}`;
+          if (activeGenesisStage.step >= activeGenesisStage.targetSteps) {
+            await finalizeL1GalaxyGenesisInternal(false);
+          }
+        }
       } else if (activeLevel === 2) {
         if (galaxyBranch === 'smbh-core' && smbhEngine) {
           smbhBodies = await smbhEngine.step({ dt: 0.008 * Math.max(0.08, Math.min(3.0, effScale)), gravity: 1.0, softening: 0.08, readback: true });
-        } else if (solarMode === 'formation' && protoplanetarySession) {
-          protoplanetaryTelemetry = await protoplanetarySession.step({
-            dt: 0.016 * Math.max(0.12, Math.min(2.5, effScale)),
-            substeps: 2,
-            readTelemetry: true
-          });
+        } else if (solarMode === 'formation' && (nebularCoalescenceSession || protoplanetarySession)) {
+          if (nebularCoalescenceSession) {
+            const wL2 = getWorkloads();
+            const isLiveNebGenesis = activeGenesisStage?.stage === 'l2-nebular-coalescence';
+            const nebSub = isLiveNebGenesis
+              ? Math.max(6, wL2.l2SubstepsPerFrame || 20)
+              : Math.min(10, Math.max(4, Math.floor((wL2.l2SubstepsPerFrame || 16) * 0.5)));
+            const gravCad = Math.max(1, wL2.l2GravityCadence || 4);
+            const prevStep = nebularCoalescenceSession.stepIndex;
+            const nextStepEst = prevStep + nebSub;
+            const readAnn = Math.floor(prevStep / 48) !== Math.floor(nextStepEst / 48)
+              || (isLiveNebGenesis && nextStepEst >= activeGenesisStage.targetSteps);
+            nebularCoalescenceTelemetry = await nebularCoalescenceSession.step({
+              dt: 0.024 * Math.max(0.22, Math.min(2.4, effScale)),
+              substeps: nebSub,
+              gravityCadence: gravCad,
+              readTelemetry: true,
+              readAnnuli: readAnn
+            });
+            if (isLiveNebGenesis && activeGenesisStage?.stage === 'l2-nebular-coalescence') {
+              activeGenesisStage.step = Math.min(activeGenesisStage.targetSteps, nebularCoalescenceSession.stepIndex);
+              activeGenesisStage.progress = activeGenesisStage.step / Math.max(1, activeGenesisStage.targetSteps);
+              const d = nebularCoalescenceSession.getCoalescedDisk();
+              const t = nebularCoalescenceTelemetry;
+              const orbitsEst = ((nebularCoalescenceSession.stepIndex * 0.024) / 0.85).toFixed(1);
+              const pFrac = activeGenesisStage.progress;
+              const nClumps = d?.bodies?.length || 0;
+              const phaseNote = pFrac < 0.28
+                ? 'spiral density waves forming (worlds not yet settled)'
+                : (pFrac < 0.78
+                  ? `${nClumps} proto-clumps accreting & carving gaps (settling)`
+                  : `XUV clearing · ${nClumps} planets locking into N-body orbits`);
+              activeGenesisStage.detail = `${orbitsEst} orbits (${nebularCoalescenceSession.parcelCount.toLocaleString()} parcels) · ${phaseNote} · Fe ${Math.round((t?.meanFeFrac || 0) * 100)}% / Si ${Math.round((t?.meanSilicateFrac || 0) * 100)}% / Ice ${Math.round((t?.meanVolatileIceFrac || 0) * 100)}%`;
+              if (nebularCoalescenceSession.stepIndex >= activeGenesisStage.targetSteps) {
+                await finalizeL2NebularGenesisInternal();
+              }
+            }
+          }
+          if (protoplanetarySession && solarMode === 'formation') {
+            protoplanetaryTelemetry = await protoplanetarySession.step({
+              dt: 0.016 * Math.max(0.12, Math.min(2.5, effScale)),
+              substeps: 2,
+              readTelemetry: true
+            });
+          }
         } else if (solarMode === 'quasar-jet' && kerrJetSession) {
           kerrJetTelemetry = await kerrJetSession.step({
             dt: 0.028 * Math.max(0.12, Math.min(2.5, effScale)),
@@ -2332,18 +3815,52 @@ export function createUlgUniversesPhysics(device, {
           const substeps = Math.max(1, Math.min(48, Math.round((3 + 21 * Math.pow(zoomNorm, 1.25)) * Math.max(0.1, timeScale))));
           await solarEngine.step({ dtSubYr, substeps, readMassive: true });
           solarConservation = solarEngine.computeConservationDiagnostics();
+          // Keep active comet anti-solar dual tails continuously integrated in L2 overview too!
+          if (radWindL2Session && radWindL2Mode === 'comet-tails' && log10SpanM < 13.8) {
+            const catL2 = getActiveSystemCatalog();
+            const cometIdx = catL2[focusedSolarBodyIndex]?.isComet
+              ? focusedSolarBodyIndex
+              : catL2.findIndex((b) => Boolean(b?.isComet));
+            if (cometIdx > 0) {
+              const cVec = computeLiveCometSolarVectors(cometIdx);
+              radWindL2Telemetry = await radWindL2Session.step({
+                dt: 0.032 * Math.max(0.15, Math.min(2.2, effScale)),
+                substeps: 2,
+                sourceDir: cVec.sourceDir,
+                orbVelDir: cVec.orbVelDir,
+                sublimationDrive: cVec.sublimationDrive,
+                sunDistAu: cVec.sunDistAu,
+                readTelemetry: false
+              });
+            }
+          }
+          // Smooth continuous XUV dissipation of residual nebular gas after settling (ZERO abrupt cut!)
+          if (nebularSettleBlend > 0.004 && nebularCoalescenceSession) {
+            await nebularCoalescenceSession.step({
+              dt: 0.016 * Math.max(0.2, Math.min(1.6, effScale)),
+              substeps: 2,
+              gravityCadence: 4,
+              readTelemetry: false,
+              readAnnuli: false
+            });
+            nebularSettleBlend = Math.max(0.0, nebularSettleBlend - 0.0042);
+          }
         }
       } else if (activeLevel === 3) {
         if (stellarMode === 'nebular-mhd' && nebulaMhdSession) {
-          const readB = (nebulaMhdSession.stepIndex % 4) === 0;
-          nebulaMhdTelemetry = await nebulaMhdSession.step({
+          const nebMhdRef = nebulaMhdSession;
+          const readB = (nebMhdRef.stepIndex % 4) === 0;
+          const nextNebTel = await nebMhdRef.step({
             dt: 0.022 * Math.max(0.12, Math.min(2.2, effScale)),
             substeps: 1,
             readTelemetry: true,
             readBFieldForStreamlines: readB
           });
-          if (readB) {
-            nebulaMhdStreamlines = nebulaMhdSession.buildMagneticFieldStreamlines({ worldScale: 1.0, alpha: 0.68 });
+          if (nebMhdRef === nebulaMhdSession && nebulaMhdSession) {
+            nebulaMhdTelemetry = nextNebTel;
+            if (readB) {
+              nebulaMhdStreamlines = nebulaMhdSession.buildMagneticFieldStreamlines({ worldScale: 1.0, alpha: 0.68 });
+            }
           }
         } else if (['h2-pillars', 'planetary-nebula', 'snr-pwn', 'reflection-nebula', 'wr-bubble'].includes(stellarMode) && radWindL3Session) {
           radWindL3Telemetry = await radWindL3Session.step({
@@ -2358,22 +3875,31 @@ export function createUlgUniversesPhysics(device, {
             readTelemetry: true
           });
         } else if ((stellarMode === 'pulsar' || stellarMode === 'magnetar') && magnetosphereSession) {
-          const readMagB = (magnetosphereSession.stepIndex % 4) === 0;
-          magnetosphereTelemetry = await magnetosphereSession.step({
+          const magRef = magnetosphereSession;
+          const readMagB = (magRef.stepIndex % 4) === 0;
+          const nextMagTel = await magRef.step({
             dt: 0.036 * Math.max(0.12, Math.min(2.5, effScale)),
             substeps: 2,
             readTelemetry: true,
             readBField: readMagB
           });
-          if (readMagB) {
-            magnetosphereFieldLines = magnetosphereSession.buildDipoleFieldLines({ linesPerRing: 16, steps: 32, worldScale: 1.0, alpha: 0.74 });
+          if (magRef === magnetosphereSession && magnetosphereSession) {
+            magnetosphereTelemetry = nextMagTel;
+            if (readMagB) {
+              magnetosphereFieldLines = magnetosphereSession.buildDipoleFieldLines({ linesPerRing: 16, steps: 32, worldScale: 1.0, alpha: 0.74 });
+            }
           }
         } else if (stellarMode === 'white-dwarf-tov') {
           // Static GR TOV equilibrium curve already solved on WebGPU
         } else if (stellarEngine) {
           const stEng = stellarEngine;
+          const wL3 = getWorkloads();
+          const stSub = stEng.solver === 'webgpu-3d-mls-mpm-nuclear-fusion'
+            ? Math.max(1, wL3.l3SubstepsPerFrame || 2)
+            : 1;
           const nextStTel = await stEng.step({
             dt: 0.014 * Math.max(0.12, Math.min(2.5, effScale)),
+            substeps: stSub,
             timeAccel: stellarTimeAccel,
             readTelemetry: true
           });
@@ -2441,12 +3967,109 @@ export function createUlgUniversesPhysics(device, {
             const len = Math.hypot(dx, dy, dz) || 1;
             sunDir = [dx / len, dy / len, dz / len];
           }
-          // Dynamically step spherical baroclinic fluid + triboelectric lightning ONLY when active!
+          // Continuous Live 3D GPU SPH Planetary Interior & Emergent Core Geodynamo!
+          //   - Formation Gear (`planetaryGenesisLiveForm === true`): rapid geologic evolution (6-8 substeps/frame)
+          //   - Secular Live Gear (`planetaryGenesisLiveForm === false`): NEVER STOPS — keeps convecting the Fe-Ni core
+          //     & silicate mantle at a gentle secular rate (1 substep/frame) driving the live 3D GPU Geodynamo B(x,y,z)!
+          let livePlanDynamoScale = null;
+          if (planetaryGenesisSphSession) {
+            const w = getWorkloads();
+            planetarySecularTick += 1;
+            if (planetaryGenesisLiveForm) {
+              const isLiveSphGenesis = activeGenesisStage?.stage === 'l4-planetary-sph';
+              const sphSub = isLiveSphGenesis ? Math.max(2, w.l4SubstepsPerFrame || 6) : 2;
+              const prevIdx = planetaryGenesisSphSession.stepIndex;
+              const nextIdxEst = prevIdx + sphSub;
+              // Update spherical SPH geology map frequently during Era 2-4 so solidifying crust & cooling fissures emerge continuously!
+              const mapCadence = Math.max(4, Math.min(16, w.l4MapUpdateCadence || 16));
+              const shouldProjectMap = !isLiveSphGenesis
+                || Math.floor(prevIdx / mapCadence) !== Math.floor(nextIdxEst / mapCadence)
+                || nextIdxEst >= (activeGenesisStage?.targetSteps || 240);
+              const liveErosion = shouldProjectMap ? 4 : 0;
+              planetaryGenesisSphTelemetry = await planetaryGenesisSphSession.step({
+                dt: 0.028 * Math.max(0.30, Math.min(2.2, effScale)),
+                substeps: sphSub,
+                updateSurfaceMap: shouldProjectMap,
+                erosionPasses: liveErosion,
+                readTelemetry: isLiveSphGenesis || (nextIdxEst % 8) === 0
+              });
+              if (isLiveSphGenesis && activeGenesisStage?.stage === 'l4-planetary-sph') {
+                activeGenesisStage.step = Math.min(activeGenesisStage.targetSteps, planetaryGenesisSphSession.stepIndex);
+                const prog = activeGenesisStage.step / Math.max(1, activeGenesisStage.targetSteps);
+                activeGenesisStage.progress = prog;
+                // Continuous radiative cooling curve: incandescent magma (1.0) -> solidifying crust (0.65) -> condensing steam/oceans (0.28)
+                planetaryCoolingHeat = Math.max(0.18, Math.min(1.0, 1.0 - Math.max(0, (prog - 0.35) / 0.65) * 0.72));
+                const eraLabel = prog < 0.25
+                  ? 'Era 1: Iron Catastrophe'
+                  : (prog < 0.55
+                    ? 'Era 2: Mantle Convection & Crust Solidification'
+                    : (prog < 0.80 ? 'Era 3: Late Heavy Bombardment & Cooling' : 'Era 4: Steam Rainout & Ocean Erosion'));
+                const st = planetaryGenesisSphTelemetry;
+                if (st) {
+                  activeGenesisStage.detail = `${eraLabel} · ${Math.round(st.geoTimeMyr)} Myr · Core r=${st.coreMeanR.toFixed(2)} · Crust r=${st.felsicMeanR.toFixed(2)} · Diff ${st.differentiationIndex.toFixed(2)} · ${planetaryGenesisSphSession.parcelCount.toLocaleString()} SPH`;
+                }
+                if (planetaryGenesisSphSession.stepIndex >= activeGenesisStage.targetSteps) {
+                  await finalizeL4PlanetarySphGenesisInternal();
+                }
+              }
+            } else {
+              // Continuous Secular Live Gear: gentle ongoing outer-core & mantle convection powering live geodynamo!
+              // Smoothly cool any remaining post-genesis magma heat down to equilibrium T_eq over ~5-7 seconds (ZERO 1-frame snap!)
+              if (planetaryCoolingHeat > 0.002) {
+                planetaryCoolingHeat = Math.max(0.0, planetaryCoolingHeat - 0.0028 * Math.max(0.3, Math.min(2.2, effScale)));
+              }
+              const secSub = Math.max(1, w.l4SecularSubstepsPerFrame || 1);
+              planetaryGenesisSphTelemetry = await planetaryGenesisSphSession.step({
+                dt: 0.014 * Math.max(0.25, Math.min(2.0, effScale)),
+                substeps: secSub,
+                updateSurfaceMap: false,
+                erosionPasses: 0,
+                readTelemetry: (planetarySecularTick % 12) === 0
+              });
+            }
+            const pDyn = planetaryDynamoSession;
+            if (pDyn && (planetarySecularTick % 3) === 0) {
+              const readPlanB = (planetarySecularTick % 6) === 0;
+              const nextPDyn = await pDyn.step({
+                particleBuffer: planetaryGenesisSphSession.getResidentParcelsBuffer(),
+                particleCount: planetaryGenesisSphSession.parcelCount,
+                dt: 0.036 * Math.max(0.20, Math.min(2.0, effScale)),
+                substeps: 1,
+                readTelemetry: readPlanB,
+                readBField: readPlanB
+              });
+              if (pDyn === planetaryDynamoSession) {
+                planetaryDynamoTelemetry = nextPDyn;
+                if (readPlanB) {
+                  planetaryDynamoStreamlines = pDyn.buildStreamlines({ worldScale: 1.0, alpha: 0.42 });
+                }
+              }
+            }
+            if (planetaryDynamoTelemetry && Number.isFinite(planetaryDynamoTelemetry.magneticEnergy)) {
+              livePlanDynamoScale = Math.max(0.25, Math.min(1.85, Math.sqrt(Math.max(0.02, planetaryDynamoTelemetry.magneticEnergy) / 0.18)));
+            }
+          }
+          // Dynamically step spherical baroclinic fluid + triboelectric lightning + LIVE GEODYNAMO AURORAE!
           if (planetaryAtmoSession) {
             planetaryAtmoTelemetry = await planetaryAtmoSession.step({
               dtSim: 0.038 * Math.max(0.15, Math.min(2.5, effScale)),
               substeps: 2,
               sunDir,
+              dynamoScale: livePlanDynamoScale,
+              readTelemetry: true
+            });
+          }
+          // Live Solar-Flux Sublimation Outgassing Jets when orbiting an active Comet — strictly anti-solar & velocity-aligned!
+          const focSpecL4 = getActiveSystemCatalog()[planetaryBodyIndex];
+          if (focSpecL4?.isComet && radWindL2Session && radWindL2Mode === 'comet-tails') {
+            const cVec = computeLiveCometSolarVectors(planetaryBodyIndex);
+            radWindL2Telemetry = await radWindL2Session.step({
+              dt: 0.034 * Math.max(0.15, Math.min(2.5, effScale)),
+              substeps: 2,
+              sourceDir: cVec.sourceDir,
+              orbVelDir: cVec.orbVelDir,
+              sublimationDrive: cVec.sublimationDrive,
+              sunDistAu: cVec.sunDistAu,
               readTelemetry: true
             });
           }
@@ -2614,7 +4237,7 @@ export function createUlgUniversesPhysics(device, {
   async function ensureLevelInitialized(level, opts = {}) {
     if (level === 0 && cosmoSession) return;
     if (level === 1 && galaxyEngine) return;
-    if (level === 2 && (galaxyBranch === 'smbh-core' ? smbhEngine : solarEngine)) return;
+    if (level === 2 && (galaxyBranch === 'smbh-core' ? smbhEngine : (solarEngine || (solarMode === 'formation' && nebularCoalescenceSession)))) return;
     if (level === 3) {
       if (stellarMode === 'fusion' && stellarEngine) return;
       if ((stellarMode === 'pulsar' || stellarMode === 'magnetar') && magnetosphereSession && magnetosphereMode === stellarMode) return;
@@ -2623,12 +4246,23 @@ export function createUlgUniversesPhysics(device, {
       if (stellarMode === 'nebular-mhd' && nebulaMhdSession) return;
       if (['h2-pillars', 'planetary-nebula', 'snr-pwn', 'reflection-nebula', 'wr-bubble'].includes(stellarMode) && radWindL3Session && radWindL3Mode === stellarMode) return;
     }
-    if (level === 4 && planetaryResult) return;
+    let targetPlanetIdx = planetaryBodyIndex;
+    if (level === 4) {
+      const cat = getActiveSystemCatalog();
+      targetPlanetIdx = opts.bodyIndex != null
+        ? Math.max(0, Math.min(cat.length - 1, Math.trunc(Number(opts.bodyIndex) || 0)))
+        : ((!cat[focusedSolarBodyIndex]?.isStar && focusedSolarBodyIndex > 0) ? focusedSolarBodyIndex : planetaryBodyIndex);
+      if (cat[targetPlanetIdx]?.isStar || targetPlanetIdx === 0) {
+        const alt = getDefaultPlanetIndex(cat);
+        if (alt > 0) targetPlanetIdx = alt;
+      }
+      if (planetaryResult && planetaryBodyIndex === targetPlanetIdx) return;
+    }
     if (level === 5 && mdSession) return;
     if (level === 6 && orbitalCloud) return;
     if (level === 7 && nuclearResult) return;
 
-    const k = level === 2 ? `2:${galaxyBranch}` : String(level);
+    const k = level === 2 ? `2:${galaxyBranch}` : (level === 4 ? `4:${targetPlanetIdx}` : String(level));
     if (initInFlight.has(k)) return initInFlight.get(k);
     const p = (async () => {
       if (level === 0) await initCosmicWeb(opts);
@@ -2639,7 +4273,7 @@ export function createUlgUniversesPhysics(device, {
       } else if (level === 3) {
         if (stellarMode !== 'fusion') await setStellarMode(stellarMode);
         else await initStellarCore(opts);
-      } else if (level === 4) await initPlanetaryInterior(opts);
+      } else if (level === 4) await initPlanetaryInterior({ ...opts, bodyIndex: targetPlanetIdx });
       else if (level === 5) await initMolecularDynamics(opts);
       else if (level === 6) await initQuantumAtom(opts);
       else if (level === 7) await initAtomicNucleus(opts);
@@ -2649,8 +4283,13 @@ export function createUlgUniversesPhysics(device, {
   }
 
   function setQuality(nextId) {
-    if (!QUALITY_PRESETS[nextId]) return false;
-    quality = QUALITY_PRESETS[nextId];
+    if (nextId !== 'auto' && !QUALITY_PRESETS[nextId]) return false;
+    qualityMode = nextId;
+    activeCapabilityProfile = buildPeerComputeSimulationProfile(baseCapabilities || {}, {
+      device,
+      qualityMode
+    });
+    quality = QUALITY_PRESETS[activeCapabilityProfile.qualityId] || QUALITY_PRESETS.med;
     return true;
   }
   function setSeed(nextSeed) { universeSeed = (Number(nextSeed) >>> 0) || 1; }
@@ -2893,8 +4532,8 @@ export function createUlgUniversesPhysics(device, {
     }
   }
   function setCosmoFocusMpc(posMpc) {
-    if (Array.isArray(posMpc) && posMpc.length >= 3 && cosmoTargets.length > 0) {
-      cosmoTargets[0] = { ...cosmoTargets[0], posMpc: [Number(posMpc[0]) || 0, Number(posMpc[1]) || 0, Number(posMpc[2]) || 0] };
+    if (Array.isArray(posMpc) && posMpc.length >= 3) {
+      cosmoFocusMpc = [Number(posMpc[0]) || 0, Number(posMpc[1]) || 0, Number(posMpc[2]) || 0];
     }
   }
   function setPlanetaryTriboelectric(enabled) {
@@ -2977,7 +4616,10 @@ export function createUlgUniversesPhysics(device, {
       }
       if (!planetaryResult || planetaryBodyIndex !== idx) {
         await initPlanetaryInterior({ bodyIndex: idx });
+      } else if (activeGenesisStage?.stage === 'l4-planetary-sph') {
+        await finalizeActiveGenesis();
       }
+      if (myEnterToken !== surfaceEnterToken) return null;
       spec = cat[idx] || REAL_SOLAR_SYSTEM_CATALOG[3];
       surfAtmoState = planetaryAtmoState;
     }
@@ -2996,15 +4638,60 @@ export function createUlgUniversesPhysics(device, {
     surfaceCraterDirty = false;
 
     surfaceLandingSite = landingSite || null;
+    // Seamless Orbit <-> Surface SPH Geology Patch Extraction!
+    // Crop the exact (latDeg, lonDeg) touchdown zone from this body's live 3D GPU SPH geology buffer
+    // (or run a fast 1-submit SPH genesis burst for visited custom minor asteroids/comets!)
+    let sphSurfacePatch = null;
+    if (evaluatePlanetaryGenesisSphActivation(spec).active) {
+      let sphSource = (!customSurfaceBodySpec && planetaryGenesisSphSession) ? planetaryGenesisSphSession : null;
+      let tempSphSession = null;
+      if (!sphSource) {
+        tempSphSession = createPlanetaryGenesisSphSessionWebGpu(device, spec, {
+          nebulaEnv: useSolReference ? null : activeCausalSystem?.starSystem?.nebulaEnv,
+          planetaryAtmoState: surfAtmoState,
+          planetaryMode: customSurfaceBodySpec ? 'standard' : planetaryMode,
+          systemAgeGyr: useSolReference ? 4.57 : (activeCausalSystem?.starSystem?.systemAgeGyr ?? 4.5),
+          parcelCount: 2048,
+          mapWidth: 256,
+          mapHeight: 128,
+          seed: (universeSeed ^ ((Number(idx) || 13) * 7919 + (spec.id?.length || 5) * 997)) >>> 0,
+          label: `ulg-surface-sph-patch-${spec.id || idx}`
+        });
+        await tempSphSession.step({ dt: 0.032, substeps: 32, updateSurfaceMap: true, erosionPasses: 10, readTelemetry: false });
+        sphSource = tempSphSession;
+      }
+      if (myEnterToken === surfaceEnterToken && sphSource) {
+        try {
+          sphSurfacePatch = await sphSource.extractLocalSurfacePatch({
+            latDeg: surfaceLandingSite?.latDeg ?? 32.0,
+            lonDeg: surfaceLandingSite?.lonDeg ?? 0.0,
+            patchN: 256,
+            angularSpanRad: spec.isMinorBody ? 0.56 : 0.34,
+            erosionPasses: 40
+          });
+        } catch {
+          sphSurfacePatch = null;
+        }
+      }
+      if (tempSphSession) {
+        try { tempSphSession.dispose(); } catch {}
+      }
+      if (myEnterToken !== surfaceEnterToken) {
+        try { sphSurfacePatch?.dispose?.(); } catch {}
+        return null;
+      }
+    }
+    const wSurf = getWorkloads();
     const nextSurf = createPlanetarySurfaceSessionWebGpu(device, {
       bodySpec: spec,
       planetaryResult,
       planetaryAtmoState: surfAtmoState,
       planetaryMode: customSurfaceBodySpec ? 'standard' : planetaryMode,
       landingSite: surfaceLandingSite,
-      gridN: quality.id === 'low' ? 81 : 129,
+      sphSurfacePatch,
+      gridN: wSurf.surfaceGridN,
       cellSizeM: 9.5,
-      particleCount: quality.id === 'low' ? 1024 : 2048,
+      particleCount: wSurf.surfaceParticles,
       seed: (universeSeed ^ ((Number(idx) || 13) * 7919 + (spec.id?.length || 5) * 997 + 0x504face)) >>> 0,
       initialVehicle,
       initialCheckpoint: restoreCheckpoint,
@@ -3211,7 +4898,7 @@ export function createUlgUniversesPhysics(device, {
    * - Entering orbit around the selected body (`L4` planet / `L3` star) or landing on it (`surfaceActive`):
    *   smoothly transitions to the selected body's exact double-float co-moving orbital frame.
    */
-  function getSolarReferenceOriginAu(spanLog10M = 12.6, focusIdxOverride = null) {
+  function getSolarReferenceOriginAu(spanLog10M = 12.6, focusIdxOverride = null, { lockToTarget = false } = {}) {
     if (!solarEngine) {
       return { originAu: [0, 0, 0], barycenterAu: [0, 0, 0], focusPosAu: [0, 0, 0], orbitBlend: 0, frameMode: 'barycenter' };
     }
@@ -3223,12 +4910,18 @@ export function createUlgUniversesPhysics(device, {
     const focusSt = solarEngine.getMassiveBodyState64(safeIdx);
     const barycenterAu = computeSolarBarycenterAu();
 
-    // Blend window: stays 100% barycentric across the entire L2 solar-system overview,
-    // and smoothly locks into the selected body's co-moving frame only when zooming into orbit (L4/L3) or landing!
-    const hiSpan = isStar ? 10.1 : 9.45;
-    const loSpan = isStar ? 9.4 : 8.65;
+    // Scale blend window dynamically to the selected body's orbital distance so zooming IN on outer worlds
+    // (Saturn, Jupiter, Uranus, Halley) smoothly glides onto the target instead of letting it fly off-screen!
+    const rBodyAu = Math.hypot(
+      focusSt.posAu[0] - barycenterAu[0],
+      focusSt.posAu[1] - barycenterAu[1],
+      focusSt.posAu[2] - barycenterAu[2]
+    );
+    const dynHi = isStar ? 10.6 : Math.max(10.8, Math.min(13.8, Math.log10(Math.max(0.28, rBodyAu) * AU_METERS * 3.8)));
+    const hiSpan = dynHi;
+    const loSpan = dynHi - 1.15;
     let orbitBlend = 0.0;
-    if (surfaceActive || spanLog10M <= loSpan) {
+    if (surfaceActive || lockToTarget || spanLog10M <= loSpan) {
       orbitBlend = 1.0;
     } else if (spanLog10M < hiSpan) {
       const t = (hiSpan - spanLog10M) / (hiSpan - loSpan);
@@ -3299,6 +4992,7 @@ export function createUlgUniversesPhysics(device, {
       const off = worldScaleInfo.cosmoOffset ?? [0, 0, 0];
       return cosmoTargets.map((t) => ({
         ...t,
+        rawPosMpc: [...t.posMpc],
         pos: [
           (t.posMpc[0] - off[0]) * sc,
           (t.posMpc[1] - off[1]) * sc,
@@ -3311,6 +5005,7 @@ export function createUlgUniversesPhysics(device, {
       const off = worldScaleInfo.galaxyOffset ?? [0, 0, 0];
       return galaxyTargets.map((t) => ({
         ...t,
+        rawPos: [...t.pos],
         pos: [
           (t.pos[0] - off[0]) * sc,
           (t.pos[1] - off[1]) * sc,
@@ -3421,16 +5116,40 @@ export function createUlgUniversesPhysics(device, {
           nextLevel: 3
         }];
       }
+      if (solarMode === 'formation') {
+        const st0 = activeCausalSystem?.catalog?.[0] || activeCausalSystem?.starSystem?.stars?.[0] || null;
+        const snowAu = nebularCoalescenceSession?.snowLineAu || protoplanetarySession?.snowLineAu || 2.71;
+        const nProto = nebularCoalescenceSession?.getCoalescedDisk?.()?.bodies?.length || 0;
+        const nParcels = nebularCoalescenceSession?.parcelCount || protoplanetarySession?.pebbleCount || 3072;
+        const nebProg = activeGenesisStage?.stage === 'l2-nebular-coalescence' ? (activeGenesisStage.progress || 0) : 1.0;
+        const nebPhaseTxt = nebProg < 0.28
+          ? 'spiral density waves collapsing (worlds not yet settled)'
+          : `${nProto} proto-clumps condensing & settling`;
+        return [{
+          id: 'l2-nebular-formation',
+          level: 2,
+          name: `${activeCausalSystem?.systemName || 'Proto-System'} · Nebular Coalescence`,
+          subtitle: `Live WebGPU Disk (${nParcels.toLocaleString()} parcels) · Snow Line ${snowAu.toFixed(2)} AU · ${nebPhaseTxt}`,
+          pos: [0, 0, 0],
+          radius: 1.5,
+          tempK: Number(st0?.tempK || st0?.teffK || 5778),
+          massLabel: `${Number(st0?.massSolar || 1.0).toFixed(2)} M☉`,
+          composition: `Host Star L=${Number(st0?.luminositySolar || 1.0).toFixed(2)} L☉ · Condensing Fe-Ni, SiO₂, C-SiC, H₂O & CO/CH₄`,
+          nextLevel: 2
+        }];
+      }
       if (!solarEngine) return [];
       const cat = getActiveSystemCatalog();
       const spanM = worldScaleInfo.solarSpanLog10M ?? 12.6;
-      const refOrigin = getSolarReferenceOriginAu(spanM);
+      const originAu = Array.isArray(worldScaleInfo.solarOriginAu)
+        ? worldScaleInfo.solarOriginAu
+        : getSolarReferenceOriginAu(spanM).originAu;
       const scaleAuToWorld = worldScaleInfo.solarScaleAuToWorld ?? 1.0;
       return cat.map((spec, idx) => {
         const st = solarEngine.getMassiveBodyState64(idx);
-        const relX = (st.posAu[0] - refOrigin.originAu[0]) * scaleAuToWorld;
-        const relY = (st.posAu[1] - refOrigin.originAu[1]) * scaleAuToWorld;
-        const relZ = (st.posAu[2] - refOrigin.originAu[2]) * scaleAuToWorld;
+        const relX = (st.posAu[0] - originAu[0]) * scaleAuToWorld;
+        const relY = (st.posAu[1] - originAu[1]) * scaleAuToWorld;
+        const relZ = (st.posAu[2] - originAu[2]) * scaleAuToWorld;
         const isStarBody = Boolean(spec.isStar) || idx === 0;
         return {
           id: spec.id,
@@ -3523,18 +5242,23 @@ export function createUlgUniversesPhysics(device, {
       const burn = getGate1StellarBurnConstants();
       const isMpm = stellarEngine?.solver === 'webgpu-3d-mls-mpm-nuclear-fusion';
       const vConv = Number(stellarTelemetry?.convectiveRmsVel || 0);
+      const stGrid = stellarEngine?.gridN || 24;
+      const genLbl = stellarTelemetry?.generationLabel || stellarEngine?.generationLabel || '3rd-Gen Pop I';
+      const domCh = stellarTelemetry?.dominantChannel || 'pp-chain (4 ¹H → ⁴He)';
+      const xCnoPct = ((stellarTelemetry?.meanXCNO ?? 0) * 100).toFixed(3);
+      const xAFePct = ((stellarTelemetry?.meanXAlphaFe ?? 0) * 100).toFixed(3);
       return [{
         id: 'stellar-fusion-core',
         level: 3,
-        name: isMpm ? '3D GPU MLS-MPM Fusion Star' : 'Thermonuclear Fusion Core',
+        name: isMpm ? `${genLbl} · 3D MLS-MPM Fusion` : 'Thermonuclear Fusion Core',
         subtitle: isMpm
-          ? `24³ MLS-MPM Plasma + Gate 1 pp/CNO/3α · Q_pp = ${burn.ppThermalMeV.toFixed(2)} MeV · v_conv = ${vConv.toFixed(2)}`
+          ? `${stGrid}³ MLS-MPM + SS Multipole · ${domCh} · Q_pp = ${burn.ppThermalMeV.toFixed(2)} MeV · v_conv = ${vConv.toFixed(2)}`
           : `Gate 1 pp/CNO/3α Burn · Q_pp = ${burn.ppThermalMeV.toFixed(2)} MeV`,
         pos: [0, 0, 0],
         radius: 1.8,
         tempK: stellarTelemetry?.coreTempK || 1.5e7,
         massLabel: `${(stellarEngine?.totalMassSolar || 1.0).toFixed(2)} M☉`,
-        composition: `H ${((stellarTelemetry?.meanXH ?? 0.72) * 100).toFixed(1)}% · He ${((stellarTelemetry?.meanXHe ?? 0.26) * 100).toFixed(1)}% · Metals ${((stellarTelemetry?.meanXZ ?? 0.02) * 100).toFixed(1)}%`,
+        composition: `H ${((stellarTelemetry?.meanXH ?? 0.72) * 100).toFixed(1)}% · He ${((stellarTelemetry?.meanXHe ?? 0.26) * 100).toFixed(1)}% · CNO ${xCnoPct}% · α/Fe ${xAFePct}%`,
         nextLevel: 4
       }];
     }
@@ -3660,6 +5384,7 @@ export function createUlgUniversesPhysics(device, {
     try { smbhEngine?.dispose(); } catch {}
     try { solarEngine?.dispose(); } catch {}
     try { protoplanetarySession?.dispose(); } catch {}
+    try { nebularCoalescenceSession?.dispose(); } catch {}
     try { kerrJetSession?.dispose(); } catch {}
     try { relBinarySession?.dispose(); } catch {}
     try { radWindL2Session?.dispose(); } catch {}
@@ -3670,6 +5395,7 @@ export function createUlgUniversesPhysics(device, {
     try { radWindL3Session?.dispose(); } catch {}
     try { magnetosphereSession?.dispose(); } catch {}
     try { planetaryAtmoSession?.dispose(); } catch {}
+    try { planetaryGenesisSphSession?.dispose(); } catch {}
     try { cryoPlumeSession?.dispose(); } catch {}
     try { surfaceSession?.dispose(); } catch {}
     try { mdSession?.destroy(); } catch {}
@@ -3685,6 +5411,9 @@ export function createUlgUniversesPhysics(device, {
     get seed() { return universeSeed; },
     get busy() { return busy; },
     get quality() { return quality; },
+    get qualityMode() { return qualityMode; },
+    get capabilityProfile() { return activeCapabilityProfile; },
+    get lastSupernovaYields() { return lastSupernovaYields; },
     get cosmicEpochId() { return cosmicEpochId; },
     get cosmicEpoch() { return cosmicEpoch; },
     get activeGalaxyEnv() { return activeGalaxyEnv; },
@@ -3708,6 +5437,7 @@ export function createUlgUniversesPhysics(device, {
     get cosmoScaleFactorA() { return cosmoSession?.getState?.()?.aScale ?? 1.0; },
     get cosmoFirstPk() { return cosmoFirstPk; },
     get cosmoTargets() { return cosmoTargets; },
+    get cosmoFocusMpc() { return cosmoFocusMpc; },
     get cosmoBaryonSession() { return cosmoBaryonSession; },
     get cosmoBaryonTelemetry() { return cosmoBaryonTelemetry; },
     get galaxyEngine() { return galaxyEngine; },
@@ -3716,6 +5446,7 @@ export function createUlgUniversesPhysics(device, {
     get galacticDynamoStreamlines() { return galacticDynamoStreamlines; },
     get galacticB0() { return galacticB0; },
     get galaxyPreset() { return galaxyPreset; },
+    get galaxyIcRegimeLabel() { return galaxyIcRegimeLabel; },
     get galaxyMetallicity() { return galaxyMetallicity; },
     get galaxyFocusPos() { return galaxyFocusPos; },
     get galaxyBranch() { return galaxyBranch; },
@@ -3728,6 +5459,8 @@ export function createUlgUniversesPhysics(device, {
     get protoplanetarySession() { return protoplanetarySession; },
     get protoplanetaryTelemetry() { return protoplanetaryTelemetry; },
     get protoplanetaryGasDrag() { return protoplanetaryGasDrag; },
+    get nebularCoalescenceSession() { return nebularCoalescenceSession; },
+    get nebularCoalescenceTelemetry() { return nebularCoalescenceTelemetry; },
     get kerrJetSession() { return kerrJetSession; },
     get kerrJetTelemetry() { return kerrJetTelemetry; },
     get kerrSpinA() { return kerrSpinA; },
@@ -3762,6 +5495,7 @@ export function createUlgUniversesPhysics(device, {
     get stellarNuclearNetwork() { return stellarNuclearNetwork; },
     get stellarLaneEmden() { return stellarLaneEmden; },
     get stellarTimeAccel() { return stellarTimeAccel; },
+    get stellarCutaway() { return stellarCutaway; },
     get planetaryMode() { return planetaryMode; },
     get planetaryResult() { return planetaryResult; },
     get planetaryBodyIndex() { return planetaryBodyIndex; },
@@ -3770,6 +5504,18 @@ export function createUlgUniversesPhysics(device, {
     get planetaryAtmoSession() { return planetaryAtmoSession; },
     get planetaryAtmoTelemetry() { return planetaryAtmoTelemetry; },
     get planetaryTriboelectric() { return planetaryTriboelectric; },
+    get planetaryGenesisSphSession() { return planetaryGenesisSphSession; },
+    get planetaryGenesisSphTelemetry() { return planetaryGenesisSphTelemetry; },
+    get planetaryGenesisLiveForm() { return planetaryGenesisLiveForm; },
+    get planetaryCoolingHeat() { return planetaryCoolingHeat; },
+    get galaxyCenterOfMass() { return galaxyEngine?.getCenterOfMass?.() || [0, 0, 0]; },
+    get nebulaCenterOfMass() { return nebularCoalescenceSession?.getCenterOfMass?.() || [0, 0, 0]; },
+    get planetaryDynamoSession() { return planetaryDynamoSession; },
+    get planetaryDynamoTelemetry() { return planetaryDynamoTelemetry; },
+    get planetaryDynamoStreamlines() { return planetaryDynamoStreamlines; },
+    get activeGenesisStage() { return getActiveGenesisPublicState(); },
+    get lastGenesisEvent() { return lastGenesisEvent; },
+    get nebularSettleBlend() { return nebularSettleBlend; },
     get cryoPlumeSession() { return cryoPlumeSession; },
     get cryoPlumeTelemetry() { return cryoPlumeTelemetry; },
     get surfaceActive() { return surfaceActive; },
@@ -3824,6 +5570,7 @@ export function createUlgUniversesPhysics(device, {
     initCompactMagnetosphere,
     initWhiteDwarfTovCurve,
     initStellarCore,
+    detonateCoreSeedNextGeneration,
     initPlanetaryInterior,
     initCryoPlumesL4,
     initMolecularDynamics,
@@ -3842,6 +5589,42 @@ export function createUlgUniversesPhysics(device, {
     setPlanetaryCutaway,
     setPlanetaryTriboelectric,
     setPlanetaryMode,
+    setPlanetaryGenesisLiveForm,
+    triggerPlanetSphGenesisReplay,
+    crystallizeCoalescedSystem,
+    triggerGalaxyCoalescence,
+    finalizeActiveGenesis,
+    getRootLineageCacheStats: () => rootLineageCache.getStats(),
+    getSphGeologySnapshot: () => planetaryGenesisSphSession?.getCachedGeologySnapshot?.() || null,
+    peekCachedPlanetSph(bodyIndex = planetaryBodyIndex) {
+      const cat = getActiveSystemCatalog();
+      const spec = cat[bodyIndex];
+      if (!spec || spec.isStar || !evaluatePlanetaryGenesisSphActivation(spec).active) return null;
+      const w = getWorkloads();
+      return rootLineageCache.peek(buildPlanetSphCacheKey(spec, bodyIndex, `${w.sphMapWidth}x${w.sphMapHeight}x${w.sphGridN}`));
+    },
+    peekCachedStarSystemForSite(starSite = null) {
+      if (!starSite) return null;
+      const activeSeed = ((universeSeed) + 409) >>> 0;
+      const key = rootLineageCache.buildKey('l2-nebular', {
+        seed: activeSeed,
+        epochId: cosmicEpochId,
+        galaxyKey: activeGalaxyEnv?.seed || 0,
+        starKey: `${starSite.starIndex ?? 0}_${starSite.forceMultiplicity || 0}_${starSite.forceExoticStage || ''}`
+      });
+      return rootLineageCache.peek(key);
+    },
+    peekCachedHaloGalaxy(posMpc = null) {
+      if (!Array.isArray(posMpc) || posMpc.length < 3) return null;
+      const key = rootLineageCache.buildKey('l1-galaxy', {
+        seed: universeSeed,
+        epochId: cosmicEpochId,
+        galaxyKey: `${Math.round((posMpc[0] || 0) / 25)}_${Math.round((posMpc[1] || 0) / 25)}_${Math.round((posMpc[2] || 0) / 25)}`
+      });
+      return rootLineageCache.peek(key);
+    },
+    setRootCachePeerPublisher: (fn) => rootLineageCache.setPeerPublisher(fn),
+    ingestRemoteRootCacheEntry: (entry) => rootLineageCache.ingestPeerEntry(entry),
     enterSurfaceView,
     exitSurfaceView,
     unloadStarSystemRegimes,
@@ -3867,6 +5650,7 @@ export function createUlgUniversesPhysics(device, {
     setSurfaceExternalEntities: (ext) => surfaceSession?.setExternalEntities?.(ext),
     drainSurfaceEvents: () => surfaceSession?.drainPendingEvents?.() || { harvested: { silicates: 0, volatiles: 0, metals: 0, exotics: 0 }, peerHits: [], abductions: [] },
     setStellarTimeAccel,
+    setStellarCutaway(enabled) { stellarCutaway = Boolean(enabled); return stellarCutaway; },
     setSolarMode,
     setKerrSpinA,
     setProtoplanetaryGasDrag,

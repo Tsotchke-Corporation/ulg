@@ -67,18 +67,22 @@ export function evaluateAmphiphileMembraneActivation(physicalState = {}) {
 
 export const amphiphileMembraneWgsl = /* wgsl */ `
 struct LipParams {
-  bead_count: u32,       // 3 * lipid_count (0=head, 1=tail1, 2=tail2)
+  bead_count: u32,       // 3 * lipid_count (0=head, 1=tail1, 2=tail2; or monolayer 0=headA, 1=core, 2=headB)
   lipid_count: u32,
   step_index: u32,
   init_mode: u32,
   dt: f32,
-  eps_hydrophobic: f32,  // Tail-tail hydrophobic attraction strength (0 -> isotropic gas!)
+  eps_hydrophobic: f32,  // Solvophobic self-assembly coupling strength (0 -> isotropic gas!)
   temp_k: f32,
   osmotic_press: f32,    // Internal osmotic pressure driving vesicle swelling / budding
   box_half: f32,
   gamma_damp: f32,
   seed_f: f32,
-  pad0: f32,
+  solvent_polarity: f32, // +1.0 = polar solvent (H2O/NH3/H2SO4 -> tails attract inward); -1.0 = nonpolar (CH4/scCO2 -> polar heads attract inward, tails face out!)
+  is_monolayer: f32,     // 0.0 = standard bilayer amphiphile (H-T-T); 1.0 = bipolar tetraether spanning monolayer (H-T-H)
+  t_ref_k: f32,          // Solvent thermal reference temp (so 94 K CH4 is fluid, not frozen solid!)
+  pad1: f32,
+  pad2: f32,
 };
 
 // 48 bytes per bead (3 x vec4<f32>):
@@ -161,8 +165,18 @@ fn step_amphiphile_beads(@builtin(global_invocation_id) gid: vec3<u32>) {
     let same_lip = (j / 3u) == lip_id;
     if (same_lip) { continue; }
 
+    // Physical solvophobic classification driven by solvent polarity & bipolar monolayer architecture:
+    //   Polar solvent (+1):      hydrocarbon tails are solvophobic (core), polar heads face solvent
+    //   Nonpolar solvent (-1):   INVERTED! polar nitrile/dipole heads are solvophobic (core), aliphatic tails face CH4/scCO2!
+    //   Bipolar monolayer (1.0): beads 0 & 2 are BOTH polar heads spanning central core bead 1 (H-T-H)!
+    let mono = params.is_monolayer > 0.5;
+    let i_is_polar = (ti == 0u) || (mono && ti == 2u);
+    let j_is_polar = (tj == 0u) || (mono && tj == 2u);
+    let i_core = select(!i_is_polar, i_is_polar, params.solvent_polarity < 0.0);
+    let j_core = select(!j_is_polar, j_is_polar, params.solvent_polarity < 0.0);
+
     // Soft WCA steric core repulsion (universal excluded volume)
-    let sigma = select(0.95, 1.12, ti == 0u && tj == 0u);
+    let sigma = select(0.95, 1.12, (!i_core) && (!j_core));
     if (r < sigma * 1.122) {
       let inv = sigma / max(0.45, r);
       let inv6 = inv * inv * inv * inv * inv * inv;
@@ -170,21 +184,21 @@ fn step_amphiphile_beads(@builtin(global_invocation_id) gid: vec3<u32>) {
       f = f + dir * f_rep;
     }
 
-    if (ti > 0u && tj > 0u) {
-      // Hydrophobic tail-tail solvent-exclusion attraction (vanishes identically when eps_hydrophobic == 0!)
+    if (i_core && j_core) {
+      // Solvophobic core-core attraction (tails in H2O; polar nitrile/amine heads in CH4/scCO2! Vanishes when eps == 0!)
       if (r > sigma && r < r_cut) {
         let u = (r - sigma) / (r_cut - sigma);
         let attract = -eps_hp * 4.8 * sin(u * 3.14159265) * (1.0 - 0.35 * u);
         f = f + dir * attract;
       }
-    } else if ((ti == 0u && tj > 0u) || (ti > 0u && tj == 0u)) {
-      // Hydrophilic-hydrophobic immiscibility repulsion (forces heads outward toward aqueous solvent!)
+    } else if (i_core != j_core) {
+      // Solvophilic-solvophobic immiscibility repulsion (drives solvophilic beads outward toward native solvent!)
       if (r < 2.25) {
         let imm = (1.0 - r / 2.25) * (1.8 + eps_hp * 2.2);
         f = f + dir * imm;
       }
-    } else if (ti == 0u && tj == 0u) {
-      // Gentle polar head-group electrostatic repulsion + water-bridged curvature stabilization
+    } else {
+      // Gentle solvophilic outer-shell steric/electrostatic repulsion
       if (r < 2.4) {
         let h_rep = (1.0 - r / 2.4) * 1.35;
         f = f + dir * h_rep;
@@ -198,18 +212,19 @@ fn step_amphiphile_beads(@builtin(global_invocation_id) gid: vec3<u32>) {
     f = f + (pi / r_cen) * params.osmotic_press * 1.4;
   }
 
-  // Gentle spherical aqueous droplet confinement boundary
+  // Gentle spherical solvent droplet confinement boundary
   if (r_cen > params.box_half) {
     f = f - (pi / r_cen) * (r_cen - params.box_half) * 8.5;
   }
 
-  // Langevin Brownian integration
+  // Langevin Brownian integration scaled to native solvent reference temperature t_ref_k!
   let dt = params.dt;
   let s0 = f32(i) * 13.37 + f32(params.step_index) * 5.19;
   let rx = (hash_l(s0 + 1.0) + hash_l(s0 + 2.0) - 1.0) * 1.732;
   let ry = (hash_l(s0 + 3.0) + hash_l(s0 + 4.0) - 1.0) * 1.732;
   let rz = (hash_l(s0 + 5.0) + hash_l(s0 + 6.0) - 1.0) * 1.732;
-  let sigma_v = sqrt(max(0.0, params.temp_k * 0.0022 * params.gamma_damp * dt));
+  let t_eff = params.temp_k * (300.0 / max(75.0, params.t_ref_k));
+  let sigma_v = sqrt(max(0.0, t_eff * 0.0022 * params.gamma_damp * dt));
 
   var v = bi.vel_m.xyz + clamp(f, vec3<f32>(-40.0), vec3<f32>(40.0)) * dt;
   v = v * exp(-params.gamma_damp * dt) + vec3<f32>(rx, ry, rz) * sigma_v;
@@ -281,6 +296,9 @@ export function createAmphiphileMembraneSessionWebGpu(device, {
   hydrophobicCoupling = 1.65,
   temperatureK = 300,
   osmoticPressure = 0.0,
+  solventPolarity = 1.0,
+  isMonolayer = false,
+  tRefK = 300,
   seed = 20261125,
   label = 'ulg-bio-amphiphile'
 } = {}) {
@@ -300,30 +318,53 @@ export function createAmphiphileMembraneSessionWebGpu(device, {
   };
 
   const init = new Float32Array(nBeads * 12);
-  const headCol = [0.22, 0.84, 1.0];   // Polar hydrophilic phosphate-like cyan head
-  const tail1Col = [0.96, 0.74, 0.24]; // Hydrophobic acyl gold tail
-  const tail2Col = [0.92, 0.50, 0.16]; // Inner hydrophobic terminal tail
+  const inverted = Number(solventPolarity) < 0;
+  const mono = Boolean(isMonolayer);
+  const headCol = inverted ? [0.16, 0.92, 1.0] : (mono ? [0.30, 0.95, 0.78] : [0.22, 0.84, 1.0]);
+  const tail1Col = inverted ? [0.78, 0.42, 0.98] : (mono ? [0.98, 0.62, 0.18] : [0.96, 0.74, 0.24]);
+  const tail2Col = inverted ? [0.52, 0.28, 0.86] : (mono ? headCol : [0.92, 0.50, 0.16]);
 
   const golden = Math.PI * (3 - Math.sqrt(5));
   for (let l = 0; l < nLip; l += 1) {
     let hx; let hy; let hz;
     let nx; let ny; let nz;
     if (initMode === 'vesicle') {
-      // Spherical double-leaflet protocell bilayer shell (outer + inner leaflets!)
-      const isOuter = (l & 1) === 0;
-      const k = l >> 1;
-      const halfN = Math.max(1, nLip >> 1);
-      const yU = 1 - 2 * ((k + 0.5) / halfN);
-      const rXY = Math.sqrt(Math.max(0, 1 - yU * yU));
-      const th = k * golden;
-      const dx = Math.cos(th) * rXY;
-      const dy = yU;
-      const dz = Math.sin(th) * rXY;
-      const rShell = isOuter ? 7.6 : 4.2;
-      hx = dx * rShell; hy = dy * rShell; hz = dz * rShell;
-      // Tails point inward into the hydrophobic bilayer midplane (R ~ 5.9)!
-      const sgn = isOuter ? -1 : 1;
-      nx = dx * sgn; ny = dy * sgn; nz = dz * sgn;
+      if (mono) {
+        // Bipolar spanning monolayer (single spherical shell with head0 outside, core1 midplane, head2 inside!)
+        const yU = 1 - 2 * ((l + 0.5) / Math.max(1, nLip));
+        const rXY = Math.sqrt(Math.max(0, 1 - yU * yU));
+        const th = l * golden;
+        const dx = Math.cos(th) * rXY;
+        const dy = yU;
+        const dz = Math.sin(th) * rXY;
+        const rShell = 6.9;
+        hx = dx * rShell; hy = dy * rShell; hz = dz * rShell;
+        nx = -dx; ny = -dy; nz = -dz;
+      } else {
+        // Spherical double-leaflet protocell shell (outer + inner leaflets!)
+        const isOuter = (l & 1) === 0;
+        const k = l >> 1;
+        const halfN = Math.max(1, nLip >> 1);
+        const yU = 1 - 2 * ((k + 0.5) / halfN);
+        const rXY = Math.sqrt(Math.max(0, 1 - yU * yU));
+        const th = k * golden;
+        const dx = Math.cos(th) * rXY;
+        const dy = yU;
+        const dz = Math.sin(th) * rXY;
+        if (inverted) {
+          // INVERTED AZOTOSOME VESICLE: polar nitrile heads pack INSIDE the midplane (R ~ 5.9),
+          // while solvophilic hydrocarbon tails bristle OUTWARD & INWARD into liquid CH4/scCO2!
+          const rCore = isOuter ? 6.25 : 5.55;
+          hx = dx * rCore; hy = dy * rCore; hz = dz * rCore;
+          const sgn = isOuter ? 1 : -1;
+          nx = dx * sgn; ny = dy * sgn; nz = dz * sgn;
+        } else {
+          const rShell = isOuter ? 7.6 : 4.2;
+          hx = dx * rShell; hy = dy * rShell; hz = dz * rShell;
+          const sgn = isOuter ? -1 : 1;
+          nx = dx * sgn; ny = dy * sgn; nz = dz * sgn;
+        }
+      }
     } else if (initMode === 'bilayer') {
       const isTop = (l & 1) === 0;
       const k = l >> 1;
@@ -332,10 +373,15 @@ export function createAmphiphileMembraneSessionWebGpu(device, {
       const gz = Math.floor(k / side) / Math.max(1, side - 1) - 0.5;
       hx = gx * 12.0 + (rand() - 0.5) * 0.25;
       hz = gz * 12.0 + (rand() - 0.5) * 0.25;
-      hy = isTop ? 1.85 : -1.85;
-      nx = 0; ny = isTop ? -1 : 1; nz = 0;
+      if (inverted) {
+        hy = isTop ? 0.35 : -0.35;
+        nx = 0; ny = isTop ? 1 : -1; nz = 0;
+      } else {
+        hy = isTop ? 1.85 : -1.85;
+        nx = 0; ny = isTop ? -1 : 1; nz = 0;
+      }
     } else {
-      // Disordered random amphiphilic soup -> spontaneous hydrophobic self-assembly!
+      // Disordered random amphiphilic soup -> spontaneous solvophobic self-assembly!
       const rr = Math.cbrt(rand()) * 6.8;
       const cy = 2 * rand() - 1;
       const sy = Math.sqrt(Math.max(0, 1 - cy * cy));
@@ -351,7 +397,7 @@ export function createAmphiphileMembraneSessionWebGpu(device, {
     const pts = [
       [hx, hy, hz, 0.0, headCol, 0.44],
       [hx + nx * 0.88, hy + ny * 0.88, hz + nz * 0.88, 1.0, tail1Col, 0.36],
-      [hx + nx * 1.76, hy + ny * 1.76, hz + nz * 1.76, 2.0, tail2Col, 0.34]
+      [hx + nx * 1.76, hy + ny * 1.76, hz + nz * 1.76, 2.0, tail2Col, mono ? 0.44 : 0.34]
     ];
     for (let k = 0; k < 3; k += 1) {
       const o = (l * 3 + k) * 12;
@@ -369,21 +415,21 @@ export function createAmphiphileMembraneSessionWebGpu(device, {
     computeBufferBinding(3, 'storage')
   ];
   const stepPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-bio-amphiphile-step.v1',
+    cacheKey: 'ulg-bio-amphiphile-step.v2-polarity',
     label: `${label}-step`,
     code: amphiphileMembraneWgsl,
     entryPoint: 'step_amphiphile_beads',
     bindings
   });
   const telPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-bio-amphiphile-tel.v1',
+    cacheKey: 'ulg-bio-amphiphile-tel.v2-polarity',
     label: `${label}-tel`,
     code: amphiphileMembraneWgsl,
     entryPoint: 'reduce_amphiphile_telemetry',
     bindings
   });
 
-  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 48, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bufA = device.createBuffer({ label: `${label}-a`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC | GPU_BUF.COPY_DST });
   const bufB = device.createBuffer({ label: `${label}-b`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC | GPU_BUF.COPY_DST });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
@@ -446,9 +492,13 @@ export function createAmphiphileMembraneSessionWebGpu(device, {
     const dtSafe = Math.max(0.008, Math.min(0.032, Number(dt) || 0.022));
     const seedF = ((seed % 997) * 0.13) + 1.1;
 
-    const ab = new ArrayBuffer(48);
+    const ab = new ArrayBuffer(64);
     new Uint32Array(ab, 0, 4).set([nBeads, nLip, stepIndex + sub, initMode === 'vesicle' ? 1 : 0]);
-    new Float32Array(ab, 16, 8).set([dtSafe, curEpsHp, curTempK, curOsmotic, boxHalf, 3.2, seedF, 0]);
+    new Float32Array(ab, 16, 12).set([
+      dtSafe, curEpsHp, curTempK, curOsmotic,
+      boxHalf, 3.2, seedF, inverted ? -1.0 : 1.0,
+      mono ? 1.0 : 0.0, Math.max(75, Number(tRefK) || 300), 0, 0
+    ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
     const enc = device.createCommandEncoder({ label: `${label}-enc-${stepIndex}` });

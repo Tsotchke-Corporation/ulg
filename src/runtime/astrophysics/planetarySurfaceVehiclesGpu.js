@@ -163,7 +163,12 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     ? (pressurePa * molarMassKgPerMol) / (8.31446 * tempK)
     : 0.0;
 
-  const volatileFrac = Math.max(0, Number(atmo?.volatileMassFrac ?? bodySpec.volatileMassFrac) || 0);
+  const volatileFrac = Math.max(
+    0,
+    Number(atmo?.volatileMassFrac) || 0,
+    Number(bodySpec.volatileMassFrac) || 0,
+    Number(bodySpec.coalescedComposition?.volatileFrac) || 0
+  );
   const dustFrac = Math.max(0, Number(atmo?.particulateMassFrac ?? bodySpec.particulateMassFrac) || 0);
   // First-principles surface solvent & xenobiology classification (7-solvent Bains 2024 + full clade web!)
   const xenobiology = deriveXenobiologyProfile({
@@ -180,8 +185,11 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     seed,
     civTechK: Number.isFinite(Number(bodySpec.civTechK)) ? Number(bodySpec.civTechK) : undefined
   });
+  const tBoilWaterK = pressurePa >= 611
+    ? Math.max(273.16, Math.min(647.1, 373.15 / Math.max(0.55, 1.0 - 0.07632 * Math.log(Math.max(1e-4, pressurePa / 101325)))))
+    : 273.16;
   const hasLiquidWaterOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !isRogue
-    && pressurePa >= 611 && tempK >= 265 && tempK <= 365 && volatileFrac >= 0.015;
+    && pressurePa >= 611 && tempK >= 255 && tempK <= tBoilWaterK && volatileFrac >= 0.012;
   const hasExoticOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !hasLiquidWaterOcean
     && (xenobiology.solvent === 'CH4' || xenobiology.solvent === 'NH3' || xenobiology.solvent === 'H2SO4');
   const hasLiquidOcean = hasLiquidWaterOcean || hasExoticOcean;
@@ -391,31 +399,25 @@ function craterFieldJs(x, z, scale, seedF) {
   return best;
 }
 
-/**
- * Evaluate exact terrain elevation (meters) at world `(x, z)` — bit-matched to the WGSL kernel!
- */
-export function evaluatePlanetaryTerrainHeight(x, z, env) {
-  const seedF = ((env.seed % 997) * 0.13) + 1.7;
-  if (!env.hasSolidCrust) {
-    // Gas giant cloud-deck undulating wave surface
-    return fbm2Js(x * 0.0065, z * 0.0065, seedF) * env.terrainAmpM - 28.0;
-  }
-  // Gentle flat landing apron right around (0, 0) so initial deployment is always stable & dramatic
-  const r0 = Math.hypot(x, z);
-  const apron = Math.min(1.0, Math.max(0.0, (r0 - 18.0) / 52.0));
-  const apronSmooth = apron * apron * (3 - 2 * apron);
-  const rolling = fbm2Js(x * 0.0055, z * 0.0055, seedF) * env.terrainAmpM;
-  const ridge = Math.abs(fbm2Js(x * 0.011 + 5.1, z * 0.011 - 3.4, seedF + 2.1)) * (env.terrainAmpM * 0.36);
-  const detail = fbm2Js(x * 0.032, z * 0.032, seedF + 4.9) * (env.terrainAmpM * 0.08);
-  const craters = env.craterStrength > 0.02
-    ? (craterFieldJs(x, z, 0.0075, seedF) * env.terrainAmpM * 0.72
-      + craterFieldJs(x, z, 0.024, seedF + 11.0) * env.terrainAmpM * 0.24) * env.craterStrength
-    : 0.0;
-  const rawH = (rolling + ridge * 0.45 + detail + craters) * (0.10 + 0.90 * apronSmooth);
-  if (env.hasLiquidOcean && rawH < env.seaLevelM) {
-    return env.seaLevelM;
-  }
-  return rawH;
+function sampleSphCoarseHeight64Js(x, z, env) {
+  const arr = env?.sphCoarseHeight64;
+  if (!arr || arr.length < 4096) return 0;
+  const span = Math.max(1000.0, Number(env.sphPatchSpanM) || 14000.0);
+  const u = Math.max(0.0, Math.min(0.9999, (x / span) + 0.5));
+  const v = Math.max(0.0, Math.min(0.9999, (z / span) + 0.5));
+  const gx = u * 63.0;
+  const gz = v * 63.0;
+  const i0 = Math.floor(gx);
+  const j0 = Math.floor(gz);
+  const i1 = Math.min(63, i0 + 1);
+  const j1 = Math.min(63, j0 + 1);
+  const fx = gx - i0;
+  const fz = gz - j0;
+  const c00 = arr[j0 * 64 + i0];
+  const c10 = arr[j0 * 64 + i1];
+  const c01 = arr[j1 * 64 + i0];
+  const c11 = arr[j1 * 64 + i1];
+  return (c00 * (1 - fx) + c10 * fx) * (1 - fz) + (c01 * (1 - fx) + c11 * fx) * fz;
 }
 
 /**
@@ -428,6 +430,14 @@ export function evaluatePlanetaryCrustElevation(x, z, env) {
     return fbm2Js(x * 0.0065, z * 0.0065, seedF) * env.terrainAmpM - 28.0;
   }
   const r0 = Math.hypot(x, z);
+  if (env.hasSphGeology && env.sphCoarseHeight64) {
+    // 100% Full-Authority GPU SPH Planetary Geology starting at r = 0 m — ZERO Perlin fbm2 hills!
+    // Ocean worlds cross exact seaLevelM = 0.0 m right at the orbital SPH shoreline (`sphSeaLevelNorm`).
+    const sphElev = sampleSphCoarseHeight64Js(x, z, env);
+    const sphOrigin = sampleSphCoarseHeight64Js(0, 0, env);
+    const refVal = env.hasLiquidOcean ? (Number(env.sphSeaLevelNorm) || 0.0) : sphOrigin;
+    return (sphElev - refVal) * (env.terrainAmpM * 3.1);
+  }
   const apron = Math.min(1.0, Math.max(0.0, (r0 - 18.0) / 52.0));
   const apronSmooth = apron * apron * (3 - 2 * apron);
   const rolling = fbm2Js(x * 0.0055, z * 0.0055, seedF) * env.terrainAmpM;
@@ -438,6 +448,17 @@ export function evaluatePlanetaryCrustElevation(x, z, env) {
       + craterFieldJs(x, z, 0.024, seedF + 11.0) * env.terrainAmpM * 0.24) * env.craterStrength
     : 0.0;
   return (rolling + ridge * 0.45 + detail + craters) * (0.10 + 0.90 * apronSmooth);
+}
+
+/**
+ * Evaluate exact terrain elevation (meters) at world `(x, z)` — bit-matched to the WGSL kernel!
+ */
+export function evaluatePlanetaryTerrainHeight(x, z, env) {
+  const rawH = evaluatePlanetaryCrustElevation(x, z, env);
+  if (env.hasSolidCrust && env.hasLiquidOcean && rawH < env.seaLevelM) {
+    return env.seaLevelM;
+  }
+  return rawH;
 }
 
 /**
@@ -1149,6 +1170,19 @@ fn eval_crust_height(x: f32, z: f32) -> f32 {
     return fbm2(x * 0.0065, z * 0.0065, params.seed_f) * params.terrain_amp + params.sea_level;
   }
   let r0 = length(vec2<f32>(x, z));
+  let has_sph = (params.mode_flags & 32u) != 0u;
+  let def = sample_deform_field(x, z);
+  if (has_sph) {
+    // 100% FULL-AUTHORITY GPU SPH PLANETARY GEOLOGY STARTING AT r = 0 m (ZERO Perlin fbm2 hills!)
+    // Direct cropped & D8-hydraulically-eroded patch from the planet's live 3D SPH Genesis buffer:
+    // Ocean worlds cross exact sea_level (0.0 m) at the EXACT orbital SPH shoreline (clip_aux.y).
+    let tect = sample_tectonic_field(x, z);
+    let tect0 = sample_tectonic_field(0.0, 0.0);
+    let has_ocean = (params.mode_flags & 8u) != 0u;
+    let ref_val = select(tect0.x, params.clip_aux.y, has_ocean);
+    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 3.1);
+    return sph_h + def.x;
+  }
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
   let apron = a * a * (3.0 - 2.0 * a);
   let rolling = fbm2(x * 0.0055, z * 0.0055, params.seed_f) * params.terrain_amp;
@@ -1159,11 +1193,9 @@ fn eval_crust_height(x: f32, z: f32) -> f32 {
     craters = (crater_field(x, z, 0.0075, params.seed_f) * params.terrain_amp * 0.72
       + crater_field(x, z, 0.024, params.seed_f + 11.0) * params.terrain_amp * 0.24) * params.crater_str;
   }
-  // Macro Voronoi plate tectonics & hydraulic river valley relief (fades smoothly outside 240 m boulder/rover valley!)
   let tect_blend = smoothstep(240.0, 560.0, r0);
   let tect = sample_tectonic_field(x, z);
   let tect_h = tect.x * (params.terrain_amp * params.clip_aux.y) * tect_blend;
-  let def = sample_deform_field(x, z);
   return (rolling + ridge * 0.45 + detail + craters + tect_h) * (0.10 + 0.90 * apron) + def.x;
 }
 
@@ -1223,13 +1255,38 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
   let y_curved = h - r2 * params.curv_inv_2r - collar_drop;
 
   let tect = sample_tectonic_field(wx, wz);
+  let has_sph = (params.mode_flags & 32u) != 0u;
   let slope = 1.0 - clamp(n_vec.y, 0.0, 1.0);
   let h_norm = clamp((h / max(4.0, params.terrain_amp)) * 0.5 + 0.5, 0.0, 1.0);
   let strata = 0.5 + 0.5 * sin(h * 1.4 + fbm2(wx * 0.08, wz * 0.08, params.seed_f + 9.0) * 3.0);
 
-  var col = mix(params.col0_pad.rgb, params.col1_pad.rgb, clamp(h_norm * 0.65 + slope * 1.2 + strata * 0.16, 0.0, 1.0));
+  // When live SPH geology is active, color directly from the 4 real SPH channels:
+  //   elevation (beach -> lush lowland -> alpine granite rock), narrow carved rivers (tect.y),
+  //   hydraulic moisture (tect.z), and felsic granite/ejecta crust composition (tect.w)!
+  // Note: on ocean worlds, params.col1_pad is deep ocean blue — blend land slopes toward real granite/sandstone instead!
+  let land_rock_col = select(params.col1_pad.rgb, vec3<f32>(0.42, 0.38, 0.32), has_ocean);
+  let sph_rock_bias = select(0.0, select(tect.w * 0.30, (1.0 - tect.z) * 0.20 - tect.z * 0.28, has_ocean), has_sph);
+  var col = mix(params.col0_pad.rgb, land_rock_col, clamp(h_norm * 0.34 + slope * 1.45 + strata * 0.08 + sph_rock_bias, 0.0, 1.0));
+  if (has_sph && is_solid && !is_ocean && has_ocean && !is_magma && !is_cryo) {
+    // Crisp golden shoreline beach strip right at water's edge (0..1.4 m) so green SPH hills rise cleanly behind!
+    let beach_w = (1.0 - smoothstep(0.0, 1.40, h - params.sea_level)) * (1.0 - smoothstep(0.22, 0.55, slope));
+    col = mix(col, vec3<f32>(0.76, 0.68, 0.48), beach_w * 0.72);
+    // Narrow hydraulically carved SPH river channels ONLY in concentrated valleys (never flooding whole hillsides!)
+    let riv_w = smoothstep(0.68, 0.92, tect.y) * (1.0 - smoothstep(0.10, 0.28, slope)) * (1.0 - smoothstep(4.0, 26.0, h - params.sea_level));
+    col = mix(col, params.ocean_rgb_ice.rgb * 1.18, riv_w * 0.82);
+  }
   var emiss = 0.0;
   var tag = 0.0;
+  if (has_sph && is_solid && !is_ocean && !has_ocean && !is_magma && !is_cryo) {
+    // Dry/cratered/tectonic worlds: highlight SPH crater ejecta rims (tect.w) & volcanic rift warmth (tect.z)
+    let ejecta_bright = smoothstep(0.55, 0.95, tect.w) * 0.22;
+    col = clamp(col + vec3<f32>(ejecta_bright * 0.95, ejecta_bright * 0.90, ejecta_bright * 0.82), vec3<f32>(0.02), vec3<f32>(0.98));
+    if (tect.z > 0.72) {
+      let rift = smoothstep(0.72, 0.96, tect.z);
+      col = mix(col, vec3<f32>(0.96, 0.36, 0.10), rift * 0.48);
+      emiss = max(emiss, rift * 0.55);
+    }
+  }
 
   if (!is_solid) {
     // Gas giant cloud bands
@@ -1433,10 +1490,10 @@ fn step_surface_plume_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let gh = eval_height(pos.x, pos.z);
     if (pos.y < gh + 0.08) {
       pos.y = gh + 0.08;
-      // Radial surface impingement splash!
+      // Physical dissipative inelastic surface rebound (never amplifies horizontal kinetic energy!)
       vel.y = abs(vel.y) * 0.22;
-      vel.x = vel.x * 1.15;
-      vel.z = vel.z * 1.15;
+      vel.x = vel.x * 0.78;
+      vel.z = vel.z * 0.78;
     }
   }
 
@@ -1764,6 +1821,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   planetaryAtmoState = null,
   planetaryMode = 'standard',
   landingSite = null,
+  sphSurfacePatch = null,
   gridN = 129,
   cellSizeM = 9.5,
   particleCount = 2048,
@@ -1777,7 +1835,21 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createPlanetarySurfaceSessionWebGpu requires a live WebGPU GPUDevice');
   }
-  const env = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, landingSite, seed });
+  const baseEnv = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, landingSite, seed });
+  const hasSphPatch = Boolean(sphSurfacePatch && sphSurfacePatch.patchBuffer && sphSurfacePatch.coarseHeight64 && baseEnv.hasSolidCrust);
+  const SPH_SURFACE_PATCH_SPAN_M = 2800.0;
+  const env = hasSphPatch
+    ? Object.freeze({
+      ...baseEnv,
+      hasSphGeology: true,
+      sphCoarseHeight64: sphSurfacePatch.coarseHeight64,
+      sphSeaLevelNorm: baseEnv.hasLiquidOcean ? (Number(sphSurfacePatch.seaLevelNorm) || 0.0) : 0.0,
+      sphPatchSpanM: SPH_SURFACE_PATCH_SPAN_M,
+      // Exact 1-to-1 SPH shoreline at y = 0.0 m (zero fake Perlin seaLevelOffsetM shift!)
+      seaLevelM: baseEnv.hasLiquidOcean ? 0.0 : -999.0
+    })
+    : baseEnv;
+  const activeGeoWorldSpanM = hasSphPatch ? SPH_SURFACE_PATCH_SPAN_M : TECTONIC_WORLD_SPAN_M;
   const n = Math.max(33, Math.min(129, Math.trunc(gridN)));
   const ringVertCount = n * n;
   const totalVertCount = ringVertCount * 2; // 2-ring +-6 km GPU clipmap packed in ONE terrain_verts buffer!
@@ -1832,7 +1904,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-planetary-surface-${entryPoint}.v5-comet-jets`,
+    cacheKey: `ulg-planetary-surface-${entryPoint}.v6-sph-geology`,
     label: `${label}-${entryPoint}`,
     code: planetarySurfaceWgsl,
     entryPoint,
@@ -1858,20 +1930,23 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   // Active-Zone Hybrid GPU MLS-MPM Deformable Terrain + 64 GPU SE(3) DLM Rigid-Body Boulders + Persistent Crater Replay!
   const deformMpm = createSurfaceDeformationAndBouldersGpu(device, {
     env,
-    baseHeightFn: (x, z) => evaluatePlanetaryTerrainHeight(x, z, env),
+    baseHeightFn: (x, z) => evaluatePlanetaryCrustElevation(x, z, env),
     initialCraterStamps,
     onCraterStamp,
     seed,
     label: `${label}-mpm`
   });
 
-  // One-Shot GPU Voronoi Plate Tectonics + 48-Pass Hydraulic Erosion (< 2.5 ms once on landing, 0 ms steady-state!)
-  const tectonicsGpu = createSurfaceTectonicsErosionGpu(device, {
-    env,
-    seed,
-    erosionPasses: env.hasSolidCrust ? 48 : 0,
-    label: `${label}-tect`
-  });
+  // Zero-Copy GPU SPH Planetary Geology Patch OR Fallback Voronoi Tectonics (< 2.5 ms once on landing!)
+  const tectonicsGpu = hasSphPatch
+    ? null
+    : createSurfaceTectonicsErosionGpu(device, {
+      env,
+      seed,
+      erosionPasses: env.hasSolidCrust ? 48 : 0,
+      label: `${label}-tect`
+    });
+  const activeGeologyBuf = hasSphPatch ? sphSurfacePatch.patchBuffer : tectonicsGpu.getResidentTectonicBuffer();
   // Live 128x128 GPU 2D Shallow-Water Ocean Wave PDE + Ekman Currents (dormant-zero on dry/frozen worlds!)
   const oceanWaveGpu = createSurfaceOceanWaveGpu(device, {
     gravityMS2: env.gravityMS2,
@@ -1881,7 +1956,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   });
   // Hardware-Instanced GPU Flora, Xenobiota & Indigenous Settlement Placement!
   const floraGpu = createSurfaceFloraPlacementGpu(device, {
-    tectonicFieldBuf: tectonicsGpu.getResidentTectonicBuffer(),
+    tectonicFieldBuf: activeGeologyBuf,
     deformFieldBuf: deformMpm.getResidentDeformBuffer(),
     label: `${label}-flora`
   });
@@ -1905,7 +1980,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
 
   const bg = createCachedExplicitBindGroup(device, {
     layout: terrainPipe.bindGroupLayout,
-    label: `${label}-bg-v4`,
+    label: `${label}-bg-v6`,
     entries: [
       { binding: 0, resource: { buffer: paramsBuf } },
       { binding: 1, resource: { buffer: terrainVertBuf } },
@@ -1913,7 +1988,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       { binding: 3, resource: { buffer: telBuf } },
       { binding: 4, resource: { buffer: deformMpm.getResidentDeformBuffer() } },
       { binding: 5, resource: { buffer: oceanWaveGpu.getResidentOceanBuffer() } },
-      { binding: 6, resource: { buffer: tectonicsGpu.getResidentTectonicBuffer() } }
+      { binding: 6, resource: { buffer: activeGeologyBuf } }
     ]
   });
 
@@ -2048,7 +2123,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       const sp = pool[oi % Math.max(1, pool.length)] || xeno.species[0];
       if (!sp) continue;
       const ang = ((oi * 2.399963) + (seed % 97) * 0.1) % (Math.PI * 2);
-      const rad = isFauna ? (16.0 + (oi % 6) * 15.0 + (oi >= 6 ? 18 : 0)) : (20.0 + ((oi - nFauna) % 8) * 15.5 + 10.0);
+      const rad = isFauna ? (10.0 + (oi % 6) * 14.0 + (oi >= 6 ? 14 : 0)) : (12.0 + ((oi - nFauna) % 8) * 14.5);
       const ox = Math.cos(ang) * rad;
       const oz = Math.sin(ang) * rad;
       const gh = evaluatePlanetaryCrustElevation(ox, oz, env);
@@ -2794,7 +2869,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       | (env.isMagmaOcean ? 2 : 0)
       | (env.isCryoMoon ? 4 : 0)
       | (env.hasLiquidOcean ? 8 : 0)
-      | (env.isComet ? 16 : 0);
+      | (env.isComet ? 16 : 0)
+      | (hasSphPatch ? 32 : 0);
     const seedF = ((env.seed % 997) * 0.13) + 1.7;
     const curvInv2R = env.hasSolidCrust ? (1.0 / (2.0 * env.tinyPlanetCurvatureRadiusM)) : 0.0;
 
@@ -2815,8 +2891,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       env.color0[0], env.color0[1], env.color0[2], focus[0],
       env.color1[0], env.color1[1], env.color1[2], focus[2],
       env.oceanRgb[0], env.oceanRgb[1], env.oceanRgb[2], liveSeaIceFrac,
-      liveSnowlineM, outerCellSizeM, TECTONIC_WORLD_SPAN_M, outerSnapX,
-      outerSnapZ, 0.42, OCEAN_PATCH_HALF_M, liveAutumnShift
+      liveSnowlineM, outerCellSizeM, activeGeoWorldSpanM, outerSnapX,
+      outerSnapZ, hasSphPatch ? (env.sphSeaLevelNorm || 0.0) : 0.42, OCEAN_PATCH_HALF_M, liveAutumnShift
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
@@ -2851,7 +2927,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           const dx = org.pos[0] - ufo.pos[0];
           const dz = org.pos[2] - ufo.pos[2];
           const hd = Math.hypot(dx, dz);
-          if (hd < 38.0) {
+          if (hd < 44.0) {
             const sc = hd * (org.kingdom === 'fauna' ? 0.84 : (org.kingdom === 'fungi' ? 0.92 : 1.0));
             if (sc < bestScore) { bestScore = sc; bestOrg = org; }
           }
@@ -2869,7 +2945,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           const toUfoY = (ufo.pos[1] - 1.2) - org.pos[1];
           const toUfoZ = ufo.pos[2] - org.pos[2];
           const d3 = Math.hypot(toUfoX, toUfoY, toUfoZ);
-          if (d3 <= 4.2) {
+          if (d3 <= 4.8) {
             org.abducted = true;
             org.abducting = false;
             const rec = synthesizeAbductedSpecimenRecord({
@@ -2886,10 +2962,14 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
             pendingAbductions.push(rec);
             continue;
           }
-          const pullSpd = 16.0;
-          org.pos[0] += (toUfoX / Math.max(0.1, d3)) * pullSpd * dtSafe;
-          org.pos[1] += Math.max(6.5, (toUfoY / Math.max(0.1, d3)) * pullSpd) * dtSafe;
-          org.pos[2] += (toUfoZ / Math.max(0.1, d3)) * pullSpd * dtSafe;
+          const pullSpd = 26.0;
+          const invD3 = 1.0 / Math.max(0.1, d3);
+          const vyPull = toUfoY > 1.5
+            ? Math.max(4.5, toUfoY * invD3 * pullSpd)
+            : toUfoY * invD3 * pullSpd;
+          org.pos[0] += toUfoX * invD3 * pullSpd * dtSafe;
+          org.pos[1] += vyPull * dtSafe;
+          org.pos[2] += toUfoZ * invD3 * pullSpd * dtSafe;
           org.yaw += 2.6 * dtSafe;
         } else {
           org.abducting = false;
@@ -3210,7 +3290,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       snowlineM: liveSnowlineM,
       autumnShift: liveAutumnShift,
       seaIceFrac: liveSeaIceFrac,
-      tectWorldSpanM: TECTONIC_WORLD_SPAN_M,
+      tectWorldSpanM: activeGeoWorldSpanM,
       tectN: TECTONIC_GRID_N,
       force: stepIndex === 1
     });
@@ -3246,6 +3326,9 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         craftPos: focus,
         altKm: liveAltKm,
         groundY: groundYAtFocus,
+        sunElev: Number.isFinite(Number(climate?.sunElevDeg))
+          ? Math.sin((Number(climate.sunElevDeg) * Math.PI) / 180.0)
+          : 0.45,
         readTelemetry: readTelemetry || (stepIndex <= 2)
       });
     }
@@ -3344,6 +3427,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       isMinorBody: Boolean(env.isMinorBody),
       isComet: Boolean(env.isComet),
       isMetallicAsteroid: Boolean(env.isMetallicAsteroid),
+      sphGeologyActive: Boolean(hasSphPatch),
       mpmActive: deformMpm.mpmActive,
       mpmDispatches: deformMpm.totalMpmDispatches,
       cfdActive: runCfd,
@@ -3366,6 +3450,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     try { cfdSession?.dispose(); } catch {}
     try { deformMpm?.dispose(); } catch {}
     try { tectonicsGpu?.dispose(); } catch {}
+    try { sphSurfacePatch?.dispose?.(); } catch {}
     try { oceanWaveGpu?.dispose(); } catch {}
     try { floraGpu?.dispose(); } catch {}
     for (const b of [paramsBuf, terrainVertBuf, terrainIdxBuf, plumesBuf, telBuf, telReadBuf, vehicleVertBuf, fxVertBuf]) {
@@ -3444,7 +3529,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     getResidentFloraInstancesBuffer: () => floraGpu.getResidentInstancesBuffer(),
     getResidentFloraTemplateVertBuffer: () => floraGpu.getResidentTemplateVertBuffer(),
     getResidentOceanBuffer: () => oceanWaveGpu.getResidentOceanBuffer(),
-    getResidentTectonicBuffer: () => tectonicsGpu.getResidentTectonicBuffer(),
+    getResidentTectonicBuffer: () => activeGeologyBuf,
+    get sphGeologyActive() { return Boolean(hasSphPatch); },
     getResidentPlumesBuffer: () => plumesBuf,
     getResidentCfdMotesBuffer: () => (cfdSession ? cfdSession.getResidentMotesBuffer() : null),
     getActiveSkyEnv,

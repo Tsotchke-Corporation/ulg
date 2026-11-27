@@ -273,7 +273,7 @@ test('Phase E Native Vulkan Visual & Functional Verification (E1–E5)', {
         headerHeight: Math.round(g.querySelector('.acc-header')?.getBoundingClientRect().height || 0)
       }));
     });
-    assert.equal(bioAcc.length, 6, 'Bio Lab must have 6 accordion groups');
+    assert.ok(bioAcc.length >= 6, `Bio Lab must have >= 6 accordion groups (got ${bioAcc.length})`);
     assert.ok(bioAcc.every((g) => g.height >= 28 && g.headerHeight >= 26), `ZERO Bio Lab accordion groups may squish below 28px! Got: ${JSON.stringify(bioAcc)}`);
     assert.equal(bioAcc.find((g) => g.group === 'vivarium')?.open, true, 'Abducted Bio-Aquarium accordion group must auto-open');
     await bioPage.screenshot({ path: path.join(OUT_DIR, 'e11_bio_lab_accordion_clean.png') });

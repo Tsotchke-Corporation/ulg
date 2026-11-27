@@ -23,37 +23,48 @@ governs**.
 
 ## 1. Non-Negotiable Core Rules
 
-1. **Star Spec physics-first:** Macroscopic behavior emerges from activated laws
+1. **Strict ULG Dogfooding — USE ULG TO BUILD ULG (Highest-Level Rule):**
+   Every app, lab, scale, solver, and shader MUST consume ULG's own canonical
+   engines, derived material/optical/thermodynamic closures (`Gate 1–2`
+   Periodic Table, Compounds, Polytope Atlas, `materialPbrOpticsBridge`,
+   `ulgMaterialPbrWgsl` Cook-Torrance GGX PBR), canonical GPU physics/chem/bio
+   solvers (`SS`, `gpuMath`, `fft3dWebGpu`, `nuclearStructureGpu`,
+   `radialKohnShamWebGpu`, `organicMolecularGraphGpu`, `U12` SDF/Turing
+   morphogenesis & cladogenesis), and `peercompute/core.js`. Zero hardcoded
+   material tables, zero un-uploaded derived fields, zero legacy fallbacks when
+   a canonical ULG solver exists; run a mandatory cross-layer dogfooding audit
+   before every deploy.
+2. **Star Spec physics-first:** Macroscopic behavior emerges from activated laws
    and validity-checked closures. Zero per-preset/material/element physics
    branches, zero scripted animations or CSS visual fakes, zero `(0,0,0)` origin
    anchors. Never remove or demote a physical law.
-2. **GPU-native validation only:** No production CPU mirror solvers, no CPU
+3. **GPU-native validation only:** No production CPU mirror solvers, no CPU
    parity acceptance gates, no full-state hot-loop readback/reupload. Validate
    via GPU manufactured states, mathematical invariants, metamorphic/same-device
    A/B runs, and fixed-size GPU reductions.
-3. **Exact integer conservation ledgers:** Keep 9-limb `2^-149` binary-dyadic
+4. **Exact integer conservation ledgers:** Keep 9-limb `2^-149` binary-dyadic
    integer ledgers for conserved carrier/parcel mass and `Σ(U − S)` internal
    energy accounting; momentum stays f32.
-4. **PeerCompute authority at the schedule & peer boundary:** ComputeManager,
+5. **PeerCompute authority at the schedule & peer boundary:** ComputeManager,
    GPUHub, StateManager, and ReservationLedger own scheduling, resource leases,
    epoch fencing, and admitted deltas. Drop intra-worker JS anti-forgery
    ceremony and manual multi-hundred-file hash manifests. Rendering consumes
    admitted outputs and never owns physics cadence.
-5. **Retiring superseded routes is authorized (2026-11-19):** Delete dead or
+6. **Retiring superseded routes is authorized (2026-11-19):** Delete dead or
    superseded execution routes (disabled 63-limb exact rationals, redundant
    non-fused shader duplicates, duplicate overlapping contact impulses,
    production-bundled CPU test mirrors, bespoke private octrees/4,096-bucket
    hashes) once the canonical GPU replacement passes its invariants.
-6. **Hardware, WM, & visual hygiene:** Headless Vulkan Chrome by default; ask
+7. **Hardware, WM, & visual hygiene:** Headless Vulkan Chrome by default; ask
    **big dog** before launching visible desktop Chrome on Wayland (never
    `terminal-browser` or terminal splits; close only owned browser/server
    processes). One GPU workload at a time (`--test-concurrency=1`, `gpuprobe.sh`,
    `MemoryMax=4G`, `<=80%` GPU target, inspect `journalctl -k` for Xid/OOM).
-7. **G7 stays advisory:** Scientific database comparisons (NIST, CODATA, AME2020,
+8. **G7 stays advisory:** Scientific database comparisons (NIST, CODATA, AME2020,
    PubChem, Materials Project, CRC, PREM, Lane–Emden/MESA, cosmological `P(k)`)
    remain offline, operator-side, and advisory — exposing honest deviations and
    uncertainty without ever becoming a blocking runtime admission gate.
-8. **Publication hold & house rule:** No push, merge to `main`, or Pages build
+9. **Publication hold & house rule:** No push, merge to `main`, or Pages build
    without authorization. Address the user as **big dog** in every response.
 
 ---

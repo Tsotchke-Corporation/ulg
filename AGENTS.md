@@ -23,6 +23,38 @@
    before opening visible desktop Chrome on Wayland (when approved for visual
    milestone checks, inspect sequential screenshots and close only the browser
    and server processes you started).
+6. **Strict ULG Dogfooding — USE ULG TO BUILD ULG (HIGHEST-LEVEL ARCHITECTURAL
+   MANDATE):** This is a ULG project — every app, lab, scale, solver, and shader
+   MUST consume ULG's own canonical engines, derived physical closures, and
+   shared WebGPU substrates rather than re-inventing approximations, hardcoded
+   tables, legacy fallbacks, or disconnected silos:
+   - **Materials, Thermodynamics & PBR Optics:** Never hardcode element/compound
+     colors, CPK palettes, densities, melting/boiling points, refractive indices
+     `n`, extinction `k`, reflectance `R_0`, or Blinn-Phong shading where ULG's
+     Gate 1–2 material physics layer (`periodicTableEngineWebGpu`,
+     `recursiveCompoundPipeline`, `electromagneticClosureWebGpu`,
+     `polytopeAtlasBuilder`, `elements.json`/`compounds.json`,
+     `materialPbrOpticsBridge`, `ulgMaterialPbrWgsl`) already derives them. All
+     ULG-derived materials MUST render with energy-conserving PBR (Cook-Torrance
+     GGX + complex `(n, k)` Fresnel) in consistent linear color space, with
+     derived fields actually uploaded and consumed by the GPU shader.
+   - **Physics, Chemistry, Nuclear, Optics & Biology Solvers:** Never duplicate
+     ad-hoc nuclear Q-values, atomic radii/electronegativities, molecular/QEq
+     solvers, solvent thermodynamics, or retired fixed anatomy/flora templates
+     where ULG's canonical GPU solvers (`nuclearStructureGpu`,
+     `radialKohnShamWebGpu`, `photonShellOpticsWebGpu`,
+     `molecularHartreeFockWebGpu`, `organicMolecularGraphGpu`,
+     `organismSdfMorphogenesisGpu`, `evolutionaryCladogenesisGpu`,
+     `surfaceEcosystemGpu`) already exist.
+   - **Spatial, Closures & Compute Spine:** Always dogfood `SchroederScaleAtlas`
+     (`SS`), `fft3dWebGpu` / `gpuMath`, `ClosureRegistry`,
+     `SimulationModuleRegistry`, `LawDagEpochScheduler`, Tier 0–3 closures
+     (A3/A4/A6), `peercompute/core.js`, and ExoWebTUI cross-app bridges.
+   - **Mandatory Pre-Ship Dogfooding Audit:** Before closing any milestone or
+     deploy, audit all modified and downstream apps/renderers for un-dogfooded
+     seams (dead derived fields, hardcoded physics constants, legacy template
+     fallbacks, non-PBR/color-space mismatches, or broken cross-app bridges) and
+     fix them before shipping.
 
 ---
 
@@ -146,10 +178,14 @@ preset behavior.
    vibrations, collisions, shock rings, or Cherenkov glow with `Math.sin(t)`
    loops, toggled canned meshes, or CSS overlays. Render every effect in 3D
    world space directly from live GPU state.
-4. **Extend ULG's canonical GPU architecture:** Plug new laws into
-   `ClosureRegistry`, `SimulationModuleRegistry`, SS / MLS-MPM / exact `2^-149`
-   ledgers / 3D volumetric & isosurface GPU renderers — no disconnected demo
-   silos or CPU fallback solvers.
+4. **Strict ULG Dogfooding — extend & consume ULG's canonical GPU architecture:**
+   Before writing new math, tables, or shaders, search what ULG already derives
+   or solves (`ClosureRegistry`, `SimulationModuleRegistry`,
+   `materialPbrOpticsBridge`, `ulgMaterialPbrWgsl`, `polytopeAtlasBuilder`,
+   `gpuMath`, `SS`, Gate 1–6 & `U12` engines) and wire that live output
+   end-to-end into the actual GPU buffers/uniforms/shaders — never attach a
+   derived field that the renderer ignores, and never build disconnected demo
+   silos, legacy template fallbacks, or CPU fallback solvers.
 5. **Invariance-first + sequential visual verification:** Write tests that break
    hacks (off-origin translation, arbitrary dielectric media, zero-hack WGSL
    checks, GPU invariants) and verify visible motion/rendering across sequential

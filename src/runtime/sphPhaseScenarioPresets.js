@@ -51,7 +51,7 @@ const COMMON_RUNTIME = Object.freeze({
   residentWorkers: '1',
   residentComputeManagerMode: 'worker-owned-resident-lane',
   residentStepsPerSchedule: '16',
-  submitBurstSteps: '4',
+  submitBurstSteps: '8',
   thermalPotential: '1',
   rigidSolids: '1',
   contactSolver: '1',

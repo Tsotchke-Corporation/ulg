@@ -13209,27 +13209,35 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       let lastInterleavedRenderSerial = typeof getPresentationSubmitSerial === 'function'
         ? (Number(getPresentationSubmitSerial()) || 0)
         : 0;
+      const burstEligibilityForInterleave = resolveSubmitBurstEligibility();
+      const presentationInterleaveStride = burstEligibilityForInterleave.eligible
+        && Number.isInteger(burstEligibilityForInterleave.stepsPerFlush)
+        && burstEligibilityForInterleave.stepsPerFlush > 1
+        ? burstEligibilityForInterleave.stepsPerFlush
+        : 1;
       for (let stepOrdinal = 1; stepOrdinal <= stepCount; stepOrdinal += 1) {
         // Once internal GPU fences are deferred, this task yield—not queue
         // completion—is what lets a cancel message run between atomic steps.
         let stepYieldWaitMs = 0;
+        const isPresentationInterleaveBoundary = stepOrdinal === 1
+          || ((stepOrdinal - 1) % presentationInterleaveStride === 0);
         if (stepOrdinal > 1) {
           const yieldStartedAtMs = workerResidentScheduleNowMs();
           traceWorkerLane('yield-wait', { stepOrdinal });
           await scheduleControlPlaneTaskYielder.yieldTask(stepOrdinal);
           if (
-            typeof waitForPresentationSubmitTurn === 'function'
+            isPresentationInterleaveBoundary
+            && typeof waitForPresentationSubmitTurn === 'function'
             && !state.cancelRequested
             && typeof globalThis.GPUDevice === 'function'
             && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
           ) {
-            // Interleave at most one canonical physics step per presentation
-            // submit so Step k never piles directly onto Step k-1 ahead of the
-            // next render frame; tightened timeoutMs (28 ms vs 44 ms) eliminates
-            // excessive stall tail while keeping Gate 4 >= 54 Hz presentation crisp.
+            // Interleave at real burst-flush boundaries (never sleeping between
+            // virtual-encoded held steps) with non-forced backpressure so Gate 4
+            // >= 54 Hz presentation stays crisp without starving canonical physics.
             lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
               lastInterleavedRenderSerial,
-              { force: true, timeoutMs: 28 }
+              { force: false, timeoutMs: 14 }
             );
           }
           stepYieldWaitMs = workerResidentScheduleNowMs() - yieldStartedAtMs;
@@ -13241,7 +13249,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         ) {
           lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
             lastInterleavedRenderSerial,
-            { force: true, timeoutMs: 28 }
+            { force: false, timeoutMs: 14 }
           );
         }
         if (

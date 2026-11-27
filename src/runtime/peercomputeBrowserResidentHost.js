@@ -7672,6 +7672,11 @@ function createDefaultNodeKernelConfig({
     enableWebGPU,
     enableWorkers,
     requireWorkers: requireWorkers === true,
+    // Studio runs 1 resident physics lane + dedicated warm workers; cap the
+    // PeerCompute ComputeManager pool so high-core hosts do not spawn 32+ idle
+    // ESM workers that contend for memory and CPU quota unless overridden.
+    minWorkers: 1,
+    maxWorkers: 2,
     workerBootstrapTimeoutMs,
     enableGPUHub: true,
     enablePersistence,

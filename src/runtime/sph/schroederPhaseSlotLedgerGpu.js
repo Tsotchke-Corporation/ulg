@@ -19,10 +19,13 @@ struct LedgerParams {
 };
 `;
 
+const PREPARED_STRIDE_WGSL = 'const PREPARED_STRIDE: u32 = 10u;';
+
 export const schroederPhaseSlotLedgerPrepareWgsl = /* wgsl */ `
 ${createSphExactMassWgsl(SPH_EXACT_THERMAL_ENERGY_FORMAT)}
 ${createSphExactLedgerWgsl(SPH_EXACT_THERMAL_ENERGY_FORMAT)}
 ${paramsWgsl}
+${PREPARED_STRIDE_WGSL}
 @group(0) @binding(0) var<storage, read> assignments: array<f32>;
 @group(0) @binding(1) var<storage, read> spare_lineages: array<u32>;
 @group(0) @binding(2) var<storage, read_write> prepared: array<vec4<f32>>;
@@ -90,15 +93,23 @@ fn member(row: u32, group: f32) -> bool {
     && ((field(row, 8u) == 6.0 && field(row, 9u) == field(row, 0u) && field(row, 10u) == 1.0 && field(row, 12u) == 0.0)
       || (field(row, 8u) == 7.0 && field(row, 11u) == field(row, 0u) && field(row, 12u) == 1.0));
 }
+fn prepared_member_row(row: u32, m: u32) -> f32 {
+  let v = select(prepared[row * PREPARED_STRIDE + 8u], prepared[row * PREPARED_STRIDE + 9u], m >= 4u);
+  let k = m & 3u;
+  if (k == 0u) { return v.x; }
+  if (k == 1u) { return v.y; }
+  if (k == 2u) { return v.z; }
+  return v.w;
+}
 @compute @workgroup_size(64)
 fn prepare_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
   let row = id.x;
   if (row >= params.assignment_count) { return; }
-  let p = prepared[row * 8u];
+  let p = prepared[row * PREPARED_STRIDE];
   if (p.x != 1.0) { return; }
   // Disable the physical writer until the whole group passes. Other groups
   // never inspect this decision in this pass; merge members wait for the next.
-  prepared[row * 8u].x = 0.0;
+  prepared[row * PREPARED_STRIDE].x = 0.0;
   let i = u32(p.y); let t0 = source_thermo[i * 3u]; let material = t0.x; let phase = t0.y;
   let source_lane = i / params.lineage_capacity;
   if (field(row, 8u) == 5.0) {
@@ -134,33 +145,58 @@ fn prepare_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   } else if (field(row, 8u) == 6.0) {
     let group = field(row, 20u);
+    let p7 = prepared[row * PREPARED_STRIDE + 7u];
+    let fast_group = p7.y < 0.5 && p.z >= 2.0 && p.z <= 8.0;
+    let member_count = u32(p.z);
     var mass: ExactMass; var energy: ExactMass; var source: ExactMass;
-    for (var r = 0u; r < params.assignment_count; r++) {
-      if (!member(r, group)) { continue; }
-      let j = u32(field(r, 0u)); let m = load_mass(j);
-      if (em_zero(m)) { reject_ledger(); return; }
-      let mm = em_add(mass, m); let uu = el_add(energy, load_energy(j, 0u));
-      let ss = el_add(source, load_energy(j, 1u));
-      if ((mm.error | uu.error | ss.error) != 0u) { reject_ledger(); return; }
-      mass = mm.value; energy = uu.value; source = ss.value;
+    if (fast_group) {
+      for (var m = 0u; m < member_count; m++) {
+        let r_f = prepared_member_row(row, m);
+        if (r_f < 0.0) { reject_ledger(); return; }
+        let r = u32(r_f);
+        let j = u32(field(r, 0u)); let mj = load_mass(j);
+        if (em_zero(mj)) { reject_ledger(); return; }
+        let mm = em_add(mass, mj); let uu = el_add(energy, load_energy(j, 0u));
+        let ss = el_add(source, load_energy(j, 1u));
+        if ((mm.error | uu.error | ss.error) != 0u) { reject_ledger(); return; }
+        mass = mm.value; energy = uu.value; source = ss.value;
+      }
+    } else {
+      for (var r = 0u; r < params.assignment_count; r++) {
+        if (!member(r, group)) { continue; }
+        let j = u32(field(r, 0u)); let mj = load_mass(j);
+        if (em_zero(mj)) { reject_ledger(); return; }
+        let mm = em_add(mass, mj); let uu = el_add(energy, load_energy(j, 0u));
+        let ss = el_add(source, load_energy(j, 1u));
+        if ((mm.error | uu.error | ss.error) != 0u) { reject_ledger(); return; }
+        mass = mm.value; energy = uu.value; source = ss.value;
+      }
     }
-    let heat = el_from_f32_bits(bitcast<u32>(prepared[row * 8u + 7u].x));
+    let heat = el_from_f32_bits(bitcast<u32>(p7.x));
     let uu = el_add(energy, heat.value); let ss = el_add(source, heat.value);
     if ((heat.error | uu.error | ss.error) != 0u) { reject_ledger(); return; }
     let view = projection(mass, uu.value, material, phase);
     if (view.w != 1.0) { reject_ledger(); return; }
     projections[row * 2u] = view;
-    for (var r = 0u; r < params.assignment_count; r++) {
-      if (member(r, group)) { store_row(u32(field(r, 0u)), ExactMass(), ExactMass(), ExactMass()); }
+    if (fast_group) {
+      for (var m = 0u; m < member_count; m++) {
+        let r = u32(prepared_member_row(row, m));
+        store_row(u32(field(r, 0u)), ExactMass(), ExactMass(), ExactMass());
+      }
+    } else {
+      for (var r = 0u; r < params.assignment_count; r++) {
+        if (member(r, group)) { store_row(u32(field(r, 0u)), ExactMass(), ExactMass(), ExactMass()); }
+      }
     }
     store_row(i, mass, uu.value, ss.value);
   } else { reject_ledger(); return; }
-  prepared[row * 8u].x = 1.0;
+  prepared[row * PREPARED_STRIDE].x = 1.0;
 }
 `;
 
 export const schroederPhaseSlotLedgerProjectWgsl = /* wgsl */ `
 ${paramsWgsl}
+${PREPARED_STRIDE_WGSL}
 @group(0) @binding(0) var<storage, read> assignments: array<f32>;
 @group(0) @binding(1) var<storage, read> spare_lineages: array<u32>;
 @group(0) @binding(2) var<storage, read> prepared: array<vec4<f32>>;
@@ -185,7 +221,7 @@ fn project(row: u32, view: vec4<f32>) {
 fn project_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
   let row = id.x;
   if (row >= params.assignment_count) { return; }
-  let p = prepared[row * 8u];
+  let p = prepared[row * PREPARED_STRIDE];
   if (p.x != 1.0) { return; }
   let leader = u32(p.y);
   let source_lane = leader / params.lineage_capacity;
@@ -226,13 +262,13 @@ export function createSchroederPhaseSlotLedgerStage({ device, particleCount, lin
     device.queue.writeBuffer(uniform, 0, new Uint32Array([particleCount, lineageCapacity,
       assignmentRowCount, massRead.byteOffset / 4, segmentCount, 0, 0, 0]));
     const preparePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-phase-slot-ledger-prepare.v3', label: 'ulg-phase-slot-ledger-prepare',
+      cacheKey: 'ulg-phase-slot-ledger-prepare.v4', label: 'ulg-phase-slot-ledger-prepare',
       code: schroederPhaseSlotLedgerPrepareWgsl, entryPoint: 'prepare_ledger',
       bindings: ['read-only-storage', 'read-only-storage', 'storage', 'read-only-storage', 'storage',
         'read-only-storage', 'storage', 'read-only-storage', 'read-only-storage', 'storage', 'uniform', 'storage']
         .map((type, binding) => computeBufferBinding(binding, type)) });
     const projectPipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-phase-slot-ledger-project.v2', label: 'ulg-phase-slot-ledger-project',
+      cacheKey: 'ulg-phase-slot-ledger-project.v3', label: 'ulg-phase-slot-ledger-project',
       code: schroederPhaseSlotLedgerProjectWgsl, entryPoint: 'project_ledger',
       bindings: ['read-only-storage', 'read-only-storage', 'read-only-storage', 'read-only-storage',
         'storage', 'storage', 'storage', 'uniform'].map((type, binding) => computeBufferBinding(binding, type)) });

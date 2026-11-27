@@ -7110,18 +7110,22 @@ export async function mountSphPhaseDemoOverlay({
         residentStepsPerScheduleMax: workerLanePolicyMax,
         workerLaneActive: initialWorkerOwnedResidentLaneReady
       });
+      const adaptiveFloorSteps = Math.min(
+        evidence.effectiveStepCount,
+        lawInputs.reactions?.checked ? 16 : 8
+      );
       const adaptiveStepCount = (
         adaptiveSyncCadenceEnabled
         && !initialTier0RealtimePacing
         && evidence.workerLaneActive
-        && evidence.effectiveStepCount > 2
+        && evidence.effectiveStepCount > adaptiveFloorSteps
       )
         ? resolveSphAdaptiveSyncScheduleStepCount({
             baseEffectiveStepCount: evidence.effectiveStepCount,
             throughputStepsPerS: frameCounters.residentCompletionThroughputEwmaFps,
-            targetScheduleWallS: 0.042,
-            minSteps: 4,
-            warmupMaxSteps: 4
+            targetScheduleWallS: 0.22,
+            minSteps: adaptiveFloorSteps,
+            warmupMaxSteps: adaptiveFloorSteps
           })
         : evidence.effectiveStepCount;
       overlay.__sphResidentScheduleControlEvidence = evidence;
@@ -10006,7 +10010,7 @@ export async function mountSphPhaseDemoOverlay({
         pendingMlsMpmResidentStepsSignature = null;
       }
       const nextAdaptiveStepCount = () => (
-        adaptiveSyncCadenceEnabled && !lawInputs.reactions?.checked
+        adaptiveSyncCadenceEnabled
           ? currentResidentStepsPerSchedule()
           : normalizedStepCount
       );

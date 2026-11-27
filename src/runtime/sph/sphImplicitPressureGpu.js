@@ -449,6 +449,7 @@ fn ip_particle_bucket(pos: vec3<f32>, bdims: vec3<u32>) -> u32 {
 }
 
 var<workgroup> partial: array<f32, 256>;
+var<workgroup> ip_wg_flag: u32;
 
 fn ip_weights(fx: f32) -> vec3<f32> {
   let a = 1.5 - fx;
@@ -597,6 +598,12 @@ fn ip_particle_apply(@builtin(global_invocation_id) id: vec3<u32>) {
   let use_dir = params.source_is_direction != 0u;
   var div = 0.0;
   var active_mask = 0u;
+  var s_scale = ip_scalar(5u);
+  if (use_dir) {
+    let p_max_dir = bitcast<f32>(atomicLoad(&scalars[12]));
+    let bound_dir = ip_scalar(7u) * p_max_dir;
+    s_scale = select(1.0, IP_FIXED_LIMIT / bound_dir, bound_dir > 0.0);
+  }
   if (interior) {
     let ny = params.grid_ny;
     let nz = params.grid_nz;
@@ -642,7 +649,7 @@ fn ip_particle_apply(@builtin(global_invocation_id) id: vec3<u32>) {
         }
       }
     }
-    let s_scaled = kv * params.dt * (16.0 * inv_h * inv_h) * div * ip_scalar(5u);
+    let s_scaled = kv * params.dt * (16.0 * inv_h * inv_h) * div * s_scale;
     if (s_scaled == 0.0) { return; }
     bit = 1u;
     for (var a = 0u; a < 3u; a = a + 1u) {
@@ -698,7 +705,7 @@ fn ip_particle_apply(@builtin(global_invocation_id) id: vec3<u32>) {
       }
     }
   }
-  let s_scaled = kv * params.dt * (16.0 * inv_h * inv_h) * div * ip_scalar(5u);
+  let s_scaled = kv * params.dt * (16.0 * inv_h * inv_h) * div * s_scale;
   if (s_scaled == 0.0) { return; }
   bit = 1u;
   for (var a = 0i; a < 3i; a = a + 1i) {
@@ -735,6 +742,9 @@ fn ip_clear_iteration(@builtin(global_invocation_id) id: vec3<u32>) {
   let num_buckets = bdims.x * bdims.y * bdims.z;
   if (id.x < num_buckets) {
     atomicStore(&scalars[16u + id.x], 0u);
+  }
+  if (id.x == 0u) {
+    atomicStore(&scalars[12], 0u);
   }
 }
 
@@ -870,7 +880,14 @@ fn ip_workgroup_max_into(group: u32, local: u32, value: f32) {
     if (stride == 1u) { break; }
     stride = stride / 2u;
   }
-  if (local == 0u) { partials[groups + group] = partial[0]; }
+  if (local == 0u) {
+    partials[groups + group] = partial[0];
+    // IEEE-754 non-negative f32 bits are strictly monotonic u32, so atomicMax
+    // computes exact global max|p| without an extra ip_reduce_pscale dispatch.
+    if (partial[0] > 0.0) {
+      atomicMax(&scalars[12], bitcast<u32>(partial[0]));
+    }
+  }
 }
 @compute @workgroup_size(256)
 fn ip_reduce_pscale(@builtin(local_invocation_index) local: u32) {
@@ -911,6 +928,9 @@ fn ip_reduce_partials(local: u32, skip_if_converged: bool) -> f32 {
 fn ip_set_scalar(slot: u32, value: f32) { atomicStore(&scalars[slot], bitcast<u32>(value)); }
 fn ip_converged() -> bool { return bitcast<f32>(atomicLoad(&scalars[9])) > 0.5; }
 fn ip_scalar(slot: u32) -> f32 { return bitcast<f32>(atomicLoad(&scalars[slot])); }
+fn ip_wg_has_mass(group_x: u32) -> bool {
+  return group_x >= 65536u || atomicLoad(&scalars[16u + group_x]) != 0u;
+}
 fn ip_take_node_av(index: u32, m: f32, scale: f32) -> vec3<f32> {
   let sum = vec3<f32>(ip_take_fixed(index * 3u, scale), ip_take_fixed(index * 3u + 1u, scale),
     ip_take_fixed(index * 3u + 2u, scale));
@@ -945,23 +965,30 @@ fn ip_reduce_rz(@builtin(local_invocation_index) local: u32) {
 // pq <- sum; alpha = rz / pq (after apply).
 @compute @workgroup_size(256)
 fn ip_reduce_alpha(@builtin(local_invocation_index) local: u32) {
-  let pq = ip_reduce_partials(local, true);
-  if (local == 0u && !ip_converged()) {
-    ip_set_scalar(1u, pq);
-    ip_set_scalar(3u, select(0.0, ip_scalar(0u) / pq, pq > 0.0));
+  if (local == 0u) { ip_wg_flag = select(0u, 1u, !ip_converged()); }
+  if (workgroupUniformLoad(&ip_wg_flag) != 0u) {
+    let pq = ip_reduce_partials(local, true);
+    if (local == 0u) {
+      ip_set_scalar(1u, pq);
+      ip_set_scalar(3u, select(0.0, ip_scalar(0u) / pq, pq > 0.0));
+    }
   }
 }
 // rz_new <- sum; beta = rz_new / rz; rz <- rz_new (after update_xr).
 @compute @workgroup_size(256)
 fn ip_reduce_beta(@builtin(local_invocation_index) local: u32) {
-  let rz_new = ip_reduce_partials(local, true);
-  if (local == 0u && !ip_converged()) {
-    let rz = ip_scalar(0u);
-    ip_set_scalar(2u, rz_new);
-    ip_set_scalar(4u, select(0.0, rz_new / rz, rz > 0.0));
-    ip_set_scalar(0u, rz_new);
-    ip_set_scalar(10u, ip_scalar(10u) + 1.0);
-    if (rz_new <= params.rz_tolerance * ip_scalar(8u)) { ip_set_scalar(9u, 1.0); }
+  if (local == 0u) { ip_wg_flag = select(0u, 1u, !ip_converged()); }
+  if (workgroupUniformLoad(&ip_wg_flag) != 0u) {
+    let rz_new = ip_reduce_partials(local, true);
+    if (local == 0u) {
+      let rz = ip_scalar(0u);
+      ip_set_scalar(2u, rz_new);
+      ip_set_scalar(4u, select(0.0, rz_new / rz, rz > 0.0));
+      ip_set_scalar(0u, rz_new);
+      ip_set_scalar(10u, ip_scalar(10u) + 1.0);
+      atomicStore(&scalars[12], 0u);
+      if (rz_new <= params.rz_tolerance * ip_scalar(8u)) { ip_set_scalar(9u, 1.0); }
+    }
   }
 }
 
@@ -972,10 +999,12 @@ fn ip_cg_init(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
     @builtin(workgroup_id) group: vec3<u32>) {
   var contribution = 0.0;
   var p_abs = 0.0;
+  var has_mass = 0.0;
   // Barrier reductions: every invocation reaches workgroupBarrier.
   if (id.x < params.grid_node_count) {
     let m = grid_nodes[id.x * 2u].x;
     if (m > 0.0) {
+      has_mass = 1.0;
       let av = ip_take_node_av(id.x, m, ip_scalar(5u));
       let r = ip_project(grid_nodes[id.x * 2u + 1u], -av);
       var z = r;
@@ -989,6 +1018,22 @@ fn ip_cg_init(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
       cg_p[id.x] = vec4<f32>(0.0);
     }
   }
+  // Record per-workgroup occupancy once in scalars[16 + group.x] (bucket counts
+  // are already consumed by ip_scatter_particles) so empty air workgroups skip
+  // all global reads and barrier reductions on every CG iteration.
+  partial[local] = has_mass;
+  workgroupBarrier();
+  var mstride = 64u;
+  loop {
+    if (local < mstride) { partial[local] = max(partial[local], partial[local + mstride]); }
+    workgroupBarrier();
+    if (mstride == 1u) { break; }
+    mstride = mstride / 2u;
+  }
+  if (local == 0u && group.x < 65536u) {
+    atomicStore(&scalars[16u + group.x], select(0u, 1u, partial[0] > 0.5));
+  }
+  workgroupBarrier();
   ip_workgroup_partial(group.x, local, contribution);
   ip_workgroup_max_into(group.x, local, p_abs);
 }
@@ -997,60 +1042,72 @@ fn ip_cg_init(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoc
 @compute @workgroup_size(128)
 fn ip_cg_apply(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) local: u32,
     @builtin(workgroup_id) group: vec3<u32>) {
-  var contribution = 0.0;
-  if (!ip_converged() && id.x < params.grid_node_count) {
-    let p4 = cg_p[id.x];
-    let m = p4.w;
-    if (m > 0.0) {
-      let av = ip_take_node_av(id.x, m, ip_scalar(5u));
-      let q = ip_project(grid_nodes[id.x * 2u + 1u], p4.xyz + av);
-      cg_q[id.x] = vec4<f32>(q, 0.0);
-      contribution = m * dot(p4.xyz, q);
+  if (local == 0u) { ip_wg_flag = select(0u, 1u, !ip_converged() && ip_wg_has_mass(group.x)); }
+  if (workgroupUniformLoad(&ip_wg_flag) != 0u) {
+    var contribution = 0.0;
+    if (id.x < params.grid_node_count) {
+      let p4 = cg_p[id.x];
+      let m = p4.w;
+      if (m > 0.0) {
+        let p_max_dir = bitcast<f32>(atomicLoad(&scalars[12]));
+        let bound_dir = ip_scalar(7u) * p_max_dir;
+        let dir_scale = select(1.0, IP_FIXED_LIMIT / bound_dir, bound_dir > 0.0);
+        let av = ip_take_node_av(id.x, m, dir_scale);
+        let q = ip_project(grid_nodes[id.x * 2u + 1u], p4.xyz + av);
+        cg_q[id.x] = vec4<f32>(q, 0.0);
+        contribution = m * dot(p4.xyz, q);
+      }
     }
+    ip_workgroup_partial(group.x, local, contribution);
   }
-  ip_workgroup_partial(group.x, local, contribution);
 }
 
 // x += alpha p (the grid velocity in place), r -= alpha q, accumulate <r, z>_M.
 @compute @workgroup_size(128)
 fn ip_cg_update_xr(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) local: u32,
     @builtin(workgroup_id) group: vec3<u32>) {
-  var contribution = 0.0;
-  if (!ip_converged() && id.x < params.grid_node_count) {
-    let p4 = cg_p[id.x];
-    let m = p4.w;
-    if (m > 0.0) {
-      let alpha = ip_scalar(3u);
-      let row = grid_nodes[id.x * 2u];
-      let r = cg_r[id.x].xyz - alpha * cg_q[id.x].xyz;
-      grid_nodes[id.x * 2u] = vec4<f32>(row.x, row.yzw + alpha * p4.xyz);
-      cg_r[id.x] = vec4<f32>(r, 0.0);
-      var z = r;
-      if ((params.flags & 1u) != 0u) { z = r / cg_diag[id.x].xyz; }
-      contribution = m * dot(r, z);
+  if (local == 0u) { ip_wg_flag = select(0u, 1u, !ip_converged() && ip_wg_has_mass(group.x)); }
+  if (workgroupUniformLoad(&ip_wg_flag) != 0u) {
+    var contribution = 0.0;
+    if (id.x < params.grid_node_count) {
+      let p4 = cg_p[id.x];
+      let m = p4.w;
+      if (m > 0.0) {
+        let alpha = ip_scalar(3u);
+        let row = grid_nodes[id.x * 2u];
+        let r = cg_r[id.x].xyz - alpha * cg_q[id.x].xyz;
+        grid_nodes[id.x * 2u] = vec4<f32>(row.x, row.yzw + alpha * p4.xyz);
+        cg_r[id.x] = vec4<f32>(r, 0.0);
+        var z = r;
+        if ((params.flags & 1u) != 0u) { z = r / cg_diag[id.x].xyz; }
+        contribution = m * dot(r, z);
+      }
     }
+    ip_workgroup_partial(group.x, local, contribution);
   }
-  ip_workgroup_partial(group.x, local, contribution);
 }
 
 // p = z + beta p (preserving mass in p.w).
 @compute @workgroup_size(128)
 fn ip_cg_update_p(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) local: u32,
     @builtin(workgroup_id) group: vec3<u32>) {
-  var p_abs = 0.0;
-  if (!ip_converged() && id.x < params.grid_node_count) {
-    let p4 = cg_p[id.x];
-    let m = p4.w;
-    if (m > 0.0) {
-      let beta = ip_scalar(4u);
-      var z = cg_r[id.x].xyz;
-      if ((params.flags & 1u) != 0u) { z = z / cg_diag[id.x].xyz; }
-      let p = z + beta * p4.xyz;
-      cg_p[id.x] = vec4<f32>(p, m);
-      p_abs = max(abs(p.x), max(abs(p.y), abs(p.z)));
+  if (local == 0u) { ip_wg_flag = select(0u, 1u, !ip_converged() && ip_wg_has_mass(group.x)); }
+  if (workgroupUniformLoad(&ip_wg_flag) != 0u) {
+    var p_abs = 0.0;
+    if (id.x < params.grid_node_count) {
+      let p4 = cg_p[id.x];
+      let m = p4.w;
+      if (m > 0.0) {
+        let beta = ip_scalar(4u);
+        var z = cg_r[id.x].xyz;
+        if ((params.flags & 1u) != 0u) { z = z / cg_diag[id.x].xyz; }
+        let p = z + beta * p4.xyz;
+        cg_p[id.x] = vec4<f32>(p, m);
+        p_abs = max(abs(p.x), max(abs(p.y), abs(p.z)));
+      }
     }
+    ip_workgroup_max_into(group.x, local, p_abs);
   }
-  ip_workgroup_max_into(group.x, local, p_abs);
 }
 
 `;
@@ -1506,8 +1563,9 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
     run('ip_cg_update_xr', nodeGroups);
     run('ip_reduce_beta', 1);
     if (k + 1 < options.iterations) {
+      // ip_cg_update_p publishes exact global max|p| via atomicMax(&scalars[12]),
+      // eliminating the separate ip_reduce_pscale dispatch on every CG iteration.
       run('ip_cg_update_p', nodeGroups);
-      run('ip_reduce_pscale', 1);
     }
   }
   if (!splitPasses) pass.end();

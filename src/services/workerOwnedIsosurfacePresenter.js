@@ -952,26 +952,25 @@ export function createWorkerOwnedIsosurfacePresenter({
     }
     // Zero-extra-fence GPU queue backpressure: when a presentation render
     // frame is already awaiting its own `onSubmittedWorkDone()` behind a prior
-    // physics submit, drain that existing fence (bounded safely at 60 ms)
-    // before submitting another physics step onto the shared GPU queue so
-    // multiple heavy physics steps cannot pile up in front of one render.
-    const drainedInflightFence = await drainActivePresentationFence(60);
+    // physics submit, drain that existing fence (bounded at 18 ms) before
+    // submitting another physics burst onto the shared GPU queue.
+    const drainedInflightFence = await drainActivePresentationFence(18);
     if (drainedInflightFence && !presentationCanInterleave()) {
       return submittedRenderSerial;
     }
     const congestedQueue = !force && (
-      recentPresentationGpuCompleteMs >= 5.5
-      || (drainedInflightFence && recentPresentationGpuCompleteMs >= 3.5)
+      recentPresentationGpuCompleteMs >= 7.0
+      || (drainedInflightFence && recentPresentationGpuCompleteMs >= 5.0)
     );
     const targetTurns = force
       ? (recentPresentationGpuCompleteMs >= 22.0
-          ? 3
-          : (recentPresentationGpuCompleteMs >= 14.0 ? 2 : 1))
-      : (recentPresentationGpuCompleteMs < 3.5
+          ? 2
+          : (recentPresentationGpuCompleteMs >= 14.0 ? 1 : 1))
+      : (recentPresentationGpuCompleteMs < 5.0
           ? 0
           : (congestedQueue
-              ? Math.min(3, Math.max(1, Math.ceil((recentPresentationGpuCompleteMs - 3.5) / 8.0)))
-              : Math.min(3, Math.max(1, Math.ceil(recentPresentationGpuCompleteMs / 5.0)))));
+              ? Math.min(2, Math.max(1, Math.ceil((recentPresentationGpuCompleteMs - 5.0) / 10.0)))
+              : 1));
     const baseSerial = (congestedQueue || force)
       ? Math.max(afterSerial, submittedRenderSerial)
       : afterSerial;
@@ -980,10 +979,10 @@ export function createWorkerOwnedIsosurfacePresenter({
       return submittedRenderSerial;
     }
     const adaptiveTimeoutMs = Math.max(
-      Number(timeoutMs) || 14,
-      Math.min(52, 16 + targetTurns * 12)
+      Number(timeoutMs) || 12,
+      Math.min(24, 12 + targetTurns * 6)
     );
-    const boundedTimeoutMs = Math.max(4, Math.min(54, adaptiveTimeoutMs));
+    const boundedTimeoutMs = Math.max(4, Math.min(24, adaptiveTimeoutMs));
     return new Promise((resolve) => {
       let settled = false;
       let timer = null;

@@ -40,10 +40,11 @@
 
 ---
 
-## Remaining Standing Architecture Specs & Post-1.0 Operational Stretches (`7` Docs)
+## Remaining Standing Architecture Specs, Active Audits & Post-1.0 Operational Stretches (`8` Docs)
 
 | File | Category | Live-Code Reality (2026-11-27) & Remaining Scope |
 |---|---|---|
+| [`ulg-cross-layer-dogfooding-audit-2026-11-27.md`](ulg-cross-layer-dogfooding-audit-2026-11-27.md) | **ACTIVE Cross-Layer ULG Dogfooding Audit (`big dog` 2026-11-27, Waves D1–D5)** | 4-auditor audit at `HEAD 43dd21cd` enforcing the highest-level **Strict ULG Dogfooding** rule ([`AGENTS.md`](../../AGENTS.md) §1.6): fixes dead `spectralKIm`/metal-`F0` crush in `materialPbrOpticsBridge`, uploads `pbrOptics` to `SphereInstance`/terrain, fixes Elements Lab `uiState.Z`/`mdTempK` & linear/sRGB gamma across Universes/ChemBio/Studio, fixes `organicMolecularGraphGpu` 105-element collapse, wires live `U12` Stages 1/2/4/5, connects L3–L7 compound/RHF/nuclear/solvent closures, fixes ExoWebTUI Paper light theme & CRT/handoff seams, and closes Studio DAG/Law-IR/A3/LOD dogfooding gaps. |
 | [`prompt-audit-and-backlog.md`](prompt-audit-and-backlog.md) | Master Audit Log | Complete chronological audit of user requests reconciled against shipped code (`P1–P5`, Pass 2 LOD, Phase B–D, `U1–U19`, 6-stage Emergent Alien Ecosystems, ExoWebTUI Multi-Window Desktop, Retro UI, Mobile Audit, Wave 1 MLS-MPM optimizations, Star-System Planet Diversity, and Universal ULG Material-Physics Cook-Torrance GGX PBR). |
 | [`SS/README.md`](SS/README.md) & [`SS/schroeder-tree-and-algorithm-plan.md`](SS/schroeder-tree-and-algorithm-plan.md) | Standing Architecture | Canonical Schroeder Simulation (`SS`) immutable spatial epoch & 6 derived views contract. Zero private 4,096-bucket solid-fluid hashes remain (`Gate 6 Phase C`); linear-time `O(A)` atomic-claim phase-slot materializer (`1->8`/`8->1` + conservative APIC shear), `LawDagEpochScheduler`, declarative Law-IR → WGSL compiler (`ulg-gpu-abi`), live 40-OOM `createDynamicSchroederScaleAtlasRuntime` in `universes.html`, and `dynamicHierarchyLod: '1'` are live. Kept as standing SS architectural specification. |
 | [`scale-adaptive-law-activation-plan.md`](scale-adaptive-law-activation-plan.md) | Standing Architecture | Canonical Two Unifications (`SS` + Tier 0–3 Closure Economy) architectural specification. Kept as standing design authority. |

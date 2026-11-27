@@ -11,8 +11,9 @@ import * as scene from '../src/visualization/sphPhaseScene.js';
 
 // Captured after binding opaque_scene_depth (@group(1) @binding(5)), linear
 // eye-depth foreground rejection (zNear=0.05..zFar=500 perspective precision),
-// and collapsing redundant identical RGB refraction lookups (2026-11-25). These
-// are generated-WGSL snapshots, not GPU validation. An intentional shader
+// collapsing redundant identical RGB refraction lookups (2026-11-25), and
+// wiring ULG's complex_normal_fresnel_rgb conductor Fresnel in Wave D1 (2026-11-27).
+// These are generated-WGSL snapshots, not GPU validation. An intentional shader
 // behavior change must review and update the snapshots.
 const PRE_EXTRACTION_SHADERS = Object.freeze({
   SPH_NATIVE_WEBGPU_BACKGROUND_WGSL: {
@@ -20,12 +21,12 @@ const PRE_EXTRACTION_SHADERS = Object.freeze({
     sha256: '4eec9414f2807388bee643fd5d2f38efbb98d68f308781aee14e077483997e06'
   },
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL: {
-    bytes: 41602,
-    sha256: '268035b5737b9df66ce7f3dfaefec2c3760dd4b5187f7b04bc18fbf5450cf502'
+    bytes: 41817,
+    sha256: 'ad8fb2ae43703df7f61d57f7d1bbe23a85db166b8125048b07dc67dd59190cf2'
   },
   SPH_RESIDENT_SURFACE_DRAW_COMPACT_POSITION_WGSL: {
-    bytes: 47422,
-    sha256: '84dbd1d7ed0df4fb0c5b91fe99d9bd575c1595a4c532fbbcaa41dfd153e5e1b2'
+    bytes: 47637,
+    sha256: '6f437e3742bf90d056983351fa757ec21a24f6c388885a7565ef03a8e51bba1f'
   }
 });
 

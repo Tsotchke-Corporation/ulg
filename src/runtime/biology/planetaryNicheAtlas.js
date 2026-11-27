@@ -253,8 +253,14 @@ export function buildPlanetaryNicheAtlas(planetState = {}) {
   const hasOcean = tensor.oceanCoverageFrac > 0.08 && !tensor.solventInfo.isCloudDeckHabitat && tensor.hasSolidCrust;
   const hasLand = tensor.hasSolidCrust && tensor.oceanCoverageFrac < 0.96 && !tensor.solventInfo.isCloudDeckHabitat && solv !== 'H2O-subsurface';
 
+  const tMeltSolvent = Number(tensor.solventInfo.tMeltK) || 90;
+  const tBoilSolvent = Number(tensor.solventInfo.tBoilK) || 373;
+  const isElevatedOrSubsurface = tensor.solventInfo.isCloudDeckHabitat || !tensor.hasSolidCrust || solv === 'H2O-subsurface';
+  const nicheMinT = isElevatedOrSubsurface ? 65 : Math.max(65, Math.min(T - 2, tMeltSolvent - 4));
+  const nicheMaxT = isElevatedOrSubsurface ? 440 : Math.min(440, Math.max(T + 4, tBoilSolvent - 3));
+
   const addNiche = (id, label, medium, opts = {}) => {
-    const localT = clamp(T + (opts.dT || 0), 65, 680);
+    const localT = clamp(T + (opts.dT || 0), nicheMinT, nicheMaxT);
     const light = clamp(opts.lightFluxNorm ?? 1.0, 0.0, 2.0);
     const fluidRho = medium === 'aquatic' ? tensor.solventDensityKgM3 : rho;
     const wind = medium === 'aquatic' ? 0.6 : tensor.windMeanMS * (opts.windMul ?? 1.0);
@@ -324,8 +330,11 @@ export function buildPlanetaryNicheAtlas(planetState = {}) {
         dT: -14, lightFluxNorm: 1.18, windMul: 1.65, moisture: 0.44, nutrient: 0.62, elevPref: 0.76, slopeTol: 0.48, areaFrac: 0.16
       });
       if (tensor.hydrothermalFrac >= 0.20) {
+        // Scale geothermal warming to at most ~25% of the solvent's liquid window so
+        // narrow-span cryo-solvents (e.g. CH4 91..116 K) form warm liquid springs rather than vaporizing.
+        const geoDt = clamp((tBoilSolvent - tMeltSolvent) * 0.24, 4, 24);
         addNiche('geothermal-rift', 'Geothermal Volcanic & Fumarole Rift', 'terrestrial', {
-          dT: 24, lightFluxNorm: 0.60, chemoFlux: 0.95, windMul: 0.85, moisture: 0.68, nutrient: 1.25, elevPref: 0.55, slopeTol: 0.45, areaFrac: 0.10
+          dT: geoDt, lightFluxNorm: 0.60, chemoFlux: 0.95, windMul: 0.85, moisture: 0.68, nutrient: 1.25, elevPref: 0.55, slopeTol: 0.45, areaFrac: 0.10
         });
       }
       if (tensor.tidallyLocked) {

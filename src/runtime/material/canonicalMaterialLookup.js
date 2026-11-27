@@ -452,9 +452,12 @@ export function resolveCanonicalMaterialThermalOptics(sample = {}) {
     0.98
   );
   // Visible absorptance derived directly from complex reflectance + band-gap transparency
+  // (wide-gap molecular dielectrics E_g > 5 eV like H2O/SiO2 glass transmit cleanly in visible)
   const visAbsorb = isMetal
     ? clamp(1.0 - refl550, 0.05, 0.72)
-    : (bandGapEv > 3.2 ? clamp(0.08 + (1.0 - refl550) * 0.25, 0.06, 0.45) : clamp(0.45 + (1.0 - refl550) * 0.35, 0.30, 0.90));
+    : (bandGapEv > 5.0
+      ? clamp(0.05 + (1.0 - refl550) * 0.08, 0.04, 0.14)
+      : (bandGapEv > 3.2 ? clamp(0.08 + (1.0 - refl550) * 0.22, 0.06, 0.35) : clamp(0.45 + (1.0 - refl550) * 0.35, 0.30, 0.90)));
 
   const tMeltK = clamp(
     Number(bankMelt?.temperatureK ?? thermo?.meltingPointK ?? 1470),
@@ -478,8 +481,12 @@ export function resolveCanonicalMaterialThermalOptics(sample = {}) {
     23000
   );
 
-  // Polar rotational dipole coupling derived from static dielectric permittivity ε_r & molecular dipole
-  const staticEr = Number(em?.staticDielectricConstant ?? 4.0);
+  // Polar rotational dipole coupling derived from Onsager/Kirkwood static dielectric ε_r & molecular dipole
+  const solventAnchorKey = cleanFormula.toLowerCase();
+  const solventRef = SOLVENT_COEXISTENCE_ANCHORS[solventAnchorKey]
+    ? resolveSolventThermodynamics(cleanFormula, 298.15, P_STD_PA)
+    : null;
+  const staticEr = Number(solventRef?.dielectricEr ?? em?.staticDielectricConstant ?? 4.0);
   const dipoleD = Number(compAtlas?.atomic?.dipoleDebye ?? 0);
   const polarDipole = isMetal
     ? 0.04

@@ -44,15 +44,27 @@ function cross3(a, b) {
  * derived directly from ULG's canonical `blackbodyColorSrgb(tempK)` (`radiationClosure.js`:
  * exact Planck spectral radiance integrated against Wyman 2013 CIE 1931 color-matching functions).
  */
+const SOLAR_DAYLIGHT_REF_LIN = (() => {
+  // Von Kries chromatic adaptation reference at 6050 K solar daylight white point
+  // so 5778 K G2V sunlight reads as authentic warm white while preserving true
+  // Planck chromaticity across M-dwarf (3000 K) to O/B (26000 K) stars.
+  const ref = blackbodyColorSrgb(6050);
+  return Object.freeze([
+    Math.max(0.05, srgbChannelToLinear(ref.r)),
+    Math.max(0.05, srgbChannelToLinear(ref.g)),
+    Math.max(0.05, srgbChannelToLinear(ref.b))
+  ]);
+})();
+
 export function starTemperatureToLightRgb(tempK) {
   const t = clamp(Number(tempK) || 5778, 1200, 50000);
   const bucket = Math.round(t / 10) * 10;
   if (BLACKBODY_LIGHT_CACHE.has(bucket)) return [...BLACKBODY_LIGHT_CACHE.get(bucket)];
   const srgb = blackbodyColorSrgb(t);
   const lin = [
-    srgbChannelToLinear(srgb.r),
-    srgbChannelToLinear(srgb.g),
-    srgbChannelToLinear(srgb.b)
+    srgbChannelToLinear(srgb.r) / SOLAR_DAYLIGHT_REF_LIN[0],
+    srgbChannelToLinear(srgb.g) / SOLAR_DAYLIGHT_REF_LIN[1],
+    srgbChannelToLinear(srgb.b) / SOLAR_DAYLIGHT_REF_LIN[2]
   ];
   const peak = Math.max(0.01, lin[0], lin[1], lin[2]);
   const out = [

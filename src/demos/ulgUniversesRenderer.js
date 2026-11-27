@@ -3479,8 +3479,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let l_dir_raw = cam.sph_geo.xyz;
     let l_dir = select(normalize(vec3<f32>(0.65, 0.45, 0.60)), normalize(l_dir_raw), length(l_dir_raw) > 0.05);
     let h_fd = 2.0 / max(12.0, f32(dim));
-    // Crisp 3D density isosurface threshold across ALL eras (Era 1 glossy liquid-magma ocean -> Era 4 solid crust plates!)
+    // Crisp 3D density isosurface threshold across ALL eras, physically contracting from +4% molten thermal
+    // inflation in Era 1 (1.04 R_p) down to EXACT 1.000 R_p before the age_f = 0.45 crossfade onto LIT_SPHERE_WGSL
+    // (eliminating ANY size disparity across 5K..57K SPH parcels & 32^3..64^3 grids!)
     let iso_thresh = mix(0.11, 0.09, age_f);
+    let r_surf_lim = mix(1.04, 1.000, smoothstep(0.0, 0.45, age_f));
+    let atm_outer_lim = r_surf_lim + mix(0.16, 0.06, age_f);
     var hit_solid = false;
 
     for (var s = 0u; s < steps; s = s + 1u) {
@@ -3488,12 +3492,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
       let p = ro + rd * t;
       let r = length(p);
       if (r >= 0.99) { continue; }
-      let r_body = r / 0.645;
-      if (cutaway_on && p.x > 0.0 && p.y > 0.0 && p.z > 0.0 && r_body < 1.08) { continue; }
+      let r_body = r * 1.55;
+      if (r_body > atm_outer_lim) { continue; }
+      if (cutaway_on && p.x > 0.0 && p.y > 0.0 && p.z > 0.0 && r_body < 1.05) { continue; }
 
       let g0 = sample_grid_trilin(p, dim, 2u, 0u);
       let dens = g0.x;
-      if (dens < 0.012) { continue; }
+      if (dens < 0.012 && r_body > r_surf_lim * 0.97) { continue; }
       let g1 = sample_grid_trilin(p, dim, 2u, 1u);
       let temp_n = clamp(g1.x, 0.0, 1.0);
       let rho0 = g1.y;
@@ -3515,9 +3520,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
       let is_crust = max(1.0 - smoothstep(2.65, 3.30, rho0), is_outer_shell * (0.42 + 0.58 * age_f));
       let is_water = (1.0 - smoothstep(1.35, 2.15, rho0)) * select(0.0, 1.0, has_ocean);
 
-      // MLS-MPM-GRADE 3D DENSITY-ISOSURFACE HIT (EVERY ERA!):
+      // MLS-MPM-GRADE 3D DENSITY-ISOSURFACE HIT (PIXEL-MATCHED TO LIT_SPHERE_WGSL RADIUS 1.000 R_p!):
       // Sharp 6-tap finite-difference ∇ρ surface normal + high-frequency magma/basalt micro-bump + glossy specular + Fresnel rim!
-      if (dens > iso_thresh || (r_body < 0.94 && dens > 0.045)) {
+      let r_relief = r_surf_lim + (tex - 0.5) * 0.022;
+      if (r_body <= r_relief && (dens > iso_thresh || r_body <= r_surf_lim * 0.985)) {
         let gx_p = sample_grid_trilin(p + vec3<f32>(h_fd, 0.0, 0.0), dim, 2u, 0u).x;
         let gx_m = sample_grid_trilin(p - vec3<f32>(h_fd, 0.0, 0.0), dim, 2u, 0u).x;
         let gy_p = sample_grid_trilin(p + vec3<f32>(0.0, h_fd, 0.0), dim, 2u, 0u).x;
@@ -3560,11 +3566,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         break;
       }
 
-      // Outer tenuous silicate-vapor & steam impact atmosphere outside the solid/liquid isosurface!
+      // Outer tenuous silicate-vapor & steam impact atmosphere outside the solid/liquid isosurface
+      // (confined to physical atmospheric scale height & fading cleanly during late cooling crossfade!)
+      let atm_h_fade = 1.0 - smoothstep(r_surf_lim, atm_outer_lim, r_body);
       let vapor_col = select(vec3<f32>(0.95, 0.36, 0.08), vec3<f32>(0.42, 0.72, 1.0), has_ocean && age_f > 0.5);
-      let dens_sc = clamp(dens * 2.2, 0.0, 0.45);
-      let sigma = dens_sc * 0.55 * dt;
-      let emit = (vapor_col * dens_sc * 0.65 + vec3<f32>(1.0, 0.84, 0.45) * shock * 0.85) * dt;
+      let dens_sc = clamp(dens * 1.4, 0.0, 0.28) * atm_h_fade * (1.0 - smoothstep(0.45, 0.90, age_f));
+      let sigma = dens_sc * 0.42 * dt;
+      let emit = (vapor_col * dens_sc * 0.52 + vec3<f32>(1.0, 0.84, 0.45) * shock * atm_h_fade * 0.65) * dt;
       accum = accum + trans * emit;
       trans = trans * exp(-sigma);
       if (trans < 0.03) { break; }

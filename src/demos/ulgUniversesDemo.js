@@ -6396,7 +6396,7 @@ export async function mountUlgUniversesDemo() {
                 buffer: sphS.getResidentParcelsBuffer(),
                 count: sphS.parcelCount,
                 mode: 13,
-                worldScale: trueRWorld * (isVolLiveNow ? 1.0 : 0.98),
+                worldScale: trueRWorld * (isVolLiveNow ? 0.96 : 0.98),
                 pointSize: isVolLiveNow
                   ? Math.max(0.032, Math.min(0.11, trueRWorld * 0.028))
                   : Math.max(0.045, Math.min(0.18, trueRWorld * 0.038)),

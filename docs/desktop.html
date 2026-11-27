@@ -385,6 +385,127 @@
         gap: 6px;
       }
 
+      /* Full PeerCompute / @exotui 5-pass Shader Stack controls inside Settings Console */
+      .exo-shader-card {
+        border: 1px solid var(--exo-border);
+        background: rgba(0, 0, 0, 0.18);
+        padding: 8px 9px;
+        margin-top: 7px;
+        border-radius: 2px;
+      }
+      .exo-shader-card.enabled {
+        border-color: var(--exo-accent);
+        box-shadow: inset 2px 0 0 var(--exo-accent);
+      }
+      .exo-shader-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .exo-shader-title {
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        color: var(--exo-text);
+      }
+      .exo-shader-knobs {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 8px;
+        padding-top: 7px;
+        border-top: 1px dashed var(--exo-border);
+      }
+      .exo-knob-row {
+        display: grid;
+        grid-template-columns: 98px 1fr 48px;
+        align-items: center;
+        gap: 8px;
+        font-size: 10.5px;
+        color: var(--exo-muted);
+      }
+      .exo-knob-row input[type="range"] {
+        width: 100%;
+        margin: 0;
+        accent-color: var(--exo-accent);
+      }
+      .exo-knob-val {
+        text-align: right;
+        font-weight: 700;
+        color: var(--exo-text);
+      }
+      .exo-mag-bar-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 7px;
+        font-size: 10.5px;
+      }
+      .exo-mag-track {
+        flex: 1;
+        height: 8px;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid var(--exo-border);
+        border-radius: 1px;
+        overflow: hidden;
+      }
+      .exo-mag-fill {
+        height: 100%;
+        width: 2%;
+        background: var(--exo-accent);
+        transition: width 0.25s linear;
+      }
+
+      /* Unified full-desktop Shader Stack overlay (scanlines, CRT vignette/bezel, phosphor, VHS/degauss FX) */
+      #exo-shader-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2600;
+        pointer-events: none;
+        display: none;
+        overflow: hidden;
+      }
+      #exo-shader-overlay.active {
+        display: block;
+      }
+      #exo-shader-overlay.has-scanlines::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          0deg,
+          rgba(0, 0, 0, var(--exo-scan-strength, 0.14)) 0px,
+          rgba(0, 0, 0, var(--exo-scan-strength, 0.14)) 1px,
+          transparent 1px,
+          transparent var(--exo-scan-period, 3px)
+        );
+      }
+      #exo-shader-overlay.has-crt::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: var(--exo-crt-radius, 4px);
+        background: radial-gradient(
+          ellipse at center,
+          transparent 56%,
+          rgba(0, 0, 0, var(--exo-crt-vignette, 0.25)) 100%
+        );
+        box-shadow:
+          inset 0 0 28px rgba(0, 0, 0, calc(var(--exo-crt-vignette, 0.25) * 1.4)),
+          inset var(--exo-crt-fringe, 0.7px) 0 0 rgba(255, 64, 96, 0.16),
+          inset calc(var(--exo-crt-fringe, 0.7px) * -1) 0 0 rgba(64, 196, 255, 0.16);
+      }
+      .exo-shader-fx-canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: none;
+        mix-blend-mode: screen;
+        pointer-events: none;
+      }
+
       /* Floating Start Menu (box-drawing ExoWebTUI aesthetic over all windows) */
       #exo-start-menu {
         position: fixed;
@@ -555,7 +676,7 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="./assets/desktop-BT7Vr_QN.js"></script>
+    <script type="module" crossorigin src="./assets/desktop-D4wla_co.js"></script>
   </head>
   <body>
     <header id="exo-topbar" role="toolbar" aria-label="ExoWebTUI Taskbar">
@@ -565,8 +686,9 @@
       <div class="exo-bar-tools">
         <button id="exo-tile-btn" class="exo-bar-btn exo-desktop-only" type="button" title="Tile all open lab windows side-by-side">⊞ TILE</button>
         <button id="exo-cascade-btn" class="exo-bar-btn exo-desktop-only" type="button" title="Cascade floating lab windows">❐ FLOAT</button>
-        <button id="exo-crt-btn" class="exo-bar-btn" type="button" title="Toggle Retro CRT Scanlines">CRT</button>
-        <button id="exo-console-btn" class="exo-bar-btn" type="button" title="Themes, Wallpapers &amp; Window Manager">⚙</button>
+        <button id="exo-crt-btn" class="exo-bar-btn" type="button" title="Toggle Trinitron CRT / Shader Stack">FX</button>
+        <button id="exo-degauss-btn" class="exo-bar-btn exo-desktop-only" type="button" title="Fire Trinitron Degauss Coil">⚡ DEGAUSS</button>
+        <button id="exo-console-btn" class="exo-bar-btn" type="button" title="Themes, Shaders, Wallpapers &amp; Window Manager">⚙</button>
         <span id="exo-clock" aria-hidden="true">--:--</span>
       </div>
     </header>
@@ -580,6 +702,8 @@
     <nav id="exo-mobile-dock" aria-label="Mobile Lab Switcher"></nav>
 
     <aside id="exo-start-menu" role="menu" aria-label="ULG ExoWebTUI Start Menu"></aside>
+
+    <div id="exo-shader-overlay" aria-hidden="true"></div>
 
   </body>
 </html>

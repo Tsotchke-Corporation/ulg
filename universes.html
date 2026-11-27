@@ -1197,6 +1197,101 @@
       padding: 9px 11px; color: #e0f2fe; margin: 10px 0; white-space: pre-wrap;
     }
 
+    /* Floating Live Observable GPU Genesis Progress & Root-Cache Toast HUD */
+    #uv-genesis-hud {
+      position: fixed;
+      bottom: 62px;
+      left: calc((100vw - var(--deck-w)) * 0.5);
+      transform: translateX(-50%);
+      z-index: 25;
+      display: none;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 320px;
+      max-width: min(520px, calc(100vw - var(--deck-w) - 36px));
+      padding: 9px 13px;
+      border-color: rgba(56, 189, 248, 0.58);
+      background: linear-gradient(155deg, rgba(8, 20, 40, 0.90), rgba(5, 11, 24, 0.94));
+      box-shadow: 0 12px 38px rgba(0, 0, 0, 0.65), 0 0 22px rgba(56, 189, 248, 0.18);
+      pointer-events: auto;
+    }
+    body.deck-collapsed #uv-genesis-hud { left: calc((100vw - 56px) * 0.5); max-width: min(540px, calc(100vw - 88px)); }
+    #uv-genesis-hud.active { display: flex; }
+    #uv-genesis-hud.toast {
+      display: flex;
+      min-width: 240px;
+      border-color: rgba(52, 211, 153, 0.62);
+      background: linear-gradient(155deg, rgba(6, 34, 30, 0.90), rgba(5, 14, 24, 0.94));
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.58), 0 0 18px rgba(52, 211, 153, 0.18);
+    }
+    .uv-genesis-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .uv-genesis-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .uv-genesis-pulse {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 10px var(--accent);
+      flex-shrink: 0;
+      animation: uvGenesisPulse 1.15s ease-in-out infinite;
+    }
+    #uv-genesis-hud.toast .uv-genesis-pulse {
+      background: var(--green);
+      box-shadow: 0 0 10px var(--green);
+      animation: none;
+    }
+    @keyframes uvGenesisPulse {
+      0%, 100% { transform: scale(0.92); opacity: 0.72; }
+      50% { transform: scale(1.22); opacity: 1.0; }
+    }
+    #uv-genesis-title {
+      font-size: 12px;
+      font-weight: 800;
+      color: #f0f9ff;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #uv-genesis-detail {
+      font-family: var(--mono);
+      font-size: 10.2px;
+      color: #bae6fd;
+      line-height: 1.32;
+    }
+    #uv-genesis-hud.toast #uv-genesis-detail { color: #a7f3d0; }
+    .uv-genesis-bar {
+      width: 100%;
+      height: 5px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.22);
+      overflow: hidden;
+    }
+    #uv-genesis-hud.toast .uv-genesis-bar { display: none; }
+    #uv-genesis-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #38bdf8, #34d399, #fbbf24);
+      transition: width 140ms ease;
+    }
+    #uv-genesis-skip-btn {
+      padding: 4px 10px;
+      font-size: 10.5px;
+      flex-shrink: 0;
+    }
+    #uv-genesis-hud.toast #uv-genesis-skip-btn { display: none; }
+
     #uv-webgpu-fallback {
       position: fixed; inset: 0; background: rgba(3, 6, 13, 0.94); z-index: 60;
       display: none; align-items: center; justify-content: center; padding: 20px;
@@ -1374,6 +1469,16 @@
         display: none;
       }
       .uv-bottom-left { display: none; }
+      #uv-genesis-hud {
+        top: 94px;
+        bottom: auto;
+        left: 50%;
+        min-width: 0;
+        width: calc(100vw - 16px);
+        max-width: calc(100vw - 16px);
+        padding: 7px 10px;
+      }
+      body.deck-collapsed #uv-genesis-hud { left: 50%; max-width: calc(100vw - 16px); }
 
       /* Mobile Surface HUD floats cleanly above collapsed bottom dock & hides keyboard hints */
       #uv-surface-hud {
@@ -1722,13 +1827,15 @@
           <button class="uv-btn subtle icon-only" data-close-drawer="uv-config-drawer" type="button" title="Return to Scanner tab">✕</button>
         </div>
 
-        <div class="uv-section-label">GPU Particle / Sample Quality</div>
+        <div class="uv-section-label">PeerCompute GPU Capability &amp; Quality</div>
         <div class="uv-seg-group" id="uv-quality-group">
+          <button class="uv-seg-btn active" data-quality="auto" type="button" title="PeerCompute automatic client capability detection &amp; workload scaling">AUTO</button>
           <button class="uv-seg-btn" data-quality="low" type="button">LOW</button>
-          <button class="uv-seg-btn active" data-quality="med" type="button">MED</button>
+          <button class="uv-seg-btn" data-quality="med" type="button">MED</button>
           <button class="uv-seg-btn" data-quality="high" type="button">HIGH</button>
           <button class="uv-seg-btn" data-quality="ultra" type="button">ULTRA</button>
         </div>
+        <div id="uv-peercompute-cap-badge" style="font-family:var(--mono);font-size:10px;color:#93c5fd;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.22);border-radius:6px;padding:5px 7px;line-height:1.35;">PeerCompute probing GPU capability...</div>
 
         <div class="uv-section-label">Optics &amp; Overlays</div>
         <label class="uv-row"><span>Schwarzschild Lensing</span><input id="uv-lensing-toggle" type="checkbox" checked /></label>
@@ -1807,6 +1914,19 @@
       </section>
     </div>
   </aside>
+
+  <!-- Floating Live Observable GPU Genesis Progress & Root-Cache HUD -->
+  <div id="uv-genesis-hud" class="uv-glass" role="status" aria-live="polite">
+    <div class="uv-genesis-top">
+      <div class="uv-genesis-title-wrap">
+        <span class="uv-genesis-pulse" aria-hidden="true"></span>
+        <span id="uv-genesis-title">Simulating on WebGPU…</span>
+      </div>
+      <button id="uv-genesis-skip-btn" class="uv-btn primary" type="button">⏩ Finish Now</button>
+    </div>
+    <div id="uv-genesis-detail">Running first-principles GPU physics…</div>
+    <div class="uv-genesis-bar"><div id="uv-genesis-bar-fill"></div></div>
+  </div>
 
   <!-- Bottom-Left Breadcrumb & Dynamic Flight/Orbit Controls Hint -->
   <div class="uv-bottom-left">

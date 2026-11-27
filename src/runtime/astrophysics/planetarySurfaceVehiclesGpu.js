@@ -423,17 +423,12 @@ export function evaluatePlanetaryCrustElevation(x, z, env) {
   }
   const r0 = Math.hypot(x, z);
   if (env.hasSphGeology && env.sphCoarseHeight64) {
-    // Full-authority GPU SPH Planetary Geology starting right at r = 0 m!
-    // Only a tiny gentle 16 m landing-pad stabilization directly under spawn (0, 0).
-    const padA = Math.min(1.0, Math.max(0.0, (r0 - 12.0) / 26.0));
-    const padSmooth = padA * padA * (3 - 2 * padA);
+    // 100% Full-Authority GPU SPH Planetary Geology starting at r = 0 m — ZERO Perlin fbm2 hills!
+    // Ocean worlds cross exact seaLevelM = 0.0 m right at the orbital SPH shoreline (`sphSeaLevelNorm`).
     const sphElev = sampleSphCoarseHeight64Js(x, z, env);
     const sphOrigin = sampleSphCoarseHeight64Js(0, 0, env);
     const refVal = env.hasLiquidOcean ? (Number(env.sphSeaLevelNorm) || 0.0) : sphOrigin;
-    const sphH = (sphElev - refVal) * env.terrainAmpM * 1.55;
-    const micro = fbm2Js(x * 0.036, z * 0.036, seedF + 4.9) * (env.terrainAmpM * 0.045);
-    const baseAtOrigin = env.hasLiquidOcean ? Math.max(env.seaLevelM + 1.4, (sphOrigin - refVal) * env.terrainAmpM * 1.55) : 0.0;
-    return baseAtOrigin * (1.0 - padSmooth) + (sphH + micro) * (0.18 + 0.82 * padSmooth);
+    return (sphElev - refVal) * (env.terrainAmpM * 2.15);
   }
   const apron = Math.min(1.0, Math.max(0.0, (r0 - 18.0) / 52.0));
   const apronSmooth = apron * apron * (3 - 2 * apron);
@@ -1170,19 +1165,15 @@ fn eval_crust_height(x: f32, z: f32) -> f32 {
   let has_sph = (params.mode_flags & 32u) != 0u;
   let def = sample_deform_field(x, z);
   if (has_sph) {
-    // FULL-AUTHORITY GPU SPH PLANETARY GEOLOGY STARTING AT r = 0 m (ZERO Perlin continent override!)
-    // Direct cropped & hydraulically-eroded patch from the planet's live 3D SPH Genesis buffer!
-    let pad_a = clamp((r0 - 12.0) / 26.0, 0.0, 1.0);
-    let pad_smooth = pad_a * pad_a * (3.0 - 2.0 * pad_a);
+    // 100% FULL-AUTHORITY GPU SPH PLANETARY GEOLOGY STARTING AT r = 0 m (ZERO Perlin fbm2 hills!)
+    // Direct cropped & D8-hydraulically-eroded patch from the planet's live 3D SPH Genesis buffer:
+    // Ocean worlds cross exact sea_level (0.0 m) at the EXACT orbital SPH shoreline (clip_aux.y).
     let tect = sample_tectonic_field(x, z);
     let tect0 = sample_tectonic_field(0.0, 0.0);
     let has_ocean = (params.mode_flags & 8u) != 0u;
     let ref_val = select(tect0.x, params.clip_aux.y, has_ocean);
-    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 1.55);
-    let micro = fbm2(x * 0.018, z * 0.018, params.seed_f + 4.9) * (params.terrain_amp * 0.14)
-      + fbm2(x * 0.048, z * 0.048, params.seed_f + 9.2) * (params.terrain_amp * 0.045);
-    let base_origin = select(0.0, max(params.sea_level + 1.6, clamp((tect0.x - ref_val) * (params.terrain_amp * 1.55), params.sea_level + 1.6, params.terrain_amp * 0.65)), has_ocean);
-    return base_origin * (1.0 - pad_smooth) + (sph_h + micro) * (0.24 + 0.76 * pad_smooth) + def.x;
+    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 2.15);
+    return sph_h + def.x;
   }
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
   let apron = a * a * (3.0 - 2.0 * a);
@@ -1261,9 +1252,21 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
   let h_norm = clamp((h / max(4.0, params.terrain_amp)) * 0.5 + 0.5, 0.0, 1.0);
   let strata = 0.5 + 0.5 * sin(h * 1.4 + fbm2(wx * 0.08, wz * 0.08, params.seed_f + 9.0) * 3.0);
 
-  // When live SPH geology is active, preserve lush vegetative lowlands (tect.z moisture) vs rocky craton ridges (slope + tect.w)!
-  let sph_rock_bias = select(0.0, select(tect.w * 0.24, (1.0 - tect.z) * 0.22 - tect.z * 0.18, has_ocean), has_sph);
-  var col = mix(params.col0_pad.rgb, params.col1_pad.rgb, clamp(h_norm * 0.42 + slope * 1.25 + strata * 0.12 + sph_rock_bias, 0.0, 1.0));
+  // When live SPH geology is active, color directly from the 4 real SPH channels:
+  //   elevation (beach -> lush lowland -> alpine granite rock), narrow carved rivers (tect.y),
+  //   hydraulic moisture (tect.z), and felsic granite/ejecta crust composition (tect.w)!
+  // Note: on ocean worlds, params.col1_pad is deep ocean blue — blend land slopes toward real granite/sandstone instead!
+  let land_rock_col = select(params.col1_pad.rgb, vec3<f32>(0.42, 0.38, 0.32), has_ocean);
+  let sph_rock_bias = select(0.0, select(tect.w * 0.30, (1.0 - tect.z) * 0.20 - tect.z * 0.28, has_ocean), has_sph);
+  var col = mix(params.col0_pad.rgb, land_rock_col, clamp(h_norm * 0.34 + slope * 1.45 + strata * 0.08 + sph_rock_bias, 0.0, 1.0));
+  if (has_sph && is_solid && !is_ocean && has_ocean && !is_magma && !is_cryo) {
+    // Crisp golden shoreline beach strip right at water's edge (0..1.4 m) so green SPH hills rise cleanly behind!
+    let beach_w = (1.0 - smoothstep(0.0, 1.40, h - params.sea_level)) * (1.0 - smoothstep(0.22, 0.55, slope));
+    col = mix(col, vec3<f32>(0.76, 0.68, 0.48), beach_w * 0.72);
+    // Narrow hydraulically carved SPH river channels ONLY in concentrated valleys (never flooding whole hillsides!)
+    let riv_w = smoothstep(0.84, 0.97, tect.y) * (1.0 - smoothstep(0.10, 0.28, slope)) * (1.0 - smoothstep(4.0, 14.0, h - params.sea_level));
+    col = mix(col, params.ocean_rgb_ice.rgb * 1.15, riv_w * 0.78);
+  }
   var emiss = 0.0;
   var tag = 0.0;
   if (has_sph && is_solid && !is_ocean && !has_ocean && !is_magma && !is_cryo) {
@@ -1826,15 +1829,19 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   }
   const baseEnv = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, landingSite, seed });
   const hasSphPatch = Boolean(sphSurfacePatch && sphSurfacePatch.patchBuffer && sphSurfacePatch.coarseHeight64 && baseEnv.hasSolidCrust);
+  const SPH_SURFACE_PATCH_SPAN_M = 4200.0;
   const env = hasSphPatch
     ? Object.freeze({
       ...baseEnv,
       hasSphGeology: true,
       sphCoarseHeight64: sphSurfacePatch.coarseHeight64,
       sphSeaLevelNorm: baseEnv.hasLiquidOcean ? (Number(sphSurfacePatch.seaLevelNorm) || 0.0) : 0.0,
-      sphPatchSpanM: TECTONIC_WORLD_SPAN_M
+      sphPatchSpanM: SPH_SURFACE_PATCH_SPAN_M,
+      // Exact 1-to-1 SPH shoreline at y = 0.0 m (zero fake Perlin seaLevelOffsetM shift!)
+      seaLevelM: baseEnv.hasLiquidOcean ? 0.0 : -999.0
     })
     : baseEnv;
+  const activeGeoWorldSpanM = hasSphPatch ? SPH_SURFACE_PATCH_SPAN_M : TECTONIC_WORLD_SPAN_M;
   const n = Math.max(33, Math.min(129, Math.trunc(gridN)));
   const ringVertCount = n * n;
   const totalVertCount = ringVertCount * 2; // 2-ring +-6 km GPU clipmap packed in ONE terrain_verts buffer!
@@ -1915,7 +1922,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   // Active-Zone Hybrid GPU MLS-MPM Deformable Terrain + 64 GPU SE(3) DLM Rigid-Body Boulders + Persistent Crater Replay!
   const deformMpm = createSurfaceDeformationAndBouldersGpu(device, {
     env,
-    baseHeightFn: (x, z) => evaluatePlanetaryTerrainHeight(x, z, env),
+    baseHeightFn: (x, z) => evaluatePlanetaryCrustElevation(x, z, env),
     initialCraterStamps,
     onCraterStamp,
     seed,
@@ -2876,7 +2883,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       env.color0[0], env.color0[1], env.color0[2], focus[0],
       env.color1[0], env.color1[1], env.color1[2], focus[2],
       env.oceanRgb[0], env.oceanRgb[1], env.oceanRgb[2], liveSeaIceFrac,
-      liveSnowlineM, outerCellSizeM, TECTONIC_WORLD_SPAN_M, outerSnapX,
+      liveSnowlineM, outerCellSizeM, activeGeoWorldSpanM, outerSnapX,
       outerSnapZ, hasSphPatch ? (env.sphSeaLevelNorm || 0.0) : 0.42, OCEAN_PATCH_HALF_M, liveAutumnShift
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
@@ -3271,7 +3278,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       snowlineM: liveSnowlineM,
       autumnShift: liveAutumnShift,
       seaIceFrac: liveSeaIceFrac,
-      tectWorldSpanM: TECTONIC_WORLD_SPAN_M,
+      tectWorldSpanM: activeGeoWorldSpanM,
       tectN: TECTONIC_GRID_N,
       force: stepIndex === 1
     });

@@ -1645,8 +1645,9 @@ fn vs_main(
   let pinpoint_w = 1.0 - smoothstep(min_glint_frac * 0.55, min_glint_frac * 2.2, app_frac);
   let min_world_half = dist * cam.cam_up.w * min_glint_frac;
 
-  let halo_inflate = select(1.24, 1.54, kind == 0u || kind == 5u);
-  let base_inflate = radius * select(1.54, halo_inflate, dist > radius * 2.6);
+  let disp_pad = max(0.0, sp.sp_info.w) * 1.40;
+  let halo_inflate = max(select(1.24, 1.54, kind == 0u || kind == 5u), 1.08 + disp_pad);
+  let base_inflate = radius * select(max(1.54, 1.15 + disp_pad), halo_inflate, dist > radius * 2.6);
   let inflate = max(base_inflate, select(0.0, min_world_half, kind <= 4u));
   let world_quad = center + to_cam * min(radius * 0.15, dist * 0.05) + right * (uv.x * inflate) + up * (uv.y * inflate);
 
@@ -1788,7 +1789,105 @@ fn fs_main(in: VsOut) -> FsOut {
   let light_dir = normalize(cam.extra1.xyz);
   let cut_active = in.params.z;
 
-  if (disc_n < 0.0) {
+  // True 3D Ray-Marched SPH Surface Displacement & Rotational Oblateness (NEVER featureless perfect spheres!):
+  //   sp_info.w > 0 -> 3D SPH topographic / irregular asteroid relief amplitude disp_amp (0.045..0.28)
+  //   sp_info.w < 0 -> Rotational equatorial oblateness f = -sp_info.w on fast-spinning gas/ice giants
+  let live_sph_any = (cam.sph_geo.x > 1.5) && (in.inst_id == u32(round(cam.sph_geo.z))) && (cut_active < 0.5)
+    && (kind == 1u || kind == 3u || kind == 4u || kind == 7u);
+  let disp_amp = select(0.0, clamp(in.sp_info.w, 0.0, 0.34), live_sph_any && in.sp_info.w > 0.002);
+  let oblate_f = select(0.0, clamp(-in.sp_info.w, 0.0, 0.16), !live_sph_any && in.sp_info.w < -0.002 && (kind == 2u || kind == 3u));
+
+  var hit_override = false;
+  var t_hit_n = 0.0;
+  var p_hit_n_disp = vec3<f32>(0.0);
+  var n_hit_geom = vec3<f32>(0.0, 1.0, 0.0);
+
+  if (disp_amp > 0.002) {
+    let r_bound = r_n * (1.0 + disp_amp * 1.12);
+    let r_floor = r_n * max(0.45, 1.0 - disp_amp * 1.08);
+    let disc_b = r_bound * r_bound - dot(perp_n, perp_n);
+    if (disc_b >= 0.0) {
+      let sq_b = sqrt(disc_b);
+      let t_enter = max(1.0e-7, -b_n - sq_b);
+      let t_exit = -b_n + sq_b;
+      if (t_exit > t_enter) {
+        let disc_f = r_floor * r_floor - dot(perp_n, perp_n);
+        let t_f_ent = select(t_exit, -b_n - sqrt(max(0.0, disc_f)), disc_f >= 0.0);
+        let t_end = select(t_exit, min(t_exit, t_f_ent), disc_f >= 0.0 && t_f_ent > t_enter);
+        let gw_m = u32(round(cam.sph_geo.x));
+        let gh_m = u32(round(cam.sph_geo.y));
+        let has_ocean_g = (kind == 1u || kind == 4u) && (in.color1.b > in.color1.r + 0.14);
+        let sea_lvl_g = select(-1.5, cam.sph_geo.w, has_ocean_g);
+        var t_prev = t_enter;
+        var t_lo = t_enter;
+        var t_hi = t_end;
+        var found_s = false;
+        let n_march = 20u;
+        for (var ms = 1u; ms <= n_march; ms = ms + 1u) {
+          let t_cur = mix(t_enter, t_end, f32(ms) / f32(n_march));
+          let p_cur = ro_n + rd * t_cur;
+          let r_cur = length(p_cur);
+          let d_cur = p_cur / max(1e-7, r_cur);
+          let e_raw = sample_sph_geology(d_cur, gw_m, gh_m).x;
+          let e_g = select(e_raw, max(e_raw, sea_lvl_g), has_ocean_g);
+          let r_surf = r_n * (1.0 + disp_amp * e_g);
+          if (r_cur <= r_surf) {
+            t_lo = t_prev;
+            t_hi = t_cur;
+            found_s = true;
+            break;
+          }
+          t_prev = t_cur;
+        }
+        if (!found_s && disc_f >= 0.0 && t_f_ent > t_enter) {
+          t_lo = t_prev;
+          t_hi = t_end;
+          found_s = true;
+        }
+        if (found_s) {
+          for (var bs = 0u; bs < 5u; bs = bs + 1u) {
+            let t_mid = 0.5 * (t_lo + t_hi);
+            let p_mid = ro_n + rd * t_mid;
+            let r_mid = length(p_mid);
+            let d_mid = p_mid / max(1e-7, r_mid);
+            let e_m = sample_sph_geology(d_mid, gw_m, gh_m).x;
+            let e_mg = select(e_m, max(e_m, sea_lvl_g), has_ocean_g);
+            let r_sm = r_n * (1.0 + disp_amp * e_mg);
+            if (r_mid <= r_sm) { t_hi = t_mid; } else { t_lo = t_mid; }
+          }
+          t_hit_n = 0.5 * (t_lo + t_hi);
+          p_hit_n_disp = ro_n + rd * t_hit_n;
+          n_hit_geom = normalize(p_hit_n_disp);
+          hit_override = true;
+        }
+      }
+    }
+  } else if (oblate_f > 0.002) {
+    let inv_y = 1.0 / (1.0 - oblate_f);
+    let ro_o = vec3<f32>(ro_n.x, ro_n.y * inv_y, ro_n.z);
+    let rd_o_raw = vec3<f32>(rd.x, rd.y * inv_y, rd.z);
+    let rd_o_len = length(rd_o_raw);
+    let rd_o = rd_o_raw / max(1e-7, rd_o_len);
+    let b_o = dot(ro_o, rd_o);
+    let perp_o = ro_o - rd_o * b_o;
+    let disc_o = r_n * r_n - dot(perp_o, perp_o);
+    if (disc_o >= 0.0) {
+      let sq_o = sqrt(disc_o);
+      var t_o = -b_o - sq_o;
+      if (t_o < 1.0e-7) { t_o = -b_o + sq_o; }
+      if (t_o >= 1.0e-7) {
+        t_hit_n = t_o / max(1e-7, rd_o_len);
+        p_hit_n_disp = ro_n + rd * t_hit_n;
+        let p_o = ro_o + rd_o * t_o;
+        n_hit_geom = normalize(vec3<f32>(p_o.x, p_o.y * inv_y, p_o.z));
+        hit_override = true;
+      }
+    }
+  }
+
+  let use_custom_hit = (disp_amp > 0.002) || (oblate_f > 0.002);
+  let missed_body = select((disc_n < 0.0), !hit_override, use_custom_hit);
+  if (missed_body) {
     // 1. Sub-pixel astronomical pinpoint glint when true physical disk is < ~2.5 px at AU distances
     if (in.pinpoint_w > 0.02) {
       let q2 = dot(in.quad_uv, in.quad_uv);
@@ -1863,14 +1962,22 @@ fn fs_main(in: VsOut) -> FsOut {
     discard;
   }
 
-  let sqrt_dn = sqrt(disc_n);
-  var t_hit_n = -b_n - sqrt_dn;
-  if (t_hit_n < 1.0e-7) { t_hit_n = -b_n + sqrt_dn; }
-  if (t_hit_n < 1.0e-7) { discard; }
-  var t_hit = t_hit_n * ro_len;
-
-  var p_hit = (ro_n + rd * t_hit_n) * ro_len;
-  var n_hit = normalize(ro_n + rd * t_hit_n);
+  var t_hit = 0.0;
+  var p_hit = vec3<f32>(0.0);
+  var n_hit = vec3<f32>(0.0, 1.0, 0.0);
+  if (hit_override) {
+    t_hit = t_hit_n * ro_len;
+    p_hit = p_hit_n_disp * ro_len;
+    n_hit = n_hit_geom;
+  } else {
+    let sqrt_dn = sqrt(max(0.0, disc_n));
+    t_hit_n = -b_n - sqrt_dn;
+    if (t_hit_n < 1.0e-7) { t_hit_n = -b_n + sqrt_dn; }
+    if (t_hit_n < 1.0e-7) { discard; }
+    t_hit = t_hit_n * ro_len;
+    p_hit = (ro_n + rd * t_hit_n) * ro_len;
+    n_hit = normalize(ro_n + rd * t_hit_n);
+  }
   var is_interior = false;
 
   // True 3D Cutaway Plane intersection when user enables L4 Planetary Interior Cutaway
@@ -2202,7 +2309,7 @@ fn fs_main(in: VsOut) -> FsOut {
       }
     }
 
-    // Crisp tangent-space topographic relief normal (computed directly from GPU SPH geology when active!)
+    // Crisp 1-texel central-difference topographic relief normal + 4-step horizon self-shadowing (ZERO blurry bumps!)
     var ndl_relief = ndl;
     if (bump_strength > 0.01) {
       let up_ref = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
@@ -2211,11 +2318,33 @@ fn fs_main(in: VsOut) -> FsOut {
       if (live_sph_geo) {
         let gw = u32(round(cam.sph_geo.x));
         let gh = u32(round(cam.sph_geo.y));
-        let eps_g = 0.012;
-        let e1 = sample_sph_geology(normalize(n_hit + t1 * eps_g), gw, gh).x;
-        let e2 = sample_sph_geology(normalize(n_hit + t2 * eps_g), gw, gh).x;
-        let n_relief = normalize(n_hit + (t1 * (elev_center - e1) + t2 * (elev_center - e2)) * (bump_strength * 3.8));
+        let eps_g = 3.14159265 / max(64.0, f32(gh));
+        let e1p = sample_sph_geology(normalize(n_hit + t1 * eps_g), gw, gh).x;
+        let e1m = sample_sph_geology(normalize(n_hit - t1 * eps_g), gw, gh).x;
+        let e2p = sample_sph_geology(normalize(n_hit + t2 * eps_g), gw, gh).x;
+        let e2m = sample_sph_geology(normalize(n_hit - t2 * eps_g), gw, gh).x;
+        let relief_gain = bump_strength * select(4.6, 9.5, disp_amp > 0.10);
+        let n_relief = normalize(n_hit + (t1 * (e1m - e1p) + t2 * (e2m - e2p)) * relief_gain);
         ndl_relief = max(0.0, dot(n_relief, light_dir));
+        // Real 4-step topographic self-shadowing across mountain cordilleras, canyons & crater rims!
+        if (disp_amp > 0.005 && raw_ndl > -0.04 && raw_ndl < 0.65) {
+          let l_tang = light_dir - n_hit * raw_ndl;
+          let lt_len = length(l_tang);
+          if (lt_len > 1e-4) {
+            let l_dir_t = l_tang / lt_len;
+            let tan_alt = max(0.0, raw_ndl) / lt_len;
+            var topo_sh = 1.0;
+            for (var sh = 1u; sh <= 4u; sh = sh + 1u) {
+              let d_ang = f32(sh) * 0.011;
+              let e_sh = sample_sph_geology(normalize(n_hit + l_dir_t * d_ang), gw, gh).x;
+              let dh_sh = (e_sh - elev_center) * disp_amp;
+              if (dh_sh > d_ang * tan_alt + 0.0005) {
+                topo_sh = min(topo_sh, clamp(1.0 - (dh_sh - d_ang * tan_alt) * 24.0, 0.28, 1.0));
+              }
+            }
+            ndl_relief = ndl_relief * topo_sh;
+          }
+        }
       } else {
         let eps_b = 0.014;
         let e1 = fbm5(normalize(n_hit + t1 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t1 * eps_b) * 14.0 + seed_v * 1.7);
@@ -2301,7 +2430,7 @@ fn fs_main(in: VsOut) -> FsOut {
     // Cratered Moon / Icy World / Atmospheric Ice Giant (Uranus & Neptune):
     // Gate rocky crater relief strictly on airless moons (atm < 0.28) so Ice Giants have silky atmospheric methane bands!
     let crater_w = 1.0 - smoothstep(0.08, 0.28, in.color1.w);
-    let live_sph3 = cam.sph_geo.x > 1.5 && in.inst_id == u32(round(cam.sph_geo.z)) && crater_w > 0.25;
+    let live_sph3 = cam.sph_geo.x > 1.5 && in.inst_id == u32(round(cam.sph_geo.z));
     let up_r3 = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
     let t1_3 = normalize(cross(up_r3, n_hit));
     let t2_3 = cross(n_hit, t1_3);
@@ -2310,11 +2439,33 @@ fn fs_main(in: VsOut) -> FsOut {
     if (live_sph3) {
       let gw3 = u32(round(cam.sph_geo.x));
       let gh3 = u32(round(cam.sph_geo.y));
+      let eps3 = 3.14159265 / max(64.0, f32(gh3));
       let g3 = sample_sph_geology(n_hit, gw3, gh3);
-      let g3x = sample_sph_geology(normalize(n_hit + t1_3 * 0.012), gw3, gh3).x;
-      let g3y = sample_sph_geology(normalize(n_hit + t2_3 * 0.012), gw3, gh3).x;
-      let n_crater = normalize(n_hit + (t1_3 * (g3.x - g3x) + t2_3 * (g3.x - g3y)) * (3.6 * crater_w));
+      let g3xp = sample_sph_geology(normalize(n_hit + t1_3 * eps3), gw3, gh3).x;
+      let g3xm = sample_sph_geology(normalize(n_hit - t1_3 * eps3), gw3, gh3).x;
+      let g3yp = sample_sph_geology(normalize(n_hit + t2_3 * eps3), gw3, gh3).x;
+      let g3ym = sample_sph_geology(normalize(n_hit - t2_3 * eps3), gw3, gh3).x;
+      let relief3 = select(6.5 * max(0.35, crater_w), 11.5, disp_amp > 0.10);
+      let n_crater = normalize(n_hit + (t1_3 * (g3xm - g3xp) + t2_3 * (g3ym - g3yp)) * relief3);
       ndl_c = max(0.0, dot(n_crater, light_dir));
+      if (disp_amp > 0.005 && raw_ndl > -0.04 && raw_ndl < 0.72) {
+        let l_tang3 = light_dir - n_hit * raw_ndl;
+        let lt_len3 = length(l_tang3);
+        if (lt_len3 > 1e-4) {
+          let l_dir3 = l_tang3 / lt_len3;
+          let tan_alt3 = max(0.0, raw_ndl) / lt_len3;
+          var sh3 = 1.0;
+          for (var s3 = 1u; s3 <= 4u; s3 = s3 + 1u) {
+            let da3 = f32(s3) * 0.014;
+            let e_s3 = sample_sph_geology(normalize(n_hit + l_dir3 * da3), gw3, gh3).x;
+            let dh3 = (e_s3 - g3.x) * disp_amp;
+            if (dh3 > da3 * tan_alt3 + 0.0006) {
+              sh3 = min(sh3, clamp(1.0 - (dh3 - da3 * tan_alt3) * 26.0, 0.22, 1.0));
+            }
+          }
+          ndl_c = ndl_c * sh3;
+        }
+      }
       base = mix(in.color1.rgb, in.color0.rgb, clamp(g3.x * 0.55 + 0.45 + g3.y * 0.25, 0.0, 1.0));
       // Cryo-tectonic rifts & subsurface-ocean tidal plumes driven by live SPH thermal channel!
       if (g3.z > 0.36) {

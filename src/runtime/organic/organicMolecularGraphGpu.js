@@ -57,9 +57,12 @@ export const ORGANIC_ELEMENT_PHYSICS = Object.freeze({
   7:  Object.freeze({ Z: 7,  sym: 'N',  massU: 14.007, valence: 3, chiEv: 6.899, etaEv: 11.760, rCovA: 0.71, rVdwA: 1.55, huckelAlpha: -0.5, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.22, 0.52, 0.98] }),
   8:  Object.freeze({ Z: 8,  sym: 'O',  massU: 15.999, valence: 2, chiEv: 8.741, etaEv: 13.364, rCovA: 0.64, rVdwA: 1.52, huckelAlpha: -1.0, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.88, 0.13, 0.13] }),
   9:  Object.freeze({ Z: 9,  sym: 'F',  massU: 18.998, valence: 1, chiEv: 10.874,etaEv: 14.948, rCovA: 0.60, rVdwA: 1.47, huckelAlpha: -2.0, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.45, 0.92, 0.52] }),
+  12: Object.freeze({ Z: 12, sym: 'Mg', massU: 24.305, valence: 2, chiEv: 3.951, etaEv: 7.386,  rCovA: 1.39, rVdwA: 1.73, huckelAlpha: 0.9,  piLonePair: 0, hBondDonor: false, hBondAcceptor: false, rgb: [0.24, 0.88, 0.36] }),
+  14: Object.freeze({ Z: 14, sym: 'Si', massU: 28.085, valence: 4, chiEv: 4.168, etaEv: 6.974,  rCovA: 1.11, rVdwA: 2.10, huckelAlpha: 0.6,  piLonePair: 0, hBondDonor: false, hBondAcceptor: false, rgb: [0.84, 0.72, 0.54] }),
   15: Object.freeze({ Z: 15, sym: 'P',  massU: 30.974, valence: 5, chiEv: 5.463, etaEv: 8.000,  rCovA: 1.07, rVdwA: 1.80, huckelAlpha: -0.2, piLonePair: 0, hBondDonor: false, hBondAcceptor: true,  rgb: [1.00, 0.56, 0.14] }),
   16: Object.freeze({ Z: 16, sym: 'S',  massU: 32.06,  valence: 2, chiEv: 6.928, etaEv: 8.972,  rCovA: 1.03, rVdwA: 1.80, huckelAlpha: -0.4, piLonePair: 2, hBondDonor: true,  hBondAcceptor: true,  rgb: [0.96, 0.72, 0.05] }),
   17: Object.freeze({ Z: 17, sym: 'Cl', massU: 35.45,  valence: 1, chiEv: 8.564, etaEv: 9.892,  rCovA: 0.99, rVdwA: 1.75, huckelAlpha: -1.6, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.22, 0.88, 0.36] }),
+  26: Object.freeze({ Z: 26, sym: 'Fe', massU: 55.845, valence: 3, chiEv: 4.058, etaEv: 7.450,  rCovA: 1.25, rVdwA: 1.94, huckelAlpha: 0.7,  piLonePair: 0, hBondDonor: false, hBondAcceptor: false, rgb: [0.88, 0.42, 0.18] }),
   35: Object.freeze({ Z: 35, sym: 'Br', massU: 79.904, valence: 1, chiEv: 7.790, etaEv: 8.850,  rCovA: 1.14, rVdwA: 1.85, huckelAlpha: -1.4, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.68, 0.20, 0.16] })
 });
 

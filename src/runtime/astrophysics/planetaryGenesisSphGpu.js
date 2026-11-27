@@ -37,6 +37,7 @@ import {
   LAW_FALLBACK_POLICIES,
   LAW_SPATIAL_AUTHORITIES
 } from '../sph/lawAdapterContract.js';
+import { createSchroederScaleAtlasGravitySolverWebGpu } from '../sph/schroederScaleAtlasMultipoleGpu.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_PLANETARY_GENESIS_SPH_SCHEMA = 'ulg.astrophysics.planetary-genesis-sph-webgpu.v1';
@@ -50,8 +51,7 @@ const GPU_BUF = Object.freeze({
   STORAGE: 0x0080
 });
 
-const GRID_N = 32;
-const GRID_TOTAL = GRID_N * GRID_N * GRID_N; // 32,768 cells
+const DEFAULT_GRID_N = 32;
 const RADIAL_BINS = 32;
 const PARCEL_STRIDE_FLOATS = 16; // 64 B per parcel (zero-copy compatible with particle renderer!)
 
@@ -66,15 +66,18 @@ export const PLANETARY_GENESIS_SPH_LAW_ADAPTER = Object.freeze({
   accumulates: Object.freeze(['sph-genesis-telemetry']),
   pairedVolumeState: 'not-applicable',
   conservedQuantities: Object.freeze(['mass', 'angular-momentum', 'buoyancy-stratification', 'impact-impulse']),
-  validityDomain: Object.freeze({ requiresSolidCrust: true, minParcelCount: 1024, maxParcelCount: 16384 }),
+  validityDomain: Object.freeze({ requiresSolidCrust: true, minParcelCount: 1024, maxParcelCount: 65536 }),
   fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
   scaleRangeM: Object.freeze([1e2, 2e7]),
   fundamentalLaws: Object.freeze([
     'self-gravitating-sph',
     'archimedes-compositional-buoyancy',
     'rayleigh-benard-mantle-convection',
+    'coriolis-geostrophic-deflection',
+    'solidus-latent-lithosphere-freezing',
     'arrhenius-lithosphere-viscosity',
     'hypervelocity-impact-cratering',
+    'shock-wave-crust-coupling',
     'spherical-hydraulic-erosion'
   ])
 });
@@ -113,8 +116,8 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
   seed = 20261125
 } = {}) {
   const M_EARTH_SOLAR = 3.00349e-6;
-  const radiusKm = Math.max(20, Number(bodySpec.radiusKm) || 6371);
-  const massEarth = Math.max(1e-5, (Number(bodySpec.massSolar) || M_EARTH_SOLAR) / M_EARTH_SOLAR);
+  const radiusKm = Math.max(0.2, Number(bodySpec.radiusKm) || 6371);
+  const massEarth = Math.max(1e-10, (Number(bodySpec.massSolar) || M_EARTH_SOLAR) / M_EARTH_SOLAR);
   const tempK = Math.max(30, Number(bodySpec.tempK) || 288);
   const pressurePa = Math.max(0, Number(planetaryAtmoState?.surfacePressurePa ?? bodySpec.surfacePressurePa) || 0);
   const cComp = bodySpec.coalescedComposition || null;
@@ -181,8 +184,10 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
     ? Math.max(0.03, (1.0 - tectonicMobility * 0.88) * (0.12 + 0.50 * atmShield))
     : Math.max(0.18, (1.0 - tectonicMobility * 0.65) * (0.35 + 0.65 * atmShield));
   const impactorClusters = isMagmaOcean
-    ? 5
-    : (hasOcean ? Math.max(3, Math.round(3 + craterPreservation * 10)) : Math.max(6, Math.min(26, Math.round(8 + craterPreservation * 18))));
+    ? 8
+    : (hasOcean
+      ? Math.max(5, Math.round(5 + craterPreservation * 14))
+      : Math.max(14, Math.min(48, Math.round(16 + craterPreservation * 32))));
 
   // Hydraulic erosion strength emerges strictly from active surface liquid solvent & atmospheric rain cycle!
   const hydraulicErosion = hasOcean
@@ -193,6 +198,10 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
   const seaLevelNorm = hasOcean
     ? Math.max(-0.14, Math.min(0.28, 0.06 + (Math.min(0.15, volatileFrac) - 0.0004) * 1.25))
     : -1.5;
+
+  // Planetary spin Coriolis parameter (normalized to Earth 24h = 1.0; tidally locked slow worlds ~ 0.05!)
+  const rotPeriodHr = Math.max(4.0, Number(bodySpec.rotationPeriodHr) || (bodySpec.tidallyLocked ? 480.0 : 24.0));
+  const rotationOmegaNorm = Math.max(0.03, Math.min(2.2, 24.0 / rotPeriodHr));
 
   const hSeed = ((Number(seed) || 20261125) ^ Math.imul(Math.round(radiusKm * 7 + tempK * 13), 2654435761)) >>> 0;
 
@@ -221,6 +230,7 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
     impactorClusters,
     hydraulicErosion,
     seaLevelNorm,
+    rotationOmegaNorm,
     seed: hSeed
   });
 }
@@ -233,7 +243,7 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
 export function buildInitialPlanetarySphParcels(genesisParams, {
   parcelCount = 5120
 } = {}) {
-  const n = Math.max(1024, Math.min(16384, Math.trunc(parcelCount)));
+  const n = Math.max(1024, Math.min(65536, Math.trunc(parcelCount)));
   const data = new Float32Array(n * PARCEL_STRIDE_FLOATS);
   const rand = mulberry32(genesisParams.seed ^ 0x9e3779b9);
 
@@ -250,8 +260,8 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
   const nFelsic = Math.max(160, Math.floor(nBody * genesisParams.felsicCrustFrac));
   const nMantle = Math.max(256, nBody - nCore - nFelsic);
 
-  // Seed 4..7 deep core-mantle thermal buoyancy plume hotspots (emergent Rayleigh-Benard seeds)
-  const nPlumes = 4 + (genesisParams.seed % 4);
+  // Seed 5..9 deep core-mantle thermal buoyancy plume hotspots (emergent Rayleigh-Benard seeds)
+  const nPlumes = 5 + (genesisParams.seed % 5);
   const plumes = [];
   for (let p = 0; p < nPlumes; p += 1) {
     const z = rand() * 2 - 1;
@@ -259,24 +269,37 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     const s = Math.sqrt(Math.max(0, 1 - z * z));
     plumes.push({
       dir: [s * Math.cos(phi), z, s * Math.sin(phi)],
-      sign: p % 2 === 0 ? 1.0 : -0.85, // Upwelling divergent hot plumes vs cold convergent downwellings!
-      width: 0.48 + rand() * 0.34
+      sign: p % 2 === 0 ? 1.0 : -0.88, // Upwelling divergent hot plumes vs cold convergent downwellings!
+      width: 0.34 + rand() * 0.28
     });
   }
 
-  // Generate impactor cluster targets (multi-scale power-law impactor sizes!)
+  // For sub-hydrostatic minor bodies (asteroids & comets < 550 km), self-gravity does NOT overcome
+  // rock/ice yield strength -> genuine irregular triaxial / contact-binary rubble-pile lobes!
+  const minorAxes = genesisParams.isMinorBody
+    ? [0.76 + rand() * 0.44, 0.62 + rand() * 0.36, 0.72 + rand() * 0.48]
+    : [1.0, 1.0, 1.0];
+  const minorLobeDir = genesisParams.isMinorBody
+    ? (() => {
+      const lz = rand() * 2 - 1;
+      const lp = rand() * Math.PI * 2;
+      const ls = Math.sqrt(Math.max(0, 1 - lz * lz));
+      return [ls * Math.cos(lp), lz, ls * Math.sin(lp)];
+    })()
+    : [1, 0, 0];
+
+  // Generate impactor cluster targets (multi-scale power-law impactor sizes: giant Mare/Hellas basins + sharp medium/small craters!)
   const impactTargets = [];
   for (let k = 0; k < genesisParams.impactorClusters; k += 1) {
     const z = rand() * 2 - 1;
     const phi = rand() * Math.PI * 2;
     const s = Math.sqrt(Math.max(0, 1 - z * z));
-    // Power-law impactor size: few giant Mare/Hellas basins + many medium sharp craters
-    const sizeNorm = Math.pow(rand(), 1.85);
+    const sizeNorm = Math.pow(rand(), 2.25);
     impactTargets.push({
       dir: [s * Math.cos(phi), z, s * Math.sin(phi)],
-      radiusNorm: 0.045 + sizeNorm * 0.145,
-      speed: 1.55 + sizeNorm * 1.65,
-      delayRadius: 1.10 + (k / Math.max(1, genesisParams.impactorClusters)) * 0.34
+      radiusNorm: 0.024 + sizeNorm * 0.145,
+      speed: 1.55 + sizeNorm * 1.75,
+      delayRadius: 1.08 + (k / Math.max(1, genesisParams.impactorClusters)) * 0.88
     });
   }
 
@@ -316,8 +339,18 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     const r = Math.pow(rand(), 0.42) * 0.62;
     const tang = [-d[2], 0.0, d[0]];
     const tNorm = 0.86 + 0.14 * (1.0 - r);
+    let cx = d[0] * r;
+    let cy = d[1] * r;
+    let cz = d[2] * r;
+    if (genesisParams.isMinorBody) {
+      const lobeDot = d[0] * minorLobeDir[0] + d[1] * minorLobeDir[1] + d[2] * minorLobeDir[2];
+      const waist = 0.72 + 0.42 * lobeDot * lobeDot;
+      cx *= minorAxes[0] * waist;
+      cy *= minorAxes[1] * waist;
+      cz *= minorAxes[2] * waist;
+    }
     writeParcel(
-      [d[0] * r, d[1] * r, d[2] * r],
+      [cx, cy, cz],
       [tang[0] * 0.06, (rand() - 0.5) * 0.04, tang[2] * 0.06],
       1.65,
       tNorm,
@@ -343,8 +376,19 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     const baseT = Math.max(0.08, Math.min(1.0, (1.12 - r * 0.78) + plumeT * 0.24 * genesisParams.radiogenicHeat));
     // Initial convective velocity perturbation aligned with thermal plumes
     const vr = plumeT * 0.14 * genesisParams.tectonicMobility;
+    let px = d[0] * r;
+    let py = d[1] * r;
+    let pz = d[2] * r;
+    if (genesisParams.isMinorBody) {
+      // Genuine triaxial + bilobed contact-binary rubble-pile distribution for sub-hydrostatic bodies!
+      const lobeDot = d[0] * minorLobeDir[0] + d[1] * minorLobeDir[1] + d[2] * minorLobeDir[2];
+      const waist = 0.72 + 0.42 * lobeDot * lobeDot;
+      px *= minorAxes[0] * waist;
+      py *= minorAxes[1] * waist;
+      pz *= minorAxes[2] * waist;
+    }
     writeParcel(
-      [d[0] * r, d[1] * r, d[2] * r],
+      [px, py, pz],
       [d[0] * vr, d[1] * vr, d[2] * vr],
       1.0,
       genesisParams.isMagmaOcean ? Math.max(0.75, baseT) : baseT,
@@ -384,8 +428,18 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     }
     const thick0 = 0.38 + rand() * 0.26;
     const t0 = genesisParams.isMagmaOcean ? 0.72 : (0.18 + Math.max(0, plumeT) * 0.22);
+    let fx = d[0] * r;
+    let fy = d[1] * r;
+    let fz = d[2] * r;
+    if (genesisParams.isMinorBody) {
+      const lobeDot = d[0] * minorLobeDir[0] + d[1] * minorLobeDir[1] + d[2] * minorLobeDir[2];
+      const waist = 0.72 + 0.42 * lobeDot * lobeDot;
+      fx *= minorAxes[0] * waist;
+      fy *= minorAxes[1] * waist;
+      fz *= minorAxes[2] * waist;
+    }
     writeParcel(
-      [d[0] * r, d[1] * r, d[2] * r],
+      [fx, fy, fz],
       [0, 0, 0],
       0.82,
       t0,
@@ -469,10 +523,14 @@ struct SphParams {
   crater_preservation: f32,
   sea_level_norm: f32,
   hydraulic_erosion: f32,
-  flags: u32,          // bit0=hasOcean, bit1=isMagmaOcean, bit2=isCryo, bit3=isCarbon
+  flags: u32,          // bit0=hasOcean, bit1=isMagmaOcean, bit2=isCryo, bit3=isCarbon, bit4=isMinorBody
   step_index: u32,
   impactor_count: u32,
   seed_f: f32,
+  omega_rot: f32,      // Planetary Coriolis spin parameter (Earth 24h = 1.0)
+  target_steps: u32,   // Reference geological evolution step count for solidus cooling curve
+  rho_norm: f32,       // Scale-invariant grid density normalization across 5K..65K parcels & 32^3..64^3 grids!
+  pad_s0: f32,
 };
 
 struct SphParcel {
@@ -500,6 +558,9 @@ struct ImpactorDesc {
 //   [0] = (coreMeanR, mantleMeanR, felsicMeanR, meanTemp)
 //   [1] = (maxCrustThick, minCrustThick, activeImpactors, differentiationIndex)
 @group(0) @binding(6) var<storage, read_write> telemetry: array<vec4<f32>>;
+// Canonical Schroeder Simulation (SS) hierarchical 3D multipole self-gravity acceleration & COM:
+//   [0..parcel_count-1] = vec4(ax, ay, az, phi), [parcel_count] = vec4(com_xyz, m_tot)
+@group(0) @binding(7) var<storage, read> ss_grav_acc: array<vec4<f32>>;
 
 const Q_M: f32 = 256.0;
 const Q_V: f32 = 128.0;
@@ -531,6 +592,54 @@ fn clear_sph_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }
 
+fn cell_frac(p: vec3<f32>) -> vec3<f32> {
+  let nf = f32(params.grid_n);
+  let u = (p + vec3<f32>(params.box_half)) / (2.0 * params.box_half);
+  return clamp(u * nf - vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(nf - 1.001));
+}
+
+fn sample_grid_trilin0(p: vec3<f32>) -> vec4<f32> {
+  let gf = cell_frac(p);
+  let c0 = vec3<i32>(floor(gf));
+  let f = gf - vec3<f32>(c0);
+  let n_i = i32(params.grid_n) - 1;
+  let c1 = min(c0 + vec3<i32>(1), vec3<i32>(n_i));
+  let v000 = grid_val[cell_idx(vec3<i32>(c0.x, c0.y, c0.z)) * 2u + 0u];
+  let v100 = grid_val[cell_idx(vec3<i32>(c1.x, c0.y, c0.z)) * 2u + 0u];
+  let v010 = grid_val[cell_idx(vec3<i32>(c0.x, c1.y, c0.z)) * 2u + 0u];
+  let v110 = grid_val[cell_idx(vec3<i32>(c1.x, c1.y, c0.z)) * 2u + 0u];
+  let v001 = grid_val[cell_idx(vec3<i32>(c0.x, c0.y, c1.z)) * 2u + 0u];
+  let v101 = grid_val[cell_idx(vec3<i32>(c1.x, c0.y, c1.z)) * 2u + 0u];
+  let v011 = grid_val[cell_idx(vec3<i32>(c0.x, c1.y, c1.z)) * 2u + 0u];
+  let v111 = grid_val[cell_idx(vec3<i32>(c1.x, c1.y, c1.z)) * 2u + 0u];
+  let c00 = mix(v000, v100, f.x);
+  let c10 = mix(v010, v110, f.x);
+  let c01 = mix(v001, v101, f.x);
+  let c11 = mix(v011, v111, f.x);
+  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
+fn sample_grid_trilin1(p: vec3<f32>) -> vec4<f32> {
+  let gf = cell_frac(p);
+  let c0 = vec3<i32>(floor(gf));
+  let f = gf - vec3<f32>(c0);
+  let n_i = i32(params.grid_n) - 1;
+  let c1 = min(c0 + vec3<i32>(1), vec3<i32>(n_i));
+  let v000 = grid_val[cell_idx(vec3<i32>(c0.x, c0.y, c0.z)) * 2u + 1u];
+  let v100 = grid_val[cell_idx(vec3<i32>(c1.x, c0.y, c0.z)) * 2u + 1u];
+  let v010 = grid_val[cell_idx(vec3<i32>(c0.x, c1.y, c0.z)) * 2u + 1u];
+  let v110 = grid_val[cell_idx(vec3<i32>(c1.x, c1.y, c0.z)) * 2u + 1u];
+  let v001 = grid_val[cell_idx(vec3<i32>(c0.x, c0.y, c1.z)) * 2u + 1u];
+  let v101 = grid_val[cell_idx(vec3<i32>(c1.x, c0.y, c1.z)) * 2u + 1u];
+  let v011 = grid_val[cell_idx(vec3<i32>(c0.x, c1.y, c1.z)) * 2u + 1u];
+  let v111 = grid_val[cell_idx(vec3<i32>(c1.x, c1.y, c1.z)) * 2u + 1u];
+  let c00 = mix(v000, v100, f.x);
+  let c10 = mix(v010, v110, f.x);
+  let c01 = mix(v001, v101, f.x);
+  let c11 = mix(v011, v111, f.x);
+  return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
 @compute @workgroup_size(64)
 fn splat_sph_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
@@ -539,18 +648,37 @@ fn splat_sph_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (pr.aux.w < 0.5) { return; }
   let pos = pr.pos_mass.xyz;
   let m = max(0.05, pr.pos_mass.w);
-  let c = cell_coords(pos);
-  let ci = cell_idx(c) * 8u;
-
-  atomicAdd(&grid_acc[ci + 0u], i32(round(m * Q_M)));
-  atomicAdd(&grid_acc[ci + 1u], i32(round(m * pr.vel_temp.x * Q_V)));
-  atomicAdd(&grid_acc[ci + 2u], i32(round(m * pr.vel_temp.y * Q_V)));
-  atomicAdd(&grid_acc[ci + 3u], i32(round(m * pr.vel_temp.z * Q_V)));
-  atomicAdd(&grid_acc[ci + 4u], i32(round(m * pr.vel_temp.w * Q_M)));
-  atomicAdd(&grid_acc[ci + 5u], i32(round(m * pr.mat_state.y * Q_M)));
   let is_felsic = select(0.0, 1.0, abs(pr.mat_state.x - 2.0) < 0.3);
-  atomicAdd(&grid_acc[ci + 6u], i32(round(m * is_felsic * Q_M)));
-  atomicAdd(&grid_acc[ci + 7u], i32(round(m * pr.mat_state.w * Q_M)));
+
+  // Smooth 2x2x2 trilinear CIC deposition (ZERO Cartesian voxel-box artifacts on continents!)
+  let gf = cell_frac(pos);
+  let c0 = vec3<i32>(floor(gf));
+  let f = gf - vec3<f32>(c0);
+  let n_i = i32(params.grid_n) - 1;
+  for (var dz = 0; dz <= 1; dz = dz + 1) {
+    let wz = select(1.0 - f.z, f.z, dz == 1);
+    let cz = min(n_i, c0.z + dz);
+    for (var dy = 0; dy <= 1; dy = dy + 1) {
+      let wy = select(1.0 - f.y, f.y, dy == 1);
+      let cy = min(n_i, c0.y + dy);
+      for (var dx = 0; dx <= 1; dx = dx + 1) {
+        let wx = select(1.0 - f.x, f.x, dx == 1);
+        let w = wx * wy * wz;
+        if (w < 1e-4) { continue; }
+        let cx = min(n_i, c0.x + dx);
+        let mw = m * w;
+        let ci = cell_idx(vec3<i32>(cx, cy, cz)) * 8u;
+        atomicAdd(&grid_acc[ci + 0u], i32(round(mw * Q_M)));
+        atomicAdd(&grid_acc[ci + 1u], i32(round(mw * pr.vel_temp.x * Q_V)));
+        atomicAdd(&grid_acc[ci + 2u], i32(round(mw * pr.vel_temp.y * Q_V)));
+        atomicAdd(&grid_acc[ci + 3u], i32(round(mw * pr.vel_temp.z * Q_V)));
+        atomicAdd(&grid_acc[ci + 4u], i32(round(mw * pr.vel_temp.w * Q_M)));
+        atomicAdd(&grid_acc[ci + 5u], i32(round(mw * pr.mat_state.y * Q_M)));
+        atomicAdd(&grid_acc[ci + 6u], i32(round(mw * is_felsic * Q_M)));
+        atomicAdd(&grid_acc[ci + 7u], i32(round(mw * pr.mat_state.w * Q_M)));
+      }
+    }
+  }
 
   let r = length(pos);
   let rbin = min(31u, u32(floor(clamp(r / 1.45, 0.0, 0.999) * 32.0)));
@@ -601,64 +729,61 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   let r = max(0.035, length(pos));
   let n_rad = pos / r;
 
-  // 1. Self-consistent radial enclosed-mass gravity g(r) = -G * M(<r) / r^2!
-  let rbin = min(31u, u32(floor(clamp(r / 1.45, 0.0, 0.999) * 32.0)));
-  var m_enc = 0.0;
-  var m_tot = 0.0;
-  for (var b = 0u; b < 32u; b = b + 1u) {
-    let mb = f32(atomicLoad(&radial_bins[b])) / Q_M;
-    m_tot = m_tot + mb;
-    if (b <= rbin) { m_enc = m_enc + mb; }
-  }
-  let m_norm = m_enc / max(1.0, m_tot);
-  let g_mag = params.gravity_g * m_norm / (r * r + 0.05);
-  var acc = -n_rad * g_mag;
+  // 1. Canonical 3D Hierarchical Schroeder Simulation (SS) Scale-Atlas Multipole Self-Gravity!
+  //    True asymmetric 3D self-gravity across 4,096 L2 + 64 L1 charts (handles both hydrostatic spheres
+  //    AND irregular triaxial/bilobed asteroids/comets + off-center sinking Fe-Ni cores!)
+  let ss_g = ss_grav_acc[i].xyz;
+  let ss_com = ss_grav_acc[params.parcel_count].xyz;
+  let g_ss_mag = length(ss_g);
+  let g_mag = clamp(g_ss_mag, 0.12, 8.5);
+  var acc = clamp(ss_g, vec3<f32>(-12.0), vec3<f32>(12.0)) - ss_com * 0.35;
 
-  // 2. Local 32^3 SPH Grid Pressure Gradient (-grad P / rho), Viscosity, & Velocity Divergence!
-  let c = cell_coords(pos);
-  let n_i = i32(params.grid_n) - 1;
-  let g_c0 = grid_val[cell_idx(c) * 2u + 0u];
-  let g_c1 = grid_val[cell_idx(c) * 2u + 1u];
-
-  let gx_p = grid_val[cell_idx(vec3<i32>(min(n_i, c.x + 1), c.y, c.z)) * 2u + 0u];
-  let gx_m = grid_val[cell_idx(vec3<i32>(max(0, c.x - 1), c.y, c.z)) * 2u + 0u];
-  let gy_p = grid_val[cell_idx(vec3<i32>(c.x, min(n_i, c.y + 1), c.z)) * 2u + 0u];
-  let gy_m = grid_val[cell_idx(vec3<i32>(c.x, max(0, c.y - 1), c.z)) * 2u + 0u];
-  let gz_p = grid_val[cell_idx(vec3<i32>(c.x, c.y, min(n_i, c.z + 1))) * 2u + 0u];
-  let gz_m = grid_val[cell_idx(vec3<i32>(c.x, c.y, max(0, c.z - 1))) * 2u + 0u];
-
+  // 2. Smooth Trilinear CIC 32^3 SPH Grid Pressure Gradient (-grad P / rho), Viscosity, & Velocity Divergence!
   let dx = (2.0 * params.box_half) / f32(params.grid_n);
+  let g_c0 = sample_grid_trilin0(pos);
+  let g_c1 = sample_grid_trilin1(pos);
+
+  let gx_p = sample_grid_trilin0(pos + vec3<f32>(dx, 0.0, 0.0));
+  let gx_m = sample_grid_trilin0(pos - vec3<f32>(dx, 0.0, 0.0));
+  let gy_p = sample_grid_trilin0(pos + vec3<f32>(0.0, dx, 0.0));
+  let gy_m = sample_grid_trilin0(pos - vec3<f32>(0.0, dx, 0.0));
+  let gz_p = sample_grid_trilin0(pos + vec3<f32>(0.0, 0.0, dx));
+  let gz_m = sample_grid_trilin0(pos - vec3<f32>(0.0, 0.0, dx));
+
   let grad_rho = vec3<f32>(gx_p.x - gx_m.x, gy_p.x - gy_m.x, gz_p.x - gz_m.x) / (2.0 * dx);
   let div_v = ((gx_p.y - gx_m.y) + (gy_p.z - gy_m.z) + (gz_p.w - gz_m.w)) / (2.0 * dx);
 
-  // Compressible EOS hydrostatic pressure support balancing self-gravity
+  // Compressible EOS hydrostatic pressure support balancing self-gravity (scale-invariant across 5K..65K parcels & 32^3..64^3 grids!)
   let k_eos = select(1.45, 2.35, species < 0.5);
-  acc = acc - grad_rho * (k_eos / max(0.35, g_c0.x + 0.45));
+  let rho_local = g_c0.x * params.rho_norm;
+  acc = acc - (grad_rho * params.rho_norm) * (k_eos / max(0.35, rho_local + 0.45));
 
   // 3. True Archimedes Compositional + Thermal Rayleigh-Benard Buoyancy!
-  //    Heavy Fe (rho0=7.9) sinks to core; buoyant Felsic (rho0=2.65) floats to crust;
-  //    hot mantle plumes (temp > cell_avg_temp) rise radially & spread laterally under crust!
   let cell_temp = g_c1.x;
   let cell_rho0 = max(1.0, g_c1.y);
   let rho_eff = rho0 * (1.0 - 0.34 * (temp - cell_temp));
   let buoy_ratio = clamp((cell_rho0 - rho_eff) / max(1.2, rho_eff), -1.35, 1.35);
   acc = acc + n_rad * (g_mag * buoy_ratio * 0.95);
 
-  // Tangent mantle convection traction driving buoyant felsic continental rafting & rifting!
+  // 3B. Planetary Coriolis Geostrophic Deflection (-2 Omega x v) on convecting mantle, tectonic plates & ocean currents!
+  if (species > 0.5 && r > 0.52) {
+    let omega_v = vec3<f32>(0.0, params.omega_rot * 0.42, 0.0);
+    acc = acc - 2.0 * cross(omega_v, vel);
+  }
+
+  // Smooth trilinear tangent mantle convection traction driving organic continental rafting & rifting!
   let grad_t = vec3<f32>(
-    grid_val[cell_idx(vec3<i32>(min(n_i, c.x + 1), c.y, c.z)) * 2u + 1u].x - grid_val[cell_idx(vec3<i32>(max(0, c.x - 1), c.y, c.z)) * 2u + 1u].x,
-    grid_val[cell_idx(vec3<i32>(c.x, min(n_i, c.y + 1), c.z)) * 2u + 1u].x - grid_val[cell_idx(vec3<i32>(c.x, max(0, c.y - 1), c.z)) * 2u + 1u].x,
-    grid_val[cell_idx(vec3<i32>(c.x, c.y, min(n_i, c.z + 1))) * 2u + 1u].x - grid_val[cell_idx(vec3<i32>(c.x, c.y, max(0, c.z - 1))) * 2u + 1u].x
+    sample_grid_trilin1(pos + vec3<f32>(dx, 0.0, 0.0)).x - sample_grid_trilin1(pos - vec3<f32>(dx, 0.0, 0.0)).x,
+    sample_grid_trilin1(pos + vec3<f32>(0.0, dx, 0.0)).x - sample_grid_trilin1(pos - vec3<f32>(0.0, dx, 0.0)).x,
+    sample_grid_trilin1(pos + vec3<f32>(0.0, 0.0, dx)).x - sample_grid_trilin1(pos - vec3<f32>(0.0, 0.0, dx)).x
   ) / (2.0 * dx);
   let grad_t_tang = grad_t - n_rad * dot(grad_t, n_rad);
-  // Hot upwelling plumes push buoyant crust parcels AWAY (divergent rifting -> mid-ocean ridges!)
-  // Cold downwellings pull buoyant crust parcels TOGETHER (convergent subduction -> continents & mountain arcs!)
   if (species > 0.5 && species < 2.5 && r > 0.65) {
-    acc = acc - grad_t_tang * (params.tectonic_mobility * 0.55);
+    acc = acc - grad_t_tang * (params.tectonic_mobility * 0.58);
     conv_flux = mix(conv_flux, clamp((temp - cell_temp) * 3.0 - div_v * 0.45, -1.5, 1.5), clamp(dt * 3.0, 0.0, 1.0));
   }
 
-  // 4. Planetesimal Hypervelocity Impact Cratering (species == 3 colliding with crust)!
+  // 4. Planetesimal Hypervelocity Impact Cratering (species == 3 colliding with crust) + 3D Shock-Wave Coupling!
   if (abs(species - 3.0) < 0.3) {
     if (r < 1.03) {
       // Impact shock converts hypervelocity kinetic energy into thermal melt & excavation impulse!
@@ -672,26 +797,26 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
       pr.mat_state.y = 3.25;
       pr.aux.y = 1.0;
     }
+  } else if (g_c1.w > 0.08 && species > 0.5 && species < 2.5 && r > 0.80) {
+    // Propagate live impact shock waves through neighboring lithospheric parcels on the 3D SPH grid!
+    temp = min(1.0, temp + g_c1.w * 0.08 * dt);
+    shock = max(shock, g_c1.w * 0.45);
   }
 
-  // 5. Convergent Orogenic Crust Thickening (Mountain Chains!) & Thermal Evolution
+  // 5. Solidus/Liquidus Lithosphere Freezing + Convergent Orogenic Crust Thickening & Thermal Evolution!
   let v_cell = g_c0.yzw;
-  let arrhenius_drag = mix(6.5, 1.8, clamp(temp * 0.75 + params.tectonic_mobility * 0.45, 0.0, 1.0));
+  let cool_age = clamp(f32(params.step_index) / max(44.0, f32(params.target_steps)), 0.0, 1.0);
+  let solidus_stiff = smoothstep(0.56, 0.24, temp) * (0.25 + 0.75 * cool_age);
+  let base_drag = mix(6.5, 1.8, clamp(temp * 0.75 + params.tectonic_mobility * 0.45, 0.0, 1.0));
+  let arrhenius_drag = mix(base_drag, 10.2, solidus_stiff * 0.45);
   vel = vel + acc * dt;
-  vel = mix(vel, v_cell, clamp(dt * arrhenius_drag, 0.0, 0.85));
+  vel = mix(vel, v_cell, clamp(dt * arrhenius_drag, 0.0, 0.88));
 
   // Keep crust thickening physically coupled to convergent tangential compression (-div_v > 0)!
+  // (Smooth trilinear cohesion without nearest-voxel Cartesian cell clumping!)
   if (abs(species - 2.0) < 0.3 && r > 0.82) {
     let conv_comp = clamp(-div_v, -1.2, 1.8);
     crust_thick = clamp(crust_thick + conv_comp * params.tectonic_mobility * dt * 0.42, 0.08, 1.65);
-    // Lateral surface cohesion holds coherent continental cratons together
-    let felsic_grad = vec3<f32>(
-      grid_val[cell_idx(vec3<i32>(min(n_i, c.x + 1), c.y, c.z)) * 2u + 1u].z - grid_val[cell_idx(vec3<i32>(max(0, c.x - 1), c.y, c.z)) * 2u + 1u].z,
-      grid_val[cell_idx(vec3<i32>(c.x, min(n_i, c.y + 1), c.z)) * 2u + 1u].z - grid_val[cell_idx(vec3<i32>(c.x, max(0, c.y - 1), c.z)) * 2u + 1u].z,
-      grid_val[cell_idx(vec3<i32>(c.x, c.y, min(n_i, c.z + 1))) * 2u + 1u].z - grid_val[cell_idx(vec3<i32>(c.x, c.y, max(0, c.z - 1))) * 2u + 1u].z
-    ) / (2.0 * dx);
-    let fg_tang = felsic_grad - n_rad * dot(felsic_grad, n_rad);
-    vel = vel + fg_tang * (0.14 * params.tectonic_mobility * dt);
   }
 
   // Volatile H2O/CH4 fluid flows tangentially down pressure/elevation gradients into low basins!
@@ -706,9 +831,19 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   pos = pos + vel * dt;
 
   // Soft radial confinement to planetary volume (prevents numerical escape while preserving buoyancy stratification!)
+  // Sub-hydrostatic minor bodies (bit 16u: asteroids/comets < 550 km) retain irregular non-spherical 3D lobes!
   let r_new = length(pos);
-  if (species < 2.5 || abs(species - 4.0) < 0.3) {
-    let r_max = select(select(1.06, 1.09, abs(species - 2.0) < 0.3), 0.72, species < 0.5);
+  let is_minor = (params.flags & 16u) != 0u;
+  if (is_minor && species < 2.5) {
+    // High cohesive rock yield strength preserves triaxial rubble-pile lobes under gentle self-gravity!
+    vel = vel * exp(-dt * 4.5);
+    if (r_new > 1.38) {
+      let nr = pos / max(1e-5, r_new);
+      pos = nr * 1.38;
+      vel = vel * 0.25;
+    }
+  } else if (species < 2.5 || abs(species - 4.0) < 0.3) {
+    let r_max = select(select(1.06, 1.12, abs(species - 2.0) < 0.3), 0.72, species < 0.5);
     if (r_new > r_max) {
       let nr = pos / max(1e-5, r_new);
       pos = nr * r_max;
@@ -837,9 +972,13 @@ fn splat_parcels_to_sphere(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (pr.aux.w < 0.5) { return; }
   let pos = pr.pos_mass.xyz;
   let r = length(pos);
+  let is_minor = (params.flags & 16u) != 0u;
   // Only lithospheric crust, upper mantle upwelling, and surface volatiles project onto the surface crust!
-  if (r < 0.76) { return; }
-  let n = pos / r;
+  // On sub-hydrostatic minor bodies (asteroids/comets), project strictly the outer bilobed shell (crustThick >= 0.08)
+  // so deep interior parcels never punch spiky speckles into the contact-binary silhouette!
+  if (!is_minor && r < 0.76) { return; }
+  if (is_minor && (pr.mat_state.z < 0.08 || r < 0.42)) { return; }
+  let n = pos / max(1e-5, r);
   let lon = atan2(n.z, n.x);
   let lat = asin(clamp(n.y, -1.0, 1.0));
   let u = fract(lon / 6.28318530718 + 0.5);
@@ -854,43 +993,54 @@ fn splat_parcels_to_sphere(@builtin(global_invocation_id) gid: vec3<u32>) {
   let conv = pr.aux.x;
 
   // Physical isostatic Airy elevation from SPH parcel buoyancy & orogenic crust thickening!
-  // Mafic/oceanic basalt sits low (-0.42..-0.22); buoyant felsic cratons sit high (+0.26..+0.78)!
-  let elev_contrib = select(
-    select(-0.42 + (r - 0.88) * 0.55, 0.26 + thick * 0.52 + (r - 0.95) * 0.45, is_felsic > 0.5),
+  // On sub-hydrostatic minor bodies (asteroids/comets), project actual 3D SPH lobe radius (r - 0.84) * 2.15!
+  var elev_contrib = select(
+    select(-0.44 + (r - 0.88) * 0.75 + conv * 0.16, 0.22 + thick * 0.68 + (r - 0.95) * 0.65 + max(0.0, conv) * 0.28, is_felsic > 0.5),
     -0.58,
     is_water > 0.5
   );
+  if (is_minor) {
+    elev_contrib = clamp((r - 0.84) * 2.15 + (thick - 0.26) * 0.22, -0.95, 0.95);
+  }
 
-  // Resolution-proportional Wendland C2 compact SPH kernel support (~9% of map_h -> 25..50 overlapping parcels/texel, ZERO popcorn!)
+  // True 3D spherical great-circle Wendland C2 compact SPH kernel support (ZERO equirectangular box edges!):
+  // Adaptive smoothing length shrinks physically with sqrt(5120 / parcel_count) while keeping coherent
+  // continental plateaus on planets & smooth sculpted bilobed rubble-pile domes on comets/asteroids!
   let wi = i32(params.map_w);
   let hi = i32(params.map_h);
   let cx = i32(floor(u * f32(wi)));
   let cy = i32(floor(v * f32(hi)));
-  let cos_lat = max(0.24, cos(lat));
-  let rad_base = clamp(i32(round(f32(hi) * 0.088)), 7, 22);
-  let rad_y = select(rad_base, min(26, rad_base + 4), is_felsic > 0.5);
-  let rad_x = min(40, i32(ceil(f32(rad_y) / cos_lat)));
+  let cos_lat = max(0.18, cos(lat));
+  let is_mtn_ridge = (is_felsic > 0.5 && (thick > 0.44 || abs(conv) > 0.30));
+  let dens_scale = clamp(sqrt(5120.0 / max(2048.0, f32(params.parcel_count))), 0.52, 1.0);
+  let base_ang = select(select(select(0.155, 0.205, is_felsic > 0.5), 0.105, is_mtn_ridge), 0.210, is_minor);
+  let ang_rad = max(select(0.064, 0.125, is_minor), base_ang * dens_scale);
+  let rad_y = clamp(i32(ceil((ang_rad / 3.14159265) * f32(hi))), 4, 28);
+  let rad_x = min(68, i32(ceil(f32(rad_y) / cos_lat)));
 
   for (var dy = -rad_y; dy <= rad_y; dy = dy + 1) {
     let py = clamp(cy + dy, 0, hi - 1);
-    let ny_d = f32(dy) / f32(rad_y + 1);
+    let lat_p = (0.5 - (f32(py) + 0.5) / f32(hi)) * 3.14159265359;
+    let cos_lp = cos(lat_p);
+    let sin_lp = sin(lat_p);
     for (var dx = -rad_x; dx <= rad_x; dx = dx + 1) {
-      let nx_d = (f32(dx) * cos_lat) / f32(rad_y + 1);
-      let q2 = nx_d * nx_d + ny_d * ny_d;
-      if (q2 >= 1.0) { continue; }
-      let q = sqrt(q2);
-      // Wendland C2 compact SPH kernel: (1 - q)^4 * (4q + 1)
+      let px = ((cx + dx) % wi + wi) % wi;
+      let lon_p = ((f32(px) + 0.5) / f32(wi) - 0.5) * 6.28318530718;
+      let n_pix = vec3<f32>(cos_lp * cos(lon_p), sin_lp, cos_lp * sin(lon_p));
+      let ang_d = acos(clamp(dot(n_pix, n), -1.0, 1.0));
+      let q = ang_d / ang_rad;
+      if (q >= 1.0) { continue; }
+      // Wendland C2 compact spherical SPH kernel: (1 - q)^4 * (4q + 1)
       let omq = 1.0 - q;
       let w_kern = omq * omq * omq * omq * (4.0 * q + 1.0);
-      let w = w_kern * select(1.0, 1.15, is_felsic > 0.5) * select(1.0, 0.30, is_deep_mantle > 0.5);
-      let px = ((cx + dx) % wi + wi) % wi;
+      let w = w_kern * select(1.0, 1.25, is_felsic > 0.5) * select(1.0, 0.28, is_deep_mantle > 0.5);
       let base = (u32(py) * params.map_w + u32(px)) * 6u;
       atomicAdd(&map_acc[base + 0u], i32(round(w * Q_G)));
       atomicAdd(&map_acc[base + 1u], i32(round(w * elev_contrib * Q_G)));
       atomicAdd(&map_acc[base + 2u], i32(round(w * is_felsic * Q_G)));
       atomicAdd(&map_acc[base + 3u], i32(round(w_kern * temp * Q_G)));
       atomicAdd(&map_acc[base + 4u], i32(round(w * is_water * Q_G)));
-      atomicAdd(&map_acc[base + 5u], i32(round(w * max(0.0, conv) * Q_G)));
+      atomicAdd(&map_acc[base + 5u], i32(round(w * clamp(conv + 0.5, 0.0, 2.0) * Q_G)));
     }
   }
 }
@@ -922,46 +1072,58 @@ fn resolve_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
     felsic = clamp((f32(atomicLoad(&map_acc[base + 2u])) / Q_G) * inv_w, 0.0, 1.0);
     temp = clamp((f32(atomicLoad(&map_acc[base + 3u])) / Q_G) * inv_w, 0.0, 1.0);
     water = clamp((f32(atomicLoad(&map_acc[base + 4u])) / Q_G) * inv_w, 0.0, 1.0);
-    conv = clamp((f32(atomicLoad(&map_acc[base + 5u])) / Q_G) * inv_w, 0.0, 1.0);
+    conv = clamp((f32(atomicLoad(&map_acc[base + 5u])) / Q_G) * inv_w - 0.5, -0.5, 1.5);
   }
 
-  // True Airy hypsometric bimodality: vast deep mafic ocean basins vs distinct buoyant felsic continents + cordilleras!
+  // True Airy hypsometric bimodality + sharp tectonic cordillera belts, offshore trenches & rift canyons!
   let has_ocean = (params.flags & 1u) != 0u;
   let is_magma = (params.flags & 2u) != 0u;
-  let cont_step = smoothstep(0.28, 0.58, felsic);
-  let mtn_belt = smoothstep(0.32, 0.62, felsic) * (1.0 - smoothstep(0.68, 0.94, felsic)) * (0.22 + conv * 0.55) * params.tectonic_mobility;
-  if (has_ocean) {
-    let ocean_floor = clamp(-0.56 + (elev + 0.42) * 0.55, -0.82, -0.02);
-    let land_elev = clamp(0.10 + (elev - 0.05) * 0.68 + mtn_belt, 0.06, 0.92);
+  let is_minor = (params.flags & 16u) != 0u;
+  let cont_step = select(smoothstep(0.24, 0.54, felsic), smoothstep(0.32, 0.62, felsic), has_ocean);
+  // Crisp narrow coastal Andean/Himalayan mountain arc right along convergent continental margins!
+  let margin_band = smoothstep(0.28, 0.48, felsic) * (1.0 - smoothstep(0.58, 0.84, felsic));
+  let mtn_belt = margin_band * (0.32 + max(0.0, conv) * 0.78) * (0.35 + params.tectonic_mobility * 0.65);
+  // Offshore subduction trench right outside the continental margin & inland divergent rift canyons!
+  let trench = smoothstep(0.08, 0.26, felsic) * (1.0 - smoothstep(0.26, 0.38, felsic)) * max(0.0, conv + 0.15) * 0.28 * params.tectonic_mobility;
+  let rift_canyon = smoothstep(0.12, 0.45, -conv) * 0.24 * (0.4 + params.tectonic_mobility * 0.6);
+  if (is_minor) {
+    elev = clamp(elev * 1.04, -0.95, 0.95);
+  } else if (has_ocean) {
+    let ocean_floor = clamp(-0.56 + (elev + 0.42) * 0.58 - trench + rift_canyon * 0.35, -0.88, -0.02);
+    let land_elev = clamp(0.10 + (elev - 0.04) * 0.72 + mtn_belt - rift_canyon * 0.65, 0.08, 0.96);
     elev = mix(ocean_floor, land_elev, cont_step);
   } else {
-    // Stagnant-lid dichotomy (highlands vs basaltic mare plains) with smooth regional curvature
-    elev = clamp(elev * 0.72 + (cont_step - 0.45) * 0.38 + mtn_belt * 0.45, -0.82, 0.82);
+    // Stagnant-lid highlands vs basaltic mare plains + tectonic rift scarps & wrinkle ridges
+    elev = clamp(elev * 0.78 + (cont_step - 0.44) * 0.42 + mtn_belt * 0.62 - rift_canyon * 0.85, -0.86, 0.88);
   }
 
-  // Imprint real SPH Late-Heavy-Bombardment impact craters (parabolic bowl + crisp raised rim + central peak + ejecta!)
+  // Imprint real SPH Late-Heavy-Bombardment impact craters progressively over geological formation time
+  // (parabolic bowl + crisp raised rim + central peak + ejecta blanket!)
   var crater_ejecta = 0.0;
   var impact_melt = 0.0;
   for (var k = 0u; k < params.impactor_count; k = k + 1u) {
     let imp = impactors[k];
+    let imp_appear = select(smoothstep(imp.props.z - 2.0, imp.props.z + 6.0, f32(params.iter_index)), 1.0, params.iter_index >= 40u);
+    if (imp_appear <= 0.01) { continue; }
     let c_dir = imp.dir_rad.xyz;
-    let c_rad = max(0.028, imp.dir_rad.w);
+    let c_rad = max(0.022, imp.dir_rad.w);
     let ang = acos(clamp(dot(n_dir, c_dir), -1.0, 1.0));
-    if (ang < c_rad * 2.2) {
+    if (ang < c_rad * 2.35) {
       let q = ang / c_rad;
-      let depth = imp.props.x * params.crater_preservation;
-      let rim_h = imp.props.y * params.crater_preservation;
+      let depth = imp.props.x * params.crater_preservation * 1.25 * imp_appear;
+      let rim_h = imp.props.y * params.crater_preservation * 1.45 * imp_appear;
       if (q < 1.0) {
-        // Flat-floored / parabolic excavated basin + central rebound peak on large basins
-        let bowl = (pow(q, 2.4) - 1.0) * depth;
-        let peak = select(0.0, exp(-q * q * 32.0) * depth * 0.34, c_rad > 0.082);
-        elev = elev + bowl + peak;
-        impact_melt = max(impact_melt, (1.0 - q) * 0.25);
+        // Flat-floored / terraced parabolic excavated basin + central rebound peak on complex craters
+        let bowl = (pow(q, 2.8) - 1.0) * depth;
+        let terrace = sin(q * 12.566) * 0.045 * depth * smoothstep(0.55, 0.95, q);
+        let peak = select(0.0, exp(-q * q * 38.0) * depth * 0.42, c_rad > 0.062);
+        elev = elev + bowl + terrace + peak;
+        impact_melt = max(impact_melt, (1.0 - q) * 0.25 * imp_appear);
       } else {
-        // Sharp overturned crater rim + radial ejecta blanket
-        let rim = exp(-pow((q - 1.03) / 0.15, 2.0)) * rim_h;
+        // Razor-sharp overturned crater rim + radial ejecta blanket
+        let rim = exp(-pow((q - 1.02) / 0.11, 2.0)) * rim_h;
         elev = elev + rim;
-        crater_ejecta = max(crater_ejecta, exp(-(q - 1.0) * 2.8) * imp.props.w * params.crater_preservation);
+        crater_ejecta = max(crater_ejecta, exp(-(q - 1.0) * 3.1) * imp.props.w * params.crater_preservation * imp_appear);
       }
     }
   }
@@ -1001,48 +1163,72 @@ fn erode_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
   let yu = max(0, y - 1);
   let yd = min(h - 1, y + 1);
 
-  let c  = geo_in[idx];
-  let nL = geo_in[u32(y * w + xl)];
-  let nR = geo_in[u32(y * w + xr)];
-  let nU = geo_in[u32(yu * w + x)];
-  let nD = geo_in[u32(yd * w + x)];
+  let c   = geo_in[idx];
+  let nL  = geo_in[u32(y * w + xl)];
+  let nR  = geo_in[u32(y * w + xr)];
+  let nU  = geo_in[u32(yu * w + x)];
+  let nD  = geo_in[u32(yd * w + x)];
+  let nUL = geo_in[u32(yu * w + xl)];
+  let nUR = geo_in[u32(yu * w + xr)];
+  let nDL = geo_in[u32(yd * w + xl)];
+  let nDR = geo_in[u32(yd * w + xr)];
 
-  let avg_h = 0.25 * (nL.x + nR.x + nU.x + nD.x);
-  let max_h = max(max(nL.x, nR.x), max(nU.x, nD.x));
-  let min_h = min(min(nL.x, nR.x), min(nU.x, nD.x));
-  let slope = max(0.0, c.x - min_h);
-  let inflow = max(0.0, max_h - c.x);
+  let has_ocean = (params.flags & 1u) != 0u;
+  let is_land = !has_ocean || c.x > params.sea_level_norm;
+  let lat = (0.5 - (f32(y) + 0.5) / f32(h)) * 3.14159265359;
+  let inv_cos = 1.0 / max(0.32, cos(lat));
+  // Subaerial base level: terrestrial erosion & talus stop at sea level (prevents submarine shelf cliffs from dilating ocean boxes into continents!)
+  let base_lvl = select(-2.0, params.sea_level_norm, has_ocean && is_land);
+  let hL  = max(base_lvl, nL.x);
+  let hR  = max(base_lvl, nR.x);
+  let hU  = max(base_lvl, nU.x);
+  let hD  = max(base_lvl, nD.x);
+  let hUL = max(base_lvl, nUL.x);
+  let hUR = max(base_lvl, nUR.x);
+  let hDL = max(base_lvl, nDL.x);
+  let hDR = max(base_lvl, nDR.x);
+
+  // Isotropic 3x3 Sobel spherical gradient |grad_sphere h| + Oono-Puri 9-point isotropic Laplacian
+  // (100% rotationally symmetric circular wavefronts — ZERO square Chebyshev L-inf dilation artifacts!)
+  let dh_dx = ((hR - hL) * 2.0 + (hUR - hUL) + (hDR - hDL)) * 0.125 * inv_cos;
+  let dh_dy = ((hD - hU) * 2.0 + (hDL - hUL) + (hDR - hUR)) * 0.125;
+  let slope = length(vec2<f32>(dh_dx, dh_dy));
+  let avg_h = (hL + hR + hU + hD) * 0.1666667 + (hUL + hUR + hDL + hDR) * 0.0833333;
+  let lap = avg_h - c.x; // > 0 in concave valleys (convergent inflow), < 0 on convex ridges!
+  let inflow = max(0.0, lap * 2.5);
 
   var elev = c.x;
   var comp = c.y;
   var volc = c.z;
   var moist = c.w;
 
-  // Thermal talus slump keeps slopes physically bounded while sharpening ridges
-  let talus = 0.095;
+  // Isotropic thermal talus creep (smooth circular relaxation above repose angle; ZERO box aliasing!)
+  let talus = mix(0.065, 0.115, comp);
   if (slope > talus) {
-    elev = elev - (slope - talus) * 0.22;
+    elev = elev + clamp(lap, -0.04, 0.04) * 0.35;
   }
 
-  // Hydraulic runoff & dendritic river-valley carving on solvent-bearing worlds!
-  if (params.hydraulic_erosion > 0.08 && elev > params.sea_level_norm) {
-    let up_moist = max(max(nL.w, nR.w), max(nU.w, nD.w));
-    let flow = (0.04 + inflow * 1.45 + up_moist * 0.35) * params.hydraulic_erosion;
-    // Carve valley where slope & accumulated runoff meet; deposit alluvium in flat coastal plains
-    let carve = clamp(flow * slope * 0.55, 0.0, 0.032);
-    let deposit = clamp(flow * max(0.0, 0.035 - slope) * 0.35, 0.0, 0.014);
+  // Isotropic hydraulic stream-power incision & dendritic river-valley carving on solvent-bearing land!
+  if (params.hydraulic_erosion > 0.08 && is_land) {
+    let avg_m = (nL.w + nR.w + nU.w + nD.w) * 0.1666667 + (nUL.w + nUR.w + nDL.w + nDR.w) * 0.0833333;
+    let flow = (0.04 + inflow * 2.25 + avg_m * 0.42) * params.hydraulic_erosion;
+    let carve = clamp(flow * pow(slope, 1.15) * 0.62, 0.0, 0.022);
+    let deposit = clamp(flow * max(0.0, 0.022 - slope) * 0.32, 0.0, 0.010);
     elev = elev - carve + deposit;
-    moist = clamp(max(moist * 0.96, min(1.0, flow * 0.82)), 0.0, 1.0);
-    // Steep eroded slopes expose bright bedrock/granite; valley floors collect fertile sediment
-    comp = clamp(comp + (carve * 2.5 - deposit * 1.8), 0.0, 1.0);
-  } else {
-    // Mild sub-grid smoothing on dry worlds so SPH splat seams vanish completely
-    elev = mix(elev, avg_h, 0.06);
+    if (has_ocean) {
+      elev = max(params.sea_level_norm + 0.002, elev);
+    }
+    moist = clamp(max(moist * 0.95, min(1.0, flow * 0.88)), 0.0, 1.0);
+    comp = clamp(comp + (carve * 3.2 - deposit * 2.0), 0.0, 1.0);
+  } else if (!has_ocean) {
+    // Crisp isotropic ridge-preserving high-pass reinforcement on dry rocky/cratered worlds!
+    let curv = elev - avg_h;
+    elev = elev + clamp(curv * 0.065, -0.014, 0.014);
   }
 
   // Smooth volcanic heat slightly along rifts
   let avg_v = 0.25 * (nL.z + nR.z + nU.z + nD.z);
-  volc = mix(volc, avg_v, 0.14);
+  volc = mix(volc, avg_v, 0.12);
 
   geo_out[idx] = vec4<f32>(clamp(elev, -1.0, 1.0), comp, volc, moist);
 }
@@ -1143,16 +1329,22 @@ fn project_local_patch(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let n_dir = normalize(up_c + east * (u * params.angular_span_rad) + north * (-v * params.angular_span_rad));
   let g = sample_sphere_geo(n_dir);
-
-  // Multi-scale geological strata & gully detail modulated strictly by local SPH slope & crust composition
-  let micro = (p_vnoise(u * 9.0 + 7.1, v * 9.0 - 3.9, params.seed_f) - 0.5) * 0.18
-    + (p_vnoise(u * 24.0 - 1.3, v * 24.0 + 5.7, params.seed_f + 4.1) - 0.5) * 0.08
-    + (p_vnoise(u * 56.0 + 2.9, v * 56.0 - 8.4, params.seed_f + 9.3) - 0.5) * 0.03;
+  // Sample local orbital SPH gradient (east/north slopes) to drive physical tectonic/hydraulic micro-terracing
+  // ZERO Perlin noise (p_vnoise retired!): all surface relief comes directly from the orbital 3D SPH geology
+  // map + local physical sedimentary/basalt strata benching + 40 passes of GPU hydraulic & thermal-talus erosion!
+  let step_ang = params.angular_span_rad / f32(n);
+  let gE = sample_sphere_geo(normalize(n_dir + east * step_ang));
+  let gN = sample_sphere_geo(normalize(n_dir + north * step_ang));
+  let grad_mag = length(vec2<f32>(gE.x - g.x, gN.x - g.x)) / max(1e-4, step_ang);
+  let has_ocean = (params.flags & 1u) != 0u;
+  // Physical sedimentary/lava-flow strata ledges emerge strictly on sloping bedrock (zero flat-plain Perlin blobs!)
+  let strata_step = sin(g.x * 42.0 + g.y * 6.0) * 0.012 * clamp(grad_mag * 0.45, 0.0, 1.0);
+  let above_sea = select(1.0, smoothstep(params.sea_level_norm - 0.01, params.sea_level_norm + 0.03, g.x), has_ocean);
   // Output layout matches planetarySurfaceVehiclesGpu tectonic_field:
   //   x = elevNorm [-1..1], y = riverMask [0..1], z = moistureOrVolc [0..1], w = soilOrCrustComp [0..1]
-  let elev = clamp(g.x + micro * (0.45 + 0.55 * g.y), -1.0, 1.0);
-  let river = clamp(g.w * smoothstep(params.sea_level_norm - 0.04, params.sea_level_norm + 0.35, elev) * 0.65, 0.0, 1.0);
-  // Encode moisture/volcanic richness & crust composition cleanly
+  let elev = clamp(g.x + strata_step * above_sea, -1.0, 1.0);
+  // Seed initial watershed headwaters strictly on high moist SPH slopes for D8 hydraulic gully carving!
+  let river = clamp(g.w * smoothstep(params.sea_level_norm + 0.02, params.sea_level_norm + 0.42, elev) * (0.28 + 0.72 * clamp(grad_mag * 0.4, 0.0, 1.0)), 0.0, 1.0);
   let moist_or_volc = select(g.w, max(g.w, g.z), (params.flags & 2u) != 0u || g.z > 0.45);
   patch_a[idx] = vec4<f32>(elev, river, moist_or_volc, g.y);
 }
@@ -1174,31 +1366,54 @@ fn erode_local_patch(@builtin(global_invocation_id) gid: vec3<u32>) {
   let nR = patch_a[u32(z * n + xr)];
   let nU = patch_a[u32(zu * n + x)];
   let nD = patch_a[u32(zd * n + x)];
+  let nUL = patch_a[u32(zu * n + xl)];
+  let nUR = patch_a[u32(zu * n + xr)];
+  let nDL = patch_a[u32(zd * n + xl)];
+  let nDR = patch_a[u32(zd * n + xr)];
 
-  let min_h = min(min(nL.x, nR.x), min(nU.x, nD.x));
-  let max_h = max(max(nL.x, nR.x), max(nU.x, nD.x));
-  let slope = max(0.0, c.x - min_h);
-  let inflow = max(0.0, max_h - c.x);
+  let has_ocean = (params.flags & 1u) != 0u;
+  let is_land = !has_ocean || c.x > params.sea_level_norm;
+  let base_lvl = select(-2.0, params.sea_level_norm, has_ocean && is_land);
+  let hL  = max(base_lvl, nL.x);
+  let hR  = max(base_lvl, nR.x);
+  let hU  = max(base_lvl, nU.x);
+  let hD  = max(base_lvl, nD.x);
+  let hUL = max(base_lvl, nUL.x);
+  let hUR = max(base_lvl, nUR.x);
+  let hDL = max(base_lvl, nDL.x);
+  let hDR = max(base_lvl, nDR.x);
+
+  // Isotropic Sobel gradient & Oono-Puri 9-point Laplacian (zero square Chebyshev grid facets on landed terrain!)
+  let dh_dx = ((hR - hL) * 2.0 + (hUR - hUL) + (hDR - hDL)) * 0.125;
+  let dh_dz = ((hD - hU) * 2.0 + (hDL - hUL) + (hDR - hUR)) * 0.125;
+  let slope = length(vec2<f32>(dh_dx, dh_dz));
+  let avg_h = (hL + hR + hU + hD) * 0.1666667 + (hUL + hUR + hDL + hDR) * 0.0833333;
+  let lap = avg_h - c.x;
+  let inflow = max(0.0, lap * 2.8);
 
   var elev = c.x;
   var river = c.y;
   var moist = c.z;
   var comp = c.w;
 
-  // Thermal talus repose
-  if (slope > 0.065) {
-    elev = elev - (slope - 0.065) * 0.24;
+  // Isotropic thermal talus creep & bedrock cliff benching
+  let talus = mix(0.028, 0.052, comp);
+  if (slope > talus) {
+    elev = elev + clamp(lap, -0.03, 0.03) * 0.35;
   }
-  // Local high-res hydraulic gully & dendritic river channel carving!
-  if (params.hydraulic_erosion > 0.08 && elev > params.sea_level_norm) {
-    let up_riv = max(max(nL.y, nR.y), max(nU.y, nD.y));
-    let flux = (0.03 + inflow * 1.9 + up_riv * 0.62) * params.hydraulic_erosion;
-    let erode_d = clamp(flux * slope * 0.42, 0.0, 0.022);
-    let dep_d = clamp(flux * max(0.0, 0.022 - slope) * 0.28, 0.0, 0.010);
+  // Isotropic hydraulic stream-power incision & alluvial delta deposition on solvent-bearing land!
+  if (params.hydraulic_erosion > 0.08 && is_land) {
+    let avg_riv = (nL.y + nR.y + nU.y + nD.y) * 0.1666667 + (nUL.y + nUR.y + nDL.y + nDR.y) * 0.0833333;
+    let flux = (0.025 + inflow * 3.4 + avg_riv * 0.72) * params.hydraulic_erosion;
+    let erode_d = clamp(flux * slope * 0.60, 0.0, 0.020);
+    let dep_d = clamp(flux * max(0.0, 0.016 - slope) * 0.32, 0.0, 0.010);
     elev = elev - erode_d + dep_d;
-    river = clamp(max(river * 0.94, min(1.0, flux * 0.78)), 0.0, 1.0);
-    moist = clamp(max(moist * 0.97, river * 0.92), 0.0, 1.0);
-    comp = clamp(comp + erode_d * 2.2 - dep_d * 1.4, 0.0, 1.0);
+    if (has_ocean) {
+      elev = max(params.sea_level_norm + 0.002, elev);
+    }
+    river = clamp(max(river * 0.92, min(1.0, flux * 0.86)), 0.0, 1.0);
+    moist = clamp(max(moist * 0.98, river * 0.95), 0.0, 1.0);
+    comp = clamp(comp + erode_d * 3.2 - dep_d * 2.0, 0.0, 1.0);
   }
   patch_b[idx] = vec4<f32>(clamp(elev, -1.0, 1.0), river, moist, comp);
 }
@@ -1225,8 +1440,10 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
   planetaryMode = 'standard',
   systemAgeGyr = 4.5,
   parcelCount = 5120,
+  gridN = DEFAULT_GRID_N,
   mapWidth = 512,
   mapHeight = 256,
+  targetSteps = 48,
   seed = 20261125,
   label = 'planetary-genesis-sph'
 } = {}) {
@@ -1243,11 +1460,16 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
   });
   const initState = buildInitialPlanetarySphParcels(genesisParams, { parcelCount });
   const nParcels = initState.parcelCount;
-  const mapW = Math.max(128, Math.min(512, Math.trunc(mapWidth)));
-  const mapH = Math.max(64, Math.min(256, Math.trunc(mapHeight)));
+  const effGridN = Math.max(24, Math.min(64, Math.trunc(Number(gridN) || DEFAULT_GRID_N)));
+  const gridTotal = effGridN * effGridN * effGridN;
+  const mapW = Math.max(128, Math.min(1024, Math.trunc(mapWidth)));
+  const mapH = Math.max(64, Math.min(512, Math.trunc(mapHeight)));
   const mapPixels = mapW * mapH;
+  const refTargetSteps = Math.max(32, Math.min(2000, Math.trunc(Number(targetSteps) || 48)));
+  // Scale-invariant EOS density factor so 5K@32^3, 32K@48^3, and 57K@64^3 share identical hydrostatic equilibrium!
+  const rhoNorm = (5120.0 / Math.max(1024.0, nParcels)) * Math.pow(effGridN / 32.0, 3);
 
-  // Pack impactor descriptors for spherical basin/rim/ejecta coupling
+  // Pack impactor descriptors for spherical basin/rim/ejecta coupling (staggered over LHB timeline!)
   const nImp = Math.max(1, initState.impactTargets.length);
   const impData = new Float32Array(nImp * 8);
   for (let k = 0; k < initState.impactTargets.length; k += 1) {
@@ -1259,15 +1481,15 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     impData[o + 3] = t.radiusNorm;
     impData[o + 4] = 0.24 + t.radiusNorm * 2.1; // crater depth
     impData[o + 5] = 0.14 + t.radiusNorm * 1.1; // raised rim height
-    impData[o + 6] = 4 + k * 2;
+    impData[o + 6] = 2 + (k / Math.max(1, nImp)) * Math.min(34, refTargetSteps * 0.55);
     impData[o + 7] = 0.65 + t.radiusNorm * 1.8; // ejecta strength
   }
 
-  // GPU Buffers
-  const sphParamsBuf = device.createBuffer({ label: `${label}-sph-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  // GPU Buffers (strictly bounded by PeerCompute capability sizing & device.limits)
+  const sphParamsBuf = device.createBuffer({ label: `${label}-sph-params`, size: 80, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const parcelsBuf = device.createBuffer({ label: `${label}-parcels`, size: nParcels * PARCEL_STRIDE_FLOATS * 4, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
-  const gridAccBuf = device.createBuffer({ label: `${label}-grid-acc`, size: GRID_TOTAL * 8 * 4, usage: GPU_BUF.STORAGE });
-  const gridValBuf = device.createBuffer({ label: `${label}-grid-val`, size: GRID_TOTAL * 2 * 16, usage: GPU_BUF.STORAGE });
+  const gridAccBuf = device.createBuffer({ label: `${label}-grid-acc`, size: gridTotal * 8 * 4, usage: GPU_BUF.STORAGE });
+  const gridValBuf = device.createBuffer({ label: `${label}-grid-val`, size: gridTotal * 2 * 16, usage: GPU_BUF.STORAGE });
   const radialBinsBuf = device.createBuffer({ label: `${label}-radial`, size: 48 * 4, usage: GPU_BUF.STORAGE });
   const impactorsBuf = device.createBuffer({ label: `${label}-impactors`, size: impData.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 32, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
@@ -1281,6 +1503,29 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
   device.queue.writeBuffer(parcelsBuf, 0, initState.parcelData);
   device.queue.writeBuffer(impactorsBuf, 0, impData);
 
+  // Sum initial parcel mass so Schroeder Scale-Atlas multipole gravity normalizes g(R=1) = 2.65 across 5K..65K parcels!
+  let totalParcelMass = 0;
+  for (let i = 0; i < nParcels; i += 1) {
+    totalParcelMass += Math.max(0.05, initState.parcelData[i * PARCEL_STRIDE_FLOATS + 3]);
+  }
+  const ssGravity = createSchroederScaleAtlasGravitySolverWebGpu(device, {
+    maxCount: nParcels,
+    strideFloats: PARCEL_STRIDE_FLOATS,
+    chartLevel: 23,
+    useAdjSoftening: true,
+    qMass: 256.0,
+    qMom: 128.0,
+    rCellFactor: 0.08,
+    label: `${label}-ss-grav`
+  });
+  ssGravity.writeParams({
+    count: nParcels,
+    gravityG: 2.65 / Math.max(100.0, totalParcelMass),
+    softening2: 0.036,
+    boxHalf: 1.55,
+    theta2: 0.72
+  });
+
   // Compute Pipelines
   const sphBgl = [
     computeBufferBinding(0, 'uniform'),
@@ -1289,13 +1534,14 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     computeBufferBinding(3, 'storage'),
     computeBufferBinding(4, 'storage'),
     computeBufferBinding(5, 'read-only-storage'),
-    computeBufferBinding(6, 'storage')
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'read-only-storage')
   ];
-  const clearGridPipe = createCachedExplicitComputePipeline(device, { label: `${label}-clear-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'clear_sph_grid', bindings: sphBgl });
-  const splatGridPipe = createCachedExplicitComputePipeline(device, { label: `${label}-splat-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'splat_sph_grid', bindings: sphBgl });
-  const finGridPipe = createCachedExplicitComputePipeline(device, { label: `${label}-fin-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'finalize_sph_grid', bindings: sphBgl });
-  const advectPipe = createCachedExplicitComputePipeline(device, { label: `${label}-advect`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'advect_sph_parcels', bindings: sphBgl });
-  const telPipe = createCachedExplicitComputePipeline(device, { label: `${label}-tel`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'write_sph_telemetry', bindings: sphBgl });
+  const clearGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-clear.v3-ss', label: `${label}-clear-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'clear_sph_grid', bindings: sphBgl });
+  const splatGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-splat.v3-ss', label: `${label}-splat-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'splat_sph_grid', bindings: sphBgl });
+  const finGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-fin.v3-ss', label: `${label}-fin-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'finalize_sph_grid', bindings: sphBgl });
+  const advectPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-advect.v3-ss', label: `${label}-advect`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'advect_sph_parcels', bindings: sphBgl });
+  const telPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-tel.v3-ss', label: `${label}-tel`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'write_sph_telemetry', bindings: sphBgl });
 
   const sphBg = createCachedExplicitBindGroup(device, {
     layout: clearGridPipe.bindGroupLayout,
@@ -1307,7 +1553,8 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
       { binding: 3, resource: { buffer: gridValBuf } },
       { binding: 4, resource: { buffer: radialBinsBuf } },
       { binding: 5, resource: { buffer: impactorsBuf } },
-      { binding: 6, resource: { buffer: telBuf } }
+      { binding: 6, resource: { buffer: telBuf } },
+      { binding: 7, resource: { buffer: ssGravity.accPhiBuffer } }
     ]
   });
 
@@ -1363,7 +1610,8 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
   const flagsU32 = (genesisParams.hasOcean ? 1 : 0)
     | (genesisParams.isMagmaOcean ? 2 : 0)
     | (genesisParams.isCryoWorld ? 4 : 0)
-    | (genesisParams.isCarbonRich ? 8 : 0);
+    | (genesisParams.isCarbonRich ? 8 : 0)
+    | (genesisParams.isMinorBody ? 16 : 0);
 
   let stepIndex = 0;
   let geoTimeMyr = 0;
@@ -1392,11 +1640,11 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
   });
 
   function writeUniforms(dt) {
-    const ab = new ArrayBuffer(64);
+    const ab = new ArrayBuffer(80);
     const u32 = new Uint32Array(ab);
     const f32 = new Float32Array(ab);
     u32[0] = nParcels;
-    u32[1] = GRID_N;
+    u32[1] = effGridN;
     u32[2] = mapW;
     u32[3] = mapH;
     f32[4] = dt;
@@ -1411,6 +1659,10 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     u32[13] = stepIndex;
     u32[14] = initState.impactTargets.length;
     f32[15] = (genesisParams.seed % 9973) * 0.013;
+    f32[16] = genesisParams.rotationOmegaNorm;
+    u32[17] = refTargetSteps;
+    f32[18] = rhoNorm;
+    f32[19] = 0.0;
     device.queue.writeBuffer(sphParamsBuf, 0, ab);
 
     const gb = new ArrayBuffer(48);
@@ -1446,16 +1698,18 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     const nSub = Math.max(1, Math.min(64, Math.trunc(substeps)));
     const dtSafe = Math.max(0.008, Math.min(0.05, Number(dt) || 0.032));
     stepIndex += nSub;
-    geoTimeMyr += nSub * 38.0;
+    geoTimeMyr += nSub * (4500.0 / Math.max(44, refTargetSteps));
     writeUniforms(dtSafe);
 
-    const wgGrid = Math.ceil(GRID_TOTAL / 64);
+    const wgGrid = Math.ceil(gridTotal / 64);
     const wgParcels = Math.ceil(nParcels / 64);
     const wgMap = Math.ceil(mapPixels / 64);
 
     const enc = device.createCommandEncoder({ label: `${label}-step-enc` });
     const pass = enc.beginComputePass({ label: `${label}-sph-pass` });
     for (let s = 0; s < nSub; s += 1) {
+      // Canonical Schroeder Simulation hierarchical multipole self-gravity encoded inside this same pass!
+      ssGravity.encodeIntoPass(pass, { srcBuffer: parcelsBuf, count: nParcels });
       pass.setBindGroup(0, sphBg);
       pass.setPipeline(clearGridPipe.pipeline);
       pass.dispatchWorkgroups(wgGrid);
@@ -1479,7 +1733,7 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
       pass.setPipeline(resolveGeoPipe.pipeline);
       pass.dispatchWorkgroups(wgMap);
       // Even number of ping-pong erosion passes so final output always lands cleanly in `geoBufA`!
-      const nErode = Math.max(2, Math.min(16, Math.trunc(erosionPasses / 2) * 2));
+      const nErode = Math.max(2, Math.min(32, Math.trunc(erosionPasses / 2) * 2));
       pass.setPipeline(erodeGeoPipe.pipeline);
       for (let e = 0; e < nErode; e += 1) {
         pass.setBindGroup(0, (e % 2 === 0) ? geoBgAB : geoBgBA);
@@ -1533,6 +1787,35 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     }
 
     return lastTelemetry;
+  }
+
+  /**
+   * GPU-safe chunked burst execution (prevents single mammoth submits on 40K-65K parcels & 64^3 grids!).
+   */
+  async function stepBurst({
+    totalSubsteps = 48,
+    chunkSize = 18,
+    dt = 0.032,
+    erosionPasses = 18,
+    readTelemetry = true
+  } = {}) {
+    if (disposed) return lastTelemetry;
+    let rem = Math.max(1, Math.trunc(totalSubsteps));
+    const chunk = Math.max(4, Math.min(24, Math.trunc(chunkSize)));
+    let tel = lastTelemetry;
+    while (rem > 0 && !disposed) {
+      const n = Math.min(chunk, rem);
+      rem -= n;
+      const isLast = rem <= 0;
+      tel = await step({
+        substeps: n,
+        dt,
+        updateSurfaceMap: isLast,
+        erosionPasses: isLast ? erosionPasses : 0,
+        readTelemetry: isLast && readTelemetry
+      });
+    }
+    return tel;
   }
 
   /**
@@ -1641,10 +1924,12 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     });
   }
 
+  let lastGeoSnapshotF32 = null;
+
   /**
    * Read back the compact evolved spherical geology map (`geoBufA`, W*H*4 floats)
-   * ONCE for root-node caching so revisiting this world restores its exact SPH
-   * continents, mountain chains, and impact basins instantaneously!
+   * ONCE for root-node caching & 1-to-1 orbital click sampling so clicking ANY pixel
+   * on the L4 planet globe reads the EXACT SPH continent/ocean/crater/mountain there!
    */
   async function exportGeologyMapSnapshot() {
     if (disposed) return null;
@@ -1657,6 +1942,7 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
       await stg.mapAsync(GPU_BUF.MAP_READ);
       const copy = !disposed ? new Float32Array(stg.getMappedRange(0, bytes)).slice() : null;
       try { stg.unmap(); } catch {}
+      if (copy) lastGeoSnapshotF32 = copy;
       return copy;
     } catch {
       return null;
@@ -1667,11 +1953,12 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
 
   /**
    * Hydrate the GPU spherical geology map (`geoBufA`) + telemetry directly from a
-   * Root Cosmic Lineage Cache hit — skipping 44 SPH + 8 erosion passes in < 0.3 ms!
+   * Root Cosmic Lineage Cache hit — skipping 44 SPH + 14 erosion passes in < 0.3 ms!
    */
   function hydrateGeologyMapSnapshot(geoF32, cachedTelemetry = null) {
     if (disposed || !(geoF32 instanceof Float32Array) || geoF32.length !== mapW * mapH * 4) return false;
     device.queue.writeBuffer(geoBufA, 0, geoF32);
+    lastGeoSnapshotF32 = geoF32.slice();
     if (cachedTelemetry && typeof cachedTelemetry === 'object') {
       stepIndex = Number(cachedTelemetry.stepIndex) || 44;
       geoTimeMyr = Number(cachedTelemetry.geoTimeMyr) || 440;
@@ -1680,9 +1967,23 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     return true;
   }
 
+  function getCachedGeologySnapshot() {
+    if (!lastGeoSnapshotF32) return null;
+    return {
+      data: lastGeoSnapshotF32,
+      width: mapW,
+      height: mapH,
+      seaLevelNorm: genesisParams.seaLevelNorm,
+      hasOcean: genesisParams.hasOcean,
+      isMagmaOcean: genesisParams.isMagmaOcean,
+      isCryoWorld: genesisParams.isCryoWorld
+    };
+  }
+
   function dispose() {
     if (disposed) return;
     disposed = true;
+    try { ssGravity.destroy(); } catch {}
     for (const b of [sphParamsBuf, parcelsBuf, gridAccBuf, gridValBuf, radialBinsBuf, impactorsBuf, telBuf, telReadBuf, geoParamsBuf, mapAccBuf, geoBufA, geoBufB]) {
       try { b.destroy(); } catch {}
     }
@@ -1691,8 +1992,10 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
   return Object.freeze({
     schema: ULG_PLANETARY_GENESIS_SPH_SCHEMA,
     lawAdapter: PLANETARY_GENESIS_SPH_LAW_ADAPTER,
+    spatialAuthority: ssGravity.gravityMode,
     genesisParams,
     get parcelCount() { return nParcels; },
+    get gridN() { return effGridN; },
     get mapWidth() { return mapW; },
     get mapHeight() { return mapH; },
     get stepIndex() { return stepIndex; },
@@ -1701,10 +2004,12 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     getResidentSphGeologyBuffer: () => geoBufA,
     getTelemetry: () => lastTelemetry,
     step,
+    stepBurst,
     resetToProtoplanet,
     extractLocalSurfacePatch,
     exportGeologyMapSnapshot,
     hydrateGeologyMapSnapshot,
+    getCachedGeologySnapshot,
     dispose
   });
 }

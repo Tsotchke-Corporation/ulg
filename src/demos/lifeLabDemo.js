@@ -23,6 +23,11 @@ import {
   TURING_MORPHOGEN_REGIMES,
   createMorphogenesisActiveSessionWebGpu
 } from '../runtime/biology/morphogenesisActiveMatterGpu.js';
+import {
+  buildPiOrbitalCloudBufferWebGpu,
+  solvePiMolecularOrbitalsWebGpu
+} from '../runtime/organic/organicMolecularGraphGpu.js';
+import { createReactiveBondOrderMdSessionWebGpu } from '../runtime/organic/reactiveBondOrderMdGpu.js';
 import { resolveActiveUniversalLaws } from '../runtime/universalLawGraph.js';
 import { GPU_PICK_LAYOUT, createGpuEntityPickerWebGpu } from '../runtime/gpuMath/gpuEntityPickerWebGpu.js';
 import { createTargetOrbitControls } from '../runtime/shared/targetOrbitControls.js';
@@ -163,6 +168,7 @@ function drawPhasePortraitPlot(canvas, traceMv = []) {
 
 function layerForMode(modeId) {
   if (modeId === 'organism-overview') return 'vivarium';
+  if (String(modeId || '').startsWith('bio-mol-')) return 'molecule';
   if (modeId === 'lipid-soup' || modeId === 'protocell-vesicle' || modeId === 'lipid-bilayer') return 'membrane';
   if (modeId === 'amphipathic-helix-bundle' || modeId === 'globular-hydrophobic-core' || modeId === 'beta-hairpin-fold') return 'fold';
   if (modeId === 'quasispecies-evolution') return 'evo';
@@ -248,6 +254,11 @@ export async function mountLifeLabDemo() {
 
   // Persistent per-layer parameters
   const params = {
+    molTempK: 288,
+    molDielectricEr: 78.4,
+    molEspBlend: 0.0,
+    molShowPi: true,
+    molStyle: 0,
     memEpsHp: 1.85,
     memTempK: 300,
     memOsmotic: 0.0,
@@ -268,6 +279,9 @@ export async function mountLifeLabDemo() {
     morphChemo: 2.20,
     morphDiffRatio: 2.00
   };
+  let activeMolMeta = null;
+  let activePiResult = null;
+  let activePiCloud = null;
 
   let simSpeed = 0.30;
   let stepAccum = 0.0;
@@ -309,13 +323,15 @@ export async function mountLifeLabDemo() {
       banner.classList.remove('visible');
       return;
     }
-    const scaleTag = currentLayer === 'membrane'
-      ? d.membraneLabel
-      : (currentLayer === 'fold'
-        ? d.proteinName
-        : (currentLayer === 'evo'
-          ? d.genomeLabel
-          : (currentLayer === 'hh' ? d.bioenergeticLabel : d.morphLabel)));
+    const scaleTag = currentLayer === 'molecule'
+      ? (activeMolMeta ? `${activeMolMeta.name} (${activeMolMeta.formula})` : 'Native Molecular Biochemistry')
+      : (currentLayer === 'membrane'
+        ? d.membraneLabel
+        : (currentLayer === 'fold'
+          ? d.proteinName
+          : (currentLayer === 'evo'
+            ? d.genomeLabel
+            : (currentLayer === 'hh' ? d.bioenergeticLabel : d.morphLabel))));
     txt.innerHTML = `🧬 <em>${d.speciesName}</em> · ${d.organLabel} <small>(${d.solventFormula} · ${d.baseTempK} K · ${scaleTag})</small>`;
     banner.classList.add('visible');
   }
@@ -336,6 +352,8 @@ export async function mountLifeLabDemo() {
     });
     activeOrganismDerived = d;
 
+    params.molTempK = d.baseTempK;
+    params.molDielectricEr = d.dielectricEr ?? 78.4;
     params.memTempK = d.memTempK;
     params.memEpsHp = d.memEpsHp;
     params.memOsmotic = d.memOsmotic;
@@ -354,6 +372,9 @@ export async function mountLifeLabDemo() {
     params.morphChemo = d.morphChemo;
     params.morphDiffRatio = d.morphDiffRatio;
 
+    if (el('sl-mol-temp')) { el('sl-mol-temp').value = String(params.molTempK); el('val-mol-temp').textContent = `${Math.round(params.molTempK)} K`; }
+    if (el('sl-mol-eps')) { el('sl-mol-eps').value = String(params.molDielectricEr); el('val-mol-eps').textContent = Number(params.molDielectricEr).toFixed(1); }
+    if (el('sub-mol-org')) el('sub-mol-org').textContent = `${d.solventFormula} · ε_r=${Number(d.dielectricEr || 78.4).toFixed(1)} · λ_B=${d.bjerrumLengthA || 7} Å`;
     if (el('sl-mem-temp')) { el('sl-mem-temp').value = String(params.memTempK); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; }
     if (el('sl-mem-eps')) { el('sl-mem-eps').value = String(params.memEpsHp); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); }
     if (el('sl-mem-osm')) { el('sl-mem-osm').value = String(params.memOsmotic); el('val-mem-osm').textContent = params.memOsmotic.toFixed(2); }
@@ -381,6 +402,18 @@ export async function mountLifeLabDemo() {
     if (el('sub-morph-org')) el('sub-morph-org').textContent = `${d.morphLabel} · v₀=${d.morphV0}`;
     if (el('val-viv-organ-src')) el('val-viv-organ-src').textContent = d.organLabel;
     if (el('btn-fold-reset')) el('btn-fold-reset').textContent = `↺ Refold ${Math.round(params.foldTempK)} K`;
+
+    // Dynamically relabel EVERY sub-mode button across Layers 1–5 directly from THIS organism & organ!
+    if (d.modeLabels) {
+      for (const [mId, meta] of Object.entries(d.modeLabels)) {
+        const btn = document.querySelector(`.mode-btn[data-mode="${mId}"]`);
+        if (!btn) continue;
+        const spEl = btn.querySelector('span');
+        const smEl = btn.querySelector('small');
+        if (spEl) spEl.textContent = meta.title;
+        if (smEl) smEl.textContent = meta.tag;
+      }
+    }
 
     syncOrganismSourceBanner();
     return d;
@@ -453,6 +486,8 @@ export async function mountLifeLabDemo() {
     let pose;
     if (layer === 'vivarium') {
       pose = { yaw: 0.42, pitch: 0.24, dist: 10.6, target: [0, -0.35, 0] };
+    } else if (layer === 'molecule') {
+      pose = { yaw: 0.48, pitch: 0.34, dist: 15.6, target: [0, 0, 0] };
     } else if (layer === 'membrane') {
       if (modeId === 'protocell-vesicle') pose = { yaw: 0.55, pitch: 0.35, dist: 17.5, target: [0, 0, 0] };
       else if (modeId === 'lipid-bilayer') pose = { yaw: 0.62, pitch: 0.42, dist: 17.5, target: [0, 0, 0] };
@@ -474,11 +509,20 @@ export async function mountLifeLabDemo() {
     if (!activeSession) return;
     const t = activeSession.getTelemetry();
     const doc = LIFE_MODE_DOCS[currentMode];
+    const dOrg = activeOrganismDerived || syncParamsFromActiveOrganism();
     el('st-step').textContent = String(t.stepIndex || 0);
-    el('pill-name').textContent = doc?.title?.split('(')[0]?.trim() || currentMode;
-    el('pill-tag').textContent = doc?.badge || currentLayer;
+    if (dOrg && currentLayer !== 'vivarium') {
+      const mMeta = dOrg.modeLabels?.[currentMode];
+      el('pill-name').textContent = `${dOrg.speciesName} · ${mMeta?.title || dOrg.organLabel}`;
+      el('pill-tag').textContent = `${dOrg.organLabel} · ${dOrg.solventFormula} ${dOrg.baseTempK} K`;
+    } else {
+      el('pill-name').textContent = doc?.title?.split('(')[0]?.trim() || currentMode;
+      el('pill-tag').textContent = doc?.badge || currentLayer;
+    }
 
     const laws = resolveActiveUniversalLaws({
+      organicAtomCount: currentLayer === 'molecule' ? (activeSession.atomCount || 0) : 0,
+      covalentBondCount: currentLayer === 'molecule' ? (activeSession.bondCount || 0) : 0,
       amphiphileCount: currentLayer === 'membrane' ? activeSession.lipidCount : 0,
       polymerResidueCount: currentLayer === 'fold' ? activeSession.residueCount : 0,
       replicatorCount: currentLayer === 'evo' ? activeSession.populationCount : 0,
@@ -492,7 +536,61 @@ export async function mountLifeLabDemo() {
       ? '1 active (xenobiology-ecology)'
       : `${laws.active.length} active (${laws.active.map((l) => l.id.split('-')[0]).join(', ')})`;
 
-    if (currentLayer === 'vivarium') {
+    if (currentLayer === 'molecule') {
+      const m = activeMolMeta || { name: 'Biomolecule', formula: '—', role: 'Native Chemistry', reason: '' };
+      el('pill-name').textContent = `${dOrg?.speciesName || 'Organism'} · ${m.name}`;
+      el('pill-tag').textContent = `${m.formula} · ${dOrg?.solventFormula || 'H₂O'} ${Math.round(params.molTempK)} K`;
+      el('st-m1-lbl').textContent = 'Formula';
+      el('st-m1-val').textContent = m.formula;
+      el('st-m2-lbl').textContent = 'Dipole';
+      el('st-m2-val').textContent = `${(t.dipoleDebye || 0).toFixed(2)} D`;
+      el('st-m3-lbl').textContent = 'H-Bonds';
+      el('st-m3-val').textContent = String(t.hBondCount ?? 0);
+      el('prov-tier').textContent = 'Tier-1';
+      el('prov-entities').textContent = `${activeSession.atomCount} atoms · ${activeSession.bondCount} bonds (QEq + Morse MD)`;
+      el('prov-inv').textContent = `ε_r=${Number(params.molDielectricEr).toFixed(1)} · ΔG_Born=${(t.bornSolvationKjMol || 0).toFixed(1)} kJ/mol`;
+      if (el('val-mol-formula')) el('val-mol-formula').textContent = m.formula;
+      if (el('mol-synthesis-reason')) el('mol-synthesis-reason').textContent = m.reason || m.role;
+
+      const p3AltBtn = el('btn-p3-alt');
+      if (p3AltBtn) p3AltBtn.style.display = 'none';
+      el('p1-title').textContent = 'Live All-Atom Thermal MD T(t)';
+      el('p1-sub').textContent = `${Math.round(t.instTempK || params.molTempK)} K (R_g=${(t.radiusOfGyrationA || 0).toFixed(2)} Å)`;
+      drawLinePlot(plot1, {
+        xMin: 0, xMax: Math.max(20, histA.length),
+        yMin: Math.max(20, params.molTempK * 0.4), yMax: Math.max(params.molTempK * 1.6, ...histA, 150),
+        series: [{ pts: histA.map((v, i) => [i, v]), color: '#facc15', width: 2.1 }],
+        labelX: 'WebGPU Reactive Bond-Order MD'
+      });
+      const qs = activeSession.qeq?.charges ? Array.from(activeSession.qeq.charges) : [0, 0];
+      el('p2-title').textContent = 'QEq Atomic Partial Charges q_i';
+      el('p2-sub').textContent = `max|q|=${(activeSession.qeq?.maxAbsCharge || 0).toFixed(2)}e`;
+      drawLinePlot(plot2, {
+        xMin: 0, xMax: Math.max(2, qs.length - 1), yMin: -0.95, yMax: 0.95,
+        series: [{ pts: qs.map((q, i) => [i, q]), color: '#56c2ff', width: 2.1 }],
+        hZero: true, labelX: 'Atom Index i (Rappé–Goddard QEq)'
+      });
+      if (activePiResult && activePiResult.energiesEv?.length >= 2) {
+        const es = Array.from(activePiResult.energiesEv);
+        el('p3-title').textContent = `GPU Hückel π-MO (${es.length}π)`;
+        el('p3-sub').textContent = `Gap ${(activePiResult.homoLumoGapEv || 0).toFixed(2)} eV`;
+        drawLinePlot(plot3, {
+          xMin: 0, xMax: Math.max(1, es.length - 1),
+          yMin: Math.min(-6, ...es) - 0.5, yMax: Math.max(6, ...es) + 0.5,
+          series: [{ pts: es.map((ev, i) => [i, ev]), color: '#34d399', width: 2.2 }],
+          hZero: true, labelX: 'Orbital Index (eV)'
+        });
+      } else {
+        el('p3-title').textContent = 'Born Solvation vs Dielectric ε_r';
+        el('p3-sub').textContent = `ε_r=${Number(params.molDielectricEr).toFixed(1)}`;
+        const gBase = Math.min(-1, (t.bornSolvationKjMol || -40) / Math.max(0.05, 1 - 1 / Math.max(1.2, params.molDielectricEr)));
+        drawLinePlot(plot3, {
+          xMin: 1, xMax: 105, yMin: gBase * 1.05, yMax: 5,
+          series: [{ pts: Array.from({ length: 35 }, (_, i) => { const er = 1.2 + i * 3; return [er, gBase * (1 - 1 / er)]; }), color: '#a78bfa', width: 2.0 }],
+          vMarker: params.molDielectricEr, hZero: true, labelX: 'Solvent Dielectric ε_r'
+        });
+      }
+    } else if (currentLayer === 'vivarium') {
       const sp = activeSession.specimen || {};
       const prof = activeXenoProfile || deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
       el('pill-name').textContent = `${sp.speciesName || 'Specimen'} · ${prof.worldName}`;
@@ -618,22 +716,31 @@ export async function mountLifeLabDemo() {
         lastContactMapStats = drawContactMapPlot(plot3, lastFoldCoordsF32, activeSession.residueCount, params.foldSeq);
         el('p3-sub').textContent = `${lastContactMapStats.contactCount} hits`;
       } else {
-        el('p3-title').textContent = 'Thermal Melt Curve';
+        el('p3-title').textContent = `Thermal Melt (T_den=${dOrg?.tDenatureK || 360} K)`;
         el('p3-sub').textContent = `T=${Math.round(params.foldTempK)} K`;
+        const tDenPlot = dOrg?.tDenatureK || 360;
+        const tPlotMin = Math.max(60, Math.round(tDenPlot - 140));
+        const tPlotMax = Math.max(tDenPlot + 180, Math.round(params.foldTempK + 40));
         drawLinePlot(plot3, {
-          xMin: 100, xMax: 850, yMin: 0, yMax: 1.05,
+          xMin: tPlotMin, xMax: tPlotMax, yMin: 0, yMax: 1.05,
           series: [{
             pts: Array.from({ length: 31 }, (_, i) => {
-              const tk = 100 + i * 25;
-              return [tk, 1 / (1 + Math.exp((tk - 470) / 55))];
+              const tk = tPlotMin + (i / 30) * (tPlotMax - tPlotMin);
+              return [tk, 1 / (1 + Math.exp((tk - tDenPlot) / Math.max(16, tDenPlot * 0.09)))];
             }),
             color: '#fb7185', width: 2.0
           }],
-          vMarker: params.foldTempK, labelX: 'Temperature T (K)'
+          vMarker: params.foldTempK, labelX: `${dOrg?.solventFormula || 'H₂O'} Fold Temp (K)`
         });
       }
     } else if (currentLayer === 'evo') {
-      const melt = evaluateDuplexMeltingCurve({ lengthL: 16, strongPairFraction: params.evoStrongFrac });
+      const melt = evaluateDuplexMeltingCurve({
+        lengthL: 16,
+        strongPairFraction: params.evoStrongFrac,
+        dHPerPairKj: dOrg?.xnaDhPerPairKj,
+        dSPerPairJ: dOrg?.xnaDsPerPairJ,
+        alphabetSize: dOrg?.xnaAlphabetSize || 4
+      });
       el('st-m1-lbl').textContent = 'Identity';
       el('st-m1-val').textContent = `${(t.meanSequenceIdentity * 100).toFixed(1)}%`;
       el('st-m2-lbl').textContent = 'Quasispecies';
@@ -646,12 +753,15 @@ export async function mountLifeLabDemo() {
         ? `Above Eigen μ_crit (${melt.eigenErrorThresholdMu.toFixed(3)})!`
         : `Adaptive (μ < μ_crit=${melt.eigenErrorThresholdMu.toFixed(3)})`;
 
-      el('p1-title').textContent = 'Duplex Melting θ(T)';
-      el('p1-sub').textContent = `T_m=${melt.meltingTempC.toFixed(1)}°C`;
+      el('p1-title').textContent = `${dOrg?.xnaAlphabetSize || 4}-Base XNA Melting θ(T)`;
+      el('p1-sub').textContent = `T_m=${melt.meltingTempK.toFixed(1)} K (${melt.meltingTempC.toFixed(1)}°C)`;
       drawLinePlot(plot1, {
-        xMin: 280, xMax: 390, yMin: 0, yMax: 1.05,
+        xMin: Math.max(60, Math.round(melt.meltingTempK - 55)),
+        xMax: Math.round(melt.meltingTempK + 55),
+        yMin: 0, yMax: 1.05,
         series: [{ pts: melt.curve.map((p) => [p.tempK, p.duplexFraction]), color: '#56c2ff', width: 2.2 }],
-        vMarker: melt.meltingTempK, labelX: 'Temperature (K)'
+        vMarker: Math.min(melt.meltingTempK + 50, Math.max(melt.meltingTempK - 50, dOrg?.baseTempK || melt.meltingTempK)),
+        labelX: `${dOrg?.speciesName || 'Organism'} XNA Temp (K)`
       });
       el('p2-title').textContent = 'Live Sequence Identity';
       el('p2-sub').textContent = `${(t.meanSequenceIdentity * 100).toFixed(1)}%`;
@@ -682,25 +792,31 @@ export async function mountLifeLabDemo() {
       const chem = evaluateChemiosmoticBioenergetics({
         deltaPsiMv: params.hhDeltaPsi,
         deltaPh: params.hhDeltaPh,
+        temperatureK: dOrg?.baseTempK || 310,
+        deltaGCurrencyKjMol: dOrg?.energyCurrencyKjMol || null,
         uncouplerLeak: params.hhUncouplerLeak
       });
+      const ions = dOrg?.channelIons || { depolIon: 'Na⁺', repolIon: 'K⁺', eDepolMv: 50, eRepolMv: -77, q10Rate: 1.0 };
+      const currShort = String(dOrg?.energyCurrencyName || 'ATP').split(' ')[0];
       el('st-m1-lbl').textContent = 'Max V_m';
       el('st-m1-val').textContent = `${t.maxVoltageMv.toFixed(1)} mV`;
       el('st-m2-lbl').textContent = 'PMF Δp';
       el('st-m2-val').textContent = `${chem.protonMotiveForceMv.toFixed(1)} mV`;
-      el('st-m3-lbl').textContent = 'ATP Flux';
+      el('st-m3-lbl').textContent = `${currShort} Flux`;
       el('st-m3-val').textContent = `${chem.atpSynthesisFlux.toFixed(1)}`;
       el('prov-tier').textContent = 'Tier-1';
-      el('prov-entities').textContent = '128×128 Rush–Larsen HH Grid';
-      el('prov-inv').textContent = params.hhGNa < 1 ? 'TTX Blocked (g_Na=0)' : (chem.atpSynthesisFlux === 0 ? 'PMF=0 / Uncoupled (0 ATP)' : 'Excitable + ATP Active');
+      el('prov-entities').textContent = `128² ${ions.depolIon}/${ions.repolIon} (${Math.round(dOrg?.baseTempK || 288)} K · Q₁₀=${ions.q10Rate}×)`;
+      el('prov-inv').textContent = params.hhGNa < 1 ? 'Blocked (g_depol=0)' : (chem.atpSynthesisFlux === 0 ? 'PMF=0 / Uncoupled (0 flux)' : `${dOrg?.energyCurrencyName || 'ATP'} (${dOrg?.energyCurrencyKjMol || 50} kJ/mol)`);
 
-      el('p1-title').textContent = 'Electrode Action Potential V_m(t)';
+      el('p1-title').textContent = `${ions.depolIon}/${ions.repolIon} Action Potential V_m(t)`;
       el('p1-sub').textContent = `${t.probeVoltageMv.toFixed(1)} mV`;
-      const vt = t.voltageTraceMv && t.voltageTraceMv.length >= 2 ? t.voltageTraceMv : [-65, -65];
+      const vt = t.voltageTraceMv && t.voltageTraceMv.length >= 2 ? t.voltageTraceMv : [ions.vRestMv ?? -65, ions.vRestMv ?? -65];
       drawLinePlot(plot1, {
-        xMin: 0, xMax: Math.max(24, vt.length), yMin: -82, yMax: 48,
+        xMin: 0, xMax: Math.max(24, vt.length),
+        yMin: Math.min(-45, (ions.eRepolMv || -77) - 8),
+        yMax: Math.max(28, (ions.eDepolMv || 50) + 6),
         series: [{ pts: vt.map((v, i) => [i, v]), color: '#facc15', width: 2.1 }],
-        hZero: true, labelX: 'Membrane Time (ms)'
+        hZero: true, labelX: `Membrane Time (ms · T=${Math.round(dOrg?.baseTempK || 288)}K)`
       });
       el('p2-title').textContent = 'Excitability vs Na⁺ Conductance';
       el('p2-sub').textContent = `g_Na=${Math.round(params.hhGNa)}`;
@@ -800,7 +916,7 @@ export async function mountLifeLabDemo() {
       grp.classList.toggle('open', isAct);
       grp.querySelector('.acc-header')?.setAttribute('aria-expanded', isAct ? 'true' : 'false');
     });
-    for (const id of ['ctrl-vivarium', 'ctrl-membrane', 'ctrl-fold', 'ctrl-evo', 'ctrl-hh', 'ctrl-morph']) {
+    for (const id of ['ctrl-vivarium', 'ctrl-molecule', 'ctrl-membrane', 'ctrl-fold', 'ctrl-evo', 'ctrl-hh', 'ctrl-morph']) {
       if (el(id)) el(id).style.display = id === `ctrl-${currentLayer}` ? 'flex' : 'none';
     }
 
@@ -809,25 +925,64 @@ export async function mountLifeLabDemo() {
     if (currentLayer === 'vivarium') {
       el('hud-title').textContent = `${dOrg?.speciesName || 'Living Specimen'} · Interactive Bio-Aquarium`;
       el('hud-sub').textContent = `Click any organ on ${dOrg?.speciesName || 'this organism'} (${dOrg?.solventFormula || 'H₂O'}, ${dOrg?.baseTempK || 288} K) to probe, heat, cool, stim, or biopsy into live GPU physics`;
+    } else if (currentLayer === 'molecule') {
+      const mMeta = dOrg?.molecules?.[modeId] || dOrg?.molecules?.['bio-mol-membrane'];
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${mMeta?.name || 'Native Biomolecule'} (${mMeta?.formula || ''})`;
+      el('hud-sub').textContent = `Live WebGPU all-atom reactive MD + QEq charges in ${dOrg?.solventFormula || 'H₂O'} (${Math.round(params.molTempK)} K, ε_r=${Number(params.molDielectricEr).toFixed(1)})`;
     } else if (currentLayer === 'membrane') {
       el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.membraneLabel || doc?.title || modeId}`;
-      el('hud-sub').textContent = `Live GPU amphiphile MD of ${dOrg?.speciesName || 'organism'}'s ${dOrg?.organLabel || 'somatic'} cell membrane (${dOrg?.baseTempK || params.memTempK} K, ε_hp=${params.memEpsHp.toFixed(2)})`;
+      el('hud-sub').textContent = `Live GPU amphiphile MD of ${dOrg?.speciesName || 'organism'}'s ${dOrg?.organLabel || 'somatic'} cell membrane (${dOrg?.baseTempK || params.memTempK} K, ${dOrg?.isNonpolar ? 'INVERTED nonpolar core' : (dOrg?.isMonolayer ? 'bipolar monolayer' : 'polar bilayer')})`;
     } else if (currentLayer === 'fold') {
       el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.proteinName || doc?.title || modeId}`;
-      el('hud-sub').textContent = `Live GPU biopolymer folding of ${dOrg?.organLabel || 'tissue'} protein (${params.foldSeq.length}-mer @ ${Math.round(params.foldTempK)} K)`;
+      el('hud-sub').textContent = `Live GPU ${dOrg?.isNonpolar ? 'inverted polar-core' : 'hydrophobic-core'} folding (${params.foldSeq.length}-mer @ ${Math.round(params.foldTempK)} K, T_den=${dOrg?.tDenatureK || 360} K, ε_r=${Number(dOrg?.dielectricEr || 78.4).toFixed(1)})`;
     } else if (currentLayer === 'evo') {
       el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.genomeLabel || doc?.title || modeId}`;
-      el('hud-sub').textContent = `1,024-lineage GPU template replication & Eigen error threshold of ${dOrg?.speciesName || 'organism'}'s ${dOrg?.genomeLabel || 'XNA'} genome (μ=${params.evoMu.toFixed(3)})`;
+      el('hud-sub').textContent = `1,024-lineage GPU ${dOrg?.xnaAlphabetSize || 4}-base XNA replication & Eigen threshold (T_m=${Math.round(dOrg?.xnaTargetTmK || 330)} K, μ=${params.evoMu.toFixed(3)})`;
     } else if (currentLayer === 'hh') {
-      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.bioenergeticLabel || doc?.title || modeId}`;
-      el('hud-sub').textContent = `128² GPU Hodgkin–Huxley & chemiosmosis of ${dOrg?.speciesName || 'organism'}'s ${dOrg?.organLabel || 'excitable'} tissue (g_Na=${Math.round(params.hhGNa)} mS, Δψ=${Math.round(params.hhDeltaPsi)} mV)`;
+      const ions = dOrg?.channelIons || { depolIon: 'Na⁺', repolIon: 'K⁺', eDepolMv: 50, eRepolMv: -77 };
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${ions.depolIon}/${ions.repolIon} & ${dOrg?.energyCurrencyName || 'ATP'}`;
+      el('hud-sub').textContent = `128² GPU Nernst (${ions.eRepolMv}..+${ions.eDepolMv} mV, Q₁₀=${ions.q10Rate ?? 1}×) + ${dOrg?.energyCurrencyName || 'ATP'} (${dOrg?.energyCurrencyKjMol || 50} kJ/mol)`;
     } else {
       el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.morphLabel || doc?.title || modeId}`;
-      el('hud-sub').textContent = `128² GPU Turing reaction-diffusion + 2,048 active embryonic cells patterning ${dOrg?.speciesName || 'organism'} (v₀=${params.morphV0.toFixed(2)})`;
+      el('hud-sub').textContent = `128² GPU Turing (F=${dOrg?.turingFeedF || 0.036}, k=${dOrg?.turingKillK || 0.062}) + 2,048 active embryonic cells (v₀=${params.morphV0.toFixed(2)})`;
     }
     syncOrganismSourceBanner();
 
-    if (currentLayer === 'vivarium') {
+    const orgSeedStr = `${dOrg?.speciesName || 'earth'}:${dOrg?.organId || 'whole'}:${dOrg?.solvent || 'H2O'}`;
+    let organismSeed = 20261125;
+    for (let ci = 0; ci < orgSeedStr.length; ci += 1) {
+      organismSeed = (Math.imul(organismSeed ^ orgSeedStr.charCodeAt(ci), 2654435761) >>> 0) || 1;
+    }
+
+    if (activePiCloud?.buffer) {
+      try { activePiCloud.buffer.destroy(); } catch {}
+      activePiCloud = null;
+    }
+    activePiResult = null;
+    activeMolMeta = null;
+
+    if (currentLayer === 'molecule') {
+      const mMeta = dOrg?.molecules?.[modeId] || dOrg?.molecules?.['bio-mol-membrane'];
+      activeMolMeta = mMeta;
+      activeSession = createReactiveBondOrderMdSessionWebGpu(device, {
+        graph: mMeta.graph,
+        temperatureK: params.molTempK,
+        dielectricEr: params.molDielectricEr,
+        seed: organismSeed,
+        label: `ulg-life-mol-${modeId}`
+      });
+      await activeSession.step({ dt: 0.014, substeps: 6, readTelemetry: true });
+      try {
+        const piRes = await solvePiMolecularOrbitalsWebGpu(device, mMeta.graph);
+        if (piRes && piRes.piCount >= 2 && myToken === modeSwitchToken && !disposed) {
+          activePiResult = piRes;
+          activePiCloud = buildPiOrbitalCloudBufferWebGpu(device, mMeta.graph, piRes, {
+            orbitalIndex: piRes.homoIndex ?? 0,
+            samplesPerAtom: 140
+          });
+        }
+      } catch {}
+    } else if (currentLayer === 'vivarium') {
       if (!activeXenoProfile) activeXenoProfile = deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
       const prof = activeXenoProfile;
       const cladeList = [];
@@ -872,11 +1027,15 @@ export async function mountLifeLabDemo() {
         initMode,
         hydrophobicCoupling: params.memEpsHp,
         temperatureK: params.memTempK,
-        osmoticPressure: params.memOsmotic
+        osmoticPressure: params.memOsmotic,
+        solventPolarity: dOrg?.solventPolarity ?? 1.0,
+        isMonolayer: Boolean(dOrg?.isMonolayer),
+        tRefK: dOrg?.baseTempK ?? 300,
+        seed: organismSeed
       });
       await activeSession.step({ dt: 0.015, substeps: 8, readTelemetry: true });
     } else if (currentLayer === 'fold') {
-      const seq = customSeq || activeOrganismDerived?.foldSeq || POLYMER_SEQUENCE_TEMPLATES[modeId]?.sequence || params.foldSeq;
+      const seq = customSeq || activeOrganismDerived?.organProteins?.[modeId] || activeOrganismDerived?.foldSeq || POLYMER_SEQUENCE_TEMPLATES[modeId]?.sequence || params.foldSeq;
       params.foldSeq = seq;
       el('inp-seq').value = seq;
       el('val-fold-len').textContent = `${seq.length}-mer`;
@@ -884,7 +1043,12 @@ export async function mountLifeLabDemo() {
         sequence: seq,
         temperatureK: params.foldTempK,
         hydrophobicCoupling: params.foldEpsHp,
-        hBondStrength: params.foldEpsHb
+        hBondStrength: params.foldEpsHb,
+        dielectricEr: dOrg?.dielectricEr ?? 78.4,
+        solventPolarity: dOrg?.solventPolarity ?? 1.0,
+        tDenatureK: dOrg?.tDenatureK ?? 360,
+        tRefK: dOrg?.baseTempK ?? 300,
+        seed: organismSeed
       });
       await activeSession.step({ dt: 0.014, substeps: 14, readTelemetry: true });
       lastFoldCoordsF32 = await readResidentFloats(activeSession.getResidentResiduesBuffer(), activeSession.residueCount * 12);
@@ -892,10 +1056,14 @@ export async function mountLifeLabDemo() {
       activeSession = createTemplateReplicationSessionWebGpu(device, {
         populationCount: 1024,
         mutationRateMu: params.evoMu,
-        selectionBeta: params.evoBeta
+        selectionBeta: params.evoBeta,
+        temperatureK: dOrg?.baseTempK ?? 310,
+        alphabetSize: dOrg?.xnaAlphabetSize ?? 4,
+        seed: organismSeed
       });
       await activeSession.step({ substeps: 6, readTelemetry: true });
     } else if (currentLayer === 'hh') {
+      const ions = dOrg?.channelIons || {};
       activeSession = createExcitableMembraneSessionWebGpu(device, {
         width: 128,
         height: 128,
@@ -904,7 +1072,15 @@ export async function mountLifeLabDemo() {
         gK: params.hhGK,
         deltaPsiMv: params.hhDeltaPsi,
         deltaPh: params.hhDeltaPh,
-        uncouplerLeak: params.hhUncouplerLeak
+        uncouplerLeak: params.hhUncouplerLeak,
+        temperatureK: dOrg?.baseTempK ?? 310,
+        deltaGCurrencyKjMol: dOrg?.energyCurrencyKjMol ?? null,
+        eDepolMv: ions.eDepolMv ?? 50.0,
+        eRepolMv: ions.eRepolMv ?? -77.0,
+        eLeakMv: ions.eLeakMv ?? -54.4,
+        vRestMv: ions.vRestMv ?? -65.0,
+        q10Rate: ions.q10Rate ?? 1.0,
+        seed: organismSeed
       });
       await activeSession.step({ dt: 0.025, substeps: 16, readTelemetry: true });
     } else {
@@ -914,8 +1090,11 @@ export async function mountLifeLabDemo() {
         height: 128,
         agentCount: 2048,
         regimeId: regKey,
+        feedF: dOrg?.turingFeedF ?? null,
+        killK: dOrg?.turingKillK ?? null,
         v0Propel: params.morphV0,
-        chemoGain: params.morphChemo
+        chemoGain: params.morphChemo,
+        seed: organismSeed
       });
       activeSession.setDiffusionRatio(params.morphDiffRatio);
       await activeSession.step({ substeps: 24, readTelemetry: true });
@@ -930,7 +1109,26 @@ export async function mountLifeLabDemo() {
   function renderCurrentScene() {
     if (!activeSession) return;
     const timeSec = (performance.now() - startTimeMs) * 0.001;
-    if (currentLayer === 'vivarium') {
+    const dOrg = activeOrganismDerived;
+    const pRgb = dOrg?.primaryRgb || [0.22, 0.85, 0.62];
+    const sRgb = dOrg?.secondaryRgb || [0.92, 0.68, 0.24];
+    const mhRgb = dOrg?.memHeadRgb || pRgb;
+    const mtRgb = dOrg?.memTailRgb || sRgb;
+    if (currentLayer === 'molecule') {
+      renderer.renderFrame({
+        orgAtomsBuffer: activeSession.getResidentAtomsBuffer(),
+        orgAtomCount: activeSession.atomCount,
+        orgBondsBuffer: activeSession.getResidentBondsBuffer(),
+        orgBondCount: activeSession.bondCount,
+        piCloudBuffer: activePiCloud?.buffer || null,
+        piCloudCount: activePiCloud?.pointCount || 0,
+        showPiMo: Boolean(params.molShowPi),
+        espBlend: params.molEspBlend,
+        style: params.molStyle,
+        sphereScale: 1.0,
+        timeSec
+      });
+    } else if (currentLayer === 'vivarium') {
       renderer.renderFrame({
         specimenSolidBuffer: vivSolidBuf,
         specimenSolidVertCount: vivSolidVertCount,
@@ -941,6 +1139,8 @@ export async function mountLifeLabDemo() {
         bioLinkMode: 0,
         bioLinkCount: 0,
         sphereScale: 0.72,
+        orgTintA: [pRgb[0], pRgb[1], pRgb[2], 0.0],
+        orgTintB: [sRgb[0], sRgb[1], sRgb[2], 0.0],
         timeSec
       });
     } else if (currentLayer === 'membrane') {
@@ -952,6 +1152,8 @@ export async function mountLifeLabDemo() {
         bioLinkCount: activeSession.lipidCount * 2,
         sphereScale: 1.0,
         clipZ: clipVal,
+        orgTintA: [mhRgb[0], mhRgb[1], mhRgb[2], 0.58],
+        orgTintB: [mtRgb[0], mtRgb[1], mtRgb[2], 0.0],
         timeSec
       });
     } else if (currentLayer === 'fold') {
@@ -961,6 +1163,8 @@ export async function mountLifeLabDemo() {
         bioLinkMode: 1,
         bioLinkCount: Math.max(0, activeSession.residueCount - 1),
         sphereScale: 1.12,
+        orgTintA: [pRgb[0], pRgb[1], pRgb[2], 0.42],
+        orgTintB: [sRgb[0], sRgb[1], sRgb[2], 0.0],
         timeSec
       });
     } else if (currentLayer === 'evo') {
@@ -970,6 +1174,8 @@ export async function mountLifeLabDemo() {
         bioLinkMode: 0,
         bioLinkCount: 0,
         sphereScale: 1.18,
+        orgTintA: [pRgb[0], pRgb[1], pRgb[2], 0.55],
+        orgTintB: [mhRgb[0], mhRgb[1], mhRgb[2], (dOrg?.xnaAlphabetSize || 4) / 12.0],
         timeSec
       });
     } else if (currentLayer === 'hh') {
@@ -978,10 +1184,12 @@ export async function mountLifeLabDemo() {
         fieldMode: 3,
         fieldW: activeSession.width,
         fieldH: activeSession.height,
+        orgTintA: [pRgb[0], pRgb[1], pRgb[2], 0.72],
+        orgTintB: [sRgb[0], sRgb[1], sRgb[2], 0.0],
         timeSec
       });
     } else {
-      // Coupled 3D Turing morphogen heightfield + 2,048 hovering 3D chemotactic agents in ONE GPU pass!
+      // Coupled 3D Turing morphogen heightfield + 2,048 hovering 3D chemotactic agents in THIS organism's exact pigmentation!
       renderer.renderFrame({
         fieldBuffer: activeSession.getResidentFieldBuffer(),
         fieldMode: 4,
@@ -992,6 +1200,8 @@ export async function mountLifeLabDemo() {
         bioLinkMode: 0,
         bioLinkCount: 0,
         sphereScale: 0.95,
+        orgTintA: [pRgb[0], pRgb[1], pRgb[2], 0.90],
+        orgTintB: [sRgb[0], sRgb[1], sRgb[2], 0.0],
         timeSec
       });
     }
@@ -1014,7 +1224,14 @@ export async function mountLifeLabDemo() {
       const doRead = forceRead || (frameCount % 4 === 0);
       let tel = null;
       const dtScale = useSpeed ? Math.max(0.2, Math.min(1.0, spd * 1.4)) : 1.0;
-      if (currentLayer === 'vivarium') {
+      if (currentLayer === 'molecule') {
+        tel = await activeSession.step({ dt: 0.014 * dtScale, substeps: useSpeed ? Math.max(1, Math.round(4 * spd)) : 4, readTelemetry: doRead });
+        if (doRead) {
+          histA.push(tel.instTempK || params.molTempK);
+          histB.push(tel.radiusOfGyrationA || 2.0);
+          csvRows.push([tel.stepIndex, (tel.instTempK || 0).toFixed(2), (tel.dipoleDebye || 0).toFixed(3), tel.hBondCount || 0]);
+        }
+      } else if (currentLayer === 'vivarium') {
         activeSession.step(0.032 * Math.max(0.35, spd * 1.8));
         uploadVivariumFrame();
         tel = activeSession.getTelemetry();
@@ -1102,6 +1319,7 @@ export async function mountLifeLabDemo() {
 
   function getActivePickBufferInfo() {
     if (!activeSession) return null;
+    if (currentLayer === 'molecule') return { buffer: activeSession.getResidentAtomsBuffer(), count: activeSession.atomCount, strideFloats: 16 };
     if (currentLayer === 'membrane') return { buffer: activeSession.getResidentBeadsBuffer(), count: activeSession.beadCount, strideFloats: 12 };
     if (currentLayer === 'fold') return { buffer: activeSession.getResidentResiduesBuffer(), count: activeSession.residueCount, strideFloats: 12 };
     if (currentLayer === 'evo') return { buffer: activeSession.getResidentPopulationBuffer(), count: activeSession.populationCount, strideFloats: 12 };
@@ -1250,7 +1468,12 @@ export async function mountLifeLabDemo() {
     const spd = Math.hypot(hit.vec1[0], hit.vec1[1], hit.vec1[2]);
     let title = `Mote #${hit.index}`;
     let details = `pos=(${hit.vec0[0].toFixed(2)}, ${hit.vec0[1].toFixed(2)}, ${hit.vec0[2].toFixed(2)}) · |v|=${spd.toFixed(2)}`;
-    if (currentLayer === 'membrane') {
+    if (currentLayer === 'molecule') {
+      const atomInfo = activeMolMeta?.graph?.atoms?.[hit.index];
+      const qVal = Number(hit.vec1?.[3] ?? 0);
+      title = `Atom #${hit.index + 1} · ${atomInfo?.sym || 'X'} (Z=${atomInfo?.Z || 6}, ${atomInfo?.hybridization || 'sp3'})`;
+      details = `QEq q=${qVal >= 0 ? '+' : ''}${qVal.toFixed(3)}e · ${activeMolMeta?.formula || ''} · T=${Math.round(params.molTempK)} K`;
+    } else if (currentLayer === 'membrane') {
       const lipId = Math.floor(hit.index / 3);
       const role = hit.index % 3 === 0 ? 'Hydrophilic Head (Polar)' : `Hydrophobic Tail #${hit.index % 3}`;
       title = `Amphiphile #${lipId} · ${role}`;
@@ -1355,13 +1578,15 @@ export async function mountLifeLabDemo() {
       row.querySelector('[data-mctx="biopsy-jump"]')?.addEventListener('click', () => el('btn-viv-biopsy-jump')?.click());
     } else {
       const primaryByLayer = {
+        molecule: { id: 'btn-mol-esp', lbl: '⚡ ESP', cls: 'gold' },
         membrane: { id: 'btn-mem-null', lbl: 'ε_hp=0', cls: 'coral' },
-        fold: { id: 'btn-fold-denature', lbl: '🔥 750K', cls: 'coral' },
+        fold: { id: 'btn-fold-denature', lbl: '🔥 Denature', cls: 'coral' },
         evo: { id: 'btn-evo-cat', lbl: '⚠ Error Cat.', cls: 'coral' },
         hh: { id: 'btn-hh-stim', lbl: '⚡ Stim', cls: 'gold' },
         morph: { id: 'btn-m-null', lbl: 'v₀=0', cls: 'coral' }
       };
       const resetByLayer = {
+        molecule: 'btn-mol-pi',
         membrane: 'btn-mem-reset',
         fold: 'btn-fold-reset',
         evo: 'btn-evo-reset',
@@ -1432,6 +1657,7 @@ export async function mountLifeLabDemo() {
       const d = activeOrganismDerived || syncParamsFromActiveOrganism();
       const k = b.dataset.orgZoom;
       const modeByKey = {
+        molecule: 'bio-mol-membrane',
         membrane: d.recommendedMemMode || 'protocell-vesicle',
         fold: d.recommendedFoldMode || 'amphipathic-helix-bundle',
         evo: 'quasispecies-evolution',
@@ -1441,6 +1667,36 @@ export async function mountLifeLabDemo() {
       closeMobileDrawers();
       void selectMode(modeByKey[k] || 'protocell-vesicle', k === 'fold' ? d.foldSeq : null);
     });
+  });
+
+  // Layer 0B (Native Environmental Molecular Chemistry) controls
+  el('sl-mol-temp')?.addEventListener('input', (e) => {
+    params.molTempK = Number(e.target.value);
+    if (el('val-mol-temp')) el('val-mol-temp').textContent = `${Math.round(params.molTempK)} K`;
+    activeSession?.setTemperatureK?.(params.molTempK);
+    updatePlotsAndHud();
+  });
+  el('sl-mol-eps')?.addEventListener('input', (e) => {
+    params.molDielectricEr = Number(e.target.value);
+    if (el('val-mol-eps')) el('val-mol-eps').textContent = params.molDielectricEr.toFixed(1);
+    activeSession?.setDielectricEr?.(params.molDielectricEr);
+    updatePlotsAndHud();
+  });
+  el('btn-mol-esp')?.addEventListener('click', () => {
+    params.molEspBlend = params.molEspBlend > 0.1 ? 0.0 : 0.45;
+    el('btn-mol-esp')?.classList.toggle('active', params.molEspBlend > 0.1);
+    renderCurrentScene();
+  });
+  el('btn-mol-pi')?.addEventListener('click', () => {
+    params.molShowPi = !params.molShowPi;
+    el('btn-mol-pi')?.classList.toggle('active', params.molShowPi);
+    renderCurrentScene();
+  });
+  el('btn-mol-rep')?.addEventListener('click', () => {
+    params.molStyle = (params.molStyle + 1) % 3;
+    const lbls = ['Ball & Stick', 'CPK vdW', 'Licorice'];
+    if (el('btn-mol-rep')) el('btn-mol-rep').textContent = lbls[params.molStyle] || 'Ball & Stick';
+    renderCurrentScene();
   });
   el('btn-viv-biopsy-jump')?.addEventListener('click', () => {
     if (!pendingBiopsyAction) return;
@@ -1831,6 +2087,7 @@ export async function mountLifeLabDemo() {
       orbitControls?.dispose();
       activeSession?.dispose?.();
       gpuPicker.dispose();
+      if (activePiCloud?.buffer) try { activePiCloud.buffer.destroy(); } catch {}
       if (readbackStagingBuf) try { readbackStagingBuf.destroy(); } catch {}
       if (vivSolidBuf) try { vivSolidBuf.destroy(); } catch {}
       if (vivGlassBuf) try { vivGlassBuf.destroy(); } catch {}

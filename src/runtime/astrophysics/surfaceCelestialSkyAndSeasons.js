@@ -64,26 +64,50 @@ function fbm5Orb(px, py, pz) {
   return sum;
 }
 
+function sampleSphGeologySnapshotJs(n, snap) {
+  const w = snap.width;
+  const h = snap.height;
+  const arr = snap.data;
+  const lon = Math.atan2(n[2], n[0]);
+  const lat = Math.asin(Math.max(-1, Math.min(1, n[1])));
+  const u = fractJs(lon / (Math.PI * 2) + 0.5);
+  const v = Math.max(0, Math.min(0.9999, 0.5 - lat / Math.PI));
+  const gx = u * w - 0.5;
+  const gy = v * h - 0.5;
+  const x0 = Math.floor(gx);
+  const y0 = Math.floor(gy);
+  const fx = gx - x0;
+  const fy = gy - y0;
+  const ix0 = ((x0 % w) + w) % w;
+  const ix1 = (((x0 + 1) % w) + w) % w;
+  const iy0 = Math.max(0, Math.min(h - 1, y0));
+  const iy1 = Math.max(0, Math.min(h - 1, y0 + 1));
+  const o00 = (iy0 * w + ix0) * 4;
+  const o10 = (iy0 * w + ix1) * 4;
+  const o01 = (iy1 * w + ix0) * 4;
+  const o11 = (iy1 * w + ix1) * 4;
+  const lerp4 = (k) => {
+    const t0 = arr[o00 + k] * (1 - fx) + arr[o10 + k] * fx;
+    const t1 = arr[o01 + k] * (1 - fx) + arr[o11 + k] * fx;
+    return t0 * (1 - fy) + t1 * fy;
+  };
+  return [lerp4(0), lerp4(1), lerp4(2), lerp4(3)];
+}
+
 /**
- * Bit-matched JS mirror of `LIT_SPHERE_WGSL` continents / oceans / polar ice / mountains / deserts!
- * Clicking ANY point `nHit` on an L4 orbital globe calls this so touching down at that exact spot
- * produces matching biome, ocean/coastline, elevation, snow/ice cap, and day/night solar elevation!
+ * Sample orbital planetary surface directly from the live 3D GPU SPH geology snapshot when active
+ * (1-to-1 match with `LIT_SPHERE_WGSL` `sample_sph_geology` — ZERO Perlin mismatch!), falling back
+ * to `fbm5Orb` only for non-SPH bodies (gas giants or offline unit tests).
  */
-export function sampleOrbitalBodySurfaceAtNormal(nHit, bodySpec = {}, seedFloat = 7.81, lightDir = null) {
+export function sampleOrbitalBodySurfaceAtNormal(nHit, bodySpec = {}, seedFloat = 7.81, lightDir = null, sphGeoSnapshot = null) {
   const n = norm3(Array.isArray(nHit) && nHit.length === 3 ? nHit : [0, 0.5, 0.866]);
   const latDeg = Math.asin(Math.max(-1, Math.min(1, n[1]))) * (180 / Math.PI);
   const lonDeg = Math.atan2(n[2], n[0]) * (180 / Math.PI);
-  const sx = seedFloat * 2.13;
-  const sy = seedFloat * 1.47;
-  const sz = seedFloat * 3.19;
-  const elev = fbm5Orb(n[0] * 3.4 + sx, n[1] * 3.4 + sy, n[2] * 3.4 + sz);
-  const detail = fbm5Orb(n[0] * 14.0 + sx * 1.7, n[1] * 14.0 + sy * 1.7, n[2] * 14.0 + sz * 1.7);
 
   const c1 = Array.isArray(bodySpec.color1) ? bodySpec.color1 : [0.1, 0.25, 0.55];
   const radiusKm = Number(bodySpec.radiusKm) || 6371;
   const isGasGiant = radiusKm >= 16000 || bodySpec.kind === 2;
-  const hasOcean = !isGasGiant && (c1[2] > c1[0] + 0.14);
-  const seaLvl = 0.51;
+  const hasSph = !isGasGiant && Boolean(sphGeoSnapshot?.data && sphGeoSnapshot.width > 1 && sphGeoSnapshot.height > 1);
 
   const sunDot = Array.isArray(lightDir) && lightDir.length === 3 ? dot3(n, norm3(lightDir)) : 0.65;
   const isNightSide = sunDot < -0.04;
@@ -105,6 +129,111 @@ export function sampleOrbitalBodySurfaceAtNormal(nHit, bodySpec = {}, seedFloat 
   let tempOffsetK = 0;
   let ampScale = 1.0;
   let floraDensityScale = 1.0;
+  let elev = 0.5;
+  let detail = 0.5;
+  let hasOcean = !isGasGiant && (c1[2] > c1[0] + 0.14);
+
+  if (hasSph) {
+    // 1-to-1 EXACT read from the live GPU 3D SPH spherical geology map rendered on screen!
+    const [elevSph, crustComp, thermalV, moistR] = sampleSphGeologySnapshotJs(n, sphGeoSnapshot);
+    elev = elevSph;
+    detail = crustComp;
+    hasOcean = Boolean(sphGeoSnapshot.hasOcean) && hasOcean;
+    const seaLvlSph = Number.isFinite(sphGeoSnapshot.seaLevelNorm) ? sphGeoSnapshot.seaLevelNorm : 0.04;
+    // CRITICAL: seaLevelOffsetM stays EXACT 0.0 on SPH worlds so the cropped SPH patch's
+    // real zero-crossing `(elevSph - seaLevelNorm)` controls ocean vs shore vs land 1-to-1!
+    seaLevelOffsetM = 0.0;
+    if (sphGeoSnapshot.isMagmaOcean || thermalV > 0.72) {
+      biomeLabel = 'Active Magma Rift & Basalt Crust (SPH)';
+      tempOffsetK = 40;
+      ampScale = 1.15;
+    } else if (hasOcean) {
+      const polar = smoothstepJs(0.77, 0.91, Math.abs(n[1]) + elevSph * 0.08);
+      if (polar > 0.48) {
+        isPolarIce = true;
+        biomeLabel = 'Polar Ice Cap & Glaciers (SPH)';
+        tempOffsetK = -34;
+        floraDensityScale = 0.08;
+        ampScale = 0.90;
+      } else if (elevSph < seaLvlSph - 0.045) {
+        isOcean = true;
+        biomeLabel = 'Open Deep Ocean (SPH)';
+        floraDensityScale = 0.05;
+      } else if (elevSph < seaLvlSph + 0.075) {
+        isCoast = true;
+        isLush = true;
+        biomeLabel = 'Coastal Shoreline & Shelf (SPH)';
+        floraDensityScale = 1.25;
+      } else {
+        const hLand = Math.max(0, Math.min(1, (elevSph - seaLvlSph) / Math.max(0.32, 0.92 - seaLvlSph)));
+        if (hLand > 0.50 || crustComp > 0.72) {
+          isMountain = true;
+          biomeLabel = 'Orogenic Mountain Cordillera (SPH)';
+          tempOffsetK = -14;
+          ampScale = 1.35;
+          floraDensityScale = 0.65;
+        } else if (moistR < 0.34) {
+          isDesert = true;
+          biomeLabel = 'Arid Continental Basin (SPH)';
+          tempOffsetK = 12;
+          floraDensityScale = 0.30;
+        } else {
+          isLush = true;
+          biomeLabel = 'Temperate SPH Continent & Valleys';
+          floraDensityScale = 1.35;
+        }
+      }
+    } else {
+      const polar = smoothstepJs(0.84, 0.94, Math.abs(n[1]));
+      if (polar > 0.45 && (bodySpec.atm ?? 0) > 0.12) {
+        isPolarIce = true;
+        biomeLabel = 'Polar Frost Cap (SPH)';
+        tempOffsetK = -30;
+      } else if (elevSph > 0.22) {
+        isMountain = true;
+        biomeLabel = 'SPH Crater Rim & Highlands';
+        ampScale = 1.32;
+      } else if (elevSph < -0.22) {
+        biomeLabel = 'SPH Impact Basin / Mare Floor';
+        ampScale = 0.92;
+      } else {
+        biomeLabel = 'SPH Differentiated Regolith Plains';
+      }
+    }
+    return Object.freeze({
+      latDeg: Number(latDeg.toFixed(2)),
+      lonDeg: Number(lonDeg.toFixed(2)),
+      nHit: Object.freeze([n[0], n[1], n[2]]),
+      elev: Number(elevSph.toFixed(4)),
+      detail: Number(crustComp.toFixed(4)),
+      sphSampled: true,
+      sphSeaLevelNorm: seaLvlSph,
+      hasOcean,
+      isGasGiant,
+      isOcean,
+      isCoast,
+      isPolarIce,
+      isMountain,
+      isDesert,
+      isLush,
+      isNightSide,
+      isTwilight,
+      sunDot: Number(sunDot.toFixed(3)),
+      solarLonOffsetRad,
+      biomeLabel,
+      seaLevelOffsetM,
+      tempOffsetK,
+      ampScale,
+      floraDensityScale
+    });
+  }
+
+  const sx = seedFloat * 2.13;
+  const sy = seedFloat * 1.47;
+  const sz = seedFloat * 3.19;
+  elev = fbm5Orb(n[0] * 3.4 + sx, n[1] * 3.4 + sy, n[2] * 3.4 + sz);
+  detail = fbm5Orb(n[0] * 14.0 + sx * 1.7, n[1] * 14.0 + sy * 1.7, n[2] * 14.0 + sz * 1.7);
+  const seaLvl = 0.51;
 
   if (isGasGiant) {
     const bandPhase = Math.sin(n[1] * 16.5 + (elev - 0.5) * 3.4);

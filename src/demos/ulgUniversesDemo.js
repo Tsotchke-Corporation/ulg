@@ -61,6 +61,9 @@ import {
   computeHostStarIllumination
 } from '../runtime/astrophysics/starlightAndExoticOptics.js';
 import { analyzeOrbitalBodySpectroscopy } from '../runtime/astrophysics/orbitalRemoteSensing.js';
+import {
+  resolvePeerComputeSimulationProfile
+} from '../runtime/astrophysics/peercomputeSimulationScaler.js';
 import { createUfoFlightController } from './ufoFlightController.js';
 import { buildLifeLabXenobiologyUrl } from '../runtime/biology/xenobiologySynthesizer.js';
 
@@ -314,10 +317,13 @@ export function resolvePrimaryLevelFromSpan(log10SpanM, {
 }
 
 function idealPlanetaryFramingLog10Span(bodySpec) {
-  const rMeters = Math.max(2e5, (Number(bodySpec?.radiusKm) || 6371) * 1000);
-  // Frame diameter cleanly (~3.6x radius for bare worlds, ~5.4x when planetary rings extend outward)
-  const mult = bodySpec?.ringed ? 5.2 : 3.65;
-  return Math.min(8.68, Math.max(6.2, Math.log10(rMeters * mult)));
+  const rKm = Math.max(0.5, Number(bodySpec?.radiusKm) || 6371);
+  const rMeters = rKm * 1000;
+  // Frame diameter cleanly (~3.6x radius for bare worlds, ~5.2x when planetary rings extend outward)
+  // Allow true close-up framing down to ~18 km for tiny comets & asteroids (e.g. 5.5 km Halley)!
+  const mult = bodySpec?.ringed ? 5.2 : (rKm < 550 ? 4.4 : 3.65);
+  const floorLog = rKm < 550 ? 3.55 : 5.85;
+  return Math.min(8.68, Math.max(floorLog, Math.log10(rMeters * mult)));
 }
 
 function mapLog10ScaleToInitialSpan(log10Val) {
@@ -337,7 +343,13 @@ export async function mountUlgUniversesDemo() {
   const shareParams = parseUniverseShareParams(window.location.search);
   const initialZ = Math.max(1, Math.min(118, Number.parseInt(urlParams.get('Z') || urlParams.get('z') || '26', 10) || 26));
   const initialSeed = shareParams.seed != null ? Math.trunc(shareParams.seed) : (Number.parseInt(urlParams.get('seed') || '20261125', 10) || 20261125);
-  const initialQuality = QUALITY_PRESETS[urlParams.get('quality')] ? urlParams.get('quality') : 'med';
+  const urlQualityParam = urlParams.get('quality');
+  const initialQuality = (urlQualityParam === 'auto' || QUALITY_PRESETS[urlQualityParam]) ? urlQualityParam : 'auto';
+  const initialCapabilityProfile = await resolvePeerComputeSimulationProfile({
+    device,
+    qualityMode: initialQuality,
+    search: window.location.search
+  });
 
   let log10ViewSpanM = UNIVERSES_SCALES[0].log10SpanM;
   if (shareParams.log10SpanM != null) {
@@ -387,6 +399,7 @@ export async function mountUlgUniversesDemo() {
   const reseedBtn = document.getElementById('uv-reseed-btn');
   const scaleControlsEl = document.getElementById('uv-scale-controls');
   const qualityGroup = document.getElementById('uv-quality-group');
+  const peercomputeCapBadgeEl = document.getElementById('uv-peercompute-cap-badge');
   const lensingToggle = document.getElementById('uv-lensing-toggle');
   const orbitsToggle = document.getElementById('uv-orbits-toggle');
   const travelToggle = document.getElementById('uv-travel-toggle');
@@ -451,6 +464,11 @@ export async function mountUlgUniversesDemo() {
   const engineTag = document.getElementById('uv-engine-tag');
   const breadcrumbEl = document.getElementById('uv-breadcrumb');
   const hintPillEl = document.getElementById('uv-hint-pill');
+  const genesisHudEl = document.getElementById('uv-genesis-hud');
+  const genesisTitleEl = document.getElementById('uv-genesis-title');
+  const genesisDetailEl = document.getElementById('uv-genesis-detail');
+  const genesisBarFillEl = document.getElementById('uv-genesis-bar-fill');
+  const genesisSkipBtn = document.getElementById('uv-genesis-skip-btn');
   const surfaceHudEl = document.getElementById('uv-surface-hud');
   const surfaceTelemetryEl = document.getElementById('uv-surf-telemetry');
   const surfaceChemBarEl = document.getElementById('uv-surf-chem-bar');
@@ -501,8 +519,25 @@ export async function mountUlgUniversesDemo() {
   const physics = createUlgUniversesPhysics(device, {
     seed: initialSeed,
     qualityId: initialQuality,
+    capabilityProfile: initialCapabilityProfile,
+    rawCapabilities: initialCapabilityProfile?.capabilities || null,
     initialElementZ: initialZ
   });
+
+  function syncPeerComputeCapBadge() {
+    if (!peercomputeCapBadgeEl) return;
+    const cp = physics.capabilityProfile;
+    if (!cp) return;
+    const w = cp.workloads;
+    const modeTag = cp.mode === 'auto' ? `AUTO → ${cp.tier.toUpperCase()}` : `MANUAL ${cp.qualityId.toUpperCase()} (${cp.tier.toUpperCase()})`;
+    const gpuTag = cp.gpuLabel || 'Hardware WebGPU';
+    const memTag = cp.maxStorageMB ? `${cp.maxStorageMB} MB SSBO` : 'WebGPU';
+    peercomputeCapBadgeEl.innerHTML =
+      `<strong>PeerCompute ${modeTag}</strong> · ${cp.cpuCores} cores · ${memTag}<br/>` +
+      `${gpuTag}<br/>` +
+      `L4 SPH: <strong>${w.sphParcels.toLocaleString()}</strong> · <strong>${w.sphGridN}³</strong> grid · <strong>${w.sphMapWidth}×${w.sphMapHeight}</strong> · L2: <strong>${w.nebularParcels.toLocaleString()}</strong> · L3: <strong>${w.stellarParcels.toLocaleString()}</strong> (<strong>${w.stellarGridN}³</strong>) · SS Multipole`;
+  }
+  syncPeerComputeCapBadge();
 
   // Global 6-DOF Quaternion UFO Free-Flight Controller + Xbox Gamepad + Perspective-Aware Bridge Deck!
   const ufoFlight = createUfoFlightController({
@@ -1036,6 +1071,10 @@ export async function mountUlgUniversesDemo() {
   let hoveredTargetId = null;
   let pickedGpuMote = null;     // Live GPU-picked individual mote (star, asteroid, plasma parcel, atom, nucleon!)
   let moteFocusLocked = false;  // When true, camera tracks pickedGpuMote.worldPos smoothly!
+  let pendingHaloEnv = null;    // Unsimulated L0 halo queued when picked — collapses live on L0->L1 approach!
+  let pendingGalaxyStarSite = null; // Unsimulated L1 star mote queued when picked — coalesces live on L1->L2 approach!
+  let lastGenesisToastTimestamp = 0;
+  let wasGenesisStageActive = false;
   let camTarget = [0, 0, 0];
   let lastNucleonSpheres = [];
   let moteTrackAccum = 0;
@@ -1573,8 +1612,81 @@ export async function mountUlgUniversesDemo() {
     if (collapseBtn) collapseBtn.textContent = collapsed ? '+' : '−';
   });
 
+  function syncGenesisHud() {
+    if (!genesisHudEl) return;
+    const stage = physics.activeGenesisStage;
+    const ev = physics.lastGenesisEvent;
+    if (stage && !physics.surfaceActive) {
+      wasGenesisStageActive = true;
+      genesisHudEl.classList.add('active');
+      genesisHudEl.classList.remove('toast');
+      const pct = Math.round(Math.max(0, Math.min(1, stage.progress || 0)) * 100);
+      const etaTag = (typeof stage.etaSec === 'number' && stage.etaSec > 1) ? ` · ~${stage.etaSec}s left` : '';
+      if (genesisTitleEl) genesisTitleEl.textContent = `${stage.title} · ${pct}%${etaTag}`;
+      if (genesisDetailEl) genesisDetailEl.textContent = `${stage.entityName} — ${stage.detail}`;
+      if (genesisBarFillEl) genesisBarFillEl.style.width = `${Math.max(4, pct)}%`;
+      if (genesisSkipBtn) genesisSkipBtn.textContent = stage.skipLabel || '⏩ Finish Now';
+      return;
+    }
+    if (wasGenesisStageActive && !stage) {
+      wasGenesisStageActive = false;
+      selectDefaultTarget();
+      syncScaleChrome();
+      updateInspectorCard();
+      renderNow(performance.now());
+    }
+    const now = Date.now();
+    const showToast = Boolean(
+      ev
+      && !physics.surfaceActive
+      && (ev.kind === 'cache-hit' || ev.kind === 'genesis-complete')
+      && (now - (ev.timestampMs || 0)) < 2800
+    );
+    if (showToast) {
+      genesisHudEl.classList.remove('active');
+      genesisHudEl.classList.add('toast');
+      if (genesisTitleEl) {
+        genesisTitleEl.textContent = ev.kind === 'cache-hit'
+          ? `✅ Root Cache Hit · Instant Restore`
+          : `✅ GPU Genesis Converged & Cached on Root`;
+      }
+      if (genesisDetailEl) {
+        genesisDetailEl.textContent = ev.detail ? `${ev.label} — ${ev.detail}` : `${ev.label} (${ev.source || 'root-cache'})`;
+      }
+      lastGenesisToastTimestamp = ev.timestampMs || now;
+    } else {
+      genesisHudEl.classList.remove('active');
+      genesisHudEl.classList.remove('toast');
+    }
+  }
+
+  async function finalizeActiveGenesisUi() {
+    if (!physics.activeGenesisStage) return null;
+    const res = await physics.finalizeActiveGenesis();
+    wasGenesisStageActive = false;
+    if (res?.stage === 'l2-nebular-coalescence') {
+      syncKardashevSystemContext();
+    }
+    if (currentLevel === 4 && !physics.surfaceActive) {
+      const cat = physics.getActiveSystemCatalog();
+      if (cat[physics.planetaryBodyIndex]) {
+        orientCameraToSunlitPhase(physics.planetaryBodyIndex);
+      }
+    }
+    selectDefaultTarget();
+    syncScaleChrome();
+    syncGenesisHud();
+    updateInspectorCard();
+    renderNow(performance.now());
+    return res;
+  }
+
+  genesisSkipBtn?.addEventListener('click', () => {
+    void finalizeActiveGenesisUi();
+  });
+
   // ---- Background Pre-Warming of Active, Adjacent & Parent-Perspective Continuous Zoom Regimes ----
-  async function warmVisibleLevels(spanLog10) {
+  async function warmVisibleLevels(spanLog10, { observeLive = false } = {}) {
     const isStar = isFocusedSolarBodyStar();
     const lvl = resolvePrimaryLevelFromSpan(spanLog10, {
       focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
@@ -1588,22 +1700,26 @@ export async function mountUlgUniversesDemo() {
     if (lvl === 6) toWarm.add(5);
     if (lvl === 7) toWarm.add(6);
 
-    if (spanLog10 >= 20.5) toWarm.add(0);
-    if (spanLog10 >= 14.8 && spanLog10 <= 23.5) toWarm.add(1);
-    if (spanLog10 >= 6.5 && spanLog10 <= 18.2) toWarm.add(2);
-    if (spanLog10 >= 6.8 && spanLog10 <= 10.8 && isStar) toWarm.add(3);
-    if (spanLog10 >= -6.2 && spanLog10 <= 9.2 && !isStar) toWarm.add(4);
+    // Inverted First-Principles Rule: NEVER silently pre-compute deeper unsimulated macroscopic scales
+    // (L1 Galaxy, L2 Star System, L4 Planet SPH) BEFORE the user actually enters that level!
+    if (spanLog10 >= 20.5 && lvl >= 0) toWarm.add(0);
+    if (spanLog10 >= 14.8 && spanLog10 <= 23.5 && lvl >= 1) toWarm.add(1);
+    if (spanLog10 >= 6.5 && spanLog10 <= 18.2 && lvl >= 2) toWarm.add(2);
+    if (spanLog10 >= 6.8 && spanLog10 <= 10.8 && isStar && lvl >= 3) toWarm.add(3);
+    if (spanLog10 >= -6.2 && spanLog10 <= 9.2 && !isStar && lvl >= 4) toWarm.add(4);
     if (spanLog10 >= -10.0 && spanLog10 <= -4.5) toWarm.add(5);
     if (spanLog10 >= -13.5 && spanLog10 <= -8.4) toWarm.add(6);
     if (spanLog10 <= -11.5) toWarm.add(7);
 
     const prevNuc = physics.nuclearResult;
     for (const l of toWarm) {
-      await physics.ensureLevelInitialized(l);
+      const liveForL = Boolean(observeLive && l === lvl && (l === 1 || l === 2 || l === 4));
+      await physics.ensureLevelInitialized(l, { observeLive: liveForL });
     }
     if (physics.nuclearResult && physics.nuclearResult !== prevNuc && physics.nuclearResult.volumeData) {
       renderer.uploadNuclearVolume(physics.nuclearResult.volumeData);
     }
+    syncGenesisHud();
   }
 
   function orientCameraToSunlitPhase(bodyIdx = physics.focusedSolarBodyIndex) {
@@ -1862,9 +1978,10 @@ export async function mountUlgUniversesDemo() {
           renderNow(performance.now());
         });
         scaleControlsEl.querySelector('#uv-sample-star-btn')?.addEventListener('click', async () => {
-          await physics.sampleNewGalacticSector();
+          await physics.sampleNewGalacticSector({ observeLive: true });
           selectDefaultTarget();
           syncScaleChrome();
+          syncGenesisHud();
           updateInspectorCard();
           renderNow(performance.now());
         });
@@ -1886,6 +2003,7 @@ export async function mountUlgUniversesDemo() {
           await physics.crystallizeCoalescedSystem();
           selectDefaultTarget();
           syncScaleChrome();
+          syncGenesisHud();
           updateInspectorCard();
           renderNow(performance.now());
         });
@@ -1906,7 +2024,6 @@ export async function mountUlgUniversesDemo() {
           const cat = physics.getActiveSystemCatalog();
           physics.setFocusedSolarBody(idx);
           selectedTargetId = cat[idx]?.id || null;
-          if (!cat[idx]?.isStar && idx > 0) await physics.initPlanetaryInterior({ bodyIndex: idx });
           updateInspectorCard();
           renderNow(performance.now());
         });
@@ -1935,8 +2052,23 @@ export async function mountUlgUniversesDemo() {
             <span id="uv-neb-b0-val" style="font-family:var(--mono);font-size:11px;">${physics.nebulaB0.toFixed(2)}</span>
           </div>
           <div style="font-size:11px;color:var(--muted);line-height:1.35;">3D self-gravitating resistive MHD winding helical B-towers &amp; launching magnetocentrifugal J×B jets.</div>
-        ` : physics.stellarMode === 'fusion' ? `
+        ` : physics.stellarMode === 'fusion' ? (() => {
+          const stTel = physics.stellarTelemetry;
+          const genLbl = stTel?.generationLabel || physics.stellarEngine?.generationLabel || '3rd-Gen Pop I';
+          const domCh = stTel?.dominantChannel || 'pp-chain (4 ¹H → ⁴He)';
+          const xH = ((stTel?.meanXH ?? 0.72) * 100).toFixed(1);
+          const xHe = ((stTel?.meanXHe ?? 0.26) * 100).toFixed(1);
+          const xCno = ((stTel?.meanXCNO ?? 0) * 100).toFixed(3);
+          const xAFe = ((stTel?.meanXAlphaFe ?? 0) * 100).toFixed(3);
+          const dZ = ((stTel?.synthesizedMetalsDelta ?? 0) * 100).toFixed(4);
+          const stN = (physics.stellarEngine?.count || 0).toLocaleString();
+          const stG = physics.stellarEngine?.gridN || 24;
+          const nextGenNum = Math.min(3, (stTel?.generation ?? physics.stellarEngine?.generation ?? 3) + 1);
+          const nextGenLabel = nextGenNum === 2 ? '2nd-Gen Pop II' : '3rd-Gen Pop I';
+          return `
           <div class="uv-seg-group" style="flex-wrap:wrap;">
+            <button class="uv-seg-btn ${physics.stellarPreset === 'pop3-first-gen' ? 'active' : ''}" data-st-preset="pop3-first-gen" type="button" title="1st-Generation Pop III primordial zero-metal star (65 M☉, Z=0): ignites 3α→¹²C first, then self-catalyzes CNO!">✨ 1st-Gen Pop III (Z=0)</button>
+            <button class="uv-seg-btn ${physics.stellarPreset === 'pop2-second-gen' ? 'active' : ''}" data-st-preset="pop2-second-gen" type="button" title="2nd-Generation Pop II α-enhanced halo star (4.5 M☉, [Fe/H]=-2.1) born from Pop III supernova ejecta">⭐ 2nd-Gen Pop II (α-rich)</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'main-sequence-star' ? 'active' : ''}" data-st-preset="main-sequence-star" type="button">G2V Sun</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'blue-supergiant' ? 'active' : ''}" data-st-preset="blue-supergiant" type="button">O/B Blue</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'red-supergiant' ? 'active' : ''}" data-st-preset="red-supergiant" type="button">Betelgeuse</button>
@@ -1946,6 +2078,12 @@ export async function mountUlgUniversesDemo() {
             <button class="uv-seg-btn ${physics.stellarPreset === 'massive-supernova' ? 'active' : ''}" data-st-preset="massive-supernova" type="button">18 M☉ SN</button>
             <button class="uv-seg-btn ${physics.stellarPreset === 'binary-nursery' ? 'active' : ''}" data-st-preset="binary-nursery" type="button">Binary</button>
           </div>
+          <div style="font-size:10.5px;color:#fde68a;background:rgba(245,158,11,0.09);border:1px solid rgba(245,158,11,0.28);border-radius:6px;padding:6px 8px;line-height:1.4;">
+            <strong>${genLbl}</strong> · <code>${stN}</code> parcels · <code>${stG}³</code> MLS-MPM + <strong>SS Multipole</strong><br/>
+            Dominant Core Burn: <strong>${domCh}</strong><br/>
+            H <code>${xH}%</code> · He <code>${xHe}%</code> · CNO <code>${xCno}%</code> · α/Fe <code>${xAFe}%</code> (ΔZ <code>+${dZ}%</code>)
+          </div>
+          <button id="uv-st-supernova-seed-btn" class="uv-btn subtle" type="button" style="justify-content:center;" title="Detonate this core and launch live L2 GPU Nebular Coalescence seeded from its REAL GPU-fused CNO &amp; α/Fe metals">💥 Detonate Core → Seed ${nextGenLabel} Nebula</button>
           <div class="uv-row">
             <span>Burn Accel</span>
             <input id="uv-st-accel" type="range" min="0.5" max="6.0" step="0.25" value="${physics.stellarTimeAccel}" />
@@ -1955,8 +2093,8 @@ export async function mountUlgUniversesDemo() {
             <span>Dynamo B₀</span>
             <input id="uv-st-b0" type="range" min="0.0" max="0.9" step="0.05" value="${physics.stellarB0.toFixed(2)}" />
             <span id="uv-st-b0-val" style="font-family:var(--mono);font-size:11px;">${physics.stellarB0.toFixed(2)}</span>
-          </div>
-        ` : `<div style="font-size:11px;color:var(--muted);line-height:1.35;">Live first-principles GPU regime from ULG’s Universal Law Graph — inspect spectra, TOV M(R), or flare light curve on the right.</div>`}`;
+          </div>`;
+        })() : `<div style="font-size:11px;color:var(--muted);line-height:1.35;">Live first-principles GPU regime from ULG’s Universal Law Graph — inspect spectra, TOV M(R), or flare light curve on the right.</div>`}`;
       scaleControlsEl.querySelector('#uv-stellar-mode-sel')?.addEventListener('change', async (e) => {
         await physics.setStellarMode(e.target.value);
         pickedGpuMote = null;
@@ -1974,6 +2112,7 @@ export async function mountUlgUniversesDemo() {
       });
       for (const b of scaleControlsEl.querySelectorAll('[data-st-preset]')) {
         b.addEventListener('click', async () => {
+          userExplicitStellarOverride = true;
           await physics.setStellarMode('fusion');
           await physics.initStellarCore({ preset: b.dataset.stPreset });
           pickedGpuMote = null;
@@ -1983,6 +2122,18 @@ export async function mountUlgUniversesDemo() {
           renderNow(performance.now());
         });
       }
+      scaleControlsEl.querySelector('#uv-st-supernova-seed-btn')?.addEventListener('click', async () => {
+        userExplicitStellarOverride = false;
+        await physics.detonateCoreSeedNextGeneration();
+        pickedGpuMote = null;
+        moteFocusLocked = false;
+        flyToLog10Span(12.8);
+        selectDefaultTarget();
+        syncGenesisHud();
+        renderScaleControls();
+        updateInspectorCard();
+        renderNow(performance.now());
+      });
       scaleControlsEl.querySelector('#uv-st-accel')?.addEventListener('input', (e) => {
         physics.setStellarTimeAccel(Number(e.target.value));
         const v = scaleControlsEl.querySelector('#uv-st-accel-val');
@@ -2034,7 +2185,7 @@ export async function mountUlgUniversesDemo() {
         </label>
         <button id="uv-sph-replay-btn" class="uv-btn subtle" type="button" style="justify-content:center;" title="Reset to protoplanet and watch live 3D GPU SPH core sinking, mantle plumes, continental rafting &amp; impact cratering">🪐 Form / Evolve Planet (3D SPH)</button>
         <div style="font-size:10.5px;color:#a7f3d0;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:6px;padding:5px 7px;line-height:1.35;">
-          <strong>3D GPU SPH Geology</strong> · Diff <code>${diffIdx}</code> · Mobility <code>${mobPct}%</code> · <code>${physics.planetaryGenesisSphSession.parcelCount.toLocaleString()}</code> parcels (0 Perlin continents)
+          <strong>3D GPU SPH + SS Multipole</strong> · Diff <code>${diffIdx}</code> · Mobility <code>${mobPct}%</code> · <code>${physics.planetaryGenesisSphSession.parcelCount.toLocaleString()}</code> parcels · <code>${physics.planetaryGenesisSphSession.gridN}³</code> · <code>${physics.planetaryGenesisSphSession.mapWidth}×${physics.planetaryGenesisSphSession.mapHeight}</code> (0 Perlin)
         </div>`;
         })() : ''}
         <button id="uv-land-surface-btn" class="uv-btn primary" type="button" style="justify-content:center;" title="Land on the live GPU planetary surface with a 6-Wheel Jump-Rocket Rover and Coaxial Atmospheric Drone (Shortcut: L)">${physics.surfaceActive ? '🚀 Launch Back to Orbit (Esc)' : '🚙 Land on Surface (Rover + Drone)'}</button>
@@ -2053,7 +2204,7 @@ export async function mountUlgUniversesDemo() {
       scaleControlsEl.querySelector('#uv-planet-sel')?.addEventListener('change', async (e) => {
         const idx = Number(e.target.value);
         physics.setFocusedSolarBody(idx);
-        await physics.initPlanetaryInterior({ bodyIndex: idx });
+        await physics.initPlanetaryInterior({ bodyIndex: idx, observeLive: !physics.surfaceActive });
         if (physics.surfaceActive) {
           await enterSurfaceViewUi({ bodyIndex: idx });
         } else {
@@ -2062,6 +2213,7 @@ export async function mountUlgUniversesDemo() {
           orientCameraToSunlitPhase(idx);
           selectDefaultTarget();
           syncScaleChrome();
+          syncGenesisHud();
         }
       });
       scaleControlsEl.querySelector('#uv-land-surface-btn')?.addEventListener('click', async () => {
@@ -2405,6 +2557,10 @@ export async function mountUlgUniversesDemo() {
       await sampleLocalSurfaceAndDiveToLattice();
       return;
     }
+    if (currentLevel === 2 && physics.solarMode === 'formation' && physics.activeGenesisStage?.stage === 'l2-nebular-coalescence') {
+      await finalizeActiveGenesisUi();
+      return;
+    }
     const t = getSelectedTarget();
     if (currentLevel === 0 && pickedGpuMote?.kind === 'cosmo-web') {
       const dens = Number(pickedGpuMote.localOverdensity) || 1.2;
@@ -2414,16 +2570,20 @@ export async function mountUlgUniversesDemo() {
         localOverdensity: dens,
         seed: physics.seed
       });
-      await physics.initGalaxy({ galaxyEnvOverride: gEnv });
+      pendingHaloEnv = null;
+      await physics.initGalaxy({ galaxyEnvOverride: gEnv, observeLive: true });
     } else if (currentLevel === 0 && t?.galaxyEnv) {
-      await physics.initGalaxy({ galaxyEnvOverride: t.galaxyEnv });
+      pendingHaloEnv = null;
+      await physics.initGalaxy({ galaxyEnvOverride: t.galaxyEnv, observeLive: true });
     } else if (currentLevel === 0 && t?.morphology) {
-      await physics.initGalaxy({ preset: t.morphology, metallicity: t.metallicity ?? 1.0 });
+      pendingHaloEnv = null;
+      await physics.initGalaxy({ preset: t.morphology, metallicity: t.metallicity ?? 1.0, observeLive: true });
     } else if (currentLevel === 1) {
       if (pickedGpuMote?.kind === 'galaxy-star' && pickedGpuMote.exoticKind) {
         // Diving into an EM-picked blinking Pulsar or X-Ray Binary synthesizes a REAL pulsar/BH causal system
         // (with fallback-disk planets!) so its identity stays 100% consistent across L3 <-> L2 <-> L4 orbit!
         userExplicitStellarOverride = false;
+        pendingGalaxyStarSite = null;
         physics.setGalaxyBranch('solar-system', pickedGpuMote.rawPos);
         const isPulsarPick = pickedGpuMote.exoticKind === 'pulsar';
         await physics.selectCausalStarSite({
@@ -2445,9 +2605,15 @@ export async function mountUlgUniversesDemo() {
       }
       if (pickedGpuMote?.kind === 'galaxy-star' && pickedGpuMote.starSite) {
         userExplicitStellarOverride = false;
+        pendingGalaxyStarSite = null;
         physics.setGalaxyBranch('solar-system', pickedGpuMote.rawPos);
-        await physics.selectCausalStarSite(pickedGpuMote.starSite);
+        await physics.selectCausalStarSite({ ...pickedGpuMote.starSite, observeLive: true });
         syncKardashevSystemContext();
+        if (physics.activeGenesisStage?.stage === 'l2-nebular-coalescence') {
+          syncGenesisHud();
+          flyToLog10Span(UNIVERSES_SCALES[2].log10SpanM);
+          return;
+        }
         const recL3 = physics.activeCausalSystem?.recommendedL3Regime;
         if (recL3 && recL3 !== 'fusion') {
           physics.setFocusedSolarBody(0);
@@ -2457,10 +2623,22 @@ export async function mountUlgUniversesDemo() {
         }
       } else if (t?.branch) {
         userExplicitStellarOverride = false;
+        pendingGalaxyStarSite = null;
         physics.setGalaxyBranch(t.branch, t.pos);
         if (t.branch === 'solar-system' && t.starSite) {
-          await physics.selectCausalStarSite(t.starSite);
+          await physics.selectCausalStarSite({ ...t.starSite, observeLive: true });
           syncKardashevSystemContext();
+        }
+      } else if (physics.galaxyBranch === 'solar-system') {
+        userExplicitStellarOverride = false;
+        const siteUse = pendingGalaxyStarSite || physics.activeStarSite;
+        pendingGalaxyStarSite = null;
+        await physics.selectCausalStarSite({ ...siteUse, observeLive: true });
+        syncKardashevSystemContext();
+        if (physics.activeGenesisStage?.stage === 'l2-nebular-coalescence') {
+          syncGenesisHud();
+          flyToLog10Span(UNIVERSES_SCALES[2].log10SpanM);
+          return;
         }
       }
     }
@@ -2477,7 +2655,7 @@ export async function mountUlgUniversesDemo() {
         userExplicitStellarOverride = false;
         await physics.syncStellarRegimeForStar(cat[t.bodyIndex], { initializeNow: true });
       } else {
-        await physics.initPlanetaryInterior({ bodyIndex: t.bodyIndex });
+        await physics.initPlanetaryInterior({ bodyIndex: t.bodyIndex, observeLive: true });
       }
     }
     // Planet Zoom Hierarchy: L4 Orbital Planet MUST land / dive onto the planet FIRST so you can
@@ -2505,6 +2683,7 @@ export async function mountUlgUniversesDemo() {
         physics.setFocusedSolarBody(physics.getDefaultPlanetIndex(cat));
       }
     }
+    syncGenesisHud();
     flyToLog10Span(UNIVERSES_SCALES[nextLvl].log10SpanM);
   }
 
@@ -3204,10 +3383,12 @@ export async function mountUlgUniversesDemo() {
         for (const other of qualityGroup.querySelectorAll('[data-quality]')) {
           other.classList.toggle('active', other.dataset.quality === q);
         }
+        syncPeerComputeCapBadge();
         if (currentLevel === 0) await physics.initCosmicWeb();
         else if (currentLevel === 1) await physics.initGalaxy();
         else if (currentLevel === 2 && physics.galaxyBranch !== 'smbh-core') await physics.initSolarSystem();
         else if (currentLevel === 3) await physics.initStellarCore();
+        else if (currentLevel === 4 && !physics.surfaceActive) await physics.initPlanetaryInterior({ bodyIndex: physics.planetaryBodyIndex });
         else if (currentLevel === 5) await physics.initMolecularDynamics();
         else if (currentLevel === 6) await physics.initQuantumAtom();
         else if (currentLevel === 7) {
@@ -3489,26 +3670,26 @@ export async function mountUlgUniversesDemo() {
       const vMag = Math.hypot(f[4] || 0, f[5] || 0, f[6] || 0);
       const rhoRaw = Math.max(0.05, Number(f[7]) || 0.5);
       // Map normalized GPU density field across full cosmic-web overdensity range (void 0.22x -> cluster knot 4.8x)
-      // so Dressler (1980) morphology-density selection spans Giant Ellipticals, Mergers, Spirals, Dwarfs & Globulars.
       const dens = Math.max(0.22, Math.min(4.8, Math.pow(rhoRaw, 1.65) * 4.2));
-      const predGal = physics.deriveGalaxyEnvironmentFromCosmicContext({
-        cosmicEpoch: physics.cosmicEpoch,
-        regionPosMpc: rawPos,
-        localOverdensity: dens,
-        seed: physics.seed
-      });
+      const cachedGal = physics.peekCachedHaloGalaxy(rawPos);
+      const envTag = dens > 2.2 ? 'Overdense Cluster Knot' : (dens < 0.7 ? 'Underdense Cosmic Void' : 'Filamentary Bridge');
       return {
         kind: desc.kind, level: currentLevel, index, rawPos, worldPos,
         localOverdensity: dens,
+        cachedHaloGalaxy: cachedGal?.payload || null,
         name: `Cosmic-Web Halo Mote #${index}`,
-        subtitle: `${predGal.morphologyLabel} · δ/ρ̄=${dens.toFixed(2)}× · [Fe/H]=${predGal.baseFeH >= 0 ? '+' : ''}${predGal.baseFeH.toFixed(2)}`,
-        composition: `Causal Cosmic Context: f_gas=${(predGal.gasFraction * 100).toFixed(0)}% · C/O=${predGal.baseCO.toFixed(2)} · Dive to form this galaxy`,
+        subtitle: cachedGal?.payload
+          ? `✅ Collapsed (Root Cache) · ${cachedGal.payload.morphologyLabel} · δ/ρ̄=${dens.toFixed(2)}×`
+          : `${envTag} · δ/ρ̄=${dens.toFixed(2)}× · Galaxy: ⏳ Unsimulated`,
+        composition: cachedGal?.payload
+          ? `Cached GPU Galaxy (${cachedGal.payload.starCount?.toLocaleString?.() || '32,768'} stars · Z=${Number(cachedGal.payload.meanMetallicitySolar || 1).toFixed(2)} Z☉) · Click Dive to re-enter`
+          : `Live FLRW TreePM density tracer — Zoom in / Dive to collapse this halo on WebGPU and cache its galaxy`,
         tempK: 8500,
         stats: [
           ['Comoving r', `${Math.hypot(...rawPos).toFixed(1)} Mpc`],
           ['Peculiar |v|', `${(vMag * 120).toFixed(0)} km/s`],
           ['Local δ/ρ̄', `${dens.toFixed(2)}×`],
-          ['Morphology', predGal.morphology]
+          ['Galaxy State', cachedGal?.payload ? `✅ ${cachedGal.payload.morphology}` : '⏳ Unsimulated']
         ]
       };
     }
@@ -3590,28 +3771,37 @@ export async function mountUlgUniversesDemo() {
           ]
         };
       }
-      const stPreview = physics.deriveStarSystemFromGalacticLocation({
-        cosmicEpoch: physics.cosmicEpoch,
-        galaxyEnv: physics.activeGalaxyEnv,
-        starPosGal: rawPos,
-        popTag: pop,
-        starIndex: index,
-        seed: (physics.seed + 409) >>> 0
-      });
-      const plPreview = physics.synthesizeNebularPlanetarySystem(stPreview, { seedOverride: (physics.seed + 409) >>> 0 });
-      const multLbl = stPreview.multiplicity === 3 ? 'Trinary' : (stPreview.multiplicity === 2 ? 'Binary' : 'Single');
-      const specLbl = stPreview.stars.map((s) => s.spectralCode).join('+');
+      // Strictly honest top-to-bottom multiscale physics:
+      // From 30,000 ly away we observe ONLY what exists in the live GPU galaxy particle + local ISM field
+      // (position R_gal, velocity |v_orb|, photospheric popTag color/T_eff, local dynamo |B|).
+      // Planetary architecture & worlds CANNOT be known until WebGPU Nebular Coalescence runs & caches on Root!
+      const cachedNeb = physics.peekCachedStarSystemForSite(starSite);
+      const baseFeH = Number(physics.activeGalaxyEnv?.baseFeH ?? 0.0);
+      const localFeH = Math.max(-3.2, Math.min(0.55, baseFeH - (rKly - 8.2) * 0.045 - Math.abs(zKly) * 0.14));
+      const approxTeffK = pop > 0.72
+        ? Math.round(9200 + (pop - 0.72) * 32000)
+        : (pop > 0.42 ? Math.round(5100 + (pop - 0.42) * 9500) : Math.round(3100 + pop * 4500));
+      const spectralBand = approxTeffK >= 10000 ? 'OB Blue-White Giant'
+        : (approxTeffK >= 6100 ? 'A/F Main-Sequence Star'
+          : (approxTeffK >= 4800 ? 'G/K Solar-Band Star' : 'M-Type Red Dwarf'));
+      const cachedDisk = cachedNeb?.payload || null;
       return {
         kind: desc.kind, level: currentLevel, index, rawPos, worldPos, starSite,
-        name: `Star #${index} · ${stPreview.systemName} (${multLbl} ${specLbl})`,
-        subtitle: `${stPreview.galacticRegion} · ${stPreview.nebulaBadge || 'Main Sequence'} · ${plPreview.planetCount} worlds${plPreview.hasEarthLike ? ' (Earth-like!)' : ''}`,
-        composition: `Nebula: ${stPreview.nebulaEnv.nebulaSummary} · Click 🎯 Focus or Dive to simulate this system`,
-        tempK: stPreview.stars[0].effectiveTempK,
+        systemSimulated: Boolean(cachedDisk),
+        cachedNebularDisk: cachedDisk,
+        name: `Galactic Star Mote #${index} (${spectralBand})`,
+        subtitle: cachedDisk
+          ? `✅ Coalesced (Root Cache) · ${cachedDisk.bodies?.length || 0} GPU-coalesced worlds · Snow Line ${Number(cachedDisk.snowLineAu || 0).toFixed(2)} AU`
+          : `R = ${rKly.toFixed(1)} kly · z = ${zKly.toFixed(2)} kly · Planetary System: ⏳ Unsimulated`,
+        composition: cachedDisk
+          ? `Cached from WebGPU Nebular Coalescence (${cachedNeb.source}) · Click Dive to enter coalesced system`
+          : `Unresolved from galactic scale — Zoom in / Dive to coalesce its entire protoplanetary nebula on WebGPU (local ISM [Fe/H] ≈ ${localFeH >= 0 ? '+' : ''}${localFeH.toFixed(2)})`,
+        tempK: approxTeffK,
         stats: [
-          ['Multiplicity', `${multLbl} (${specLbl})`],
-          ['L3 Regime', stPreview.nebulaBadge || 'Fusion Star'],
-          ['Nebula [Fe/H]', `${stPreview.nebulaEnv.feH >= 0 ? '+' : ''}${stPreview.nebulaEnv.feH.toFixed(2)}`],
-          ['Local |B|', `${(bLocal * 12.0).toFixed(2)} μG`]
+          ['Galactic R', `${rKly.toFixed(1)} kly`],
+          ['Orbital |v|', `${(vOrb * 24.5).toFixed(0)} km/s`],
+          ['ISM [Fe/H]', `${localFeH >= 0 ? '+' : ''}${localFeH.toFixed(2)}`],
+          ['Planets', cachedDisk ? `✅ ${cachedDisk.bodies?.length || 0} (Cached)` : '⏳ Unsimulated']
         ]
       };
     }
@@ -3892,7 +4082,8 @@ export async function mountUlgUniversesDemo() {
         if (tHit > 0) {
           const hitPos = [ro[0] + rd[0] * tHit, ro[1] + rd[1] * tHit, ro[2] + rd[2] * tHit];
           const nHit = vec3Norm([hitPos[0] - center[0], hitPos[1] - center[1], hitPos[2] - center[2]]);
-          const sample = sampleOrbitalBodySurfaceAtNormal(nHit, spec, seedFloat, gLight);
+          const sphSnap = physics.getSphGeologySnapshot?.() || null;
+          const sample = sampleOrbitalBodySurfaceAtNormal(nHit, spec, seedFloat, gLight, sphSnap);
           selectedLandingSite = Object.freeze({
             ...sample,
             bodyIndex,
@@ -3936,11 +4127,12 @@ export async function mountUlgUniversesDemo() {
       pickedGpuMote = null;
       moteFocusLocked = false;
       selectedTargetId = macroHit.id;
-      if (currentLevel === 1 && macroHit.branch) {
+      if (currentLevel === 0 && macroHit.galaxyEnv) {
+        pendingHaloEnv = macroHit.galaxyEnv;
+      } else if (currentLevel === 1 && macroHit.branch) {
         physics.setGalaxyBranch(macroHit.branch, macroHit.pos);
       } else if (currentLevel === 2 && macroHit.bodyIndex != null) {
         physics.setFocusedSolarBody(macroHit.bodyIndex);
-        if (macroHit.bodyIndex > 0) void physics.initPlanetaryInterior({ bodyIndex: macroHit.bodyIndex });
       }
       renderScaleControls();
       syncScaleChrome();
@@ -3990,6 +4182,17 @@ export async function mountUlgUniversesDemo() {
         if (!macroHit || currentLevel !== 2 || moteDistPx <= (macroHit.hitDistPx ?? 999)) {
           selectedTargetId = null;
           pickedGpuMote = decoded;
+          if (decoded?.kind === 'cosmo-web' && Array.isArray(decoded.rawPos)) {
+            pendingHaloEnv = physics.deriveGalaxyEnvironmentFromCosmicContext({
+              cosmicEpoch: physics.cosmicEpoch,
+              regionPosMpc: decoded.rawPos,
+              localOverdensity: Number(decoded.localOverdensity) || 1.2,
+              seed: physics.seed
+            });
+          } else if (decoded?.kind === 'galaxy-star' && decoded.starSite) {
+            pendingGalaxyStarSite = decoded.starSite;
+            physics.setGalaxyBranch('solar-system', decoded.rawPos);
+          }
           syncScaleChrome();
           updateInspectorCard();
           renderNow(performance.now());
@@ -4003,10 +4206,10 @@ export async function mountUlgUniversesDemo() {
       pickedGpuMote = null;
       moteFocusLocked = false;
       selectedTargetId = macroHit.id;
-      if (currentLevel === 1 && macroHit.branch) physics.setGalaxyBranch(macroHit.branch, macroHit.pos);
+      if (currentLevel === 0 && macroHit.galaxyEnv) pendingHaloEnv = macroHit.galaxyEnv;
+      else if (currentLevel === 1 && macroHit.branch) physics.setGalaxyBranch(macroHit.branch, macroHit.pos);
       else if (currentLevel === 2 && macroHit.bodyIndex != null) {
         physics.setFocusedSolarBody(macroHit.bodyIndex);
-        if (macroHit.bodyIndex > 0) void physics.initPlanetaryInterior({ bodyIndex: macroHit.bodyIndex });
       }
       renderScaleControls();
       syncScaleChrome();
@@ -4030,11 +4233,17 @@ export async function mountUlgUniversesDemo() {
     if (!pickedGpuMote) return false;
     if (currentLevel === 0 && pickedGpuMote.kind === 'cosmo-web') {
       physics.setCosmoFocusMpc(pickedGpuMote.rawPos);
+      pendingHaloEnv = physics.deriveGalaxyEnvironmentFromCosmicContext({
+        cosmicEpoch: physics.cosmicEpoch,
+        regionPosMpc: pickedGpuMote.rawPos,
+        localOverdensity: Number(pickedGpuMote.localOverdensity) || 1.2,
+        seed: physics.seed
+      });
       moteFocusLocked = true;
       if (zoomIn) flyToLog10Span(Math.max(21.2, log10ViewSpanM - 1.6));
     } else if (currentLevel === 1 && pickedGpuMote.kind === 'galaxy-star') {
       physics.setGalaxyBranch('solar-system', pickedGpuMote.rawPos);
-      if (pickedGpuMote.starSite) void physics.selectCausalStarSite(pickedGpuMote.starSite);
+      if (pickedGpuMote.starSite) pendingGalaxyStarSite = pickedGpuMote.starSite;
       moteFocusLocked = true;
       if (zoomIn) flyToLog10Span(Math.max(17.5, log10ViewSpanM - 1.5));
     } else {
@@ -4830,14 +5039,14 @@ export async function mountUlgUniversesDemo() {
         ];
       } else {
         const st = physics.stellarTelemetry;
-        const stageStr = typeof st?.stage === 'string'
-          ? st.stage
-          : (st?.stage?.label || st?.stage?.id || st?.stellarLabel || st?.stellarClass || physics.stellarPreset || 'convective-fusion');
+        const domCh = st?.dominantChannel || st?.stellarLabel || physics.stellarPreset || 'pp-chain';
+        const cnoPct = ((st?.meanXCNO ?? 0) * 100).toFixed(3);
+        const aFePct = ((st?.meanXAlphaFe ?? 0) * 100).toFixed(3);
         cells = [
           ['Core Temp', st ? `${(st.coreTempK / 1e6).toFixed(2)} MK` : '—'],
-          ['Stage', String(stageStr).slice(0, 22)],
-          ['GPU Steps', `${physics.stellarEngine?.stepIndex || 0}`],
-          ['LE n=3 ξ₁', `${(physics.stellarLaneEmden?.solutions?.[1]?.xi1 || 6.9).toFixed(3)}`]
+          ['Fusion Burn', String(domCh).slice(0, 22)],
+          ['CNO / α-Fe', `${cnoPct}% / ${aFePct}%`],
+          ['SS Grid/Step', `${physics.stellarEngine?.gridN || 24}³ · #${physics.stellarEngine?.stepIndex || 0}`]
         ];
       }
     } else if (currentLevel === 4) {
@@ -5084,27 +5293,47 @@ export async function mountUlgUniversesDemo() {
         primaryLabel = '🌍 Planets';
         primaryAction = () => { void initiateHyperdrive(); };
       }
+    } else if (currentLevel === 2 && physics.solarMode === 'formation') {
+      ctxType = 'star';
+      const nebSess = physics.nebularCoalescenceSession;
+      const nProto = nebSess?.getCoalescedDisk?.()?.bodies?.length || 0;
+      badge = '🌌 LIVE GPU NEBULAR COALESCENCE';
+      headline = `${physics.activeCausalSystem?.systemName || 'Proto-System'} Disk`;
+      sub = `Condensing Fe, SiO₂, C, H₂O & CO across ${(nebSess?.snowLineAu || 2.71).toFixed(2)} AU snow line (${nProto} proto-worlds emerging)`;
+      chips.push({ text: `Snow ${(nebSess?.snowLineAu || 2.71).toFixed(2)} AU`, cls: 'gold' });
+      chips.push({ text: `${nProto} Proto-Worlds`, cls: 'bio' });
+      actions.push({ id: 'crystallize-now', label: '⏩ Crystallize Orbits', cls: 'primary', onClick: () => { void finalizeActiveGenesisUi(); } });
+      primaryLabel = '⏩ Crystallize';
+      primaryAction = () => { void finalizeActiveGenesisUi(); };
     } else if (currentLevel === 2 || currentLevel === 4) {
       ctxType = 'planet';
-      const isGiant = Boolean(focusedSpec && (focusedSpec.kind === 2 || focusedSpec.isGasGiant));
+      const isGiant = Boolean(focusedSpec && (focusedSpec.kind === 2 || focusedSpec.isGasGiant || (Number(focusedSpec.radiusKm) || 0) >= 16000));
       const rs = lastOrbitalRemoteSensing;
       badge = rs?.biosignatureBadge || (isGiant ? '🌀 GAS GIANT WORLD' : '🌍 PLANETARY WORLD');
       headline = focusedSpec?.name || target?.name || 'Planet';
       const fluxW = lastStarIllumination?.irradianceWm2;
       const fluxTxt = Number.isFinite(fluxW) ? (fluxW >= 10 ? `${Math.round(fluxW).toLocaleString()} W/m²` : `${fluxW.toFixed(2)} W/m²`) : null;
+      const targetBodyIdx = currentLevel === 4 ? physics.planetaryBodyIndex : physics.focusedSolarBodyIndex;
+      const cachedSphPeek = (!isGiant && currentLevel === 2) ? physics.peekCachedPlanetSph(targetBodyIdx) : null;
       sub = selectedLandingSite && currentLevel === 4
         ? `LZ Locked: ${selectedLandingSite.biomeLabel} (${selectedLandingSite.latDeg.toFixed(1)}°, ${selectedLandingSite.lonDeg.toFixed(1)}°) — tap Land!`
         : (currentLevel === 4
-          ? 'Tap anywhere on the globe to pick a touchdown zone, or land now.'
-          : 'Tap Land to explore the live surface, or Orbit (L4) to scan the globe.');
+          ? 'Tap anywhere on the 3D SPH globe to pick a touchdown zone, or land now.'
+          : (!isGiant
+            ? (cachedSphPeek
+              ? '3D SPH crust cached on Root Node — Orbit (L4) for instant restore or Land now.'
+              : '3D SPH crust: ⏳ Unsimulated — Orbit (L4) to watch 10,240-parcel 3D SPH genesis live!')
+            : 'Tap Dive Clouds to descend, or Orbit (L4) to scan the atmosphere.'));
       if (fluxTxt) chips.push({ text: `☀️ ${fluxTxt}`, cls: 'gold' });
       if (focusedSpec?.tempK) chips.push({ text: `${Math.round(focusedSpec.tempK)} K`, cls: '' });
+      if (!isGiant && currentLevel === 2) {
+        chips.push({ text: cachedSphPeek ? '✅ SPH Cached' : '⏳ SPH Unsimulated', cls: cachedSphPeek ? 'bio' : 'gold' });
+      }
       if (rs?.solventFormula) chips.push({ text: `Solvent: ${rs.solventFormula}`, cls: rs.biosignatureLevel === 'strong' ? 'bio' : '' });
-      const targetBodyIdx = currentLevel === 4 ? physics.planetaryBodyIndex : physics.focusedSolarBodyIndex;
       const landLbl = isGiant ? '🛸 Dive Clouds' : '🚙 Land on Surface';
       actions.push({ id: 'land-world', label: landLbl, cls: 'primary', onClick: () => { void enterSurfaceViewUi({ bodyIndex: targetBodyIdx }); } });
       if (currentLevel === 2) {
-        actions.push({ id: 'orbit-world', label: '⚡ Orbit (L4)', cls: '', onClick: () => { void initiateHyperdrive(); } });
+        actions.push({ id: 'orbit-world', label: cachedSphPeek ? '⚡ Orbit (L4)' : '🪐 Form & Orbit (L4)', cls: '', onClick: () => { void initiateHyperdrive(); } });
       } else {
         actions.push({
           id: 'toggle-cutaway',
@@ -5777,8 +6006,8 @@ export async function mountUlgUniversesDemo() {
         });
       }
     } else if (currentLevel >= 2) {
-      // REAL-SCALE SOLAR SYSTEM CONTINUOUSLY SPANNING 10^15.95 m -> 10^5.6 m (Earth/Saturn/Jupiter/Moon!)
-      const wSolar = bandWeight(span, 5.4, 6.4, 15.0, 15.95);
+      // REAL-SCALE SOLAR SYSTEM CONTINUOUSLY SPANNING 10^15.95 m -> 10^3.0 m (Stars/Planets/Moons/Asteroids/5.5 km Comets!)
+      const wSolar = bandWeight(span, 2.2, 3.0, 15.0, 15.95);
       const spanAu = spanMeters / AU_METERS;
       const scaleAuToWorld = WORLD_VIEW_SPAN / Math.max(1e-9, spanAu);
       lastWorldScaleInfo.solarScaleAuToWorld = scaleAuToWorld;
@@ -5865,7 +6094,7 @@ export async function mountUlgUniversesDemo() {
           // Hide focused star's opaque photosphere at L3 (`span <= 9.9`) so live 3D MHD / Fusion Plasma shines unobstructed!
           if (i === focusIdx && bodyIsStar && span <= 9.9) continue;
 
-          const isFocusL4 = (i === focusIdx && !bodyIsStar && span < 8.85);
+          const isFocusL4 = (!bodyIsStar && span < 9.5 && (i === physics.planetaryBodyIndex || i === focusIdx));
           if (isFocusL4) {
             lastL4GlobeMeta = {
               center: [wx, wy, wz],
@@ -5900,6 +6129,27 @@ export async function mountUlgUniversesDemo() {
               stellarModeHint: i === 0 ? physics.stellarMode : null
             });
           } else {
+            // True 3D Ray-Marched SPH Surface Displacement (flags > 0) for solid bodies
+            // OR physical rotational equatorial oblateness (flags < 0) for fast-spinning gas/ice giants!
+            const isSolidSphFocus = Boolean(isFocusL4 && !isCutPlanet && physics.planetaryGenesisSphSession && i === physics.planetaryBodyIndex);
+            let bodyShapeFlags = 0.0;
+            if (isSolidSphFocus) {
+              const gp = physics.planetaryGenesisSphSession.genesisParams;
+              const rKm = Number(spec.radiusKm) || 6371;
+              if (gp?.isMinorBody || spec.isMinorBody || spec.isComet || rKm < 550) {
+                bodyShapeFlags = 0.24; // Non-spherical triaxial / bilobed cratered 3D asteroid or comet!
+              } else if (rKm < 1250) {
+                bodyShapeFlags = 0.042; // Medium icy/rocky moon with prominent 3D impact basins & ridges!
+              } else if (gp?.hasOcean) {
+                bodyShapeFlags = 0.015; // Hydrostatic ocean planet: smooth geoid sea + realistic 3D mountain chains!
+              } else {
+                bodyShapeFlags = 0.020; // Hydrostatic rocky planet: realistic 3D crater rims, canyons & cordilleras!
+              }
+            } else if ((spec.kind === 2 || spec.kind === 3) && (Number(spec.radiusKm) || 0) >= 16000) {
+              const rotHr = Math.max(5.0, Number(spec.rotationPeriodHr) || 10.5);
+              const oblate = Math.max(0.025, Math.min(0.098, 0.72 / rotHr));
+              bodyShapeFlags = -oblate;
+            }
             spheres.push({
               pos: [wx, wy, wz],
               radius: trueRWorld,
@@ -5913,12 +6163,13 @@ export async function mountUlgUniversesDemo() {
               tempK: Number(spec.tempK) || 288,
               civTechK: Number(spec.civTechK) || 0,
               dysonCoverage: 0,
+              flags: bodyShapeFlags,
               seed: i * 2.17 + 1.3
             });
           }
           // Bind zero-copy 3D Multi-Material GPU SPH Planetary/Moon/Asteroid/Comet Geology directly onto the L4 globe!
           // (Replaces Perlin fbm5 continents with real GPU SPH core/mantle/crust/cratering/erosion!)
-          if (isFocusL4 && physics.planetaryGenesisSphSession) {
+          if (isFocusL4 && physics.planetaryGenesisSphSession && i === physics.planetaryBodyIndex) {
             sphGeology = {
               buffer: physics.planetaryGenesisSphSession.getResidentSphGeologyBuffer(),
               width: physics.planetaryGenesisSphSession.mapWidth,
@@ -6860,9 +7111,45 @@ export async function mountUlgUniversesDemo() {
         // Preserve authentic Pulsar / Magnetar / Black Hole / White Dwarf / Supergiant identity when returning from planet orbit!
         void physics.syncStellarRegimeForStar(null, { initializeNow: true });
       }
+      // Inverted First-Principles Approach Trigger: crossing deeper into an unsimulated halo, star, or planet
+      // launches its live observable WebGPU simulation right on screen (or hits Root Cache instantaneously)!
+      if (nextLvl > prevLvl) {
+        if (currentLevel === 1 && prevLvl === 0 && (pendingHaloEnv || !physics.galaxyEngine)) {
+          const envGo = pendingHaloEnv || physics.activeGalaxyEnv;
+          pendingHaloEnv = null;
+          void physics.initGalaxy({ galaxyEnvOverride: envGo, observeLive: true }).then(() => {
+            selectDefaultTarget();
+            syncScaleChrome();
+            syncGenesisHud();
+          });
+        } else if (currentLevel === 2 && prevLvl <= 1 && physics.galaxyBranch !== 'smbh-core' && !physics.useSolReference && (pendingGalaxyStarSite || (!physics.solarEngine && physics.solarMode !== 'formation'))) {
+          const siteGo = pendingGalaxyStarSite || physics.activeStarSite;
+          pendingGalaxyStarSite = null;
+          void physics.selectCausalStarSite({ ...siteGo, observeLive: true }).then(() => {
+            syncKardashevSystemContext();
+            selectDefaultTarget();
+            syncScaleChrome();
+            syncGenesisHud();
+          });
+        } else if (currentLevel === 4 && prevLvl <= 3 && !physics.surfaceActive) {
+          const cat = physics.getActiveSystemCatalog();
+          const targetIdx = (!cat[physics.focusedSolarBodyIndex]?.isStar && physics.focusedSolarBodyIndex > 0)
+            ? physics.focusedSolarBodyIndex
+            : physics.getDefaultPlanetIndex(cat);
+          if (targetIdx > 0 && (!physics.planetaryResult || physics.planetaryBodyIndex !== targetIdx)) {
+            physics.setFocusedSolarBody(targetIdx);
+            void physics.initPlanetaryInterior({ bodyIndex: targetIdx, observeLive: true }).then(() => {
+              orientCameraToSunlitPhase(targetIdx);
+              selectDefaultTarget();
+              syncScaleChrome();
+              syncGenesisHud();
+            });
+          }
+        }
+      }
       selectDefaultTarget();
       syncScaleChrome();
-      void warmVisibleLevels(log10ViewSpanM);
+      void warmVisibleLevels(log10ViewSpanM, { observeLive: nextLvl > prevLvl });
     }
 
     if (running) {
@@ -7002,6 +7289,7 @@ export async function mountUlgUniversesDemo() {
       hudTickAccum = 0;
       if (fpsBadge) fpsBadge.textContent = `${fpsDisplay} FPS · WebGPU`;
       if (physics.surfaceActive) syncSurfaceHud();
+      syncGenesisHud();
       syncFlightConsoleUi();
       syncWeaponControlsUi();
       updateInspectorCard();
@@ -7154,11 +7442,39 @@ export async function mountUlgUniversesDemo() {
         solarRelMomentumError: c1?.relMomentumError ?? null,
         stellarSteps: physics.stellarEngine?.stepIndex ?? 0,
         stellarSolver: physics.stellarEngine?.solver ?? (physics.stellarEngine ? 'self-gravitating-hydro' : null),
+        stellarSpatialAuthority: physics.stellarEngine?.spatialAuthority ?? null,
+        stellarGeneration: physics.stellarTelemetry?.generation ?? physics.stellarEngine?.generation ?? null,
+        stellarGenerationLabel: physics.stellarTelemetry?.generationLabel ?? physics.stellarEngine?.generationLabel ?? null,
+        stellarDominantChannel: physics.stellarTelemetry?.dominantChannel ?? null,
+        stellarFusedXCNO: physics.stellarTelemetry?.meanXCNO ?? null,
+        stellarFusedXAlphaFe: physics.stellarTelemetry?.meanXAlphaFe ?? null,
+        stellarSynthesizedDeltaZ: physics.stellarTelemetry?.synthesizedMetalsDelta ?? null,
+        stellarGridN: physics.stellarEngine?.gridN ?? null,
+        stellarParticleCount: physics.stellarEngine?.count ?? null,
         stellarMode: physics.stellarMode,
         stellarPreset: physics.stellarPreset,
         stellarCoreTempK: physics.stellarTelemetry?.coreTempK ?? null,
         stellarConvectiveRmsVel: physics.stellarTelemetry?.convectiveRmsVel ?? null,
         stellarActiveFusionParcels: physics.stellarTelemetry?.activeFusionParcels ?? null,
+        lastSupernovaYields: physics.lastSupernovaYields ?? null,
+        qualityMode: physics.qualityMode,
+        capabilityProfile: physics.capabilityProfile ? {
+          tier: physics.capabilityProfile.tier,
+          detectedTier: physics.capabilityProfile.detectedTier,
+          mode: physics.capabilityProfile.mode,
+          qualityId: physics.capabilityProfile.qualityId,
+          cpuCores: physics.capabilityProfile.cpuCores,
+          maxStorageMB: physics.capabilityProfile.maxStorageMB,
+          summaryLabel: physics.capabilityProfile.summaryLabel,
+          workloads: physics.capabilityProfile.workloads
+        } : null,
+        sphSpatialAuthority: physics.planetaryGenesisSphSession?.spatialAuthority ?? null,
+        sphParcelCount: physics.planetaryGenesisSphSession?.parcelCount ?? null,
+        sphGridN: physics.planetaryGenesisSphSession?.gridN ?? null,
+        sphMapWidth: physics.planetaryGenesisSphSession?.mapWidth ?? null,
+        sphMapHeight: physics.planetaryGenesisSphSession?.mapHeight ?? null,
+        nebularSpatialAuthority: physics.nebularCoalescenceSession?.spatialAuthority ?? null,
+        nebularParcelCount: physics.nebularCoalescenceSession?.parcelCount ?? null,
         cosmoScaleFactorA: physics.cosmoScaleFactorA ?? 1.0,
         cosmoBigBangMode: Boolean(physics.cosmoBigBangMode),
         stellarDynamoMagEnergy: physics.stellarDynamoTelemetry?.magneticEnergy ?? null,
@@ -7183,6 +7499,10 @@ export async function mountUlgUniversesDemo() {
         tidalRupturedFrac: physics.tidalRocheTelemetry?.rupturedFraction ?? null,
         protoplanetarySteps: physics.protoplanetarySession?.stepIndex ?? 0,
         protoplanetaryAccreted: physics.protoplanetaryTelemetry?.accretedPebbles ?? null,
+        nebularCoalescenceSteps: physics.nebularCoalescenceSession?.stepIndex ?? 0,
+        activeGenesisStage: physics.activeGenesisStage ?? null,
+        lastGenesisEvent: physics.lastGenesisEvent ?? null,
+        planetaryGenesisLiveForm: physics.planetaryGenesisLiveForm,
         planetaryMode: physics.planetaryMode,
         planetaryInteriorValid: Boolean(physics.planetaryResult?.valid),
         planetaryMoiFactor: physics.planetaryResult?.moiFactor ?? null,
@@ -7458,6 +7778,18 @@ export async function mountUlgUniversesDemo() {
       updateInspectorCard();
       renderNow(performance.now());
       return this.getState();
+    },
+    async detonateCoreSeedNextGeneration() {
+      userExplicitStellarOverride = false;
+      const res = await physics.detonateCoreSeedNextGeneration();
+      pickedGpuMote = null;
+      moteFocusLocked = false;
+      selectDefaultTarget();
+      syncGenesisHud();
+      renderScaleControls();
+      updateInspectorCard();
+      renderNow(performance.now());
+      return { ...res, state: this.getState() };
     },
     setFlightMode(mode = 'ufo') {
       setGlobalFlightMode(mode);
@@ -7940,9 +8272,16 @@ export async function mountUlgUniversesDemo() {
       const env = await physics.triggerGalaxyCoalescence();
       selectDefaultTarget();
       renderScaleControls();
+      syncGenesisHud();
       renderNow(performance.now());
       return env;
     },
+    async finalizeActiveGenesis() {
+      return finalizeActiveGenesisUi();
+    },
+    peekCachedStarSystemForSite: (site) => physics.peekCachedStarSystemForSite(site),
+    peekCachedPlanetSph: (idx) => physics.peekCachedPlanetSph(idx),
+    peekCachedHaloGalaxy: (posMpc) => physics.peekCachedHaloGalaxy(posMpc),
     async reseed(nextSeed = null) {
       physics.setSeed(nextSeed ?? ((physics.seed + 7919) >>> 0));
       await physics.initCosmicWeb();
@@ -7968,6 +8307,7 @@ export async function mountUlgUniversesDemo() {
           syncSurfaceHud();
         }
       }
+      syncGenesisHud();
       updateInspectorCard();
       return this.getState();
     },

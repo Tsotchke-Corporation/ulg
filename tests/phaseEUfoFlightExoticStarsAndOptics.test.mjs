@@ -81,8 +81,8 @@ test('Phase E1: Exotic star synthesis (Pulsar/BH/WD), fallback-disk pulsar plane
   assert.equal(bhDisk.length, 1);
   assert.ok(bhLines.length >= 168, 'Black hole in orbit must emit relativistic BZ jet beams');
 
-  // Zero-COM stabilization embedded in 3D MLS-MPM stellar fusion WGSL
-  assert.ok(stellarMlsMpmFusionWgsl.includes('COM_OFFSET'), 'stellarMlsMpmFusionWgsl must include GPU COM stabilization');
+  // Zero-COM stabilization embedded in 3D MLS-MPM stellar fusion WGSL (via canonical SS Scale-Atlas COM)
+  assert.ok(stellarMlsMpmFusionWgsl.includes('com_pos'), 'stellarMlsMpmFusionWgsl must include GPU COM stabilization');
   assert.ok(stellarMlsMpmFusionWgsl.includes('com_vel'), 'stellarMlsMpmFusionWgsl must zero net COM momentum drift');
 });
 

@@ -332,10 +332,21 @@ test('Hand-Driven Full-Stack Soak across all 5 Flagship ULG WebGPU Demos (Vulkan
       assert.equal(refFrameCheck.l4FrameInOrbit, 'body-orbit', `Entering L4 orbit around a planet must switch to body-orbit frame (got ${refFrameCheck.l4FrameInOrbit})`);
       assert.ok(refFrameCheck.chosenSite && typeof refFrameCheck.chosenSite.biomeLabel === 'string', 'Clicking Earth globe on L4 must choose an orbital touchdown site');
 
-      // 3C. Land on Earth at our chosen site & Hand-Drive UFO with REAL Keyboard Holds (W/D/Space/M) + Tractor Beam Specimen Abduction!
+      // 3C. Land on a REAL clicked SPH continental site on Earth & Hand-Drive UFO with REAL Keyboard Holds (W/D/Space/M) + Tractor Beam Specimen Abduction!
       await page.evaluate(async () => {
         const api = window.__ulgUniversesDemo;
-        await api.enterSurfaceView({ bodyIndex: 'earth', landingSite: { latDeg: 28.0, lonDeg: 10.0, biomeLabel: 'Temperate Forest & Valleys', isLush: true, seaLevelOffsetM: -14.0, tempOffsetK: 0, ampScale: 1.0 } });
+        let landSite = null;
+        for (const fy of [0.38, 0.46, 0.54, 0.62]) {
+          for (const fx of [0.38, 0.44, 0.50, 0.56]) {
+            const hit = await api.pickAtCanvasFraction(fx, fy, { preferGpuMote: false });
+            if (hit && !hit.isOcean && (hit.isLush || hit.isCoast || hit.isMountain || hit.isDesert)) {
+              landSite = hit;
+              break;
+            }
+          }
+          if (landSite) break;
+        }
+        await api.enterSurfaceView({ bodyIndex: 'earth', landingSite: landSite || { latDeg: 33.5, lonDeg: -26.3, biomeLabel: 'SPH Continent' } });
         for (let i = 0; i < 6; i += 1) await api.stepOnce();
       });
       await page.waitForTimeout(250);

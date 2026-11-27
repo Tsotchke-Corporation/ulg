@@ -72,9 +72,9 @@ test('Phase C2: All 11 L1 Galaxy Morphologies produce finite, physically distinc
   assert.ok(irregBodies.length === 2048 * 8);
 });
 
-test('Phase C3: All 5 3D MLS-MPM Stellar Structure Regimes conserve X_H + X_He + X_Z = 1 and span 1,150 K -> 28,500 K Teff', () => {
+test('Phase C3: All 7 3D MLS-MPM Stellar Structure Regimes (Pop III/II/I) conserve X_H + X_He + X_CNO + X_AlphaFe = 1 and span 1,150 K -> 85,000 K Teff', () => {
   const classes = Object.keys(STELLAR_MLS_MPM_PROFILES);
-  assert.equal(classes.length, 5);
+  assert.equal(classes.length, 7);
   assert.equal(STELLAR_MLS_MPM_FUSION_LAW_ADAPTER.id, 'stellar-mls-mpm-fusion');
   const maxLogTByClass = {};
   for (const cls of classes) {
@@ -82,7 +82,7 @@ test('Phase C3: All 5 3D MLS-MPM Stellar Structure Regimes conserve X_H + X_He +
     let maxLt = 0;
     for (let i = 0; i < 1024; i += 1) {
       const o = i * 16;
-      const sumX = arr[o + 10] + arr[o + 14] + arr[o + 15];
+      const sumX = arr[o + 10] + arr[o + 14] + arr[o + 15] + arr[o + 12];
       assert.ok(Math.abs(sumX - 1.0) < 1e-4, `Nucleon conservation violated in ${cls}: ${sumX}`);
       if (arr[o + 8] > maxLt) maxLt = arr[o + 8];
     }

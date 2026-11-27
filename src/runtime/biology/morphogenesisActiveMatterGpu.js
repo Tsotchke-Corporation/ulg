@@ -281,6 +281,8 @@ export function createMorphogenesisActiveSessionWebGpu(device, {
   height = 128,
   agentCount = 2048,
   regimeId = 'turing-spots',
+  feedF = null,
+  killK = null,
   v0Propel = 2.6,
   chemoGain = 1.8,
   seed = 20261125,
@@ -385,8 +387,8 @@ export function createMorphogenesisActiveSessionWebGpu(device, {
     ]
   });
 
-  let curF = reg.F;
-  let curK = reg.k;
+  let curF = Number.isFinite(Number(feedF)) ? Math.max(0.015, Math.min(0.08, Number(feedF))) : reg.F;
+  let curK = Number.isFinite(Number(killK)) ? Math.max(0.045, Math.min(0.072, Number(killK))) : reg.k;
   let curDu = reg.dU;
   let curDv = reg.dV;
   let curV0 = Math.max(0, Number(v0Propel));

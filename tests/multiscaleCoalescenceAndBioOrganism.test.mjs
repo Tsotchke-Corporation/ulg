@@ -31,6 +31,19 @@ import {
   decodeFloat32Quantized,
   encodeFloat32Quantized
 } from '../src/runtime/astrophysics/cosmicLineageRootCache.js';
+import {
+  sampleOrbitalBodySurfaceAtNormal
+} from '../src/runtime/astrophysics/surfaceCelestialSkyAndSeasons.js';
+import {
+  buildPeerComputeSimulationProfile
+} from '../src/runtime/astrophysics/peercomputeSimulationScaler.js';
+import {
+  STELLAR_MLS_MPM_PROFILES,
+  buildStellarMlsMpmInitialParcels
+} from '../src/runtime/astrophysics/stellarMlsMpmFusionGpu.js';
+import {
+  resolveStellarRegimeForStarSpec
+} from '../src/runtime/astrophysics/starlightAndExoticOptics.js';
 
 test('Root L0 -> L1 causal galaxy morphology honors GPU halo overdensity & tidal-torque spin lambda', () => {
   const highSpinSpiral = deriveGalaxyEnvironmentFromCosmicContext({
@@ -164,6 +177,24 @@ test('Bio Lab derives distinct physical GPU parameters across ALL 5 layers direc
   assert.ok(pEarthHead.hhGNa > pEarthFlora.hhGNa, `Motile fauna neural g_Na (${pEarthHead.hhGNa}) must exceed sessile flora (${pEarthFlora.hhGNa})`);
   assert.ok(pEarthHead.morphV0 > pEarthFlora.morphV0, `Motile fauna v0 (${pEarthHead.morphV0}) must exceed sessile flora (${pEarthFlora.morphV0})`);
   assert.ok(pAcid.evoStrongFrac !== pTitan.evoStrongFrac, 'XNA duplex stability fraction must respond to organism temperature & alphabet');
+
+  // True bottom-up environmental molecular biochemistry (ZERO tinted Earth clones!)
+  assert.equal(pEarthTorso.solventPolarity, 1.0, 'Earth H2O must have polar solventPolarity = +1');
+  assert.equal(pTitan.solventPolarity, -1.0, 'Titan CH4 must invert to nonpolar solventPolarity = -1');
+  assert.ok(pTitan.bjerrumLengthA > pEarthTorso.bjerrumLengthA * 50, `Titan low-eps Bjerrum length (${pTitan.bjerrumLengthA} A) must dwarf Earth (${pEarthTorso.bjerrumLengthA} A)`);
+  assert.ok(pTitan.tDenatureK < 180 && pAcid.tDenatureK > 420, `Denaturation T must scale to organism chemistry (Titan ${pTitan.tDenatureK}K vs Acid ${pAcid.tDenatureK}K)`);
+  assert.ok(pTitan.xnaTargetTmK < 145 && pEarthTorso.xnaTargetTmK > 315 && pAcid.xnaTargetTmK > 365, 'XNA duplex melting T_m must sit above each world habitat T');
+  assert.ok(pTitan.energyCurrencyKjMol < 25 && pEarthTorso.energyCurrencyKjMol > 42, 'Energy currency DeltaG must scale to thermal budget kBT');
+  assert.notEqual(pEarthTorso.molecules['bio-mol-membrane'].formula, pTitan.molecules['bio-mol-membrane'].formula, 'Earth vs Titan membrane monomers must have genuinely distinct atomic formulas');
+  assert.notEqual(pEarthTorso.molecules['bio-mol-membrane'].formula, pAcid.molecules['bio-mol-membrane'].formula, 'Earth vs Venus acid membrane monomers must have distinct atomic formulas');
+  assert.notEqual(pEarthTorso.molecules['bio-mol-energy'].formula, pTitan.molecules['bio-mol-energy'].formula, 'Earth vs Titan metabolic energy cofactors must have distinct atomic formulas');
+  assert.ok(pEarthTorso.molecules['bio-mol-membrane'].formula.includes('P'), 'Earth phospholipid must contain Phosphorus (P)');
+  assert.ok(pTitan.molecules['bio-mol-membrane'].formula.includes('N') && !pTitan.molecules['bio-mol-membrane'].formula.includes('P'), 'Titan azotosome must use Nitrile/Amine (N) with zero Phosphorus');
+  assert.ok(pAcid.molecules['bio-mol-membrane'].formula.includes('S'), 'Venus H2SO4 acidophile amphiphile must contain Sulfur (S)');
+  const europaProf = deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS.find((p) => p.id === 'europa-vent'));
+  const pEuropa = deriveOrganismTissueLabParameters(europaProf.species[0], europaProf);
+  assert.equal(pEuropa.isMonolayer, true, 'High-pressure subsurface brine must select bipolar tetraether monolayer');
+  assert.ok(pEuropa.molecules['bio-mol-energy'].formula.includes('Fe') && pEuropa.molecules['bio-mol-energy'].formula.includes('S'), 'Hydrothermal Europa cofactor must synthesize [Fe2S2] ferredoxin');
 });
 
 test('Root Cosmic Lineage Cache stores, quantizes, hits, bypasses on replay, and ingests PeerCompute P2P artifacts', async () => {
@@ -222,4 +253,110 @@ test('Root Cosmic Lineage Cache stores, quantizes, hits, bypasses on replay, and
   // Fail-closed rejection of mismatched schema
   const rejected = await peerCache.ingestPeerEntry({ schema: 'bad-schema', key: 'k2', payload: { x: 1 } });
   assert.equal(rejected, false);
+  assert.equal(cache.peek(key)?.hit, true, 'peek() must synchronously detect cached root artifacts');
+  assert.equal(cache.peek('unsimulated-key'), null, 'peek() must return null for unsimulated entities');
+});
+
+test('Orbital globe click reads live SPH geology snapshot 1-to-1 with zero Perlin seaLevelOffsetM', () => {
+  const w = 16;
+  const h = 8;
+  const data = new Float32Array(w * h * 4);
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      const o = (y * w + x) * 4;
+      // Western hemisphere = deep SPH ocean (-0.55), Eastern hemisphere = elevated SPH mountain continent (+0.65)
+      const isEast = x >= w / 2;
+      data[o + 0] = isEast ? 0.65 : -0.55;
+      data[o + 1] = isEast ? 0.80 : 0.05;
+      data[o + 2] = 0.15;
+      data[o + 3] = isEast ? 0.60 : 1.0;
+    }
+  }
+  const snap = { data, width: w, height: h, seaLevelNorm: 0.05, hasOcean: true, isMagmaOcean: false };
+  const earthSpec = { radiusKm: 6371, color1: [0.06, 0.26, 0.58], atm: 0.72 };
+  const oceanClick = sampleOrbitalBodySurfaceAtNormal([0, 0, -1], earthSpec, 7.81, [1, 0, 0], snap);
+  const mtnClick = sampleOrbitalBodySurfaceAtNormal([0, 0, 1], earthSpec, 7.81, [1, 0, 0], snap);
+  assert.equal(oceanClick.sphSampled, true);
+  assert.equal(oceanClick.isOcean, true, `Expected SPH ocean click (got ${oceanClick.biomeLabel})`);
+  assert.equal(oceanClick.seaLevelOffsetM, 0);
+  assert.equal(mtnClick.sphSampled, true);
+  assert.equal(mtnClick.isMountain, true, `Expected SPH mountain click (got ${mtnClick.biomeLabel})`);
+  assert.equal(mtnClick.seaLevelOffsetM, 0);
+});
+
+test('PeerCompute capability scaler scales SPH/nebular/stellar workloads across device tiers and clamps strictly to GPU limits', () => {
+  const mobile = buildPeerComputeSimulationProfile({
+    tier: 'mobile',
+    cpu: { cores: 4 },
+    memory: { deviceMemoryGiB: 4 },
+    environment: { os: 'android' },
+    webgpu: { available: true, isFallbackAdapter: false, limits: { maxStorageBufferBindingSize: 128 * 1024 * 1024 } }
+  });
+  const laptop = buildPeerComputeSimulationProfile({
+    tier: 'laptop',
+    cpu: { cores: 8 },
+    memory: { deviceMemoryGiB: 8 },
+    environment: { os: 'linux' },
+    webgpu: { available: true, isFallbackAdapter: false, limits: { maxStorageBufferBindingSize: 256 * 1024 * 1024 } }
+  });
+  const workstation = buildPeerComputeSimulationProfile({
+    tier: 'workstation',
+    cpu: { cores: 16 },
+    memory: { deviceMemoryGiB: 32 },
+    environment: { os: 'linux' },
+    webgpu: { available: true, isFallbackAdapter: false, limits: { maxStorageBufferBindingSize: 1024 * 1024 * 1024 } }
+  });
+  const cluster = buildPeerComputeSimulationProfile({
+    tier: 'cluster',
+    cpu: { cores: 32 },
+    memory: { deviceMemoryGiB: 64 },
+    environment: { os: 'linux' },
+    webgpu: { available: true, isFallbackAdapter: false, limits: { maxStorageBufferBindingSize: 2048 * 1024 * 1024 } }
+  });
+
+  assert.equal(mobile.tier, 'mobile');
+  assert.equal(workstation.tier, 'workstation');
+  assert.ok(mobile.workloads.sphParcels < laptop.workloads.sphParcels, 'Laptop SPH parcels must scale above mobile');
+  assert.ok(laptop.workloads.sphParcels < workstation.workloads.sphParcels, 'Workstation SPH parcels must scale above laptop');
+  assert.ok(workstation.workloads.sphParcels <= cluster.workloads.sphParcels, 'Cluster SPH parcels must be >= workstation');
+  assert.ok(workstation.workloads.sphGridN > mobile.workloads.sphGridN, 'Workstation 3D SPH grid must scale above mobile');
+  assert.ok(workstation.workloads.sphMapWidth >= 768 && workstation.workloads.sphMapWidth > mobile.workloads.sphMapWidth);
+  assert.ok(workstation.workloads.l4TargetSteps > mobile.workloads.l4TargetSteps, 'Desktop coalescence must allow richer longer live formation');
+  assert.ok(workstation.workloads.stellarParcels > mobile.workloads.stellarParcels);
+
+  // Strict hardware limit clamping: even on manual ULTRA, tiny maxStorageBufferBindingSize must clamp buffers safely!
+  const tinyLimit = buildPeerComputeSimulationProfile(
+    { tier: 'workstation', cpu: { cores: 16 }, webgpu: { available: true, limits: { maxStorageBufferBindingSize: 8 * 1024 * 1024 } } },
+    { qualityMode: 'ultra' }
+  );
+  assert.ok(tinyLimit.workloads.sphGridN * tinyLimit.workloads.sphGridN * tinyLimit.workloads.sphGridN * 64 <= 8 * 1024 * 1024);
+});
+
+test('First-Gen Pop III (Z=0) and Second-Gen Pop II (alpha-rich) stellar mechanics profiles & causal routing are distinct', () => {
+  const pop3 = STELLAR_MLS_MPM_PROFILES['pop3-first-gen'];
+  const pop2 = STELLAR_MLS_MPM_PROFILES['pop2-second-gen'];
+  const pop1 = STELLAR_MLS_MPM_PROFILES['main-sequence-star'];
+
+  assert.equal(pop3.generation, 1);
+  assert.equal(pop3.xCno0, 0, '1st-Gen Pop III must start with strictly zero primordial CNO metals');
+  assert.equal(pop3.xAlphaFe0, 0, '1st-Gen Pop III must start with strictly zero primordial alpha/Fe metals');
+  assert.ok(pop3.coreTempK > 1.0e8, '1st-Gen Pop III core must contract above 100 MK to ignite triple-alpha');
+
+  assert.equal(pop2.generation, 2);
+  assert.ok(pop2.xCno0 > 0 && pop2.xCno0 < pop1.xCno0 * 0.2, '2nd-Gen Pop II must carry trace Pop III CNO metals');
+  assert.ok(pop2.xAlphaFe0 > 0 && pop2.xAlphaFe0 < pop1.xAlphaFe0 * 0.2);
+
+  // Verify initial parcel seeding carries exact zero CNO on Pop III
+  const init3 = buildStellarMlsMpmInitialParcels({ count: 512, stellarClass: 'pop3-first-gen', seed: 42 });
+  let maxCno3 = 0;
+  for (let i = 0; i < 512; i += 1) maxCno3 = Math.max(maxCno3, init3[i * 16 + 15]);
+  assert.equal(maxCno3, 0, 'Every Pop III initial parcel must start with xCNO === 0');
+
+  // Verify causal star spec routing maps stellarGeneration 1 -> pop3-first-gen and 2 -> pop2-second-gen
+  const r1 = resolveStellarRegimeForStarSpec({ isStar: true, stellarGeneration: 1, spectralType: 'PopIII-O', tempK: 75000, massSolar: 55 });
+  const r2 = resolveStellarRegimeForStarSpec({ isStar: true, stellarGeneration: 2, spectralType: 'A4V', tempK: 9200, massSolar: 3.8 });
+  assert.equal(r1.stellarMode, 'fusion');
+  assert.equal(r1.stellarPreset, 'pop3-first-gen');
+  assert.equal(r2.stellarMode, 'fusion');
+  assert.equal(r2.stellarPreset, 'pop2-second-gen');
 });

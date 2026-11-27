@@ -391,10 +391,20 @@ export function deriveStarSystemFromGalacticLocation({
         : (evo.stage === 'stellar-black-hole'
           ? 'Relativistic Kerr Event Horizon · Accretion Disk'
           : `H ${hPct.toFixed(1)}% · He ${hePct.toFixed(1)}% · Metals ${zPct.toFixed(2)}% ([Fe/H]=${feH >= 0 ? '+' : ''}${feH.toFixed(2)})`));
+    const stellarGeneration = (gEnv.isPrimordialPopIII || feH <= -2.6)
+      ? 1
+      : ((feH <= -0.75 || isHalo || gEnv.morphology === 'globular') ? 2 : 3);
+    const generationLabel = stellarGeneration === 1
+      ? '1st-Gen Pop III (Z=0)'
+      : (stellarGeneration === 2 ? '2nd-Gen Pop II (α-rich)' : '3rd-Gen Pop I');
     return Object.freeze({
       component: starLetters[idx],
       name: multiplicity > 1 ? `${systemName} ${starLetters[idx]} (${specCode})` : `${systemName} (${specCode})`,
       spectralCode: specCode,
+      stellarGeneration,
+      generationLabel,
+      feH: Number(feH.toFixed(2)),
+      alphaOverFe: Number(alphaOverFe.toFixed(2)),
       stage: evo.stage,
       remnantClass: evo.remnantClass,
       initialMassSolar: m0,

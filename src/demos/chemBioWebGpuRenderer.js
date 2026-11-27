@@ -79,6 +79,8 @@ struct RenderUniforms {
   cam_up_time: vec4<f32>,    // xyz = camUp, w = timeSec
   field_info: vec4<f32>,     // x = fieldMode, y = fieldW, z = fieldH, w = sphereScale
   extra_info: vec4<f32>,     // x = countA, y = countB, z = pointSize, w = bgStyle (0=org, 1=bio)
+  org_tint_a: vec4<f32>,     // rgb = active organism primary pigment/solvent tint, w = tintStrength [0..1]
+  org_tint_b: vec4<f32>,     // rgb = active organism secondary pigment/tail tint, w = modeAux
 };
 `;
 
@@ -424,9 +426,15 @@ fn fs_bio_bead(in: VsOut) -> FsOut {
   let h1 = normalize(l1 + vec3<f32>(0.0, 0.0, 1.0));
   let spec = pow(max(dot(n_view, h1), 0.0), 38.0) * 0.72;
   let fres = pow(max(0.0, 1.0 - nz), 2.8) * 0.44;
+  // Blend bead biochemistry smoothly with active living organism's solvent/pigment palette when present!
+  let org_mix = clamp(u.org_tint_a.w, 0.0, 1.0);
+  let bead_luma = dot(in.color, vec3<f32>(0.299, 0.587, 0.114));
+  let role_sel = smoothstep(-0.2, 0.9, in.color.b - in.color.r);
+  let org_col = mix(u.org_tint_b.rgb, u.org_tint_a.rgb, role_sel) * (0.62 + 0.58 * bead_luma);
+  let base_rgb = mix(in.color, org_col, org_mix);
   // Subtle glowing cutaway cross-section rim right near clipZ plane!
   let cut_rim = select(0.0, (1.0 - smoothstep(0.0, 0.85, abs(in.world_pos.z - u.extra_info.x))) * 0.55, u.extra_info.x < 90.0);
-  let col = in.color * (0.26 + diff) + vec3<f32>(spec) + in.color * fres * 0.88 + vec3<f32>(0.24, 0.96, 0.84) * cut_rim;
+  let col = base_rgb * (0.26 + diff) + vec3<f32>(spec) + base_rgb * fres * 0.88 + vec3<f32>(0.24, 0.96, 0.84) * cut_rim;
   var out: FsOut;
   out.color = vec4<f32>(col, 1.0);
   out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
@@ -631,23 +639,34 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
     dhx = 0.5 * ((sx.y + sx.z) - (sxm.y + sxm.z));
     dhy = 0.5 * ((sy.y + sy.z) - (sym.y + sym.z));
   } else if (fmode == 3u) {
-    // Hodgkin-Huxley Excitable Membrane Voltage V_m (-75 mV -> +35 mV) + refractory K+ h/n trail!
+    // Organism Bioenergetics & Excitable Tissue Voltage V_m (-75 mV -> +35 mV) + refractory trail
+    // tinted directly by the active organism's photopigment / metabolic redox spectrum!
     let vn = clamp((s.x + 75.0) / 110.0, 0.0, 1.15);
     let refr = clamp((s.z - 0.32) * 2.4, 0.0, 1.0);
+    let om = clamp(u.org_tint_a.w, 0.0, 1.0);
+    let wave_c = mix(vec3<f32>(0.12, 0.72, 1.0), clamp(u.org_tint_a.rgb * 1.45, vec3<f32>(0.1), vec3<f32>(1.4)), om * 0.75);
+    let peak_c = mix(vec3<f32>(1.45, 0.88, 0.22), clamp(u.org_tint_b.rgb * 1.65 + vec3<f32>(0.25), vec3<f32>(0.2), vec3<f32>(1.6)), om * 0.65);
+    let refr_c = mix(vec3<f32>(0.24, 0.14, 0.54), u.org_tint_b.rgb * 0.62, om * 0.65);
     col = vec3<f32>(0.025, 0.04, 0.11);
-    col = mix(col, vec3<f32>(0.24, 0.14, 0.54), refr * 0.85);
-    col = mix(col, vec3<f32>(0.12, 0.72, 1.0), smoothstep(0.18, 0.55, vn));
-    col = mix(col, vec3<f32>(1.45, 0.88, 0.22), smoothstep(0.55, 0.92, vn));
+    col = mix(col, refr_c, refr * 0.85);
+    col = mix(col, wave_c, smoothstep(0.18, 0.55, vn));
+    col = mix(col, peak_c, smoothstep(0.55, 0.92, vn));
     col = mix(col, vec3<f32>(1.65, 1.55, 1.35), smoothstep(0.88, 1.08, vn));
     dhx = 0.5 * (sx.x - sxm.x) * 0.02;
     dhy = 0.5 * (sy.x - sym.x) * 0.02;
   } else {
-    // Turing Morphogenesis: deep navy basin -> emerald teal -> glowing golden morphogen ridges!
+    // Organism Embryonic Turing Morphogenesis: rendered directly in the active organism's
+    // actual dermal/cuticle primaryRgb (org_tint_a) & secondaryRgb (org_tint_b) pigmentation!
     let v_act = clamp(s.y * 2.3, 0.0, 1.3);
-    col = vec3<f32>(0.02, 0.055, 0.11);
-    col = mix(col, vec3<f32>(0.06, 0.54, 0.58), smoothstep(0.08, 0.48, v_act));
-    col = mix(col, vec3<f32>(0.22, 0.96, 0.64), smoothstep(0.42, 0.82, v_act));
-    col = mix(col, vec3<f32>(1.28, 0.96, 0.34), smoothstep(0.78, 1.12, v_act));
+    let om = clamp(u.org_tint_a.w, 0.0, 1.0);
+    let c_base = mix(vec3<f32>(0.02, 0.045, 0.09), clamp(u.org_tint_b.rgb * 0.34, vec3<f32>(0.02), vec3<f32>(0.36)), om * 0.85);
+    let c_mid = mix(vec3<f32>(0.06, 0.54, 0.58), clamp(u.org_tint_b.rgb * 0.96, vec3<f32>(0.05), vec3<f32>(1.05)), om * 0.92);
+    let c_hi = mix(vec3<f32>(0.22, 0.96, 0.64), clamp(u.org_tint_a.rgb * 1.24, vec3<f32>(0.10), vec3<f32>(1.28)), om * 0.92);
+    let c_ridge = mix(vec3<f32>(1.28, 0.96, 0.34), clamp(u.org_tint_a.rgb * 1.48 + vec3<f32>(0.12), vec3<f32>(0.22), vec3<f32>(1.45)), om * 0.85);
+    col = c_base;
+    col = mix(col, c_mid, smoothstep(0.08, 0.46, v_act));
+    col = mix(col, c_hi, smoothstep(0.42, 0.80, v_act));
+    col = mix(col, c_ridge, smoothstep(0.76, 1.10, v_act));
     dhx = 0.5 * (sx.y - sxm.y) * 2.4;
     dhy = 0.5 * (sy.y - sym.y) * 2.4;
   }
@@ -824,10 +843,10 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
 
   const uniformBuf = device.createBuffer({
     label: 'ulg-chembio-render-uniforms',
-    size: 144,
+    size: 176,
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   });
-  const uniformF32 = new Float32Array(36);
+  const uniformF32 = new Float32Array(44);
 
   const depthState = { depthWriteEnabled: true, depthCompare: 'less', format: 'depth24plus' };
   const depthReadOnly = { depthWriteEnabled: false, depthCompare: 'less', format: 'depth24plus' };
@@ -1066,6 +1085,10 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
     uniformF32[33] = scene.bioLinkMode ?? 0;
     uniformF32[34] = scene.piPointSize ?? 0.17;
     uniformF32[35] = bgStyle;
+    const tA = scene.orgTintA || [0.22, 0.85, 0.62, 0.0];
+    const tB = scene.orgTintB || [0.92, 0.68, 0.24, 0.0];
+    uniformF32[36] = tA[0] ?? 0.22; uniformF32[37] = tA[1] ?? 0.85; uniformF32[38] = tA[2] ?? 0.62; uniformF32[39] = tA[3] ?? 0.0;
+    uniformF32[40] = tB[0] ?? 0.92; uniformF32[41] = tB[1] ?? 0.68; uniformF32[42] = tB[2] ?? 0.24; uniformF32[43] = tB[3] ?? 0.0;
     device.queue.writeBuffer(uniformBuf, 0, uniformF32);
 
     const enc = device.createCommandEncoder({ label: 'chembio-frame' });

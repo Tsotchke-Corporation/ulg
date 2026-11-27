@@ -31,6 +31,7 @@ import {
   LAW_FALLBACK_POLICIES,
   LAW_SPATIAL_AUTHORITIES
 } from '../sph/lawAdapterContract.js';
+import { createSchroederScaleAtlasGravitySolverWebGpu } from '../sph/schroederScaleAtlasMultipoleGpu.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_NEBULAR_SYSTEM_COALESCENCE_SCHEMA = 'ulg.astrophysics.nebular-system-coalescence-webgpu.v1';
@@ -58,13 +59,16 @@ export const NEBULAR_SYSTEM_COALESCENCE_LAW_ADAPTER = Object.freeze({
   accumulates: Object.freeze(['coalesced-system-summary']),
   pairedVolumeState: 'not-applicable',
   conservedQuantities: Object.freeze(['mass', 'angular-momentum', 'elemental-budgets']),
-  validityDomain: Object.freeze({ minParcels: 512, maxParcels: 16384, radialBins: NEBULAR_RADIAL_BINS }),
+  validityDomain: Object.freeze({ minParcels: 512, maxParcels: 32768, radialBins: 128 }),
   fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
   scaleRangeM: Object.freeze([1e9, 1e14]),
   fundamentalLaws: Object.freeze([
     'radiative-equilibrium-condensation-fronts',
     'epstein-stokes-aerodynamic-drift',
     'streaming-instability-clumping',
+    'azimuthal-hill-embryo-condensation',
+    'lindblad-tidal-gap-clearing',
+    'xuv-photoevaporative-disk-dispersal',
     'self-gravitating-hill-coalescence',
     'runaway-gas-envelope-accretion'
   ])
@@ -113,9 +117,10 @@ struct NebParcel {
   info: vec4<f32>,
 };
 
-// 8 atomic i32 slots per radial bin (fixed-point scaled by 10000.0):
+// 10 atomic i32 slots per radial bin (fixed-point scaled by 1000.0):
 //   0: solid_mass, 1: fe_mass, 2: sil_mass, 3: carbon_mass,
-//   4: h2o_mass,   5: supervol_mass, 6: gas_mass, 7: count
+//   4: h2o_mass,   5: supervol_mass, 6: gas_mass, 7: count,
+//   8: cos_phi_m,  9: sin_phi_m (2D azimuthal Hill-sphere proto-embryo condensation!)
 @group(0) @binding(0) var<uniform> params: NebParams;
 @group(0) @binding(1) var<storage, read_write> parcels: array<NebParcel>;
 @group(0) @binding(2) var<storage, read_write> bin_atomic: array<atomic<i32>>;
@@ -125,6 +130,10 @@ struct NebParcel {
 @group(0) @binding(3) var<storage, read_write> bin_summary: array<vec4<f32>>;
 // 2 vec4<f32> global telemetry
 @group(0) @binding(4) var<storage, read_write> telemetry: array<vec4<f32>>;
+// 1 vec4<f32> per radial bin: vec4(mean_cos_phi, mean_sin_phi, azim_coherence, lindblad_gap_torque)
+@group(0) @binding(5) var<storage, read_write> bin_azim: array<vec4<f32>>;
+// Canonical Schroeder Simulation (SS) 3D hierarchical multipole self-gravity acceleration per nebular parcel!
+@group(0) @binding(6) var<storage, read> ss_grav_acc: array<vec4<f32>>;
 
 fn u_to_r_au(u: f32) -> f32 {
   let u_c = clamp(u, 0.0, 1.0);
@@ -168,7 +177,7 @@ fn eval_condensate_weights(temp_k: f32, c_to_o: f32, met: f32) -> vec4<f32> {
 @compute @workgroup_size(64)
 fn clear_annuli(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x;
-  if (idx >= params.radial_bins * 8u) { return; }
+  if (idx >= params.radial_bins * 10u) { return; }
   atomicStore(&bin_atomic[idx], 0);
 }
 
@@ -195,17 +204,21 @@ fn deposit_annuli(@builtin(global_invocation_id) gid: vec3<u32>) {
   let c_f   = w4.z * inv_s;
   let ice_f = (w4.w + w_svol) * inv_s;
 
-  // Ambient nebular H2/He gas surface density scales gently as r^-0.65 * gas_fraction
-  let gas_local = params.gas_fraction * pow(max(0.15, r_au), -0.45) * smoothstep(params.r_max_au * 1.05, params.r_max_au * 0.55, r_au);
+  // Host-star XUV photoevaporative outer-disk gas dispersal over coalescence epoch!
+  let xuv_decay = exp(-f32(params.step_index) * 0.0014 * pow(max(0.05, params.star_lum_solar), 0.18));
+  let gas_local = params.gas_fraction * xuv_decay * pow(max(0.15, r_au), -0.45) * smoothstep(params.r_max_au * 1.05, params.r_max_au * 0.55, r_au);
 
   p.pos_m.w = m_solid;
   p.thermo = vec4<f32>(temp_k, ice_f, p.thermo.z, r_au);
   p.info = vec4<f32>(fe_f, sil_f, c_f, 1.0);
   parcels[i] = p;
 
+  // Mass-conserving surface-density normalization across 3K..32K parcels & 64..128 radial bins!
+  let mass_norm = (3072.0 / max(512.0, f32(params.parcel_count))) * (f32(params.radial_bins) / 64.0);
   let b = min(params.radial_bins - 1u, u32(floor(u * f32(params.radial_bins))));
-  let base = b * 8u;
-  let sc = 1000.0;
+  let base = b * 10u;
+  let sc = 1000.0 * mass_norm;
+  let phi = atan2(p.pos_m.z, p.pos_m.x);
   atomicAdd(&bin_atomic[base + 0u], i32(round(m_solid * sc)));
   atomicAdd(&bin_atomic[base + 1u], i32(round(w4.x * sc)));
   atomicAdd(&bin_atomic[base + 2u], i32(round(w4.y * sc)));
@@ -214,13 +227,15 @@ fn deposit_annuli(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicAdd(&bin_atomic[base + 5u], i32(round(w_svol * sc)));
   atomicAdd(&bin_atomic[base + 6u], i32(round(gas_local * sc)));
   atomicAdd(&bin_atomic[base + 7u], 1);
+  atomicAdd(&bin_atomic[base + 8u], i32(round(cos(phi) * m_solid * sc)));
+  atomicAdd(&bin_atomic[base + 9u], i32(round(sin(phi) * m_solid * sc)));
 }
 
 @compute @workgroup_size(64)
 fn finalize_annuli(@builtin(global_invocation_id) gid: vec3<u32>) {
   let b = gid.x;
   if (b >= params.radial_bins) { return; }
-  let base = b * 8u;
+  let base = b * 10u;
   let sc = 1.0 / 1000.0;
   let m_sol  = max(0.0, f32(atomicLoad(&bin_atomic[base + 0u])) * sc);
   let m_fe   = max(0.0, f32(atomicLoad(&bin_atomic[base + 1u])) * sc);
@@ -229,7 +244,9 @@ fn finalize_annuli(@builtin(global_invocation_id) gid: vec3<u32>) {
   let m_h2o  = max(0.0, f32(atomicLoad(&bin_atomic[base + 4u])) * sc);
   let m_svol = max(0.0, f32(atomicLoad(&bin_atomic[base + 5u])) * sc);
   let m_gas  = max(0.0, f32(atomicLoad(&bin_atomic[base + 6u])) * sc);
-  let cnt    = max(1.0, f32(atomicLoad(&bin_atomic[base + 7u])));
+  let cnt_n  = max(1.0, f32(atomicLoad(&bin_atomic[base + 7u])) * (3072.0 / max(512.0, f32(params.parcel_count))) * (f32(params.radial_bins) / 64.0));
+  let c_sum  = f32(atomicLoad(&bin_atomic[base + 8u])) * sc;
+  let s_sum  = f32(atomicLoad(&bin_atomic[base + 9u])) * sc;
 
   let u_mid = (f32(b) + 0.5) / f32(params.radial_bins);
   let r_au = u_to_r_au(u_mid);
@@ -240,10 +257,16 @@ fn finalize_annuli(@builtin(global_invocation_id) gid: vec3<u32>) {
   // outside or near the snow line (Mizuno-Pollack core-accretion instability)!
   let cold_capture = smoothstep(420.0, 145.0, temp_k);
   let core_excess = smoothstep(32.0, 95.0, m_sol * (0.65 + 0.55 * cold_capture));
-  let gas_env_frac = clamp(core_excess * clamp(m_gas / (cnt * 0.25 + 1.0), 0.0, 1.0) * 0.88, 0.0, 0.92);
+  let gas_env_frac = clamp(core_excess * clamp(m_gas / (cnt_n * 0.25 + 1.0), 0.0, 1.0) * 0.88, 0.0, 0.92);
+
+  let coh = clamp(length(vec2<f32>(c_sum, s_sum)) * inv_s, 0.0, 1.0);
+  let mean_c = select(1.0, c_sum / max(1e-5, length(vec2<f32>(c_sum, s_sum))), coh > 0.01);
+  let mean_s = select(0.0, s_sum / max(1e-5, length(vec2<f32>(c_sum, s_sum))), coh > 0.01);
+  let gap_torque = smoothstep(0.14, 0.55, gas_env_frac) * 0.85 + smoothstep(45.0, 120.0, m_sol) * 0.25;
 
   bin_summary[b * 2u + 0u] = vec4<f32>(r_au, m_sol, m_fe * inv_s, m_sil * inv_s);
   bin_summary[b * 2u + 1u] = vec4<f32>(m_c * inv_s, m_h2o * inv_s, m_svol * inv_s, gas_env_frac);
+  bin_azim[b] = vec4<f32>(mean_c, mean_s, coh, gap_torque);
 }
 
 @compute @workgroup_size(64)
@@ -259,19 +282,26 @@ fn step_coalesce_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   let bf = u * f32(params.radial_bins) - 0.5;
   let bi = clamp(i32(round(bf)), 0, nb - 1);
 
-  // 1. Self-gravitational + streaming-instability SPH radial clumping force over local Hill width (~3 bins)
-  //    Draws pebbles toward emerging local solid surface-density peaks while creating cleared gaps between orbits!
+  // 1. Self-gravitational + streaming-instability radial clumping + Lindblad tidal gap clearing!
   var f_clump = 0.0;
-  var local_gas_env = 0.0;
-  for (var db = -3; db <= 3; db = db + 1) {
+  var f_gap = 0.0;
+  let span_bins = max(3, i32(round(3.0 * (f32(params.radial_bins) / 64.0))));
+  for (var db = -span_bins; db <= span_bins; db = db + 1) {
     if (db == 0) { continue; }
     let bj = clamp(bi + db, 0, nb - 1);
     let m_j = bin_summary[u32(bj) * 2u + 0u].y;
+    let gap_j = bin_azim[u32(bj)].w;
     let d_u = (f32(bj) + 0.5) / f32(params.radial_bins) - u;
-    let w_kern = exp(-abs(f32(db)) * 0.72);
+    let norm_db = abs(f32(db)) * (64.0 / f32(params.radial_bins));
+    let w_kern = exp(-norm_db * 0.72);
     f_clump = f_clump + sign(d_u) * m_j * w_kern;
+    // Lindblad tidal torque: massive gas-giant cores repel surrounding dust outside 1 Hill width to carve Cassini gaps!
+    if (gap_j > 0.08 && norm_db > 1.15 && norm_db < 3.2) {
+      f_gap = f_gap - sign(d_u) * gap_j * exp(-(norm_db - 1.8) * (norm_db - 1.8) * 1.4) * 18.0;
+    }
   }
-  local_gas_env = bin_summary[u32(bi) * 2u + 1u].w;
+  let local_gas_env = bin_summary[u32(bi) * 2u + 1u].w;
+  let local_az = bin_azim[u32(bi)];
 
   // 2. Sub-Keplerian aerodynamic drift (pebbles drift gently inward until trapped at snow-line / peak pressure bumps!)
   let r_au = u_to_r_au(u);
@@ -291,21 +321,33 @@ fn step_coalesce_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (u < 0.03) { wall_f = (0.03 - u) * 2.5; }
   if (u > 0.97) { wall_f = (0.97 - u) * 2.5; }
 
-  // Radial velocity in log-radius u-space (stored in vel_st.y lightly damped by nebular gas!)
+  // Radial velocity in log-radius u-space + Canonical 3D Schroeder Simulation (SS) Hierarchical Multipole Disk Self-Gravity!
+  let phi_prev = atan2(p.pos_m.z, p.pos_m.x);
+  let r_hat_xz = vec2<f32>(cos(phi_prev), sin(phi_prev));
+  let t_hat_xz = vec2<f32>(-r_hat_xz.y, r_hat_xz.x);
+  let ss_g = clamp(ss_grav_acc[i].xyz, vec3<f32>(-2.5), vec3<f32>(2.5));
+  let ss_g_rad = dot(vec2<f32>(ss_g.x, ss_g.z), r_hat_xz);
+  let ss_g_tan = dot(vec2<f32>(ss_g.x, ss_g.z), t_hat_xz);
+
   var vu = p.vel_st.y;
-  let a_u = f_clump * params.clump_strength * 0.00018 + drift_u + wall_f;
+  let bin_scale_norm = 64.0 / f32(params.radial_bins);
+  let a_u = (f_clump + f_gap) * params.clump_strength * 0.00018 * bin_scale_norm + ss_g_rad * 0.045 + drift_u + wall_f;
   vu = (vu + a_u * dt) * exp(-2.2 * dt);
   let u_new = clamp(u + vu * dt, 0.005, 0.995);
   let r_new_au = u_to_r_au(u_new);
 
-  // Keplerian azimuthal orbital advance: omega ~ sqrt(M_star / r^3)
-  let phi_prev = atan2(p.pos_m.z, p.pos_m.x);
+  // Keplerian azimuthal orbital advance + 3D Schroeder Scale-Atlas Spiral Torque + 2D Hill Embryo Condensation!
   let omega_vis = sqrt(max(0.08, params.star_mass_solar) / max(0.08, pow(r_new_au, 1.35))) * 1.45;
-  let phi_new = phi_prev + omega_vis * dt;
+  var phi_new = phi_prev + (omega_vis + clamp(ss_g_tan * 0.12, -0.35, 0.35)) * dt;
+  let peak_phi = atan2(local_az.y, local_az.x);
+  let d_phi_raw = peak_phi - phi_prev;
+  let d_phi = atan2(sin(d_phi_raw), cos(d_phi_raw));
+  let embryo_pull = smoothstep(20.0, 75.0, bin_summary[u32(bi) * 2u + 0u].y) * (0.20 + 0.80 * local_az.z);
+  phi_new = phi_new + clamp(d_phi, -0.35, 0.35) * embryo_pull * 0.65 * dt;
 
-  // Vertical settling toward disk midplane (scaled cleanly for visual display radius 0.9 .. 9.5)
+  // Vertical settling toward disk midplane driven by stellar vertical gravity + 3D SS disk self-gravity!
   let r_vis = 0.92 + u_new * 8.6;
-  let y_new = p.pos_m.y * exp(-1.15 * dt);
+  let y_new = clamp(p.pos_m.y * exp(-1.15 * dt) + ss_g.y * 0.015 * dt, -1.6, 1.6);
 
   p.pos_m = vec4<f32>(cos(phi_new) * r_vis, y_new, sin(phi_new) * r_vis, p.pos_m.w);
   p.vel_st = vec4<f32>(-sin(phi_new) * omega_vis * r_vis, vu, cos(phi_new) * omega_vis * r_vis, u_new);
@@ -320,12 +362,17 @@ fn reduce_nebula_telemetry(@builtin(local_invocation_id) lid: vec3<u32>) {
   let tid = lid.x;
   var acc0 = vec4<f32>(0.0);
   var acc1 = vec4<f32>(0.0);
-  if (tid < params.radial_bins) {
-    let s0 = bin_summary[tid * 2u + 0u];
-    let s1 = bin_summary[tid * 2u + 1u];
+  for (var b = tid; b < params.radial_bins; b = b + 64u) {
+    let s0 = bin_summary[b * 2u + 0u];
+    let s1 = bin_summary[b * 2u + 1u];
     let m = s0.y;
-    acc0 = vec4<f32>(m, m * s0.z, m * s0.w, m * (s1.y + s1.z));
-    acc1 = vec4<f32>(select(0.0, 1.0, m > 22.0), select(0.0, 1.0, s1.w > 0.25), m * s1.x, s0.y);
+    acc0 = acc0 + vec4<f32>(m, m * s0.z, m * s0.w, m * (s1.y + s1.z));
+    acc1 = vec4<f32>(
+      acc1.x + select(0.0, 1.0, m > 22.0),
+      acc1.y + select(0.0, 1.0, s1.w > 0.25),
+      acc1.z + m * s1.x,
+      max(acc1.w, s0.y)
+    );
   }
   wg_sum[tid] = acc0;
   workgroupBarrier();
@@ -373,7 +420,7 @@ export function extractCoalescedBodiesFromAnnuli(summaryF32, {
   rMaxStableAu = 28.0,
   maxBodies = 8
 } = {}) {
-  const nBins = Math.min(NEBULAR_RADIAL_BINS, Math.floor((summaryF32?.length || 0) / 8));
+  const nBins = Math.min(256, Math.floor((summaryF32?.length || 0) / 8));
   if (nBins < 8) return { bodies: [], bins: [], beltAu: null, cometAu: null };
 
   const bins = [];
@@ -528,6 +575,7 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   rMinStableAu = 0.14,
   rMaxStableAu = 28.0,
   parcelCount = 4096,
+  radialBins = NEBULAR_RADIAL_BINS,
   enableGasDrag = true,
   seed = 20261126,
   label = 'ulg-nebular-system-coalescence'
@@ -535,7 +583,8 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createNebularSystemCoalescenceSessionWebGpu requires a live WebGPU GPUDevice');
   }
-  const nParcels = Math.max(512, Math.min(16384, Math.trunc(parcelCount)));
+  const nParcels = Math.max(512, Math.min(32768, Math.trunc(parcelCount)));
+  const nBins = Math.max(32, Math.min(128, Math.trunc(Number(radialBins) || NEBULAR_RADIAL_BINS)));
   const rMin = Math.max(0.04, Number(rMinStableAu) || 0.14);
   const rMax = Math.max(rMin * 3.5, Math.min(48.0, Number(rMaxStableAu) || 28.0));
   const mStar = Math.max(0.08, Number(starMassSolar) || 1.0);
@@ -595,10 +644,12 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
     computeBufferBinding(1, 'storage'),
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'storage'),
-    computeBufferBinding(4, 'storage')
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-nebular-sys-coalesce-${entryPoint}.v1`,
+    cacheKey: `ulg-nebular-sys-coalesce-${entryPoint}.v3-ss`,
     label: `${label}-${entryPoint}`,
     code: nebularSystemCoalescenceWgsl,
     entryPoint,
@@ -612,14 +663,33 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
 
   const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const parcelsBuf = device.createBuffer({ label: `${label}-parcels`, size: initData.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
-  const binAtomicBuf = device.createBuffer({ label: `${label}-bin-atomic`, size: NEBULAR_RADIAL_BINS * 32, usage: GPU_BUF.STORAGE });
-  const binSummaryBytes = NEBULAR_RADIAL_BINS * 32;
+  const binAtomicBuf = device.createBuffer({ label: `${label}-bin-atomic`, size: nBins * 40, usage: GPU_BUF.STORAGE });
+  const binSummaryBytes = nBins * 32;
   const binSummaryBuf = device.createBuffer({ label: `${label}-bin-summary`, size: binSummaryBytes, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const binSummaryReadBuf = device.createBuffer({ label: `${label}-bin-read`, size: binSummaryBytes, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 32, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telReadBuf = device.createBuffer({ label: `${label}-tel-read`, size: 32, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
+  const binAzimBuf = device.createBuffer({ label: `${label}-bin-azim`, size: nBins * 16, usage: GPU_BUF.STORAGE });
 
   device.queue.writeBuffer(parcelsBuf, 0, initData);
+
+  const ssGravity = createSchroederScaleAtlasGravitySolverWebGpu(device, {
+    maxCount: nParcels,
+    strideFloats: PARCEL_STRIDE_FLOATS,
+    chartLevel: 38,
+    useAdjSoftening: true,
+    qMass: 256.0,
+    qMom: 32.0,
+    rCellFactor: 0.08,
+    label: `${label}-ss-grav`
+  });
+  ssGravity.writeParams({
+    count: nParcels,
+    gravityG: 0.085 / Math.max(128.0, nParcels * Math.max(0.15, met) * 0.4),
+    softening2: 0.18,
+    boxHalf: 11.5,
+    theta2: 0.72
+  });
 
   const bg = createCachedExplicitBindGroup(device, {
     layout: stepPipe.bindGroupLayout,
@@ -629,7 +699,9 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
       { binding: 1, resource: { buffer: parcelsBuf } },
       { binding: 2, resource: { buffer: binAtomicBuf } },
       { binding: 3, resource: { buffer: binSummaryBuf } },
-      { binding: 4, resource: { buffer: telBuf } }
+      { binding: 4, resource: { buffer: telBuf } },
+      { binding: 5, resource: { buffer: binAzimBuf } },
+      { binding: 6, resource: { buffer: ssGravity.accPhiBuffer } }
     ]
   });
 
@@ -637,12 +709,13 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   let gasDragOn = Boolean(enableGasDrag);
   let disposed = false;
   let mapInFlight = false;
-  let lastSummaryF32 = new Float32Array(NEBULAR_RADIAL_BINS * 8);
+  let lastSummaryF32 = new Float32Array(nBins * 8);
   let lastCoalesced = null;
   let lastTelemetry = Object.freeze({
     schema: ULG_NEBULAR_SYSTEM_COALESCENCE_SCHEMA,
     stepIndex: 0,
     parcelCount: nParcels,
+    radialBins: nBins,
     snowLineAu,
     totalSolidMass: 0,
     meanFeFrac: 0.3,
@@ -658,7 +731,7 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
 
   function writeParams(dt) {
     const ab = new ArrayBuffer(64);
-    new Uint32Array(ab, 0, 4).set([nParcels, NEBULAR_RADIAL_BINS, stepIndex, gasDragOn ? 1 : 0]);
+    new Uint32Array(ab, 0, 4).set([nParcels, nBins, stepIndex, gasDragOn ? 1 : 0]);
     new Float32Array(ab, 16, 12).set([
       dt,
       mStar,
@@ -677,8 +750,8 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   }
 
   const wgParcels = Math.ceil(nParcels / 64);
-  const wgClear = Math.ceil((NEBULAR_RADIAL_BINS * 8) / 64);
-  const wgBins = Math.ceil(NEBULAR_RADIAL_BINS / 64);
+  const wgClear = Math.ceil((nBins * 10) / 64);
+  const wgBins = Math.ceil(nBins / 64);
 
   async function step({
     dt = 0.032,
@@ -693,8 +766,10 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
 
     const enc = device.createCommandEncoder({ label: `${label}-step-${stepIndex}` });
     const pass = enc.beginComputePass({ label: `${label}-pass` });
-    pass.setBindGroup(0, bg);
     for (let s = 0; s < nSub; s += 1) {
+      // Canonical Schroeder Simulation hierarchical 3D multipole disk self-gravity encoded inside this same pass!
+      ssGravity.encodeIntoPass(pass, { srcBuffer: parcelsBuf, count: nParcels });
+      pass.setBindGroup(0, bg);
       pass.setPipeline(clearPipe.pipeline);
       pass.dispatchWorkgroups(wgClear);
       pass.setPipeline(depositPipe.pipeline);
@@ -706,6 +781,7 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
       stepIndex += 1;
     }
     // Final deposit + finalize + telemetry so annuli match the stepped parcel positions!
+    pass.setBindGroup(0, bg);
     pass.setPipeline(clearPipe.pipeline);
     pass.dispatchWorkgroups(wgClear);
     pass.setPipeline(depositPipe.pipeline);
@@ -774,11 +850,18 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   }
 
   /**
-   * Run a fast 1-submit GPU nebular coalescence burst (32 substeps) and return the
+   * Run a GPU-safe chunked nebular coalescence burst and return the
    * coalesced bodies + composition zones ready for `synthesizeNebularPlanetarySystem`!
    */
-  async function coalesceSystemBurst({ substeps = 32, dt = 0.036 } = {}) {
-    await step({ dt, substeps, readTelemetry: true, readAnnuli: true });
+  async function coalesceSystemBurst({ substeps = 32, chunkSize = 18, dt = 0.036 } = {}) {
+    let rem = Math.max(1, Math.trunc(substeps));
+    const chunk = Math.max(4, Math.min(24, Math.trunc(chunkSize)));
+    while (rem > 0 && !disposed) {
+      const n = Math.min(chunk, rem);
+      rem -= n;
+      const isLast = rem <= 0;
+      await step({ dt, substeps: n, readTelemetry: isLast, readAnnuli: isLast });
+    }
     return lastCoalesced;
   }
 
@@ -821,7 +904,8 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   function dispose() {
     if (disposed) return;
     disposed = true;
-    for (const b of [paramsBuf, parcelsBuf, binAtomicBuf, binSummaryBuf, binSummaryReadBuf, telBuf, telReadBuf]) {
+    try { ssGravity.destroy(); } catch {}
+    for (const b of [paramsBuf, parcelsBuf, binAtomicBuf, binSummaryBuf, binSummaryReadBuf, binAzimBuf, telBuf, telReadBuf]) {
       try { b.destroy(); } catch {}
     }
   }
@@ -829,7 +913,9 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   return Object.freeze({
     schema: ULG_NEBULAR_SYSTEM_COALESCENCE_SCHEMA,
     lawAdapter: NEBULAR_SYSTEM_COALESCENCE_LAW_ADAPTER,
+    spatialAuthority: ssGravity.gravityMode,
     get parcelCount() { return nParcels; },
+    get radialBins() { return nBins; },
     get snowLineAu() { return snowLineAu; },
     get stepIndex() { return stepIndex; },
     get enableGasDrag() { return gasDragOn; },
@@ -852,6 +938,7 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
  */
 export async function runNebularSystemCoalescenceBurstWebGpu(device, starSystem, {
   parcelCount = 3072,
+  radialBins = NEBULAR_RADIAL_BINS,
   substeps = 32,
   seedOverride = null
 } = {}) {
@@ -872,6 +959,7 @@ export async function runNebularSystemCoalescenceBurstWebGpu(device, starSystem,
     rMinStableAu,
     rMaxStableAu,
     parcelCount,
+    radialBins,
     seed: ((seedOverride ?? starSystem?.seed ?? 20261126) ^ 0x4eb01a) >>> 0
   });
   try {

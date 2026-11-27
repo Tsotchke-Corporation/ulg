@@ -52,7 +52,9 @@ test('Stellar 3D GPU MLS-MPM Fusion initial parcels obey radial hydrostatic ther
     const T = Math.pow(10, data[o + 8]);
     const xH = data[o + 10];
     const xHe = data[o + 14];
-    const xZ = data[o + 15];
+    const xCno = data[o + 15];
+    const xAlphaFe = data[o + 12];
+    const xZ = xCno + xAlphaFe;
     assert.ok(Math.abs((xH + xHe + xZ) - 1.0) < 1e-5, `Mass fractions must sum to 1 (got ${xH + xHe + xZ})`);
     if (r < rStar * 0.25) { coreSumT += T; coreN += 1; }
     if (r > rStar * 0.85) { surfSumT += T; surfN += 1; }
@@ -66,13 +68,14 @@ test('Stellar 3D GPU MLS-MPM Fusion initial parcels obey radial hydrostatic ther
   assert.ok(coreMeanT > surfMeanT * 20, 'Strong radial temperature gradient required for Rayleigh-Benard convection');
 });
 
-test('Stellar MLS-MPM Fusion WGSL obeys Star Spec zero @workgroup_size(1), zero reserved meta, & has all 6 kernels', () => {
+test('Stellar MLS-MPM Fusion WGSL obeys Star Spec zero @workgroup_size(1), zero reserved meta, & uses canonical SS multipole gravity', () => {
   assert.equal(ULG_STELLAR_MLS_MPM_FUSION_SCHEMA, 'ulg.astrophysics.stellar-mls-mpm-fusion-webgpu.v1');
   assert.ok(!/@workgroup_size\s*\(\s*1\s*\)/.test(stellarMlsMpmFusionWgsl), 'Zero @workgroup_size(1) serial bottlenecks');
   assert.ok(!/\bmeta\b/.test(stellarMlsMpmFusionWgsl), 'Must never use WGSL reserved keyword meta');
-  for (const ep of ['clear_mpm_grid', 'p2g_stellar_mpm', 'resolve_radial_gravity', 'grid_eos_burn', 'grid_momentum_step', 'g2p_advect_burn']) {
+  for (const ep of ['clear_mpm_grid', 'p2g_stellar_mpm', 'grid_eos_burn', 'grid_momentum_step', 'g2p_advect_burn']) {
     assert.ok(stellarMlsMpmFusionWgsl.includes(`fn ${ep}(`), `Missing MLS-MPM kernel entryPoint ${ep}`);
   }
+  assert.ok(stellarMlsMpmFusionWgsl.includes('ss_grav_acc'), 'Stellar MLS-MPM must consume canonical Schroeder Scale-Atlas multipole gravity');
 });
 
 test('Pass 2 Deep Visual LOD & P0 Control Contracts across Nuclear, Elements, Universes, Organic & Life Labs', async () => {

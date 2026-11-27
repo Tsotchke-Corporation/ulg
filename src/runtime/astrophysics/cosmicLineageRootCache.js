@@ -225,6 +225,17 @@ export function createCosmicLineageRootCache({
     }
   }
 
+  function peek(key) {
+    if (!key || !mem.has(key)) return null;
+    const rec = mem.get(key);
+    return {
+      hit: true,
+      source: rec.source === 'peer' ? 'peer-cache-hit' : 'root-cache-hit',
+      payload: rec.payload,
+      storedAtMs: rec.storedAtMs
+    };
+  }
+
   async function get(key, { bypassCache = false } = {}) {
     if (!key || bypassCache) {
       stats.misses += 1;
@@ -374,6 +385,7 @@ export function createCosmicLineageRootCache({
   return Object.freeze({
     schema: ULG_COSMIC_LINEAGE_CACHE_SCHEMA,
     buildKey: buildCosmicLineageKey,
+    peek,
     get,
     set,
     ingestPeerEntry,

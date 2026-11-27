@@ -216,6 +216,14 @@ export function resolveStellarRegimeForStarSpec(starSpec, recommendedL3Regime = 
   if (stage === 'brown-dwarf' || massSolar < 0.08 || tempK < 2200) {
     return { stellarMode: 'fusion', stellarPreset: 'brown-dwarf', isExotic: false };
   }
+  const gen = Number(starSpec.stellarGeneration) || 0;
+  const specCodeStr = String(starSpec.spectralCode || starSpec.spectralClass || '');
+  if (gen === 1 || specCodeStr.startsWith('PopIII') || (Number.isFinite(Number(starSpec.feH)) && Number(starSpec.feH) <= -2.6)) {
+    return { stellarMode: 'fusion', stellarPreset: 'pop3-first-gen', isExotic: false };
+  }
+  if (gen === 2 || (Number.isFinite(Number(starSpec.feH)) && Number(starSpec.feH) <= -0.85)) {
+    return { stellarMode: 'fusion', stellarPreset: 'pop2-second-gen', isExotic: false };
+  }
   if (tempK >= 11000 || massSolar >= 5.5) {
     return { stellarMode: 'fusion', stellarPreset: 'blue-supergiant', isExotic: false };
   }

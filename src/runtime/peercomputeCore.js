@@ -36,7 +36,19 @@ export {
   evaluatePlacementAdmission,
   GpuResidentLaneManager,
   registerDefaultWorkerBootstrapURL,
-  getDefaultWorkerBootstrapURL
+  getDefaultWorkerBootstrapURL,
+  CAPABILITIES_SCHEMA,
+  probeCapabilities,
+  readCapabilityOverrides,
+  inferHardwareTier,
+  defaultTierBudgets,
+  sizeCountWorkload,
+  sizeGrid3dWorkload,
+  sizeGrid2dWorkload,
+  selectQualityPreset,
+  sizeWorkload,
+  RuntimeBudgetGovernor,
+  createRuntimeBudgetGovernor
 } from '../../../peercompute/peercompute/src/peercompute/core.js';
 
 export const PEERCOMPUTE_CORE_ENTRYPOINT_SCHEMA = 'peercompute.ulg.peercompute-core.v1';

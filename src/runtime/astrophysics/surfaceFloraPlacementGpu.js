@@ -230,17 +230,13 @@ fn eval_ground_h(x: f32, z: f32) -> f32 {
   let def = sample_def(x, z);
   let has_sph = (params.flags & 16u) != 0u;
   if (has_sph) {
-    let pad_a = clamp((r0 - 12.0) / 26.0, 0.0, 1.0);
-    let pad_smooth = pad_a * pad_a * (3.0 - 2.0 * pad_a);
+    // 100% Exact match with planetarySurfaceVehiclesGpu ZERO-Perlin SPH geology elevation!
     let tect = sample_tect(x, z);
     let tect0 = sample_tect(0.0, 0.0);
     let has_ocean = (params.flags & 2u) != 0u;
     let ref_val = select(tect0.x, params.arch_cdf1.z, has_ocean);
-    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 1.55);
-    let micro = f_fbm2(x * 0.018, z * 0.018, params.seed_f + 4.9) * (params.terrain_amp * 0.14)
-      + f_fbm2(x * 0.048, z * 0.048, params.seed_f + 9.2) * (params.terrain_amp * 0.045);
-    let base_origin = select(0.0, max(params.sea_level + 1.6, clamp((tect0.x - ref_val) * (params.terrain_amp * 1.55), params.sea_level + 1.6, params.terrain_amp * 0.65)), has_ocean);
-    return base_origin * (1.0 - pad_smooth) + (sph_h + micro) * (0.24 + 0.76 * pad_smooth) + def.x;
+    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 2.15);
+    return sph_h + def.x;
   }
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
   let apron = a * a * (3.0 - 2.0 * a);

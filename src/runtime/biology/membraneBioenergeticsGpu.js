@@ -79,19 +79,22 @@ export function evaluateChemiosmoticBioenergetics({
   temperatureK = 310.0,
   protonsPerAtp = 3.33,
   uncouplerLeak = 0.0, // 0..1 protonophore short-circuit (DNP-like uncoupler!)
-  atpOverAdpRatio = 5.0
+  atpOverAdpRatio = 5.0,
+  deltaGCurrencyKjMol = null // Optional organism energy currency (e.g. 16.5 kJ/mol Titan thioester vs ~50 kJ/mol Earth ATP!)
 } = {}) {
-  const T = Math.max(250, Number(temperatureK) || 310.0);
+  const T = Math.max(70, Number(temperatureK) || 310.0);
   const R = 8.31446;
   const F = 96485.33;
   const leak = Math.max(0, Math.min(1, Number(uncouplerLeak) || 0));
   const effPsi = Math.abs(Number(deltaPsiMv) || 0) * (1.0 - leak);
   const effDph = Math.abs(Number(deltaPh) || 0) * (1.0 - leak);
-  const nernstFactorMv = (2.303 * R * T / F) * 1000.0; // ~61.5 mV at 310 K
+  const nernstFactorMv = (2.303 * R * T / F) * 1000.0; // ~18.6 mV at 94 K Titan, ~61.5 mV at 310 K Earth!
   const protonMotiveForceMv = effPsi + nernstFactorMv * effDph;
   const protonDriveKjMol = protonsPerAtp * (F * protonMotiveForceMv * 1e-6);
-  // Actual cellular phosphorylation potential DeltaG_ATP ≈ 30.5 + RT ln([ATP]/([ADP][Pi])) ~ 50 kJ/mol
-  const deltaGAtpKjMol = 30.5 + (R * T * 1e-3) * Math.log(Math.max(0.01, atpOverAdpRatio) / 0.002);
+  // Actual cellular phosphorylation/thioester potential (default Earth ATP ~50 kJ/mol or organism currency!)
+  const deltaGAtpKjMol = Number.isFinite(Number(deltaGCurrencyKjMol)) && Number(deltaGCurrencyKjMol) > 1
+    ? Number(deltaGCurrencyKjMol)
+    : (30.5 + (R * T * 1e-3) * Math.log(Math.max(0.01, atpOverAdpRatio) / 0.002));
   const netThermoDriveKj = Math.max(0.0, protonDriveKjMol - deltaGAtpKjMol);
   const atpSynthesisFlux = protonMotiveForceMv > 1e-3
     ? Math.max(0.0, netThermoDriveKj * 2.4)
@@ -101,6 +104,7 @@ export function evaluateChemiosmoticBioenergetics({
   return Object.freeze({
     schema: ULG_MEMBRANE_BIOENERGETICS_SCHEMA,
     temperatureK: T,
+    nernstFactorMv,
     protonMotiveForceMv,
     protonDriveKjMol,
     deltaGAtpKjMol,
@@ -123,13 +127,17 @@ struct HhParams {
   step_index: u32,
   stim_active: u32,
   dt_ms: f32,
-  g_na: f32,         // Sodium conductance (mS/cm^2; 120 normal, 0 = TTX block -> NO action potential!)
-  g_k: f32,          // Potassium conductance (mS/cm^2; 36 normal)
+  g_na: f32,         // Depolarizing carrier conductance (mS/cm^2; 0 = channel block -> NO action potential!)
+  g_k: f32,          // Repolarizing carrier conductance (mS/cm^2)
   g_leak: f32,       // Leak conductance (0.3)
   diff_v: f32,       // Electrotonic cable diffusion D_V
   stim_amp: f32,
   stim_x: f32,
   stim_y: f32,
+  e_depol: f32,      // Nernst reversal potential of depolarizing ion (+50 mV Earth Na+, +22.6 mV Titan cryo!)
+  e_repol: f32,      // Nernst reversal potential of repolarizing ion (-77 mV Earth K+, -35.6 mV Titan!)
+  e_leak: f32,       // Leak reversal potential (-54.4 mV Earth, -22.5 mV Titan!)
+  q10_rate: f32,     // Arrhenius Q10 thermal gating rate multiplier (0.24 cryogenic Titan -> 1.0 Earth -> 1.5 hot!)
 };
 
 // vec4(V_m [mV], m, h, n) per membrane patch cell
@@ -174,17 +182,20 @@ fn step_hodgkin_huxley_membrane(@builtin(global_invocation_id) gid: vec3<u32>) {
     + mem_in[idx_clamp(ix, iy + 1)].x
     - 4.0 * V;
 
-  // Classic Hodgkin-Huxley voltage-gated channel rate equations (shifted to V_rest = -65 mV)
-  let am = 0.1 * safe_vtrap(-(V + 40.0), 10.0);
-  let bm = 4.0 * exp(-(V + 65.0) / 18.0);
-  let ah = 0.07 * exp(-(V + 65.0) / 20.0);
-  let bh = 1.0 / (exp(-(V + 35.0) / 10.0) + 1.0);
-  let an = 0.01 * safe_vtrap(-(V + 55.0), 10.0);
-  let bn = 0.125 * exp(-(V + 65.0) / 80.0);
+  // Thermodynamic Nernst-scaled & Arrhenius Q10-scaled Hodgkin-Huxley voltage-gated channel kinetics!
+  let v_span = max(25.0, params.e_depol - params.e_repol);
+  let v_norm = ((V - params.e_repol) / v_span) * 127.0 - 77.0;
+  let q10 = clamp(params.q10_rate, 0.15, 2.5);
+  let am = q10 * 0.1 * safe_vtrap(-(v_norm + 40.0), 10.0);
+  let bm = q10 * 4.0 * exp(-(v_norm + 65.0) / 18.0);
+  let ah = q10 * 0.07 * exp(-(v_norm + 65.0) / 20.0);
+  let bh = q10 * (1.0 / (exp(-(v_norm + 35.0) / 10.0) + 1.0));
+  let an = q10 * 0.01 * safe_vtrap(-(v_norm + 55.0), 10.0);
+  let bn = q10 * 0.125 * exp(-(v_norm + 65.0) / 80.0);
 
-  let e_na = 50.0;
-  let e_k = -77.0;
-  let e_l = -54.4;
+  let e_na = params.e_depol;
+  let e_k = params.e_repol;
+  let e_l = params.e_leak;
   let i_na = params.g_na * (m * m * m) * h * (V - e_na);
   let i_k  = params.g_k * (n * n * n * n) * (V - e_k);
   let i_l  = params.g_leak * (V - e_l);
@@ -258,6 +269,13 @@ export function createExcitableMembraneSessionWebGpu(device, {
   deltaPsiMv = 150.0,
   deltaPh = 1.0,
   uncouplerLeak = 0.0,
+  temperatureK = 310.0,
+  deltaGCurrencyKjMol = null,
+  eDepolMv = 50.0,
+  eRepolMv = -77.0,
+  eLeakMv = -54.4,
+  vRestMv = -65.0,
+  q10Rate = 1.0,
   initSpiral = true,
   label = 'ulg-bio-excitable'
 } = {}) {
@@ -266,6 +284,13 @@ export function createExcitableMembraneSessionWebGpu(device, {
   }
   const w = Math.max(32, Math.min(256, Math.trunc(width)));
   const h = Math.max(32, Math.min(256, Math.trunc(height)));
+  const eDep = Number.isFinite(Number(eDepolMv)) ? Number(eDepolMv) : 50.0;
+  const eRep = Number.isFinite(Number(eRepolMv)) ? Number(eRepolMv) : -77.0;
+  const eLk = Number.isFinite(Number(eLeakMv)) ? Number(eLeakMv) : -54.4;
+  const vRest = Number.isFinite(Number(vRestMv)) ? Number(vRestMv) : -65.0;
+  const q10 = Math.max(0.15, Math.min(2.5, Number(q10Rate) || 1.0));
+  const vPeakInit = vRest + (eDep - vRest) * 0.76;
+  const vRefrInit = eRep + (vRest - eRep) * 0.38;
 
   const init = new Float32Array(w * h * 4);
   for (let y = 0; y < h; y += 1) {
@@ -273,13 +298,11 @@ export function createExcitableMembraneSessionWebGpu(device, {
       const o = (y * w + x) * 4;
       const fx = x / w;
       const fy = y / h;
-      // Resting Hodgkin-Huxley equilibrium (-65 mV, m=0.053, h=0.596, n=0.318)
-      let V = -65.0; let m = 0.053; let hv = 0.596; let nv = 0.318;
+      let V = vRest; let m = 0.053; let hv = 0.596; let nv = 0.318;
       if (initSpiral && fx > 0.44 && fx < 0.52 && fy > 0.45) {
-        // Depolarized half-wave next to a refractory wake -> curls into a live excitable spiral wave!
-        V = 22.0; m = 0.92; hv = 0.45; nv = 0.35;
+        V = vPeakInit; m = 0.92; hv = 0.45; nv = 0.35;
       } else if (initSpiral && fx >= 0.52 && fx < 0.64 && fy > 0.45) {
-        V = -72.0; m = 0.02; hv = 0.08; nv = 0.72;
+        V = vRefrInit; m = 0.02; hv = 0.08; nv = 0.72;
       }
       init[o + 0] = V; init[o + 1] = m; init[o + 2] = hv; init[o + 3] = nv;
     }
@@ -292,21 +315,21 @@ export function createExcitableMembraneSessionWebGpu(device, {
     computeBufferBinding(3, 'storage')
   ];
   const stepPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-bio-hh-step.v1',
+    cacheKey: 'ulg-bio-hh-step.v2-nernst',
     label: `${label}-step`,
     code: excitableMembraneWgsl,
     entryPoint: 'step_hodgkin_huxley_membrane',
     bindings
   });
   const telPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-bio-hh-tel.v1',
+    cacheKey: 'ulg-bio-hh-tel.v2-nernst',
     label: `${label}-tel`,
     code: excitableMembraneWgsl,
     entryPoint: 'reduce_membrane_telemetry',
     bindings
   });
 
-  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 48, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const fieldA = device.createBuffer({ label: `${label}-fa`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC | GPU_BUF.COPY_DST });
   const fieldB = device.createBuffer({ label: `${label}-fb`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC | GPU_BUF.COPY_DST });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
@@ -386,9 +409,13 @@ export function createExcitableMembraneSessionWebGpu(device, {
     const stimOn = stimPulsesLeft > 0 ? 1 : 0;
     if (stimPulsesLeft > 0) stimPulsesLeft -= 1;
 
-    const ab = new ArrayBuffer(48);
+    const ab = new ArrayBuffer(64);
     new Uint32Array(ab, 0, 4).set([w, h, stepIndex + sub, stimOn]);
-    new Float32Array(ab, 16, 8).set([dtSafe, curGNa, curGK, 0.3, 1.25, 38.0, stimX, stimY]);
+    new Float32Array(ab, 16, 12).set([
+      dtSafe, curGNa, curGK, 0.3,
+      1.25 * Math.sqrt(q10), 38.0 * Math.max(0.45, (eDep - eRep) / 127.0), stimX, stimY,
+      eDep, eRep, eLk, q10
+    ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
     const enc = device.createCommandEncoder({ label: `${label}-enc-${stepIndex}` });
@@ -443,7 +470,13 @@ export function createExcitableMembraneSessionWebGpu(device, {
       excitedFraction: excF,
       probeVoltageMv: probeV,
       voltageTraceMv: [...voltageTraceMv],
-      chemiosmosis: evaluateChemiosmoticBioenergetics({ deltaPsiMv: curDeltaPsi, deltaPh: curDeltaPh, uncouplerLeak: curLeak }),
+      chemiosmosis: evaluateChemiosmoticBioenergetics({
+        deltaPsiMv: curDeltaPsi,
+        deltaPh: curDeltaPh,
+        temperatureK,
+        deltaGCurrencyKjMol,
+        uncouplerLeak: curLeak
+      }),
       accuracyTier: ULG_ACCURACY_TIERS.TIER_1_QUANTITATIVE,
       scientificValidation: false
     });

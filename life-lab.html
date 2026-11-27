@@ -423,6 +423,16 @@
           </div>
         </div>
 
+        <div class="acc-group" data-group="molecules">
+          <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>0B. Native Environmental Chemistry</span><span class="acc-sub-org" id="sub-mol-org">All-atom GPU MD · QEq + Hückel π-MO</span></span><span class="acc-header-right"><span class="acc-count">4</span><span class="acc-chev">▸</span></span></button>
+          <div class="acc-body">
+            <button class="mode-btn" data-mode="bio-mol-membrane" type="button"><span>Native Membrane Amphiphile</span><small>All-Atom</small></button>
+            <button class="mode-btn" data-mode="bio-mol-genetic" type="button"><span>Native XNA Genetic Base-Pair</span><small>H-Bond</small></button>
+            <button class="mode-btn" data-mode="bio-mol-energy" type="button"><span>Native Redox / Energy Cofactor</span><small>QEq MD</small></button>
+            <button class="mode-btn" data-mode="bio-mol-pigment" type="button"><span>Native Starlight Photopigment</span><small>π-MO</small></button>
+          </div>
+        </div>
+
         <div class="acc-group" data-group="membranes">
           <button class="acc-header" type="button" aria-expanded="false"><span class="acc-title-wrap"><span>1. Organism Cell Membrane</span><span class="acc-sub-org" id="sub-mem-org">Derived from active organism</span></span><span class="acc-header-right"><span class="acc-count">3</span><span class="acc-chev">▸</span></span></button>
           <div class="acc-body">
@@ -495,12 +505,31 @@
           <div class="ctrl-row" style="margin-top:2px;">
             <div class="ctrl-head"><span>Zoom Into This Organism's Physics</span><b id="val-viv-organ-src">Whole Body</b></div>
             <div class="btn-row" id="viv-scale-zoom-row">
+              <button class="sm-btn gold" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="molecule" type="button">⚛ Chemistry</button>
               <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="membrane" type="button">🧫 Membrane</button>
               <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="fold" type="button">🧬 Protein</button>
               <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="evo" type="button">🧪 XNA</button>
               <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="hh" type="button">⚡ Nerves</button>
               <button class="sm-btn" style="min-width:0;padding:3px 5px;font-size:9.5px;" data-org-zoom="morph" type="button">🌀 Embryo</button>
             </div>
+          </div>
+        </div>
+
+        <div id="ctrl-molecule" class="card" style="display:none;">
+          <h3><span>Environmental Molecular MD</span><b id="val-mol-formula">—</b></h3>
+          <div id="mol-synthesis-reason" style="font-size:9.5px;color:#d1fae5;background:rgba(4,12,20,0.72);border:1px solid rgba(52,211,153,0.28);border-radius:6px;padding:6px 7px;line-height:1.38;">Synthesized bottom-up from planetary temperature, dielectric ε_r, elemental C/O &amp; host starlight.</div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Habitat Temperature T</span><b id="val-mol-temp">288 K</b></div>
+            <input id="sl-mol-temp" type="range" min="70" max="650" step="5" value="288" />
+          </div>
+          <div class="ctrl-row">
+            <div class="ctrl-head"><span>Solvent Dielectric ε_r</span><b id="val-mol-eps">78.4</b></div>
+            <input id="sl-mol-eps" type="range" min="1.2" max="105" step="0.5" value="78.4" />
+          </div>
+          <div class="btn-row">
+            <button class="sm-btn" id="btn-mol-esp" type="button">⚡ QEq ESP</button>
+            <button class="sm-btn active" id="btn-mol-pi" type="button">⚛ π-MO Cloud</button>
+            <button class="sm-btn" id="btn-mol-rep" type="button">Ball &amp; Stick</button>
           </div>
         </div>
 

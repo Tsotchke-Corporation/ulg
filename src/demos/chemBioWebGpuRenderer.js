@@ -754,11 +754,39 @@ struct VsOut {
 @vertex
 fn vs_spec_mesh(in: VsIn) -> VsOut {
   var out: VsOut;
-  out.pos = u.view_proj * vec4<f32>(in.pos_part.xyz, 1.0);
-  out.world_pos = in.pos_part.xyz;
-  out.norm = in.norm_zone.xyz;
+  var pos = in.pos_part.xyz;
+  var nrm = in.norm_zone.xyz;
+  let zone = in.norm_zone.w;
+  // Live GPU biomechanical vertex skinning for GPU-baked SDF living specimens (zone >= 1.5 && zone < 5.5):
+  // Static tank floor/substrate/frame (zone < 1.5) and lab beams (zone > 5.5) remain strictly rigid!
+  if (zone >= 1.5 && zone < 5.5) {
+    let t = u.cam_up_time.w;
+    let bone = in.pos_part.w;
+    let arousal = clamp(u.org_tint_a.w, 0.0, 1.5);
+    let gait_hz = select(1.15, clamp(u.org_tint_b.w, 0.35, 3.6), u.org_tint_b.w > 0.10);
+    // Keep grounded feet/roots near tank floor (y = -1.86) firmly anchored while upper body & appendages articulate!
+    let h_lift = clamp((pos.y + 1.86) * 0.58, 0.0, 1.35);
+    let breath_ph = t * (1.7 + arousal * 1.45);
+    let breath = sin(breath_ph) * (0.022 + arousal * 0.016) * h_lift;
+    let lat_n = normalize(vec3<f32>(nrm.x, 0.0, nrm.z) + vec3<f32>(1.0e-4, 0.0, 0.0));
+    pos = pos + lat_n * breath;
+    pos.y = pos.y + cos(breath_ph) * (0.018 + arousal * 0.014) * h_lift;
+
+    let wave_ph = t * gait_hz * 3.14159265 - pos.z * 1.55 + bone * 0.75;
+    let is_appendage = bone >= 1.5;
+    let sway_amp = select(0.036, 0.088, is_appendage) * (0.75 + 0.45 * arousal) * h_lift;
+    let dx = sin(wave_ph) * sway_amp;
+    let dy = cos(wave_ph * 1.0 + bone * 0.45) * select(0.016, 0.052, is_appendage) * (0.75 + 0.45 * arousal) * h_lift;
+    let dz = select(0.0, sin(wave_ph + 1.57) * 0.042 * h_lift, is_appendage);
+    pos = pos + vec3<f32>(dx, dy, dz);
+    let twist = cos(wave_ph) * sway_amp * 0.85;
+    nrm = normalize(nrm + vec3<f32>(twist, 0.0, -twist * 0.5));
+  }
+  out.pos = u.view_proj * vec4<f32>(pos, 1.0);
+  out.world_pos = pos;
+  out.norm = nrm;
   out.col_emiss = in.col_emiss;
-  out.zone = in.norm_zone.w;
+  out.zone = zone;
   return out;
 }
 

@@ -700,7 +700,7 @@ function selectBiomineralSkeleton(solvent, gravityMS2, bodyPlan, rand) {
   return rand() < 0.55 ? 'Hydroxyapatite Calcified Endoskeleton' : 'Fibrous Cartilage-Silica Endoskeleton';
 }
 
-function mutateFasta(baseSeq, seed, isFauna, isFungi) {
+export function mutateFasta(baseSeq, seed, isFauna, isFungi) {
   const chars = String(baseSeq || 'HPPHH+PHHPPHH-PPHHPPH+PPH-PHHPPH').split('');
   const alpha = isFungi ? ['H', 'P', '+', '-', 'H', '-'] : (isFauna ? ['H', 'P', '+', '-', 'H', 'P'] : ['H', 'H', 'P', 'P', '+', '-']);
   const rand = mulberry32(seed);
@@ -720,7 +720,7 @@ function makeSpeciesName(solvent, bodyPlan, rand) {
   return `${genus} ${epithet}`;
 }
 
-function buildAnatomicalParts(kingdom, bodyPlan, traits, skeleton, sensory, photo, redox) {
+export function buildAnatomicalParts(kingdom, bodyPlan, traits, skeleton, sensory, photo, redox) {
   if (kingdom === 'flora') {
     return Object.freeze([
       Object.freeze({

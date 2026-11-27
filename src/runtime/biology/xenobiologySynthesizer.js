@@ -12,6 +12,10 @@ import {
   solvePhotobiologySpectrum,
   synthesizeWorldEcosystem
 } from './xenobiologyEcologyEngine.js';
+import {
+  runPlanetaryCladogenesisWebGpu,
+  synthesizeEmergentPlanetaryBiosphere
+} from './evolutionaryCladogenesisGpu.js';
 import { synthesizeOrganismBiochemistry } from './organismBiochemistryGenerator.js';
 import {
   encodeDevelopmentalGenomeCompact,
@@ -55,9 +59,10 @@ export function deriveXenobiologyProfile({
   uvFluxNorm = 1.0,
   cToO = 0.55,
   civTechK: civOverride = undefined,
-  seed = 20261125
+  seed = 20261125,
+  cladogenesisOverride = null
 } = {}) {
-  const eco = synthesizeWorldEcosystem({
+  const planetInputs = {
     worldName,
     tempK,
     pressurePa,
@@ -71,6 +76,27 @@ export function deriveXenobiologyProfile({
     uvFluxNorm,
     cToO,
     seed
+  };
+  const ecoBase = synthesizeWorldEcosystem(planetInputs);
+  // Stage 1–2 U12 Dogfooding: evolve per-planet Tree of Life via Planetary Niche Atlas +
+  // Lotka-Volterra / Lindeman cladogenesis (ZERO legacy 17-menu template species!).
+  const clado = cladogenesisOverride || synthesizeEmergentPlanetaryBiosphere(planetInputs, { targetSpeciesCount: 14 });
+  const evolvedSpecies = (clado && Array.isArray(clado.species) && clado.species.length > 0)
+    ? clado.species
+    : ecoBase.species;
+  const eco = Object.freeze({
+    ...ecoBase,
+    backend: clado?.backend || 'deterministic-cladogenesis',
+    atlas: clado?.atlas || null,
+    trophicBiomass: clado?.trophicBiomass || null,
+    species: evolvedSpecies,
+    trophicSummary: Object.freeze({
+      producers: evolvedSpecies.filter((s) => s.kingdom === 'flora').length,
+      decomposers: evolvedSpecies.filter((s) => s.kingdom === 'fungi').length,
+      grazers: evolvedSpecies.filter((s) => s.kingdom === 'fauna' && !String(s.trophicGuild || '').includes('predator')).length,
+      predators: evolvedSpecies.filter((s) => String(s.trophicGuild || '').includes('predator')).length,
+      aerialOrAquatic: evolvedSpecies.filter((s) => s.medium === 'aerial' || s.medium === 'buoyant' || s.medium === 'aquatic').length
+    })
   });
   const solv = eco.solventInfo;
   const photo = eco.photobiology;
@@ -148,7 +174,15 @@ export function deriveXenobiologyProfile({
     photobiology: photo,
     redox,
     ecosystem: eco,
+    atlas: eco.atlas,
+    cladogenesisBackend: eco.backend,
+    trophicBiomass: eco.trophicBiomass,
     species: eco.species,
+    tempK: Math.round(Number(tempK) || 288),
+    volatileFrac: Number(volatileFrac) || 0.04,
+    isCryoMoon: Boolean(isCryoMoon),
+    isMagmaOcean: Boolean(isMagmaOcean),
+    cToO: Number(cToO) || 0.55,
     stellarTeffK: Math.round(stellarTeffK),
     uvFluxNorm: Number(uv.toFixed(2)),
     gravityMS2: Number(g.toFixed(2)),
@@ -171,6 +205,18 @@ export function deriveXenobiologyProfile({
       morphV0: v0Propel
     })
   });
+}
+
+/**
+ * Full WebGPU-Native Per-Planet Xenobiology Profile (runs Stage 2 200-epoch Lotka-Volterra
+ * Lindeman cladogenesis directly on WebGPU in < 10 ms!).
+ */
+export async function evolveXenobiologyProfileWebGpu(device, opts = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    return deriveXenobiologyProfile(opts);
+  }
+  const clado = await runPlanetaryCladogenesisWebGpu(device, opts, { epochs: 200, targetSpeciesCount: 14 });
+  return deriveXenobiologyProfile({ ...opts, cladogenesisOverride: clado });
 }
 
 export const XENOBIOLOGY_PLANET_PRESETS = Object.freeze([

@@ -40,6 +40,7 @@ import {
   XENOBIOLOGY_PLANET_PRESETS,
   deriveOrganismTissueLabParameters,
   deriveXenobiologyProfile,
+  evolveXenobiologyProfileWebGpu,
   parseXenobiologyFromSearch
 } from '../runtime/biology/xenobiologySynthesizer.js';
 import { createVivariumOrganismController } from '../runtime/biology/xenobiologyAnatomyMesh.js';
@@ -1176,6 +1177,13 @@ export async function mountLifeLabDemo() {
         timeSec
       });
     } else if (currentLayer === 'vivarium') {
+      const vivTel = activeSession?.getTelemetry?.();
+      const vivArousal = Number(vivTel?.arousal ?? 0.2);
+      const vivGaitHz = Number(
+        activeVivariumSpecimen?.developmentalGenome?.gaitFreqHz
+        ?? activeVivariumSpecimen?.traits?.strouhalHz
+        ?? 1.25
+      );
       renderer.renderFrame({
         specimenSolidBuffer: vivSolidBuf,
         specimenSolidVertCount: vivSolidVertCount,
@@ -1186,8 +1194,8 @@ export async function mountLifeLabDemo() {
         bioLinkMode: 0,
         bioLinkCount: 0,
         sphereScale: 0.72,
-        orgTintA: [pRgb[0], pRgb[1], pRgb[2], 0.0],
-        orgTintB: [sRgb[0], sRgb[1], sRgb[2], 0.0],
+        orgTintA: [pRgb[0], pRgb[1], pRgb[2], vivArousal],
+        orgTintB: [sRgb[0], sRgb[1], sRgb[2], vivGaitHz],
         timeSec
       });
     } else if (currentLayer === 'membrane') {
@@ -1920,8 +1928,39 @@ export async function mountLifeLabDemo() {
   el('mobile-dock-close')?.addEventListener('click', closeMobileDrawers);
 
   let activeXenoProfile = null;
-  async function applyXenobiologyProfile(profile, { targetMode = null } = {}) {
-    if (!profile) return null;
+  const webgpuCladoProfileCache = new Map();
+  async function applyXenobiologyProfile(profileIn, { targetMode = null } = {}) {
+    if (!profileIn) return null;
+    let profile = profileIn;
+    // Live Stage 2 WebGPU Cladogenesis: evolve each world's Tree of Life on WebGPU in < 10 ms!
+    if (device && !profile.abductedSpecimen && profile.cladogenesisBackend !== 'webgpu' && profile.solvent !== 'none') {
+      const cacheKey = `${profile.worldName}:${profile.seed}:${profile.tempK}:${profile.pressurePa}:${profile.gravityMS2}:${profile.solvent}`;
+      if (webgpuCladoProfileCache.has(cacheKey)) {
+        profile = webgpuCladoProfileCache.get(cacheKey);
+      } else {
+        try {
+          const gpuProf = await evolveXenobiologyProfileWebGpu(device, {
+            worldName: profile.worldName,
+            tempK: profile.tempK ?? profile.labParams?.memTempK ?? 288,
+            pressurePa: profile.pressurePa ?? 101325,
+            gravityMS2: profile.gravityMS2 ?? 9.81,
+            rhoAtmKgM3: profile.rhoAtmKgM3 ?? 1.22,
+            volatileFrac: profile.volatileFrac ?? 0.04,
+            hasSolidCrust: profile.hasSolidCrust !== false,
+            isCryoMoon: Boolean(profile.isCryoMoon),
+            isMagmaOcean: Boolean(profile.isMagmaOcean),
+            stellarTeffK: profile.stellarTeffK ?? 5778,
+            uvFluxNorm: profile.uvFluxNorm ?? 1.0,
+            cToO: profile.cToO ?? 0.55,
+            seed: profile.seed ?? 20261125
+          });
+          if (gpuProf && gpuProf.species?.length > 0) {
+            webgpuCladoProfileCache.set(cacheKey, gpuProf);
+            profile = gpuProf;
+          }
+        } catch {}
+      }
+    }
     activeXenoProfile = profile;
     const lp = profile.labParams || profile.lifeLabParams || {};
     if (Number.isFinite(lp.memTempK)) { params.memTempK = lp.memTempK; if (el('sl-mem-temp')) { el('sl-mem-temp').value = String(params.memTempK); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; } }

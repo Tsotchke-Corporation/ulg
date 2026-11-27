@@ -106,7 +106,7 @@ struct FloraParams {
   grid_side: u32,
   flags: u32,            // bit0=biosphereActive, bit1=hasLiquidOcean, bit2=hasCiv, bit3=isExoticSolvent
   tect_n: u32,
-  pad0: u32,
+  baked_flora_count: u32,
   center_x: f32,
   center_z: f32,
   spacing_m: f32,
@@ -352,7 +352,9 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
       instances[idx] = inst;
       return;
     }
-    // Select among 6 physically-weighted flora architectures from this world's clade distribution!
+    // Select among physically-weighted flora architectures from this world's clade distribution,
+    // wrapped modulo params.baked_flora_count so 0% of trees are ever culled when a planet
+    // evolves fewer than 6 unique flora/fungi clades!
     if (snow_w > 0.35 && params.arch_cdf0.x > 0.08) {
       kind = 0.0; // Alpine spire conifers hug snowy ridges
     } else if (r_sp < params.arch_cdf0.x) {
@@ -368,6 +370,8 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
       kind = 5.0;
     }
+    let max_k = max(1u, min(6u, params.baked_flora_count));
+    kind = f32(u32(round(kind)) % max_k);
 
     scale_h = (5.4 + r_sz * 9.8) * clamp(params.buckling_scale, 0.52, 2.5);
     rad_scale = select(0.95 + r_sz * 0.42, 0.74 + r_sz * 0.28, kind < 0.5 || (kind > 2.5 && kind < 3.5));
@@ -567,7 +571,9 @@ export function createSurfaceFloraPlacementGpu(device, {
   });
   device.queue.writeBuffer(templateVertBuf, 0, templateFloats);
 
-  function replaceTemplateMesh(nextFloats) {
+  let bakedFloraCount = 6;
+
+  function replaceTemplateMesh(nextFloats, speciesCount = 6) {
     if (disposed || !(nextFloats instanceof Float32Array) || nextFloats.length < 24) return false;
     const nextCount = Math.floor(nextFloats.length / 8);
     if (nextFloats.byteLength > templateVertBuf.size) {
@@ -582,6 +588,8 @@ export function createSurfaceFloraPlacementGpu(device, {
     device.queue.writeBuffer(templateVertBuf, 0, nextFloats);
     templateFloats = nextFloats;
     templateVertCount = nextCount;
+    bakedFloraCount = Math.max(1, Math.min(6, Math.trunc(Number(speciesCount) || 6)));
+    lastSnapKey = '';
     return true;
   }
 
@@ -597,7 +605,7 @@ export function createSurfaceFloraPlacementGpu(device, {
     computeBufferBinding(3, 'storage')
   ];
   const placePipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-surface-flora-placement.v2-7morphs',
+    cacheKey: 'ulg-surface-flora-placement.v3-baked-wrap',
     label: `${label}-place`,
     code: FLORA_PLACEMENT_WGSL,
     entryPoint: 'place_surface_flora',
@@ -656,7 +664,7 @@ export function createSurfaceFloraPlacementGpu(device, {
     const spacingM = 26.0;
     const snapX = Math.floor(centerX / spacingM);
     const snapZ = Math.floor(centerZ / spacingM);
-    const snapKey = `${snapX}:${snapZ}:${Math.round(snowlineM)}:${Math.round(autumnShift * 20)}`;
+    const snapKey = `${snapX}:${snapZ}:${Math.round(snowlineM)}:${Math.round(autumnShift * 20)}:${bakedFloraCount}`;
     if (!force && snapKey === lastSnapKey) {
       activeCount = FLORA_MAX_INSTANCES;
       return false;
@@ -685,7 +693,7 @@ export function createSurfaceFloraPlacementGpu(device, {
     u32[0] = FLORA_GRID_SIDE;
     u32[1] = flags;
     u32[2] = tectN;
-    u32[3] = 0;
+    u32[3] = bakedFloraCount;
     f32[4] = centerX;
     f32[5] = centerZ;
     f32[6] = spacingM;

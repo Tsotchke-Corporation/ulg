@@ -21,6 +21,10 @@ import {
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 import { buildPlanetaryNicheAtlas } from './planetaryNicheAtlas.js';
 import {
+  buildAnatomicalParts,
+  mutateFasta
+} from './xenobiologyEcologyEngine.js';
+import {
   buildDevelopmentalGenome,
   encodeDevelopmentalGenomeCompact,
   decodeDevelopmentalGenomeCompact
@@ -438,6 +442,32 @@ function selectWinningClades(atlas, evolvedF32, lineageCount = 64, targetSpecies
 
     // Parent clade pointer (forms true phylogenetic Tree of Life per planet!)
     const parentCladeId = wIdx === 0 ? 'LUCA' : (species[Math.max(0, Math.floor((wIdx - 1) * 0.45))]?.id || 'LUCA');
+    const skeleton = tensor.mineralogy.siFrac > 0.48
+      ? 'Opaline Silicate Lattice'
+      : (tensor.mineralogy.feFrac > 0.34 ? 'Iron-Sulfide / Magnetite Biomineral' : (genome.carapaceHardness > 0.55 ? 'Chitin-Mineral Exoskeleton' : 'Articulated Calcified Endoskeleton'));
+    const sensoryOrgans = Object.freeze(kingdom === 'fauna'
+      ? [niche.lightFluxNorm < 0.3 ? 'Infrared / Acoustic Receptors' : `${genome.receptorCount}-Aperture Photoreceptors`, 'Mechanosensory Array']
+      : ['Photoreceptor / Turgor Mechanosensor']);
+    const traits = Object.freeze({
+      limbCount,
+      symmetry: genome.symmetryOrder === 2 ? 'bilateral' : `${genome.symmetryOrder}-radial`,
+      symmetryOrder: genome.symmetryOrder,
+      scaleBase: genome.sizeScale,
+      bodyMassKg,
+      kleiberWatts,
+      strouhalHz: genome.gaitFreqHz,
+      hasSail: genome.dorsalSailHeight > 0.14,
+      hasHorns: genome.crestOrHornLen > 0.1,
+      hasTendrils: genome.symmetryOrder >= 3 || genome.hasGasBladder,
+      hasWings: genome.wingMembraneSpan > 0.52 && genome.medium === 'aerial',
+      hasFins: genome.medium === 'aquatic',
+      hasGasSac: genome.hasGasBladder,
+      hasCap: kingdom === 'fungi',
+      tOptK: Math.round(niche.tempK),
+      tDenatureK: Math.round(solv.tDenatureK)
+    });
+    const fasta = mutateFasta(solv.sequence, spSeed, kingdom === 'fauna', kingdom === 'fungi');
+    const anatomicalParts = buildAnatomicalParts(kingdom, legacyPlan, traits, skeleton, sensoryOrgans, photo, redox);
 
     species.push(Object.freeze({
       id: `evo-${kingdom}-${wIdx}-${(spSeed & 0xffff).toString(16)}`,
@@ -453,40 +483,20 @@ function selectWinningClades(atlas, evolvedF32, lineageCount = 64, targetSpecies
       speciesName,
       morphClass: genome.morphDescriptor,
       developmentalGenome: genome,
-      skeleton: tensor.mineralogy.siFrac > 0.48
-        ? 'Opaline Silicate Lattice'
-        : (tensor.mineralogy.feFrac > 0.34 ? 'Iron-Sulfide / Magnetite Biomineral' : (genome.carapaceHardness > 0.55 ? 'Chitin-Mineral Exoskeleton' : 'Articulated Calcified Endoskeleton')),
-      sensoryOrgans: Object.freeze(kingdom === 'fauna'
-        ? [niche.lightFluxNorm < 0.3 ? 'Infrared / Acoustic Receptors' : `${genome.receptorCount}-Aperture Photoreceptors`, 'Mechanosensory Array']
-        : ['Photoreceptor / Turgor Mechanosensor']),
+      skeleton,
+      sensoryOrgans,
       primaryRgb: genome.colors.primaryRgb,
       secondaryRgb: genome.colors.secondaryRgb,
       accentRgb: genome.colors.accentRgb,
       biolumRgb: genome.colors.biolumRgb,
       biolumIntensity: genome.colors.biolumIntensity,
-      traits: Object.freeze({
-        limbCount,
-        symmetry: genome.symmetryOrder === 2 ? 'bilateral' : `${genome.symmetryOrder}-radial`,
-        symmetryOrder: genome.symmetryOrder,
-        scaleBase: genome.sizeScale,
-        bodyMassKg,
-        kleiberWatts,
-        strouhalHz: genome.gaitFreqHz,
-        hasSail: genome.dorsalSailHeight > 0.14,
-        hasHorns: genome.crestOrHornLen > 0.1,
-        hasTendrils: genome.symmetryOrder >= 3 || genome.hasGasBladder,
-        hasWings: genome.wingMembraneSpan > 0.52 && genome.medium === 'aerial',
-        hasFins: genome.medium === 'aquatic',
-        hasGasSac: genome.hasGasBladder,
-        hasCap: kingdom === 'fungi',
-        tOptK: Math.round(niche.tempK),
-        tDenatureK: Math.round(solv.tDenatureK)
-      }),
+      traits,
       metabolicPathway: redox.metabolicPathway,
       deltaGKjMol: redox.deltaGKjMol,
       xnaBackbone: solv.xnaBackbone,
       xnaAlphabetSize: solv.xnaAlphabetSize,
-      fasta: solv.sequence
+      fasta,
+      anatomicalParts
     }));
   }
 

@@ -270,3 +270,31 @@ test('Phase B6: Canonical Law Adapter descriptors exported cleanly by xenobiolog
   const actSterile = evaluateXenobiologyEcologyActivation({ tempK: 1500, pressurePa: 0, isMagmaOcean: true });
   assert.equal(actSterile.active, false);
 });
+
+test('Wave D2 dogfooding invariants: live Stage 1-2 cladogenesis, 0% flora culling, live GPU Stage 5 consumer & GPU SDF skinning', async () => {
+  const fs = await import('node:fs/promises');
+  // 1. Live Stage 1-2 cladogenesis wired directly into deriveXenobiologyProfile (zero legacy 17-menu fallback!)
+  const earth = deriveXenobiologyProfile({
+    worldName: 'Earth', tempK: 288, pressurePa: 101325, gravityMS2: 9.81, rhoAtmKgM3: 1.22, seed: 20261127
+  });
+  assert.ok(earth.atlas && earth.atlas.niches.length >= 4, 'deriveXenobiologyProfile must expose Stage 1 planetaryNicheAtlas');
+  assert.ok(earth.species.length >= 12, `Expected >= 12 Stage 2 evolved clades (got ${earth.species.length})`);
+  for (const sp of earth.species) {
+    assert.ok(sp.parentCladeId, `Clade ${sp.speciesName} must carry phylogenetic parentCladeId`);
+    assert.ok(sp.nicheId, `Clade ${sp.speciesName} must carry Stage 1 nicheId`);
+    assert.ok(sp.developmentalGenome, `Clade ${sp.speciesName} must carry Stage 3 continuous developmentalGenome`);
+    assert.ok(Array.isArray(sp.anatomicalParts) && sp.anatomicalParts.length >= 3, `Clade ${sp.speciesName} must carry >= 3 anatomicalParts`);
+  }
+
+  // 2. Zero flora culling modulo wrap + live GPU Stage 5 agent consumer + GPU SDF hero fauna + GPU Vivarium skinning
+  const floraSrc = await fs.readFile(new URL('../src/runtime/astrophysics/surfaceFloraPlacementGpu.js', import.meta.url), 'utf8');
+  const surfSrc = await fs.readFile(new URL('../src/runtime/astrophysics/planetarySurfaceVehiclesGpu.js', import.meta.url), 'utf8');
+  const bioRenSrc = await fs.readFile(new URL('../src/demos/chemBioWebGpuRenderer.js', import.meta.url), 'utf8');
+
+  assert.match(floraSrc, /baked_flora_count:\s*u32/, 'FloraParams must upload baked_flora_count');
+  assert.match(floraSrc, /kind\s*=\s*f32\(u32\(round\(kind\)\)\s*%\s*max_k\)/, 'FLORA_PLACEMENT_WGSL must wrap kind modulo baked_flora_count');
+  assert.match(surfSrc, /surfaceEcoGpu\.getLatestAgentsF32\(\)/, 'Planetary surface session must consume live Stage 5 GPU agent state');
+  assert.match(surfSrc, /surfaceEcoGpu\.pollReadback\(\)/, 'Planetary surface session must run non-blocking GPU agent readback');
+  assert.match(surfSrc, /appendBakedOrganismMesh\(/, 'Landed hero fauna must render GPU-baked SDF Surface-Nets meshes');
+  assert.match(bioRenSrc, /zone\s*>=\s*1\.5\s*&&\s*zone\s*<\s*5\.5/, 'Bio-Lab vs_spec_mesh must apply GPU biomechanical vertex skinning to living SDF organisms');
+});

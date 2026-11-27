@@ -77,7 +77,11 @@ import {
   synthesizeAbductedSpecimenRecord
 } from '../biology/xenobiologySynthesizer.js';
 import { appendProceduralOrganismGeometry } from '../biology/xenobiologyAnatomyMesh.js';
-import { bakePlanetaryFloraAtlasWebGpu } from '../biology/organismSdfMorphogenesisGpu.js';
+import {
+  bakeOrganismMeshWebGpu,
+  bakePlanetaryFloraAtlasWebGpu
+} from '../biology/organismSdfMorphogenesisGpu.js';
+import { runPlanetaryCladogenesisWebGpu } from '../biology/evolutionaryCladogenesisGpu.js';
 import { createSurfaceEcosystemGpu } from '../biology/surfaceEcosystemGpu.js';
 
 export const ULG_PLANETARY_SURFACE_SCHEMA = 'ulg.astrophysics.planetary-surface-vehicles-webgpu.v1';
@@ -1855,14 +1859,65 @@ function buildRoverAndDroneMeshFloats(rover, drone, curvInv2R, refX, refZ, ufo =
     }
   }
 
-  // --- 5. LIVE PROCEDURAL XENOBIOLOGY ECOSYSTEM (17 ARTICULATED FAUNA, FLORA, FUNGI, SKY-LEVIATHAN & SWIMMER MORPHS!) ---
+function appendBakedOrganismMesh(out, baked, org, applyCurv) {
+  const verts = baked?.vertsF32;
+  if (!verts || verts.length < 36) return;
+  const sc = Math.max(0.35, Number(org.scale) || 1.0);
+  const yaw = Number(org.yaw) || 0;
+  const cy = Math.cos(yaw);
+  const sy = Math.sin(yaw);
+  const ox = org.pos?.[0] || 0;
+  const oy = org.pos?.[1] || 0;
+  const oz = org.pos?.[2] || 0;
+  const phase = Number(org.phase) || 0;
+  const arousal = Math.max(0, Math.min(1.5, Number(org.arousal) || 0));
+  const freq = Number(org.developmentalGenome?.gaitFreqHz || org.traits?.strouhalHz || 1.2);
+  const bob = Math.sin(phase * freq * 2.0) * (0.06 + arousal * 0.04) * sc;
+  const count = Math.floor(verts.length / 36) * 36; // strict triangle alignment (3 verts * 12 floats)
+  for (let i = 0; i < count; i += 12) {
+    let lx = verts[i + 0];
+    let ly = verts[i + 1];
+    let lz = verts[i + 2];
+    const bone = verts[i + 3];
+    if (bone >= 1.5) {
+      const hLift = Math.max(0, Math.min(1.2, ly * 0.7));
+      const swing = Math.sin(phase * freq * 2.4 + bone * 0.9) * (0.08 + arousal * 0.05) * hLift;
+      lx += swing * 0.45;
+      ly += Math.cos(phase * freq * 2.4 + bone * 0.6) * 0.05 * hLift;
+      lz += swing;
+    }
+    const rx = (lx * cy + lz * sy) * sc;
+    const rz = (-lx * sy + lz * cy) * sc;
+    const ry = ly * sc + bob;
+    const wp = applyCurv ? applyCurv([ox + rx, oy + ry, oz + rz]) : [ox + rx, oy + ry, oz + rz];
+    const nx = verts[i + 4];
+    const ny = verts[i + 5];
+    const nz = verts[i + 6];
+    const rnx = nx * cy + nz * sy;
+    const rnz = -nx * sy + nz * cy;
+    out.push(
+      wp[0], wp[1], wp[2], wp[1],
+      rnx, ny, rnz, 4.0,
+      verts[i + 8], verts[i + 9], verts[i + 10], verts[i + 11]
+    );
+  }
+}
+
+  // --- 5. LIVE GPU-BAKED SDF XENOBIOLOGY ECOSYSTEM (ZERO LEGACY TUBE FALLBACK ONCE GPU BAKE RESOLVES!) ---
   if (Array.isArray(extras.organisms)) {
+    const bakedMap = extras.bakedFaunaMeshMap || null;
     for (const org of extras.organisms) {
       if (!org || org.abducted) continue;
       const [ox, , oz] = org.pos;
       const dist2 = (ox - refX) * (ox - refX) + (oz - refZ) * (oz - refZ);
       if (dist2 > 310 * 310) continue;
-      appendProceduralOrganismGeometry(out, fxOut, org, applyCurv);
+      const spKey = org.speciesRecord?.id || org.speciesRecord?.speciesName || null;
+      const baked = (bakedMap && spKey) ? bakedMap.get(spKey) : null;
+      if (baked && baked.vertsF32 && baked.vertCount >= 3) {
+        appendBakedOrganismMesh(out, baked, org, applyCurv);
+      } else {
+        appendProceduralOrganismGeometry(out, fxOut, org, applyCurv);
+      }
     }
   }
 
@@ -2240,6 +2295,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       abducted: false
     })));
   }
+  const bakedFaunaMeshMap = new Map();
+  let gpuCladogenesisVerified = false;
   if (isSolidSurfaceBio && Array.isArray(xeno?.species) && xeno.species.some((s) => s.developmentalGenome)) {
     // Non-blocking GPU bake of THIS planet's unique developmental-genome flora/fungi into the hardware-instanced atlas!
     bakePlanetaryFloraAtlasWebGpu(device, xeno.species, {
@@ -2248,9 +2305,60 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       settlementFloats: buildSettlementTemplateFloats()
     }).then((atlas) => {
       if (!disposed && atlas?.floats?.length >= 24) {
-        floraGpu.replaceTemplateMesh(atlas.floats);
+        floraGpu.replaceTemplateMesh(atlas.floats, atlas.bakedSpeciesCount || 6);
       }
     }).catch(() => {});
+  }
+  if ((isSolidSurfaceBio || isGasCloudBio) && surfaceOrganisms.length > 0) {
+    // Non-blocking GPU SDF + 3D Turing mesh bake for EVERY unique landed hero fauna/fungi/flora species!
+    const uniqueSpecies = [];
+    const seenKeys = new Set();
+    for (const org of surfaceOrganisms) {
+      const sp = org.speciesRecord;
+      const key = sp?.id || sp?.speciesName || null;
+      if (!sp?.developmentalGenome || !key || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      uniqueSpecies.push({ key, sp });
+      if (uniqueSpecies.length >= 8) break;
+    }
+    (async () => {
+      for (const { key, sp } of uniqueSpecies) {
+        if (disposed) break;
+        try {
+          const isAerialOrSwim = sp.medium === 'aerial' || sp.medium === 'buoyant' || sp.medium === 'aquatic';
+          const baked = await bakeOrganismMeshWebGpu(device, sp.developmentalGenome, {
+            gridDim: 20,
+            turingDim: 14,
+            turingSteps: 16,
+            maxVerts: 540,
+            scaleOut: sp.kingdom === 'flora' ? 1.15 : 0.95,
+            offset: [0, isAerialOrSwim ? 0.25 : 0.72, 0],
+            formatMode: 0
+          });
+          if (!disposed && baked?.vertsF32 && baked.vertCount >= 3) {
+            bakedFaunaMeshMap.set(key, { vertsF32: baked.vertsF32, vertCount: baked.vertCount });
+          }
+        } catch {}
+      }
+    })();
+    if (xeno?.cladogenesisBackend !== 'webgpu') {
+      runPlanetaryCladogenesisWebGpu(device, {
+        worldName: bodySpec?.name || xeno?.worldName || 'Exoplanet',
+        tempK: env.tempK,
+        pressurePa: env.pressurePa,
+        gravityMS2: env.gravityMS2,
+        rhoAtmKgM3: env.rhoAtmKgM3,
+        volatileFrac: env.volatileFrac,
+        hasSolidCrust: env.hasSolidCrust,
+        isCryoMoon: env.isCryoMoon,
+        isMagmaOcean: env.isMagmaOcean,
+        stellarTeffK: xeno?.stellarTeffK ?? 5778,
+        uvFluxNorm: xeno?.uvFluxNorm ?? 1.0,
+        seed: xeno?.seed ?? seed
+      }, { epochs: 200, targetSpeciesCount: 14 }).then(() => {
+        if (!disposed) gpuCladogenesisVerified = true;
+      }).catch(() => {});
+    }
   }
 
   // Restore saved surface exploration pose cleanly when returning from sampled L5/L6/L7 views!
@@ -3025,10 +3133,13 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         }
       }
       const cfdW = (cfdSession && lastCfdTelemetry?.craftWindMS) ? lastCfdTelemetry.craftWindMS : [0, 0, 0];
-      for (const org of surfaceOrganisms) {
+      const gpuAgents = surfaceEcoGpu ? surfaceEcoGpu.getLatestAgentsF32() : null;
+      const useGpuEco = Boolean(surfaceEcoGpu && surfaceEcoGpu.hasLiveReadback && gpuAgents && gpuAgents.length >= surfaceOrganisms.length * 16);
+      for (let oi = 0; oi < surfaceOrganisms.length; oi += 1) {
+        const org = surfaceOrganisms[oi];
         if (org.abducted) continue;
-        org.phase += dtSafe;
         if (org === bestOrg) {
+          org.phase += dtSafe;
           org.abducting = true;
           org.arousal = 1.1;
           activeAbductionTarget = org;
@@ -3039,6 +3150,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           if (d3 <= 4.8) {
             org.abducted = true;
             org.abducting = false;
+            surfaceEcoGpu?.syncAgentState?.(oi, { pos: org.pos, yaw: org.yaw, abducted: true });
             const rec = synthesizeAbductedSpecimenRecord({
               kind: org.kingdom || org.kind,
               speciesRecord: org.speciesRecord || null,
@@ -3062,73 +3174,74 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           org.pos[1] += vyPull * dtSafe;
           org.pos[2] += toUfoZ * invD3 * pullSpd * dtSafe;
           org.yaw += 2.6 * dtSafe;
+          surfaceEcoGpu?.syncAgentState?.(oi, { pos: org.pos, yaw: org.yaw, abducted: false });
         } else {
           org.abducting = false;
-          org.arousal = Math.max(0, (org.arousal || 0) - dtSafe * 0.6);
           if (org.kingdom === 'fauna' || org.kind === 'fauna') {
             const isAir = org.bodyPlan === 'aero-gasbag' || org.bodyPlan === 'wing-glider' || !env.hasSolidCrust;
             const isSwim = org.bodyPlan === 'aquatic-swimmer';
-            const isPred = String(org.trophicGuild || '').includes('predator');
-            let steerYaw = org.yaw + Math.sin(org.phase * 0.45 + org.seed * 0.001) * 0.42 * dtSafe;
-            let spdMul = 1.0;
-
-            // Trophic ecological AI: flee overhead tractor beam; predators stalk grazers; grazers flee predators & forage near flora!
-            const dUfo = Math.hypot(org.pos[0] - ufo.pos[0], org.pos[2] - ufo.pos[2]);
-            if (tractorActive && dUfo < 44.0) {
-              steerYaw = Math.atan2(org.pos[0] - ufo.pos[0], org.pos[2] - ufo.pos[2]);
-              spdMul = 1.55;
-              org.arousal = 0.85;
-            } else if (!isAir && !isSwim) {
-              let bestTarget = null;
-              let bestD = 38.0;
-              for (const other of surfaceOrganisms) {
-                if (other === org || other.abducted) continue;
-                const d = Math.hypot(other.pos[0] - org.pos[0], other.pos[2] - org.pos[2]);
-                if (d >= bestD) continue;
-                if (isPred && other.kingdom === 'fauna' && !String(other.trophicGuild || '').includes('predator')) {
-                  bestD = d; bestTarget = { x: other.pos[0], z: other.pos[2], flee: false };
-                } else if (!isPred && other.kingdom === 'fauna' && String(other.trophicGuild || '').includes('predator') && d < 24.0) {
-                  bestD = d; bestTarget = { x: other.pos[0], z: other.pos[2], flee: true };
-                } else if (!isPred && !bestTarget && (other.kingdom === 'flora' || other.kingdom === 'fungi') && d > 5.0 && d < 26.0) {
-                  bestTarget = { x: other.pos[0], z: other.pos[2], flee: false };
+            if (useGpuEco) {
+              // Live Stage 5 Consumer: directly read GPU-stepped flocking, foraging, predator-prey pursuit & ATP arousal!
+              const off = oi * 16;
+              const gx = gpuAgents[off + 0];
+              const gy = gpuAgents[off + 1];
+              const gz = gpuAgents[off + 2];
+              const gyaw = gpuAgents[off + 3];
+              const gphase = gpuAgents[off + 8];
+              const garousal = gpuAgents[off + 10];
+              org.phase = Number.isFinite(gphase) ? gphase : (org.phase + dtSafe);
+              org.arousal = Number.isFinite(garousal) ? garousal : Math.max(0, (org.arousal || 0) - dtSafe * 0.6);
+              if (Number.isFinite(gyaw)) org.yaw = gyaw;
+              if (!env.hasSolidCrust) {
+                if (Number.isFinite(gx) && Number.isFinite(gz)) {
+                  org.pos[0] = gx;
+                  org.pos[2] = gz;
+                }
+                const targetY = Number.isFinite(gy) ? gy : (focus[1] - 4.0 + Math.sin(org.phase * 0.9) * 14.0 + cfdW[1] * 0.5);
+                org.pos[1] += (targetY - org.pos[1]) * Math.min(1, dtSafe * 4.5);
+              } else if (Number.isFinite(gx) && Number.isFinite(gz)) {
+                const gh = deformMpm.evaluateGroundHeight(gx, gz);
+                const inWater = env.hasLiquidOcean && gh <= env.seaLevelM + 0.35;
+                const badTerrain = (isSwim && !inWater) || (!isAir && !isSwim && inWater);
+                if (badTerrain) {
+                  // Reflect shoreline violation back into the live GPU agent buffer!
+                  const bouncedYaw = org.yaw + 1.85;
+                  org.yaw = bouncedYaw;
+                  surfaceEcoGpu.syncAgentState(oi, { pos: org.pos, yaw: bouncedYaw, abducted: false });
+                } else {
+                  org.pos[0] = gx;
+                  org.pos[2] = gz;
+                  const targetY = isAir
+                    ? Math.max(gh + 7.5, Number.isFinite(gy) ? gy : (gh + 9.0))
+                    : (isSwim ? (env.seaLevelM - 0.85) : gh);
+                  org.pos[1] += (targetY - org.pos[1]) * Math.min(1, dtSafe * 8.0);
                 }
               }
-              if (bestTarget) {
-                const angT = bestTarget.flee
-                  ? Math.atan2(org.pos[0] - bestTarget.x, org.pos[2] - bestTarget.z)
-                  : Math.atan2(bestTarget.x - org.pos[0], bestTarget.z - org.pos[2]);
-                steerYaw = org.yaw + Math.sin(angT - org.yaw) * Math.min(1, dtSafe * 2.6);
-                if (bestTarget.flee || isPred) { spdMul = 1.38; org.arousal = 0.65; }
-              }
-            }
-            org.yaw = steerYaw;
-            const vx = Math.sin(org.yaw) * org.speed * spdMul + (isAir ? cfdW[0] * 0.35 : 0);
-            const vz = Math.cos(org.yaw) * org.speed * spdMul + (isAir ? cfdW[2] * 0.35 : 0);
-            const nx = org.pos[0] + vx * dtSafe;
-            const nz = org.pos[2] + vz * dtSafe;
-            if (!env.hasSolidCrust) {
-              // Gas-giant cloud-deck sky-leviathans drift smoothly in 3D CFD updrafts around UFO!
-              if (Math.hypot(nx - focus[0], nz - focus[2]) > 240.0) org.yaw = Math.atan2(focus[0] - org.pos[0], focus[2] - org.pos[2]);
-              org.pos[0] = nx;
-              org.pos[2] = nz;
-              const targetY = focus[1] - 4.0 + Math.sin(org.phase * 0.9 + org.seed * 0.01) * 14.0 + cfdW[1] * 0.5;
-              org.pos[1] += (targetY - org.pos[1]) * Math.min(1, dtSafe * 1.4);
             } else {
-              const gh = deformMpm.evaluateGroundHeight(nx, nz);
-              const inWater = env.hasLiquidOcean && gh <= env.seaLevelM + 0.35;
-              const badTerrain = (isSwim && !inWater) || (!isAir && !isSwim && inWater) || Math.hypot(nx - focus[0], nz - focus[2]) > 280.0;
-              if (badTerrain) {
-                org.yaw += 1.55;
-              } else {
+              // First-frame bootstrap before initial async GPU readback completes (zero O(N^2) CPU loop!)
+              org.phase += dtSafe;
+              org.arousal = Math.max(0, (org.arousal || 0) - dtSafe * 0.6);
+              const vx = Math.sin(org.yaw) * org.speed + (isAir ? cfdW[0] * 0.35 : 0);
+              const vz = Math.cos(org.yaw) * org.speed + (isAir ? cfdW[2] * 0.35 : 0);
+              const nx = org.pos[0] + vx * dtSafe;
+              const nz = org.pos[2] + vz * dtSafe;
+              if (!env.hasSolidCrust) {
                 org.pos[0] = nx;
                 org.pos[2] = nz;
-                const targetY = isAir
-                  ? (gh + 9.0 + Math.sin(org.phase * 1.3) * 2.4)
-                  : (isSwim ? (env.seaLevelM - 0.85) : gh);
-                org.pos[1] += (targetY - org.pos[1]) * Math.min(1, dtSafe * 7.0);
+              } else {
+                const gh = deformMpm.evaluateGroundHeight(nx, nz);
+                const inWater = env.hasLiquidOcean && gh <= env.seaLevelM + 0.35;
+                if (!((isSwim && !inWater) || (!isAir && !isSwim && inWater))) {
+                  org.pos[0] = nx;
+                  org.pos[2] = nz;
+                  const targetY = isAir ? (gh + 9.0) : (isSwim ? (env.seaLevelM - 0.85) : gh);
+                  org.pos[1] += (targetY - org.pos[1]) * Math.min(1, dtSafe * 7.0);
+                }
               }
             }
           } else if (env.hasSolidCrust) {
+            org.phase += dtSafe;
+            org.arousal = Math.max(0, (org.arousal || 0) - dtSafe * 0.6);
             const gh = deformMpm.evaluateGroundHeight(org.pos[0], org.pos[2]);
             if (org.pos[1] > gh + 0.05) {
               org.pos[1] = Math.max(gh, org.pos[1] - 12.0 * dtSafe);
@@ -3350,7 +3463,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       missiles: activeMissiles,
       remoteUfos: externalRemoteUfos,
       probes: externalProbes,
-      organisms: surfaceOrganisms
+      organisms: surfaceOrganisms,
+      bakedFaunaMeshMap
     });
     vehicleVertCount = Math.min(MAX_VEHICLE_VERTS, Math.floor(meshBundle.opaque.length / 12));
     if (vehicleVertCount > 0) {
@@ -3399,7 +3513,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         windVec: lastCfdTelemetry?.craftWindMS || [0, 0, 0],
         rhoAtm: env.rhoAtmKgM3 || 1.22,
         ufoPos: ufo.pos,
-        tractorRadiusM: 44.0
+        tractorRadiusM: 44.0,
+        copyForReadback: true
       });
     }
     const pass = enc.beginComputePass({ label: `${label}-pass` });
@@ -3418,6 +3533,9 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       enc.copyBufferToBuffer(telBuf, 0, telReadBuf, 0, 16);
     }
     device.queue.submit([enc.finish()]);
+    if (surfaceEcoGpu) {
+      surfaceEcoGpu.pollReadback();
+    }
 
     // Step live 3D WebGPU Stratified Atmospheric CFD on EVERY atmosphere-bearing world (Rover, Drone, AND UFO;
     // strictly dormant / null on airless vacuum worlds where P < 20 Pa!)

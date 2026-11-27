@@ -222,6 +222,8 @@ export function createSurfaceEcosystemGpu(device, {
   const cellBuf = device.createBuffer({ label: `${label}-cells`, size: 256 * 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const statsBuf = device.createBuffer({ label: `${label}-stats`, size: 32, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
   const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 96, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const readAgentsBuf = device.createBuffer({ label: `${label}-read-agents`, size: byteSize, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
+  const readStatsBuf = device.createBuffer({ label: `${label}-read-stats`, size: 32, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
 
   const bindings = [
     computeBufferBinding(0, 'uniform'),
@@ -264,6 +266,12 @@ export function createSurfaceEcosystemGpu(device, {
   const pU = new Uint32Array(pAb);
   const pF = new Float32Array(pAb);
   const zeroStats = new Uint32Array(8);
+  const latestAgentsF32 = new Float32Array(cap * ECOSYSTEM_AGENT_STRIDE_FLOATS);
+  const singleAgentScratch = new Float32Array(ECOSYSTEM_AGENT_STRIDE_FLOATS);
+  let latestStats = null;
+  let hasLiveReadback = false;
+  let readInFlight = false;
+  let readPendingCopy = false;
   let activeCount = 0;
   let ping = 0;
   let stepIndex = 0;
@@ -296,9 +304,30 @@ export function createSurfaceEcosystemGpu(device, {
       f32[o + 14] = a.senseRangeM || 32.0;
       f32[o + 15] = a.abducted ? 3 : 1;
     }
+    latestAgentsF32.set(f32);
     device.queue.writeBuffer(bufA, 0, f32);
     device.queue.writeBuffer(bufB, 0, f32);
     ping = 0;
+  }
+
+  function syncAgentState(index, { pos = null, yaw = null, abducted = null } = {}) {
+    if (disposed || index < 0 || index >= activeCount) return;
+    const o = index * ECOSYSTEM_AGENT_STRIDE_FLOATS;
+    if (Array.isArray(pos) && pos.length >= 3) {
+      latestAgentsF32[o + 0] = Number(pos[0]) || 0;
+      latestAgentsF32[o + 1] = Number(pos[1]) || 0;
+      latestAgentsF32[o + 2] = Number(pos[2]) || 0;
+    }
+    if (Number.isFinite(Number(yaw))) {
+      latestAgentsF32[o + 3] = Number(yaw);
+    }
+    if (typeof abducted === 'boolean') {
+      latestAgentsF32[o + 15] = abducted ? 3 : 1;
+    }
+    singleAgentScratch.set(latestAgentsF32.subarray(o, o + ECOSYSTEM_AGENT_STRIDE_FLOATS));
+    const byteOffset = index * ECOSYSTEM_AGENT_STRIDE_FLOATS * 4;
+    device.queue.writeBuffer(bufA, byteOffset, singleAgentScratch);
+    device.queue.writeBuffer(bufB, byteOffset, singleAgentScratch);
   }
 
   function encodeStep(encoder, {
@@ -314,7 +343,8 @@ export function createSurfaceEcosystemGpu(device, {
     windVec = [0, 0, 0],
     rhoAtm = 1.22,
     ufoPos = [0, 16, 0],
-    tractorRadiusM = 44.0
+    tractorRadiusM = 44.0,
+    copyForReadback = false
   } = {}) {
     if (disposed || activeCount <= 0) return false;
     stepIndex += 1;
@@ -338,7 +368,50 @@ export function createSurfaceEcosystemGpu(device, {
     pass.dispatchWorkgroups(Math.ceil(activeCount / 64));
     pass.end();
     ping = 1 - ping;
+
+    if (copyForReadback && !readInFlight && !readPendingCopy
+      && readAgentsBuf.mapState === 'unmapped' && readStatsBuf.mapState === 'unmapped') {
+      const latestSrc = ping === 0 ? bufA : bufB;
+      encoder.copyBufferToBuffer(latestSrc, 0, readAgentsBuf, 0, activeCount * 64);
+      encoder.copyBufferToBuffer(statsBuf, 0, readStatsBuf, 0, 32);
+      readPendingCopy = true;
+    }
     return true;
+  }
+
+  function pollReadback() {
+    if (disposed || !readPendingCopy || readInFlight || activeCount <= 0) return;
+    if (readAgentsBuf.mapState !== 'unmapped' || readStatsBuf.mapState !== 'unmapped') return;
+    readPendingCopy = false;
+    readInFlight = true;
+    const snapCount = activeCount;
+    const snapStep = stepIndex;
+    Promise.all([
+      readAgentsBuf.mapAsync(GPU_BUF.MAP_READ, 0, snapCount * 64),
+      readStatsBuf.mapAsync(GPU_BUF.MAP_READ, 0, 32)
+    ]).then(() => {
+      if (disposed) return;
+      const aF = new Float32Array(readAgentsBuf.getMappedRange(0, snapCount * 64));
+      const sU = new Uint32Array(readStatsBuf.getMappedRange(0, 32));
+      latestAgentsF32.set(aF, 0);
+      const cnt = Math.max(1, sU[3]);
+      latestStats = {
+        schema: ULG_SURFACE_ECOSYSTEM_GPU_SCHEMA,
+        stepIndex: snapStep,
+        activeCount: sU[3],
+        meanSpeedMS: (sU[0] / 100) / cnt,
+        meanAtp: (sU[1] / 1000) / cnt,
+        predatorChaseEvents: sU[2]
+      };
+      hasLiveReadback = true;
+      try { readAgentsBuf.unmap(); } catch {}
+      try { readStatsBuf.unmap(); } catch {}
+    }).catch(() => {
+      try { if (readAgentsBuf.mapState === 'mapped') readAgentsBuf.unmap(); } catch {}
+      try { if (readStatsBuf.mapState === 'mapped') readStatsBuf.unmap(); } catch {}
+    }).finally(() => {
+      readInFlight = false;
+    });
   }
 
   async function readTelemetryAndAgents() {
@@ -376,14 +449,19 @@ export function createSurfaceEcosystemGpu(device, {
     schema: ULG_SURFACE_ECOSYSTEM_GPU_SCHEMA,
     maxAgents: cap,
     get activeCount() { return activeCount; },
+    get hasLiveReadback() { return hasLiveReadback; },
     getResidentAgentsBuffer: () => (ping === 0 ? bufA : bufB),
+    getLatestAgentsF32: () => latestAgentsF32,
+    getLatestStats: () => latestStats,
     seedAgents,
+    syncAgentState,
     encodeStep,
+    pollReadback,
     readTelemetryAndAgents,
     dispose() {
       if (disposed) return;
       disposed = true;
-      for (const b of [bufA, bufB, cellBuf, statsBuf, paramsBuf]) {
+      for (const b of [bufA, bufB, cellBuf, statsBuf, paramsBuf, readAgentsBuf, readStatsBuf]) {
         try { b.destroy(); } catch {}
       }
     }

@@ -24496,7 +24496,8 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(device.submissions.length, 2);
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.dispatchMode, 'dispatchWorkgroupsIndirect');
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 6);
-  assert.equal(device.dispatches.length, 7);
+  // 7 -> 8: includes the +0-submit/+0-pass coalesced live compiled Law-IR Tait EOS dispatch.
+  assert.equal(device.dispatches.length, 8);
   assert.equal(device.indirectDispatches.length, 6);
   // Spatial-density EOS copies are gated off while the estimator is
   // disabled (aliasing instability); no grid->previous copies are encoded.
@@ -24725,7 +24726,8 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(execution.fullParticleReadbackFree, true);
   assert.equal(execution.residentContinuationReady, true);
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 8);
+  // 8 -> 9: includes the +0-submit/+0-pass coalesced live compiled Law-IR Tait EOS dispatch.
+  assert.equal(device.dispatches.length, 9);
   // These two are read-only all-zero rows that stand in for a disabled feature.
   // They are shared per device rather than rebuilt and destroyed per substep,
   // so they are created exactly once and deliberately never destroyed --
@@ -24748,10 +24750,13 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.deepEqual(
     undestroyed.map((buffer) => buffer.label).sort(),
     [
+      'ulg-live-law-ir-params',
+      'ulg-live-law-ir-receipt',
+      'ulg-live-law-ir-receipt-readback',
       'ulg-mls-mpm-fused-sequence-empty-schroeder-level-assignments',
       'ulg-mls-mpm-fused-sequence-empty-schroeder-spatial-directory'
     ],
-    'only the shared zero-row placeholders outlive the execution'
+    'only the device-cached Law-IR and shared zero-row placeholders outlive the execution'
   );
 });
 
@@ -25876,7 +25881,8 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.equal(execution.nextSphParticleState.residentActiveGridDispatchPlanHint.dispatchArgsBuffer, summaryPlanArgsBuffer);
   assert.equal(execution.nextParticleUploads.activeGridDispatchPlanHint.metadataBuffer, summaryPlanMetadataBuffer);
   assert.equal(device.clears.length, 0);
-  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1, 1, 1]);
+  // Includes the coalesced live compiled Law-IR Tait EOS dispatch (1 workgroup).
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1, 1, 1, 1]);
   assert.deepEqual(device.indirectDispatches.map((entry) => entry.workgroupCountX), [4, 4, 4, 4, 4, 4]);
   const second = await runMlsMpmResidentStepsWithOptionalWebGpu({
     ...buffers,
@@ -26579,7 +26585,8 @@ test('MLS-MPM fused resident sequence encodes thermal sidecar fusion in one subm
   assert.equal(execution.sidecarAwareResidentSequenceActive, false);
   assert.equal(execution.sidecarAwareDirectRunnerContractStatus, 'thermal-sidecar-direct-runner-not-candidate');
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 24);
+  // 24 -> 26: includes 2 coalesced live compiled Law-IR Tait EOS dispatches (1 per step, +0 submits).
+  assert.equal(device.dispatches.length, 26);
   const dispatchEntryPoints = device.dispatches.map(
     (dispatch) => dispatch.pipeline?.compute?.entryPoint ?? null
   );
@@ -26821,7 +26828,8 @@ test('MLS-MPM fused resident sequence encodes exact phase-carrier transfer betwe
     }
   );
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 40);
+  // 40 -> 42: includes 2 coalesced live compiled Law-IR Tait EOS dispatches (1 per step, +0 submits).
+  assert.equal(device.dispatches.length, 42);
   const dispatchEntryPoints = device.dispatches.map(
     (dispatch) => dispatch.pipeline?.compute?.entryPoint ?? null
   );

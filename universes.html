@@ -2036,17 +2036,19 @@
           <input id="uv-peer-url" type="text" placeholder="ws://127.0.0.1:8787" style="flex:1;min-width:0;" />
         </div>
         <div class="uv-row">
-          <select id="uv-peer-role">
+          <select id="uv-peer-role" style="flex:1;min-width:0;">
             <option value="requester">requester</option>
             <option value="responder">responder</option>
             <option value="observer">observer</option>
             <option value="validator">validator</option>
           </select>
-          <select id="uv-peer-ice-policy" title="WebRTC ICE transport policy">
+          <button id="uv-peer-connect-btn" class="uv-btn subtle" type="button">Join Mesh</button>
+        </div>
+        <div class="uv-row">
+          <select id="uv-peer-ice-policy" title="WebRTC ICE transport policy" style="flex:1;min-width:0;">
             <option value="all">ICE: Auto (Direct + TURN)</option>
             <option value="relay">ICE: Force TURN Relay</option>
           </select>
-          <button id="uv-peer-connect-btn" class="uv-btn subtle" type="button">Join Mesh</button>
         </div>
         <div id="uv-peer-status" style="font-family:var(--mono);font-size:10px;color:var(--muted);">Local GPU · 0 remote peers</div>
       </section>

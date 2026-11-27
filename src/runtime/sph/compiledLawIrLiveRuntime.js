@@ -46,7 +46,15 @@ function getCompiledPerParticleTaitIr() {
 }
 
 function getOrCreateDeviceRuntime(device) {
-  if (!device || typeof device.createComputePipeline !== 'function' || typeof device.createBuffer !== 'function') {
+  if (
+    !device
+    || typeof device.createShaderModule !== 'function'
+    || typeof device.createBindGroupLayout !== 'function'
+    || typeof device.createPipelineLayout !== 'function'
+    || typeof device.createComputePipeline !== 'function'
+    || typeof device.createBindGroup !== 'function'
+    || typeof device.createBuffer !== 'function'
+  ) {
     return null;
   }
   const key = unwrapWebGpuCacheDevice(device);

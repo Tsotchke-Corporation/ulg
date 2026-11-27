@@ -1201,7 +1201,7 @@ export function createUlgUniversesPhysics(device, {
   }
 
   function buildPlanetSphCacheKey(spec, idx, dimsStr) {
-    return rootLineageCache.buildKey('l4-sph-geo-v7-pc-ss', {
+    return rootLineageCache.buildKey('l4-sph-geo-v11-pc-ss', {
       seed: universeSeed,
       epochId: cosmicEpochId,
       systemId: useSolReference ? 'sol' : (activeCausalSystem?.systemId || 'sys'),
@@ -1771,7 +1771,7 @@ export function createUlgUniversesPhysics(device, {
           seed: (activeSeed ^ 0x4eb01a) >>> 0,
           label: `ulg-universes-nebular-live-${activeStarSite.starIndex ?? 0}`
         });
-        nebularCoalescenceTelemetry = await nextCoalesce.step({ dt: 0.032, substeps: 2, readTelemetry: true, readAnnuli: true });
+        nebularCoalescenceTelemetry = await nextCoalesce.step({ dt: 0.024, substeps: 16, readTelemetry: true, readAnnuli: true });
         nebularCoalescenceSession = nextCoalesce;
         activeCausalSystem = buildProvisionalCoalescingSystem(starSys, nextCoalesce.snowLineAu, rMinStableAu, rMaxStableAu);
         focusedSolarBodyIndex = 0;
@@ -2012,7 +2012,7 @@ export function createUlgUniversesPhysics(device, {
       seed: activeSeed,
       label: 'ulg-universes-nebular-coalesce'
     });
-    nebularCoalescenceTelemetry = await nextCoalesce.step({ dt: 0.032, substeps: 6, readTelemetry: true, readAnnuli: true });
+    nebularCoalescenceTelemetry = await nextCoalesce.step({ dt: 0.024, substeps: 18, readTelemetry: true, readAnnuli: true });
     nebularCoalescenceSession = nextCoalesce;
 
     const nextDisk = createProtoplanetaryDiskFormationSessionWebGpu(device, {
@@ -2083,7 +2083,7 @@ export function createUlgUniversesPhysics(device, {
     if (!nebularCoalescenceSession) await initProtoplanetaryDisk();
     const curSteps = nebularCoalescenceSession?.stepIndex || 0;
     const remSub = curSteps < w.l2BurstSubsteps ? Math.max(8, w.l2BurstSubsteps - curSteps) : 2;
-    const disk = await nebularCoalescenceSession.coalesceSystemBurst({ substeps: remSub, chunkSize: 18, dt: 0.034 });
+    const disk = await nebularCoalescenceSession.coalesceSystemBurst({ substeps: remSub, chunkSize: 24, dt: 0.024 });
     const activeSeed = meta.activeSeed ?? ((universeSeed + 409) >>> 0);
     const starSys = meta.starSys || activeCausalSystem?.starSystem || deriveStarSystemFromGalacticLocation({
       cosmicEpoch,
@@ -2154,8 +2154,8 @@ export function createUlgUniversesPhysics(device, {
     const remSub = curSteps < w.l4BurstSubsteps ? Math.max(6, w.l4BurstSubsteps - curSteps) : 2;
     planetaryGenesisSphTelemetry = await planetaryGenesisSphSession.stepBurst({
       totalSubsteps: remSub,
-      chunkSize: 18,
-      dt: 0.030,
+      chunkSize: 24,
+      dt: 0.028,
       erosionPasses: w.sphErosionPasses,
       readTelemetry: true
     });
@@ -2818,6 +2818,7 @@ export function createUlgUniversesPhysics(device, {
         gridN: sphGridN,
         mapWidth: sphW,
         mapHeight: sphH,
+        targetSteps: observeLive ? w.l4TargetSteps : w.l4BurstSubsteps,
         seed: (universeSeed ^ (idx * 2654435761 + (spec.id?.length || 3) * 131)) >>> 0,
         label: `ulg-universes-sph-genesis-${spec.id || idx}`
       });
@@ -2837,11 +2838,12 @@ export function createUlgUniversesPhysics(device, {
         });
       } else if (observeLive) {
         // Live Observable 3D GPU SPH + SS Multipole Planetary Differentiation right on screen!
+        // Warm-start 12 substeps so the 3D volumetric grid (Fe core + magma mantle) renders richly on frame 1!
         planetaryGenesisSphTelemetry = await nextSph.step({
-          dt: 0.030,
-          substeps: 2,
+          dt: 0.028,
+          substeps: 12,
           updateSurfaceMap: true,
-          erosionPasses: 2,
+          erosionPasses: 4,
           readTelemetry: true
         });
         planetaryGenesisLiveForm = true;
@@ -2850,7 +2852,7 @@ export function createUlgUniversesPhysics(device, {
           stage: 'l4-planetary-sph',
           title: `Differentiating World via 3D SPH + SS Multipole (${activeCapabilityProfile.tier.toUpperCase()})`,
           entityName: spec.name || `World #${idx}`,
-          detail: `Protoplanet · Core r=${(planetaryGenesisSphTelemetry?.coreMeanR || 0.5).toFixed(2)} · Crust r=${(planetaryGenesisSphTelemetry?.felsicMeanR || 0.7).toFixed(2)} · ${nextSph.parcelCount.toLocaleString()} SPH · ${nextSph.gridN}³ · ${sphW}×${sphH}`,
+          detail: `Era 1: Iron Catastrophe · Core r=${(planetaryGenesisSphTelemetry?.coreMeanR || 0.5).toFixed(2)} · Crust r=${(planetaryGenesisSphTelemetry?.felsicMeanR || 0.7).toFixed(2)} · ${nextSph.parcelCount.toLocaleString()} SPH · ${nextSph.gridN}³ · ${sphW}×${sphH}`,
           step: nextSph.stepIndex,
           targetSteps: w.l4TargetSteps,
           progress: Math.min(1, nextSph.stepIndex / Math.max(1, w.l4TargetSteps)),
@@ -2870,8 +2872,8 @@ export function createUlgUniversesPhysics(device, {
       } else {
         planetaryGenesisSphTelemetry = await nextSph.stepBurst({
           totalSubsteps: w.l4BurstSubsteps,
-          chunkSize: 18,
-          dt: 0.030,
+          chunkSize: 24,
+          dt: 0.028,
           erosionPasses: w.sphErosionPasses,
           readTelemetry: true
         });
@@ -2919,9 +2921,9 @@ export function createUlgUniversesPhysics(device, {
     planetaryGenesisLiveForm = true;
     planetaryGenesisSphTelemetry = await planetaryGenesisSphSession.step({
       dt: 0.028,
-      substeps: 4,
+      substeps: 12,
       updateSurfaceMap: true,
-      erosionPasses: 2,
+      erosionPasses: 4,
       readTelemetry: true
     });
     activeGenesisStage = {
@@ -3114,9 +3116,10 @@ export function createUlgUniversesPhysics(device, {
         }
       } else if (activeLevel === 1 && galaxyEngine) {
         const galEng = galaxyEngine;
+        const wL1 = getWorkloads();
         const isLiveGalGenesis = activeGenesisStage?.stage === 'l1-galaxy-collapse';
-        const dt = (isLiveGalGenesis ? 0.0085 : 0.0018) * Math.max(0.08, Math.min(3.0, effScale));
-        const substeps = isLiveGalGenesis ? 2 : 1;
+        const dt = (isLiveGalGenesis ? 0.0082 : 0.0018) * Math.max(0.08, Math.min(3.0, effScale));
+        const substeps = isLiveGalGenesis ? Math.max(2, wL1.l1SubstepsPerFrame || 2) : 1;
         await galEng.step({ dt, substeps, gravity: 1.0, softening: 0.35, readback: false });
         const dyn = galacticDynamoSession;
         if (dyn && galEng === galaxyEngine) {
@@ -3150,13 +3153,17 @@ export function createUlgUniversesPhysics(device, {
           smbhBodies = await smbhEngine.step({ dt: 0.008 * Math.max(0.08, Math.min(3.0, effScale)), gravity: 1.0, softening: 0.08, readback: true });
         } else if (solarMode === 'formation' && (nebularCoalescenceSession || protoplanetarySession)) {
           if (nebularCoalescenceSession) {
+            const wL2 = getWorkloads();
             const isLiveNebGenesis = activeGenesisStage?.stage === 'l2-nebular-coalescence';
-            const nebSub = isLiveNebGenesis ? 1 : 2;
-            const nextStepEst = nebularCoalescenceSession.stepIndex + nebSub;
-            const readAnn = (nebularCoalescenceSession.stepIndex % 6) === 0
+            const nebSub = isLiveNebGenesis
+              ? Math.max(2, wL2.l2SubstepsPerFrame || 4)
+              : Math.min(4, Math.max(2, wL2.l2SubstepsPerFrame || 3));
+            const prevStep = nebularCoalescenceSession.stepIndex;
+            const nextStepEst = prevStep + nebSub;
+            const readAnn = Math.floor(prevStep / 24) !== Math.floor(nextStepEst / 24)
               || (isLiveNebGenesis && nextStepEst >= activeGenesisStage.targetSteps);
             nebularCoalescenceTelemetry = await nebularCoalescenceSession.step({
-              dt: 0.032 * Math.max(0.22, Math.min(2.5, effScale)),
+              dt: 0.024 * Math.max(0.22, Math.min(2.4, effScale)),
               substeps: nebSub,
               readTelemetry: true,
               readAnnuli: readAnn
@@ -3166,7 +3173,8 @@ export function createUlgUniversesPhysics(device, {
               activeGenesisStage.progress = activeGenesisStage.step / Math.max(1, activeGenesisStage.targetSteps);
               const d = nebularCoalescenceSession.getCoalescedDisk();
               const t = nebularCoalescenceTelemetry;
-              activeGenesisStage.detail = `Snow Line ${(nebularCoalescenceSession.snowLineAu || 2.7).toFixed(2)} AU · ${d?.bodies?.length || 0} proto-worlds · ${t?.denseRingCount || 0} dense rings · Fe ${Math.round((t?.meanFeFrac || 0) * 100)}% / Si ${Math.round((t?.meanSilicateFrac || 0) * 100)}% / Ice ${Math.round((t?.meanVolatileIceFrac || 0) * 100)}%`;
+              const orbitsEst = ((nebularCoalescenceSession.stepIndex * 0.024) / 0.85).toFixed(1);
+              activeGenesisStage.detail = `${orbitsEst} inner orbits · Snow Line ${(nebularCoalescenceSession.snowLineAu || 2.7).toFixed(2)} AU · ${d?.bodies?.length || 0} proto-worlds · Fe ${Math.round((t?.meanFeFrac || 0) * 100)}% / Si ${Math.round((t?.meanSilicateFrac || 0) * 100)}% / Ice ${Math.round((t?.meanVolatileIceFrac || 0) * 100)}%`;
               if (nebularCoalescenceSession.stepIndex >= activeGenesisStage.targetSteps) {
                 await finalizeL2NebularGenesisInternal();
               }
@@ -3250,8 +3258,13 @@ export function createUlgUniversesPhysics(device, {
           // Static GR TOV equilibrium curve already solved on WebGPU
         } else if (stellarEngine) {
           const stEng = stellarEngine;
+          const wL3 = getWorkloads();
+          const stSub = stEng.solver === 'webgpu-3d-mls-mpm-nuclear-fusion'
+            ? Math.max(1, wL3.l3SubstepsPerFrame || 2)
+            : 1;
           const nextStTel = await stEng.step({
             dt: 0.014 * Math.max(0.12, Math.min(2.5, effScale)),
+            substeps: stSub,
             timeAccel: stellarTimeAccel,
             readTelemetry: true
           });
@@ -3332,27 +3345,33 @@ export function createUlgUniversesPhysics(device, {
           if (planetaryGenesisLiveForm && planetaryGenesisSphSession) {
             const w = getWorkloads();
             const isLiveSphGenesis = activeGenesisStage?.stage === 'l4-planetary-sph';
-            const nextIdxEst = planetaryGenesisSphSession.stepIndex + (isLiveSphGenesis ? 1 : 2);
-            const mapCadence = Math.max(1, w.l4MapUpdateCadence || 2);
+            const sphSub = isLiveSphGenesis ? Math.max(2, w.l4SubstepsPerFrame || 4) : 2;
+            const prevIdx = planetaryGenesisSphSession.stepIndex;
+            const nextIdxEst = prevIdx + sphSub;
+            const mapCadence = Math.max(4, w.l4MapUpdateCadence || 20);
             const shouldProjectMap = !isLiveSphGenesis
-              || (planetaryGenesisSphSession.stepIndex % mapCadence) === 0
-              || nextIdxEst >= (activeGenesisStage?.targetSteps || 48);
-            const liveErosion = (planetaryGenesisSphSession.stepIndex % 32) === 0
-              ? Math.min(10, w.sphErosionPasses || 14)
-              : 2;
+              || Math.floor(prevIdx / mapCadence) !== Math.floor(nextIdxEst / mapCadence)
+              || nextIdxEst >= (activeGenesisStage?.targetSteps || 240);
+            const liveErosion = shouldProjectMap ? 4 : 0;
             planetaryGenesisSphTelemetry = await planetaryGenesisSphSession.step({
-              dt: 0.030 * Math.max(0.30, Math.min(2.2, effScale)),
-              substeps: isLiveSphGenesis ? 1 : 2,
+              dt: 0.028 * Math.max(0.30, Math.min(2.2, effScale)),
+              substeps: sphSub,
               updateSurfaceMap: shouldProjectMap,
-              erosionPasses: shouldProjectMap ? liveErosion : 0,
-              readTelemetry: isLiveSphGenesis || (planetaryGenesisSphSession.stepIndex % 4) === 0
+              erosionPasses: liveErosion,
+              readTelemetry: isLiveSphGenesis || (nextIdxEst % 8) === 0
             });
             if (isLiveSphGenesis && activeGenesisStage?.stage === 'l4-planetary-sph') {
               activeGenesisStage.step = Math.min(activeGenesisStage.targetSteps, planetaryGenesisSphSession.stepIndex);
-              activeGenesisStage.progress = activeGenesisStage.step / Math.max(1, activeGenesisStage.targetSteps);
+              const prog = activeGenesisStage.step / Math.max(1, activeGenesisStage.targetSteps);
+              activeGenesisStage.progress = prog;
+              const eraLabel = prog < 0.25
+                ? 'Era 1: Iron Catastrophe'
+                : (prog < 0.55
+                  ? 'Era 2: Mantle Convection & Tectonics'
+                  : (prog < 0.80 ? 'Era 3: Late Heavy Bombardment' : 'Era 4: Fluvial & Coastal Erosion'));
               const st = planetaryGenesisSphTelemetry;
               if (st) {
-                activeGenesisStage.detail = `Age ${Math.round(st.geoTimeMyr)} Myr · Core r=${st.coreMeanR.toFixed(2)} · Crust r=${st.felsicMeanR.toFixed(2)} · Diff ${st.differentiationIndex.toFixed(2)} · ${planetaryGenesisSphSession.parcelCount.toLocaleString()} SPH · SS Multipole`;
+                activeGenesisStage.detail = `${eraLabel} · ${Math.round(st.geoTimeMyr)} Myr · Core r=${st.coreMeanR.toFixed(2)} · Crust r=${st.felsicMeanR.toFixed(2)} · Diff ${st.differentiationIndex.toFixed(2)} · ${planetaryGenesisSphSession.parcelCount.toLocaleString()} SPH`;
               }
               if (planetaryGenesisSphSession.stepIndex >= activeGenesisStage.targetSteps) {
                 await finalizeL4PlanetarySphGenesisInternal();

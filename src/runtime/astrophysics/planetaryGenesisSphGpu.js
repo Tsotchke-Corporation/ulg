@@ -181,7 +181,7 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
   // thin-atmosphere stagnant-lid worlds preserve sharp multi-scale impact craters!
   const atmShield = Math.exp(-pressurePa / 3.5e5);
   const craterPreservation = hasOcean
-    ? Math.max(0.03, (1.0 - tectonicMobility * 0.88) * (0.12 + 0.50 * atmShield))
+    ? Math.max(0.015, (1.0 - tectonicMobility * 0.94) * (0.08 + 0.25 * atmShield))
     : Math.max(0.18, (1.0 - tectonicMobility * 0.65) * (0.35 + 0.65 * atmShield));
   const impactorClusters = isMagmaOcean
     ? 8
@@ -254,14 +254,18 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
   //   3 = Late-Heavy-Bombardment Planetesimal Impactors (hypervelocity radial infall)
   //   4 = Volatile Surface Hydrosphere / Cryo Fluid (rho0 = 1.15)
   const nImpactors = Math.min(Math.floor(n * 0.08), genesisParams.impactorClusters * 14);
-  const nVolatile = genesisParams.hasOcean ? Math.floor(n * Math.min(0.14, 0.06 + genesisParams.volatileFrac * 1.4)) : 0;
+  const nVolatile = genesisParams.hasOcean ? Math.floor(n * Math.min(0.16, 0.08 + genesisParams.volatileFrac * 1.4)) : 0;
   const nBody = n - nImpactors - nVolatile;
   const nCore = Math.max(128, Math.floor(nBody * genesisParams.feCoreFrac * 0.65));
-  const nFelsic = Math.max(160, Math.floor(nBody * genesisParams.felsicCrustFrac));
+  // Realistic continental area budget (~30-35% coherent continents on ocean worlds -> 65-70% wide open sapphire oceans!)
+  const effFelsicFrac = genesisParams.hasOcean
+    ? Math.max(0.26, Math.min(0.36, genesisParams.felsicCrustFrac * 0.96))
+    : genesisParams.felsicCrustFrac;
+  const nFelsic = Math.max(160, Math.floor(nBody * effFelsicFrac));
   const nMantle = Math.max(256, nBody - nCore - nFelsic);
 
-  // Seed 5..9 deep core-mantle thermal buoyancy plume hotspots (emergent Rayleigh-Benard seeds)
-  const nPlumes = 5 + (genesisParams.seed % 5);
+  // Seed 5..8 deep core-mantle thermal buoyancy plume hotspots (emergent low-degree Rayleigh-Benard cells)
+  const nPlumes = 5 + (genesisParams.seed % 4);
   const plumes = [];
   for (let p = 0; p < nPlumes; p += 1) {
     const z = rand() * 2 - 1;
@@ -270,23 +274,35 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     plumes.push({
       dir: [s * Math.cos(phi), z, s * Math.sin(phi)],
       sign: p % 2 === 0 ? 1.0 : -0.88, // Upwelling divergent hot plumes vs cold convergent downwellings!
-      width: 0.34 + rand() * 0.28
+      width: 0.36 + rand() * 0.26
     });
   }
 
   // For sub-hydrostatic minor bodies (asteroids & comets < 550 km), self-gravity does NOT overcome
-  // rock/ice yield strength -> genuine irregular triaxial / contact-binary rubble-pile lobes!
+  // rock/ice yield strength -> genuine dramatic 2:1 contact-binary bilobed rubble-pile shape (67P / Halley / Arrokoth)!
   const minorAxes = genesisParams.isMinorBody
-    ? [0.76 + rand() * 0.44, 0.62 + rand() * 0.36, 0.72 + rand() * 0.48]
+    ? [1.56 + rand() * 0.12, 0.48 + rand() * 0.10, 0.56 + rand() * 0.12]
     : [1.0, 1.0, 1.0];
   const minorLobeDir = genesisParams.isMinorBody
     ? (() => {
-      const lz = rand() * 2 - 1;
+      // Orient primary contact-binary axis near the equatorial plane so its twin lobes & pinched neck show cleanly!
+      const lz = (rand() - 0.5) * 0.28;
       const lp = rand() * Math.PI * 2;
       const ls = Math.sqrt(Math.max(0, 1 - lz * lz));
       return [ls * Math.cos(lp), lz, ls * Math.sin(lp)];
     })()
     : [1, 0, 0];
+  const applyMinorLobe = (d, r) => {
+    const lobeDot = d[0] * minorLobeDir[0] + d[1] * minorLobeDir[1] + d[2] * minorLobeDir[2];
+    // Pronounced pinched bilobed contact-binary waist + asymmetric secondary head lobe!
+    const waist = 0.42 + 0.74 * (lobeDot * lobeDot) + 0.16 * lobeDot;
+    const bump = 1.0 + 0.10 * Math.sin(d[0] * 3.7 + d[1] * 2.9) * Math.cos(d[2] * 3.1);
+    return [
+      d[0] * r * minorAxes[0] * waist * bump,
+      d[1] * r * minorAxes[1] * waist * bump,
+      d[2] * r * minorAxes[2] * waist * bump
+    ];
+  };
 
   // Generate impactor cluster targets (multi-scale power-law impactor sizes: giant Mare/Hellas basins + sharp medium/small craters!)
   const impactTargets = [];
@@ -339,16 +355,7 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     const r = Math.pow(rand(), 0.42) * 0.62;
     const tang = [-d[2], 0.0, d[0]];
     const tNorm = 0.86 + 0.14 * (1.0 - r);
-    let cx = d[0] * r;
-    let cy = d[1] * r;
-    let cz = d[2] * r;
-    if (genesisParams.isMinorBody) {
-      const lobeDot = d[0] * minorLobeDir[0] + d[1] * minorLobeDir[1] + d[2] * minorLobeDir[2];
-      const waist = 0.72 + 0.42 * lobeDot * lobeDot;
-      cx *= minorAxes[0] * waist;
-      cy *= minorAxes[1] * waist;
-      cz *= minorAxes[2] * waist;
-    }
+    let [cx, cy, cz] = genesisParams.isMinorBody ? applyMinorLobe(d, r) : [d[0] * r, d[1] * r, d[2] * r];
     writeParcel(
       [cx, cy, cz],
       [tang[0] * 0.06, (rand() - 0.5) * 0.04, tang[2] * 0.06],
@@ -376,17 +383,7 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     const baseT = Math.max(0.08, Math.min(1.0, (1.12 - r * 0.78) + plumeT * 0.24 * genesisParams.radiogenicHeat));
     // Initial convective velocity perturbation aligned with thermal plumes
     const vr = plumeT * 0.14 * genesisParams.tectonicMobility;
-    let px = d[0] * r;
-    let py = d[1] * r;
-    let pz = d[2] * r;
-    if (genesisParams.isMinorBody) {
-      // Genuine triaxial + bilobed contact-binary rubble-pile distribution for sub-hydrostatic bodies!
-      const lobeDot = d[0] * minorLobeDir[0] + d[1] * minorLobeDir[1] + d[2] * minorLobeDir[2];
-      const waist = 0.72 + 0.42 * lobeDot * lobeDot;
-      px *= minorAxes[0] * waist;
-      py *= minorAxes[1] * waist;
-      pz *= minorAxes[2] * waist;
-    }
+    let [px, py, pz] = genesisParams.isMinorBody ? applyMinorLobe(d, r) : [d[0] * r, d[1] * r, d[2] * r];
     writeParcel(
       [px, py, pz],
       [d[0] * vr, d[1] * vr, d[2] * vr],
@@ -405,13 +402,15 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
   //    Nucleate preferentially over cold convective downwellings (true cratonic aggregation)
   //    while remaining 24% form oceanic island arcs; GPU SPH convection rafts & thickens them!
   const coldPlumes = plumes.filter((pl) => pl.sign < 0);
-  const cratonSeeds = coldPlumes.length > 0 ? coldPlumes : plumes;
+  const cratonSeeds = (coldPlumes.length > 0 ? coldPlumes : plumes).slice(0, genesisParams.hasOcean ? 4 : 5);
   for (let i = 0; i < nFelsic; i += 1) {
     let d;
-    if (rand() < 0.76 && cratonSeeds.length > 0) {
+    if (rand() < (genesisParams.hasOcean ? 0.90 : 0.78) && cratonSeeds.length > 0) {
       const seedP = cratonSeeds[i % cratonSeeds.length];
       const jit = randUnitSphere();
-      const spread = 0.34 + rand() * 0.44;
+      // Cohesive continental cratonic shields (0.24..0.58 rad) assembling into 3-4 broad continents
+      // (~32% land / ~68% open deep sapphire oceans — NEVER fragmented potholes or empty waterworlds!)
+      const spread = genesisParams.hasOcean ? (0.24 + Math.pow(rand(), 1.15) * 0.34) : (0.28 + rand() * 0.44);
       const sx = seedP.dir[0] + jit[0] * spread;
       const sy = seedP.dir[1] + jit[1] * spread;
       const sz = seedP.dir[2] + jit[2] * spread;
@@ -428,16 +427,7 @@ export function buildInitialPlanetarySphParcels(genesisParams, {
     }
     const thick0 = 0.38 + rand() * 0.26;
     const t0 = genesisParams.isMagmaOcean ? 0.72 : (0.18 + Math.max(0, plumeT) * 0.22);
-    let fx = d[0] * r;
-    let fy = d[1] * r;
-    let fz = d[2] * r;
-    if (genesisParams.isMinorBody) {
-      const lobeDot = d[0] * minorLobeDir[0] + d[1] * minorLobeDir[1] + d[2] * minorLobeDir[2];
-      const waist = 0.72 + 0.42 * lobeDot * lobeDot;
-      fx *= minorAxes[0] * waist;
-      fy *= minorAxes[1] * waist;
-      fz *= minorAxes[2] * waist;
-    }
+    let [fx, fy, fz] = genesisParams.isMinorBody ? applyMinorLobe(d, r) : [d[0] * r, d[1] * r, d[2] * r];
     writeParcel(
       [fx, fy, fz],
       [0, 0, 0],
@@ -809,6 +799,12 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   let solidus_stiff = smoothstep(0.56, 0.24, temp) * (0.25 + 0.75 * cool_age);
   let base_drag = mix(6.5, 1.8, clamp(temp * 0.75 + params.tectonic_mobility * 0.45, 0.0, 1.0));
   let arrhenius_drag = mix(base_drag, 10.2, solidus_stiff * 0.45);
+  let is_minor = (params.flags & 16u) != 0u;
+  // Sub-hydrostatic rubble-pile comets & asteroids (< 550 km) are material-strength dominated (sigma_yield >> rho*g*R),
+  // preserving genuine 2:1 bilobed contact-binary shapes instead of relaxing into hydrostatic spheres!
+  if (is_minor && species < 2.5) {
+    acc = acc * 0.032;
+  }
   vel = vel + acc * dt;
   vel = mix(vel, v_cell, clamp(dt * arrhenius_drag, 0.0, 0.88));
 
@@ -833,14 +829,13 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Soft radial confinement to planetary volume (prevents numerical escape while preserving buoyancy stratification!)
   // Sub-hydrostatic minor bodies (bit 16u: asteroids/comets < 550 km) retain irregular non-spherical 3D lobes!
   let r_new = length(pos);
-  let is_minor = (params.flags & 16u) != 0u;
   if (is_minor && species < 2.5) {
-    // High cohesive rock yield strength preserves triaxial rubble-pile lobes under gentle self-gravity!
-    vel = vel * exp(-dt * 4.5);
-    if (r_new > 1.38) {
+    // High cohesive rock yield strength preserves triaxial bilobed rubble-pile lobes under weak self-gravity!
+    vel = vel * exp(-dt * 5.2);
+    if (r_new > 1.48) {
       let nr = pos / max(1e-5, r_new);
-      pos = nr * 1.38;
-      vel = vel * 0.25;
+      pos = nr * 1.48;
+      vel = vel * 0.20;
     }
   } else if (species < 2.5 || abs(species - 4.0) < 0.3) {
     let r_max = select(select(1.06, 1.12, abs(species - 2.0) < 0.3), 0.72, species < 0.5);
@@ -1000,23 +995,24 @@ fn splat_parcels_to_sphere(@builtin(global_invocation_id) gid: vec3<u32>) {
     is_water > 0.5
   );
   if (is_minor) {
-    elev_contrib = clamp((r - 0.84) * 2.15 + (thick - 0.26) * 0.22, -0.95, 0.95);
+    // True full-range 3D contact-binary lobe elevation mapped smoothly from real bilobed SPH shell radii [0.38..1.45]
+    elev_contrib = clamp((r - 0.86) * 1.48 + (thick - 0.24) * 0.14, -0.96, 0.96);
   }
 
   // True 3D spherical great-circle Wendland C2 compact SPH kernel support (ZERO equirectangular box edges!):
-  // Adaptive smoothing length shrinks physically with sqrt(5120 / parcel_count) while keeping coherent
-  // continental plateaus on planets & smooth sculpted bilobed rubble-pile domes on comets/asteroids!
+  // Adaptive smoothing length resolves coherent tectonic continental shelves & mountain chains on planets
+  // and smooth sculpted bilobed rubble-pile domes on comets/asteroids!
   let wi = i32(params.map_w);
   let hi = i32(params.map_h);
   let cx = i32(floor(u * f32(wi)));
   let cy = i32(floor(v * f32(hi)));
   let cos_lat = max(0.18, cos(lat));
-  let is_mtn_ridge = (is_felsic > 0.5 && (thick > 0.44 || abs(conv) > 0.30));
-  let dens_scale = clamp(sqrt(5120.0 / max(2048.0, f32(params.parcel_count))), 0.52, 1.0);
-  let base_ang = select(select(select(0.155, 0.205, is_felsic > 0.5), 0.105, is_mtn_ridge), 0.210, is_minor);
-  let ang_rad = max(select(0.064, 0.125, is_minor), base_ang * dens_scale);
-  let rad_y = clamp(i32(ceil((ang_rad / 3.14159265) * f32(hi))), 4, 28);
-  let rad_x = min(68, i32(ceil(f32(rad_y) / cos_lat)));
+  let is_mtn_ridge = (is_felsic > 0.5 && (thick > 0.48 || abs(conv) > 0.34));
+  let dens_scale = clamp(sqrt(5120.0 / max(2048.0, f32(params.parcel_count))), 0.58, 1.0);
+  let base_ang = select(select(select(0.185, 0.235, is_felsic > 0.5), 0.125, is_mtn_ridge), 0.240, is_minor);
+  let ang_rad = max(select(0.088, 0.145, is_minor), base_ang * dens_scale);
+  let rad_y = clamp(i32(ceil((ang_rad / 3.14159265) * f32(hi))), 5, 32);
+  let rad_x = min(76, i32(ceil(f32(rad_y) / cos_lat)));
 
   for (var dy = -rad_y; dy <= rad_y; dy = dy + 1) {
     let py = clamp(cy + dy, 0, hi - 1);
@@ -1033,7 +1029,8 @@ fn splat_parcels_to_sphere(@builtin(global_invocation_id) gid: vec3<u32>) {
       // Wendland C2 compact spherical SPH kernel: (1 - q)^4 * (4q + 1)
       let omq = 1.0 - q;
       let w_kern = omq * omq * omq * omq * (4.0 * q + 1.0);
-      let w = w_kern * select(1.0, 1.25, is_felsic > 0.5) * select(1.0, 0.28, is_deep_mantle > 0.5);
+      // Buoyant surface granitic crust (species == 2) carries physical lithospheric surface authority over sub-crustal mantle!
+      let w = w_kern * select(select(select(0.55, 0.18, is_deep_mantle > 0.5), 1.0, is_minor), 2.15, is_felsic > 0.5);
       let base = (u32(py) * params.map_w + u32(px)) * 6u;
       atomicAdd(&map_acc[base + 0u], i32(round(w * Q_G)));
       atomicAdd(&map_acc[base + 1u], i32(round(w * elev_contrib * Q_G)));
@@ -1079,22 +1076,23 @@ fn resolve_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
   let has_ocean = (params.flags & 1u) != 0u;
   let is_magma = (params.flags & 2u) != 0u;
   let is_minor = (params.flags & 16u) != 0u;
-  let cont_step = select(smoothstep(0.24, 0.54, felsic), smoothstep(0.32, 0.62, felsic), has_ocean);
-  // Crisp narrow coastal Andean/Himalayan mountain arc right along convergent continental margins!
-  let margin_band = smoothstep(0.28, 0.48, felsic) * (1.0 - smoothstep(0.58, 0.84, felsic));
-  let mtn_belt = margin_band * (0.32 + max(0.0, conv) * 0.78) * (0.35 + params.tectonic_mobility * 0.65);
+  // Realistic Earth-like ~32% cohesive continental plates on ocean worlds (leaves ~68% open deep sapphire oceans!)
+  let cont_step = select(smoothstep(0.24, 0.54, felsic), smoothstep(0.42, 0.68, felsic), has_ocean);
+  // Crisp narrow coastal Andean/Himalayan mountain arc strictly along convergent continental subduction margins!
+  let margin_band = smoothstep(0.46, 0.62, felsic) * (1.0 - smoothstep(0.70, 0.90, felsic));
+  let mtn_belt = margin_band * (0.28 + max(0.0, conv) * 0.72) * (0.35 + params.tectonic_mobility * 0.65);
   // Offshore subduction trench right outside the continental margin & inland divergent rift canyons!
-  let trench = smoothstep(0.08, 0.26, felsic) * (1.0 - smoothstep(0.26, 0.38, felsic)) * max(0.0, conv + 0.15) * 0.28 * params.tectonic_mobility;
-  let rift_canyon = smoothstep(0.12, 0.45, -conv) * 0.24 * (0.4 + params.tectonic_mobility * 0.6);
+  let trench = smoothstep(0.18, 0.36, felsic) * (1.0 - smoothstep(0.36, 0.48, felsic)) * max(0.0, conv + 0.15) * 0.28 * params.tectonic_mobility;
+  let rift_canyon = smoothstep(0.18, 0.52, -conv) * 0.18 * (0.4 + params.tectonic_mobility * 0.6);
   if (is_minor) {
-    elev = clamp(elev * 1.04, -0.95, 0.95);
+    elev = clamp(elev * 1.08, -0.96, 0.96);
   } else if (has_ocean) {
-    let ocean_floor = clamp(-0.56 + (elev + 0.42) * 0.58 - trench + rift_canyon * 0.35, -0.88, -0.02);
-    let land_elev = clamp(0.10 + (elev - 0.04) * 0.72 + mtn_belt - rift_canyon * 0.65, 0.08, 0.96);
+    let ocean_floor = clamp(-0.60 + (elev + 0.40) * 0.52 - trench + rift_canyon * 0.25, -0.92, -0.06);
+    let land_elev = clamp(0.20 + (elev - 0.04) * 0.58 + mtn_belt * 0.92 - rift_canyon * 0.35, 0.15, 0.96);
     elev = mix(ocean_floor, land_elev, cont_step);
   } else {
-    // Stagnant-lid highlands vs basaltic mare plains + tectonic rift scarps & wrinkle ridges
-    elev = clamp(elev * 0.78 + (cont_step - 0.44) * 0.42 + mtn_belt * 0.62 - rift_canyon * 0.85, -0.86, 0.88);
+    // Smooth stagnant-lid highlands vs basaltic mare plains + tectonic rift scarps (ZERO lumpy Play-Doh!)
+    elev = clamp(elev * 0.68 + (cont_step - 0.44) * 0.36 + mtn_belt * 0.48 - rift_canyon * 0.65, -0.86, 0.86);
   }
 
   // Imprint real SPH Late-Heavy-Bombardment impact craters progressively over geological formation time
@@ -1110,8 +1108,9 @@ fn resolve_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ang = acos(clamp(dot(n_dir, c_dir), -1.0, 1.0));
     if (ang < c_rad * 2.35) {
       let q = ang / c_rad;
-      let depth = imp.props.x * params.crater_preservation * 1.25 * imp_appear;
-      let rim_h = imp.props.y * params.crater_preservation * 1.45 * imp_appear;
+      let minor_cr = select(1.0, 0.30, is_minor);
+      let depth = imp.props.x * params.crater_preservation * 1.25 * minor_cr * imp_appear;
+      let rim_h = imp.props.y * params.crater_preservation * 1.45 * minor_cr * imp_appear;
       if (q < 1.0) {
         // Flat-floored / terraced parabolic excavated basin + central rebound peak on complex craters
         let bowl = (pow(q, 2.8) - 1.0) * depth;
@@ -1138,11 +1137,16 @@ fn resolve_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
     1.0
   );
 
-  // Moisture / ocean basin mask (humid coasts & tropical/temperate latitudes -> lush green continents!)
+  // Physical Hadley-Cell Climatic Moisture (Equatorial ITCZ rainforest, subtropical dry belt ~25 deg,
+  // lush mid-latitude temperate westerlies ~45-62 deg, coastal humidity!)
+  let abs_lat = abs(lat);
+  let itcz_rain = exp(-pow(abs_lat / 0.36, 2.0)) * 0.82;
+  let subtrop_dry = exp(-pow((abs_lat - 0.46) / 0.16, 2.0)) * 0.48;
+  let temp_belt = exp(-pow((abs_lat - 0.88) / 0.32, 2.0)) * 0.72;
+  let climate_rain = clamp(0.24 + itcz_rain + temp_belt - subtrop_dry, 0.12, 0.96);
   let below_sea = select(0.0, smoothstep(params.sea_level_norm + 0.06, params.sea_level_norm - 0.14, elev), has_ocean);
-  let coast_humid = select(0.0, smoothstep(params.sea_level_norm + 0.45, params.sea_level_norm + 0.02, elev) * 0.55, has_ocean);
-  let lat_rain = select(0.0, (0.35 + 0.65 * (1.0 - abs(sin(lat * 1.4)))) * 0.48, has_ocean);
-  let moisture = clamp(max(below_sea, water * 0.65 + coast_humid + lat_rain), 0.0, 1.0);
+  let coast_humid = select(0.0, smoothstep(params.sea_level_norm + 0.42, params.sea_level_norm + 0.01, elev) * 0.44, has_ocean);
+  let moisture = clamp(max(below_sea, select(0.0, climate_rain * 0.78 + coast_humid + water * 0.32, has_ocean)), 0.0, 1.0);
   let crust_comp = clamp(mix(felsic, 0.38, crater_ejecta * 0.68), 0.0, 1.0);
 
   geo_in[idx] = vec4<f32>(clamp(elev, -1.0, 1.0), crust_comp, thermal_volc, moisture);
@@ -1174,10 +1178,11 @@ fn erode_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
   let nDR = geo_in[u32(yd * w + xr)];
 
   let has_ocean = (params.flags & 1u) != 0u;
+  let is_minor = (params.flags & 16u) != 0u;
   let is_land = !has_ocean || c.x > params.sea_level_norm;
   let lat = (0.5 - (f32(y) + 0.5) / f32(h)) * 3.14159265359;
   let inv_cos = 1.0 / max(0.32, cos(lat));
-  // Subaerial base level: terrestrial erosion & talus stop at sea level (prevents submarine shelf cliffs from dilating ocean boxes into continents!)
+  // Subaerial base level: terrestrial erosion & talus stop at sea level (ZERO square ocean dilation!)
   let base_lvl = select(-2.0, params.sea_level_norm, has_ocean && is_land);
   let hL  = max(base_lvl, nL.x);
   let hR  = max(base_lvl, nR.x);
@@ -1189,41 +1194,67 @@ fn erode_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
   let hDR = max(base_lvl, nDR.x);
 
   // Isotropic 3x3 Sobel spherical gradient |grad_sphere h| + Oono-Puri 9-point isotropic Laplacian
-  // (100% rotationally symmetric circular wavefronts — ZERO square Chebyshev L-inf dilation artifacts!)
   let dh_dx = ((hR - hL) * 2.0 + (hUR - hUL) + (hDR - hDL)) * 0.125 * inv_cos;
   let dh_dy = ((hD - hU) * 2.0 + (hDL - hUL) + (hDR - hUR)) * 0.125;
   let slope = length(vec2<f32>(dh_dx, dh_dy));
   let avg_h = (hL + hR + hU + hD) * 0.1666667 + (hUL + hUR + hDL + hDR) * 0.0833333;
-  let lap = avg_h - c.x; // > 0 in concave valleys (convergent inflow), < 0 on convex ridges!
-  let inflow = max(0.0, lap * 2.5);
+  let lap = avg_h - c.x; // > 0 in concave valleys, < 0 on convex ridges
 
   var elev = c.x;
   var comp = c.y;
   var volc = c.z;
   var moist = c.w;
 
-  // Isotropic thermal talus creep (smooth circular relaxation above repose angle; ZERO box aliasing!)
-  let talus = mix(0.065, 0.115, comp);
+  // Isotropic thermal talus creep (smooth circular relaxation above repose angle; eliminates Play-Doh particle grain!)
+  let talus = mix(0.055, 0.105, comp);
   if (slope > talus) {
-    elev = elev + clamp(lap, -0.04, 0.04) * 0.35;
+    elev = elev + clamp(lap, -0.035, 0.035) * 0.34;
   }
 
-  // Isotropic hydraulic stream-power incision & dendritic river-valley carving on solvent-bearing land!
+  // Real Multi-Flow-Direction (MFD) Steepest-Descent Watershed Runoff Accumulation & Stream-Power Incision!
   if (params.hydraulic_erosion > 0.08 && is_land) {
+    // Accumulate runoff strictly from HIGHER uphill neighbors flowing down into this cell!
+    var upslope_runoff = 0.0;
+    if (nL.x  > c.x) { upslope_runoff = upslope_runoff + nL.w  * (nL.x  - c.x) * 1.0; }
+    if (nR.x  > c.x) { upslope_runoff = upslope_runoff + nR.w  * (nR.x  - c.x) * 1.0; }
+    if (nU.x  > c.x) { upslope_runoff = upslope_runoff + nU.w  * (nU.x  - c.x) * 1.0; }
+    if (nD.x  > c.x) { upslope_runoff = upslope_runoff + nD.w  * (nD.x  - c.x) * 1.0; }
+    if (nUL.x > c.x) { upslope_runoff = upslope_runoff + nUL.w * (nUL.x - c.x) * 0.707; }
+    if (nUR.x > c.x) { upslope_runoff = upslope_runoff + nUR.w * (nUR.x - c.x) * 0.707; }
+    if (nDL.x > c.x) { upslope_runoff = upslope_runoff + nDL.w * (nDL.x - c.x) * 0.707; }
+    if (nDR.x > c.x) { upslope_runoff = upslope_runoff + nDR.w * (nDR.x - c.x) * 0.707; }
     let avg_m = (nL.w + nR.w + nU.w + nD.w) * 0.1666667 + (nUL.w + nUR.w + nDL.w + nDR.w) * 0.0833333;
-    let flow = (0.04 + inflow * 2.25 + avg_m * 0.42) * params.hydraulic_erosion;
-    let carve = clamp(flow * pow(slope, 1.15) * 0.62, 0.0, 0.022);
-    let deposit = clamp(flow * max(0.0, 0.022 - slope) * 0.32, 0.0, 0.010);
+    // Physical equilibrium Hadley-cell climate rainfall anchor (NEVER decays Earth's continents to 0.16 tan desert!)
+    let abs_l = abs(lat);
+    let clim_rain = clamp(
+      0.24 + exp(-pow(abs_l / 0.36, 2.0)) * 0.78 + exp(-pow((abs_l - 0.88) / 0.32, 2.0)) * 0.68 - exp(-pow((abs_l - 0.46) / 0.16, 2.0)) * 0.46,
+      0.14,
+      0.94
+    );
+    let valley_flow = clamp(upslope_runoff * 6.5 + max(0.0, lap) * 2.2, 0.0, 1.0);
+    let discharge = (0.06 + valley_flow * 1.15 + clim_rain * 0.24) * params.hydraulic_erosion;
+    // Physically scaled per-pass stream-power incision (balanced for 24-40 passes so continents keep crisp
+    // alpine plateaus & natural river valleys instead of collapsing into flat sea-level moat rings!)
+    let h_above = max(0.0, elev - params.sea_level_norm);
+    let base_guard = smoothstep(0.02, 0.14, h_above);
+    let carve = clamp(pow(max(0.01, discharge), 0.65) * pow(slope, 1.15) * 0.11 * base_guard, 0.0, 0.0038);
+    let deposit = clamp(discharge * max(0.0, 0.014 - slope) * 0.12, 0.0, 0.0022);
     elev = elev - carve + deposit;
     if (has_ocean) {
-      elev = max(params.sea_level_norm + 0.002, elev);
+      elev = max(params.sea_level_norm + 0.008, elev);
     }
-    moist = clamp(max(moist * 0.95, min(1.0, flow * 0.88)), 0.0, 1.0);
-    comp = clamp(comp + (carve * 3.2 - deposit * 2.0), 0.0, 1.0);
-  } else if (!has_ocean) {
-    // Crisp isotropic ridge-preserving high-pass reinforcement on dry rocky/cratered worlds!
-    let curv = elev - avg_h;
-    elev = elev + clamp(curv * 0.065, -0.014, 0.014);
+    // Smooth Hadley-cell climatic humidity + delicate valley moisture (never saturates entire plateaus to neon-cyan!)
+    let target_m = clamp(max(clim_rain * 0.84, avg_m * 0.92) + valley_flow * 0.12, 0.12, 0.94);
+    moist = clamp(mix(moist, target_m, 0.22), 0.12, 0.96);
+    comp = clamp(comp + (carve * 2.2 - deposit * 1.4), 0.0, 1.0);
+  } else if (!has_ocean && !is_minor) {
+    // Gentle isotropic regolith smoothing preserving razor-sharp crater rims, escarpments & tectonic ridges!
+    let smooth_w = select(0.045, 0.012, slope > 0.035);
+    elev = elev + clamp(lap, -0.020, 0.020) * smooth_w;
+  } else if (is_minor) {
+    // Keep contact-binary comet/asteroid lobes clean and smooth without spiky high-frequency facets
+    let smooth_m = select(0.14, 0.04, slope > 0.08);
+    elev = elev + clamp(lap, -0.025, 0.025) * smooth_m;
   }
 
   // Smooth volcanic heat slightly along rifts
@@ -1540,7 +1571,7 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
   const clearGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-clear.v3-ss', label: `${label}-clear-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'clear_sph_grid', bindings: sphBgl });
   const splatGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-splat.v3-ss', label: `${label}-splat-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'splat_sph_grid', bindings: sphBgl });
   const finGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-fin.v3-ss', label: `${label}-fin-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'finalize_sph_grid', bindings: sphBgl });
-  const advectPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-advect.v3-ss', label: `${label}-advect`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'advect_sph_parcels', bindings: sphBgl });
+  const advectPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-advect.v4-ss', label: `${label}-advect`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'advect_sph_parcels', bindings: sphBgl });
   const telPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-tel.v3-ss', label: `${label}-tel`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'write_sph_telemetry', bindings: sphBgl });
 
   const sphBg = createCachedExplicitBindGroup(device, {
@@ -2001,6 +2032,7 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     get stepIndex() { return stepIndex; },
     get geoTimeMyr() { return geoTimeMyr; },
     getResidentParcelsBuffer: () => parcelsBuf,
+    getResident3dGridBuffer: () => gridValBuf,
     getResidentSphGeologyBuffer: () => geoBufA,
     getTelemetry: () => lastTelemetry,
     step,

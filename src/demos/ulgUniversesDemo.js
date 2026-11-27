@@ -5627,6 +5627,7 @@ export async function mountUlgUniversesDemo() {
     let sphGeology = null;
     let mdCloud = null;
     let nuclearVol = null;
+    let astroVol = null;
     const post = {
       bhUv: [0.5, 0.5],
       bhStrength: 0,
@@ -5878,8 +5879,8 @@ export async function mountUlgUniversesDemo() {
             count: nebSess.parcelCount,
             mode: 6,
             worldScale: dScale,
-            pointSize: Math.max(0.042, Math.min(0.14, 0.068 * dScale)),
-            alphaGain: 0.56 * wDisk,
+            pointSize: Math.max(0.034, Math.min(0.115, 0.056 * dScale)),
+            alphaGain: 0.44 * wDisk,
             extra1: [0, 0, 0, 0]
           });
           spheres.push(...nebSess.getCoalescedRenderSpheres(dScale));
@@ -6129,69 +6130,102 @@ export async function mountUlgUniversesDemo() {
               stellarModeHint: i === 0 ? physics.stellarMode : null
             });
           } else {
-            // True 3D Ray-Marched SPH Surface Displacement (flags > 0) for solid bodies
-            // OR physical rotational equatorial oblateness (flags < 0) for fast-spinning gas/ice giants!
-            const isSolidSphFocus = Boolean(isFocusL4 && !isCutPlanet && physics.planetaryGenesisSphSession && i === physics.planetaryBodyIndex);
-            let bodyShapeFlags = 0.0;
-            if (isSolidSphFocus) {
-              const gp = physics.planetaryGenesisSphSession.genesisParams;
-              const rKm = Number(spec.radiusKm) || 6371;
-              if (gp?.isMinorBody || spec.isMinorBody || spec.isComet || rKm < 550) {
-                bodyShapeFlags = 0.24; // Non-spherical triaxial / bilobed cratered 3D asteroid or comet!
-              } else if (rKm < 1250) {
-                bodyShapeFlags = 0.042; // Medium icy/rocky moon with prominent 3D impact basins & ridges!
-              } else if (gp?.hasOcean) {
-                bodyShapeFlags = 0.015; // Hydrostatic ocean planet: smooth geoid sea + realistic 3D mountain chains!
-              } else {
-                bodyShapeFlags = 0.020; // Hydrostatic rocky planet: realistic 3D crater rims, canyons & cordilleras!
+            // Live 3D Volumetric Ray-Marched Differentiating Molten Protoplanet (`ASTRO_VOL_WGSL` Mode 1)!
+            // When live 3D SPH formation is unfolding, render the real 3D SPH density/T/Fe-core/magma-mantle grid
+            // directly in volumetric 3D + pinpoint velocity-stretched LHB impactor meteor streaks — NO static sphere overlap!
+            const sphSess = physics.planetaryGenesisSphSession;
+            const isVolLiveForm = Boolean(
+              isFocusL4
+              && !isCutPlanet
+              && physics.planetaryGenesisLiveForm
+              && sphSess
+              && i === physics.planetaryBodyIndex
+              && typeof sphSess.getResident3dGridBuffer === 'function'
+            );
+            if (isVolLiveForm) {
+              const gp = sphSess.genesisParams || {};
+              const ageFrac = Math.max(0, Math.min(1, (sphSess.stepIndex || 0) / Math.max(1, physics.activeGenesisStage?.targetSteps || 240)));
+              astroVol = {
+                mode: 1,
+                buffer: sphSess.getResident3dGridBuffer(),
+                dim: sphSess.gridN || 40,
+                boxRadius: trueRWorld * 1.55,
+                center: [wx, wy, wz],
+                alphaMul: wSolar,
+                paramA: ageFrac,
+                extra2: [gp.hasOcean ? 1.0 : 0.0, gp.isMinorBody ? 1.0 : 0.0, nowSec, (isMagmaOcean || gp.isMagmaOcean) ? 1.0 : 0.0]
+              };
+            } else {
+              // True 3D Ray-Marched SPH Surface Displacement (flags > 0) for solid bodies
+              // OR physical rotational equatorial oblateness (flags < 0) for fast-spinning gas/ice giants!
+              const isSolidSphFocus = Boolean(isFocusL4 && !isCutPlanet && sphSess && i === physics.planetaryBodyIndex);
+              let bodyShapeFlags = 0.0;
+              if (isSolidSphFocus) {
+                const gp = sphSess.genesisParams;
+                const rKm = Number(spec.radiusKm) || 6371;
+                if (gp?.isMinorBody || spec.isMinorBody || spec.isComet || rKm < 550) {
+                  bodyShapeFlags = 0.38; // Unmistakable Rosetta 67P / Halley 2:1 bilobed contact-binary 3D comet/asteroid!
+                } else if (rKm < 1250) {
+                  bodyShapeFlags = 0.048; // Medium icy/rocky moon with prominent 3D impact basins & ridges!
+                } else if (gp?.hasOcean) {
+                  bodyShapeFlags = 0.014; // Hydrostatic ocean planet: smooth geoid sea + realistic 3D mountain chains!
+                } else {
+                  bodyShapeFlags = 0.022; // Hydrostatic rocky planet: realistic 3D crater rims, canyons & cordilleras!
+                }
+              } else if ((spec.kind === 2 || spec.kind === 3) && (Number(spec.radiusKm) || 0) >= 16000) {
+                const rotHr = Math.max(5.0, Number(spec.rotationPeriodHr) || 10.5);
+                const oblate = Math.max(0.025, Math.min(0.098, 0.72 / rotHr));
+                bodyShapeFlags = -oblate;
               }
-            } else if ((spec.kind === 2 || spec.kind === 3) && (Number(spec.radiusKm) || 0) >= 16000) {
-              const rotHr = Math.max(5.0, Number(spec.rotationPeriodHr) || 10.5);
-              const oblate = Math.max(0.025, Math.min(0.098, 0.72 / rotHr));
-              bodyShapeFlags = -oblate;
+              spheres.push({
+                pos: [wx, wy, wz],
+                radius: trueRWorld,
+                color0: isMagmaOcean ? [1.0, 0.44, 0.10] : (isCryoMoon ? [0.86, 0.92, 0.98] : (isRogue ? [0.16, 0.24, 0.36] : spec.color0)),
+                color1: isMagmaOcean ? [0.22, 0.08, 0.05] : (isCryoMoon ? [0.48, 0.68, 0.86] : (isRogue ? [0.06, 0.10, 0.18] : spec.color1)),
+                kind: isCutPlanet ? 4 : (isMagmaOcean ? 7 : (isCryoMoon ? 3 : spec.kind)),
+                atm: isMagmaOcean ? 0.55 : (isCryoMoon ? 0.18 : (spec.atm ?? 0.35)),
+                rCore: rCoreNorm,
+                rMantle: rMantleNorm,
+                cutaway: isCutPlanet,
+                tempK: Number(spec.tempK) || 288,
+                civTechK: Number(spec.civTechK) || 0,
+                dysonCoverage: 0,
+                flags: bodyShapeFlags,
+                seed: i * 2.17 + 1.3
+              });
             }
-            spheres.push({
-              pos: [wx, wy, wz],
-              radius: trueRWorld,
-              color0: isMagmaOcean ? [1.0, 0.44, 0.10] : (isCryoMoon ? [0.86, 0.92, 0.98] : (isRogue ? [0.16, 0.24, 0.36] : spec.color0)),
-              color1: isMagmaOcean ? [0.22, 0.08, 0.05] : (isCryoMoon ? [0.48, 0.68, 0.86] : (isRogue ? [0.06, 0.10, 0.18] : spec.color1)),
-              kind: isCutPlanet ? 4 : (isMagmaOcean ? 7 : (isCryoMoon ? 3 : spec.kind)),
-              atm: isMagmaOcean ? 0.55 : (isCryoMoon ? 0.18 : (spec.atm ?? 0.35)),
-              rCore: rCoreNorm,
-              rMantle: rMantleNorm,
-              cutaway: isCutPlanet,
-              tempK: Number(spec.tempK) || 288,
-              civTechK: Number(spec.civTechK) || 0,
-              dysonCoverage: 0,
-              flags: bodyShapeFlags,
-              seed: i * 2.17 + 1.3
-            });
           }
           // Bind zero-copy 3D Multi-Material GPU SPH Planetary/Moon/Asteroid/Comet Geology directly onto the L4 globe!
           // (Replaces Perlin fbm5 continents with real GPU SPH core/mantle/crust/cratering/erosion!)
           if (isFocusL4 && physics.planetaryGenesisSphSession && i === physics.planetaryBodyIndex) {
-            sphGeology = {
-              buffer: physics.planetaryGenesisSphSession.getResidentSphGeologyBuffer(),
-              width: physics.planetaryGenesisSphSession.mapWidth,
-              height: physics.planetaryGenesisSphSession.mapHeight,
-              sphereIndex: sphereIdx,
-              seaLevelNorm: physics.planetaryGenesisSphSession.genesisParams?.seaLevelNorm ?? -1.5
-            };
-            // Render live 3D GPU SPH planetary genesis parcels (Fe core, mantle plumes, felsic continents, LHB impactors!)
-            // when Live Geologic Time replay OR 3D Interior Cutaway is active!
+            const isVolLiveNow = Boolean(!isCutPlanet && physics.planetaryGenesisLiveForm && typeof physics.planetaryGenesisSphSession.getResident3dGridBuffer === 'function');
+            if (!isVolLiveNow) {
+              sphGeology = {
+                buffer: physics.planetaryGenesisSphSession.getResidentSphGeologyBuffer(),
+                width: physics.planetaryGenesisSphSession.mapWidth,
+                height: physics.planetaryGenesisSphSession.mapHeight,
+                sphereIndex: sphereIdx,
+                seaLevelNorm: physics.planetaryGenesisSphSession.genesisParams?.seaLevelNorm ?? -1.5
+              };
+            }
+            // Render live 3D GPU SPH planetary parcels:
+            //   - During volumetric live formation (`only_impactors = 1.0`): ONLY crisp fiery LHB meteor streaks & impact sparks!
+            //   - During 3D Interior Cutaway (`only_impactors = 0.0`): interior convective parcel tracers inside the cut octant!
             if (physics.planetaryGenesisLiveForm || isCutPlanet) {
               particleClouds.push({
                 buffer: physics.planetaryGenesisSphSession.getResidentParcelsBuffer(),
                 count: physics.planetaryGenesisSphSession.parcelCount,
                 mode: 13,
-                worldScale: trueRWorld * (physics.planetaryGenesisLiveForm ? 1.04 : 0.98),
-                pointSize: Math.max(0.055, Math.min(0.24, trueRWorld * 0.048)),
-                alphaGain: (physics.planetaryGenesisLiveForm ? 0.62 : 0.44) * wSolar,
-                extra1: [wx, wy, wz, 0]
+                worldScale: trueRWorld * (isVolLiveNow ? 1.0 : 0.98),
+                pointSize: isVolLiveNow
+                  ? Math.max(0.032, Math.min(0.11, trueRWorld * 0.028))
+                  : Math.max(0.045, Math.min(0.18, trueRWorld * 0.038)),
+                alphaGain: (isVolLiveNow ? 0.72 : 0.44) * wSolar,
+                extra1: [wx, wy, wz, isVolLiveNow ? 1.0 : 0.0]
               });
             }
           }
-          // Zooming into an active Comet renders live solar-flux sublimation outgassing coma & dual tail!
+          // Zooming into an active Comet renders crisp Rosetta-style velocity-stretched sublimation coma & dual tails!
           if (isFocusL4 && spec.isComet && physics.radWindL2Session) {
             const cScale = Math.max(0.35, trueRWorld * 2.4);
             particleClouds.push({
@@ -6199,9 +6233,9 @@ export async function mountUlgUniversesDemo() {
               count: physics.radWindL2Session.particleCount,
               mode: 8,
               worldScale: cScale,
-              pointSize: Math.max(0.05, Math.min(0.16, 0.095 * cScale)),
-              alphaGain: 0.30 * wSolar,
-              extra1: [wx, wy, wz, 0]
+              pointSize: Math.max(0.016, Math.min(0.048, 0.024 * cScale)),
+              alphaGain: 0.24 * wSolar,
+              extra1: [wx, wy, wz, 1.0]
             });
           }
           // Bind zero-copy live GPU spherical baroclinic atmosphere + triboelectric lightning + polar aurorae + CFD flow onto the focused world!
@@ -6264,7 +6298,7 @@ export async function mountUlgUniversesDemo() {
           });
         }
 
-        if (showOrbits && span > 8.1 && !(currentLevel === 3 && physics.stellarMode !== 'fusion')) {
+        if (showOrbits && span > (isFocusStar ? 9.8 : 8.1) && currentLevel !== 3) {
           const wOrb = bandWeight(span, 8.1, 8.8, 15.2, 16.4);
           lineChunks.push(...buildSolarOsculatingOrbitLines(physics.solarEngine, originAu, scaleAuToWorld, span, wOrb));
         }
@@ -6400,16 +6434,33 @@ export async function mountUlgUniversesDemo() {
           }
         }
       } else if (physics.stellarEngine) {
-        const teffLog = Math.log10(Math.max(900, Number(physics.stellarEngine.surfaceTempK) || 5778));
-        particleClouds.push({
-          buffer: physics.stellarEngine.getResidentBuffer(),
-          count: physics.stellarEngine.count,
-          mode: 2,
-          worldScale: stScale * 0.95,
-          pointSize: Math.max(0.045, Math.min(0.20, 0.125 * stScale)),
-          alphaGain: 0.30 * wStarCore,
-          extra1: [0, 0, 0, teffLog]
-        });
+        const stEng = physics.stellarEngine;
+        const teffLog = Math.log10(Math.max(900, Number(stEng.surfaceTempK) || 5778));
+        if (stEng.solver === 'webgpu-3d-mls-mpm-nuclear-fusion' && typeof stEng.getResidentGridBuffer === 'function') {
+          // True Zero-Copy 3D Volumetric Radiative-Transfer Star (`ASTRO_VOL_WGSL` Mode 0) directly reading
+          // the live 32^3 MLS-MPM stellar density/temperature/velocity/4-channel nuclear burn grid!
+          // (Retires blown-out flat cotton-ball point-sprite puff!)
+          astroVol = {
+            mode: 0,
+            buffer: stEng.getResidentGridBuffer(),
+            dim: stEng.gridN || 24,
+            boxRadius: (stEng.boxHalf || 7.5) * stScale * 0.95,
+            center: [0, 0, 0],
+            alphaMul: wStarCore,
+            paramA: teffLog,
+            extra2: [(stEng.rStar || 5.3) / (stEng.boxHalf || 7.5), 1.0, nowSec, stEng.generation ?? 3]
+          };
+        } else {
+          particleClouds.push({
+            buffer: stEng.getResidentBuffer(),
+            count: stEng.count,
+            mode: 2,
+            worldScale: stScale * 0.95,
+            pointSize: Math.max(0.045, Math.min(0.20, 0.125 * stScale)),
+            alphaGain: 0.30 * wStarCore,
+            extra1: [0, 0, 0, teffLog]
+          });
+        }
         // 100% EMERGENT 3D GPU Stellar Convective Dynamo magnetic streamlines traced through live GPU B(x,y,z)!
         // (Zero hardcoded analytic dipole loops; B₀ = 0 produces 0 streamlines!)
         if (showOrbits && physics.stellarDynamoStreamlines?.length >= 14) {
@@ -6558,6 +6609,7 @@ export async function mountUlgUniversesDemo() {
       disks: disks.length ? disks : null,
       lines: lineChunks.length >= 14 ? new Float32Array(lineChunks) : null,
       nuclearVol,
+      astroVol,
       post
     };
   }

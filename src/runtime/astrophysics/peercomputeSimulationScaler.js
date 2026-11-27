@@ -249,19 +249,27 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
     memoryFraction: 0.22
   }, ctx);
 
-  // 5. Watchable Live Genesis Coalescence Pacing (richer, deeper live evolution on capable GPUs!
-  //    Mobile stays snappy ~12-18s; Desktop/Workstation unfolds over ~45-100s with instant [Finish]!)
+  // 5. Watchable Long-Horizon Multi-Substep GPU Coalescence Pacing!
+  //    Each animation frame batches multiple GPU compute substeps inside ONE `queue.submit`
+  //    so L1/L2/L4 genuinely run 400..1,800+ dynamical substeps (25+ orbits, full planetary tectonics &
+  //    hydrologic flow-accumulation erosion!) over ~45-100s on desktop/workstation while [Finish Now]
+  //    fast-forwards via chunked bursts in ~1-2s!
   const perfScale = presetChoice.perfScale;
   const tier = sizingOverrides.tier || normalizedCaps.tier;
-  const l1TargetSteps = tier === 'cluster' ? 540 : (tier === 'workstation' ? 380 : (tier === 'laptop' ? 220 : 96));
-  const l2TargetSteps = tier === 'cluster' ? 560 : (tier === 'workstation' ? 420 : (tier === 'laptop' ? 240 : 120));
-  const l4TargetSteps = tier === 'cluster' ? 600 : (tier === 'workstation' ? 460 : (tier === 'laptop' ? 260 : 120));
-  const sphErosionPasses = tier === 'cluster' ? 28 : (tier === 'workstation' ? 24 : (tier === 'laptop' ? 18 : 14));
-  // Re-project spherical geology smoothly every 2-4 steps during live 3D SPH formation to keep 60 FPS!
-  const l4MapUpdateCadence = sphParcelsSizing.count >= 24576 ? 4 : (sphParcelsSizing.count >= 12288 ? 3 : 2);
+  const l1TargetSteps = tier === 'cluster' ? 960 : (tier === 'workstation' ? 720 : (tier === 'laptop' ? 420 : 180));
+  const l1SubstepsPerFrame = tier === 'cluster' ? 4 : (tier === 'workstation' ? 3 : 2);
+  const l2TargetSteps = tier === 'cluster' ? 1680 : (tier === 'workstation' ? 1280 : (tier === 'laptop' ? 720 : 280));
+  const l2SubstepsPerFrame = tier === 'cluster' ? 6 : (tier === 'workstation' ? 5 : (tier === 'laptop' ? 4 : 2));
+  const l4TargetSteps = tier === 'cluster' ? 1560 : (tier === 'workstation' ? 1180 : (tier === 'laptop' ? 640 : 240));
+  const l4SubstepsPerFrame = tier === 'cluster' ? 6 : (tier === 'workstation' ? 5 : (tier === 'laptop' ? 3 : 2));
+  const l3SubstepsPerFrame = tier === 'cluster' ? 4 : (tier === 'workstation' ? 3 : 2);
+  const sphErosionPasses = tier === 'cluster' ? 40 : (tier === 'workstation' ? 34 : (tier === 'laptop' ? 24 : 16));
+  // Re-project spherical geology smoothly every 24-36 substeps during live 3D SPH formation (keeping 60 FPS!)
+  const l4MapUpdateCadence = sphParcelsSizing.count >= 24576 ? 30 : (sphParcelsSizing.count >= 12288 ? 20 : 12);
   // Chunked burst substeps used when clicking [Finish Now] or pre-computing non-observed worlds
-  const l4BurstSubsteps = tier === 'cluster' ? 84 : (tier === 'workstation' ? 72 : (tier === 'laptop' ? 56 : 44));
-  const l2BurstSubsteps = tier === 'cluster' ? 64 : (tier === 'workstation' ? 56 : (tier === 'laptop' ? 44 : 32));
+  // (deep enough for genuine core segregation, tectonic plate drift & cratering without stalling!)
+  const l4BurstSubsteps = tier === 'cluster' ? 240 : (tier === 'workstation' ? 200 : (tier === 'laptop' ? 150 : 96));
+  const l2BurstSubsteps = tier === 'cluster' ? 260 : (tier === 'workstation' ? 210 : (tier === 'laptop' ? 140 : 84));
 
   const gpuInfo = normalizedCaps.webgpu.info || {};
   const gpuLabel = [gpuInfo.vendor, gpuInfo.architecture, gpuInfo.description]
@@ -291,18 +299,22 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
       cosmoFftN,
       galaxyStars: galaxyStarsSizing.count,
       l1TargetSteps,
+      l1SubstepsPerFrame,
       nebularParcels: nebularParcelsSizing.count,
       nebularRadialBins,
       l2TargetSteps,
+      l2SubstepsPerFrame,
       l2BurstSubsteps,
       stellarParcels: stellarParcelsSizing.count,
       stellarGridN,
+      l3SubstepsPerFrame,
       sphParcels: sphParcelsSizing.count,
       sphGridN: sphGridSizing.x,
       sphMapWidth: sphMapSizing.width,
       sphMapHeight: sphMapSizing.height,
       sphErosionPasses,
       l4TargetSteps,
+      l4SubstepsPerFrame,
       l4MapUpdateCadence,
       l4BurstSubsteps,
       surfaceGridN: tier === 'mobile' ? 81 : (tier === 'laptop' ? 129 : 161),

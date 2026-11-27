@@ -2115,7 +2115,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       const sp = pool[oi % Math.max(1, pool.length)] || xeno.species[0];
       if (!sp) continue;
       const ang = ((oi * 2.399963) + (seed % 97) * 0.1) % (Math.PI * 2);
-      const rad = isFauna ? (16.0 + (oi % 6) * 15.0 + (oi >= 6 ? 18 : 0)) : (20.0 + ((oi - nFauna) % 8) * 15.5 + 10.0);
+      const rad = isFauna ? (10.0 + (oi % 6) * 14.0 + (oi >= 6 ? 14 : 0)) : (12.0 + ((oi - nFauna) % 8) * 14.5);
       const ox = Math.cos(ang) * rad;
       const oz = Math.sin(ang) * rad;
       const gh = evaluatePlanetaryCrustElevation(ox, oz, env);
@@ -2919,7 +2919,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           const dx = org.pos[0] - ufo.pos[0];
           const dz = org.pos[2] - ufo.pos[2];
           const hd = Math.hypot(dx, dz);
-          if (hd < 38.0) {
+          if (hd < 44.0) {
             const sc = hd * (org.kingdom === 'fauna' ? 0.84 : (org.kingdom === 'fungi' ? 0.92 : 1.0));
             if (sc < bestScore) { bestScore = sc; bestOrg = org; }
           }
@@ -2937,7 +2937,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
           const toUfoY = (ufo.pos[1] - 1.2) - org.pos[1];
           const toUfoZ = ufo.pos[2] - org.pos[2];
           const d3 = Math.hypot(toUfoX, toUfoY, toUfoZ);
-          if (d3 <= 4.2) {
+          if (d3 <= 4.8) {
             org.abducted = true;
             org.abducting = false;
             const rec = synthesizeAbductedSpecimenRecord({
@@ -2954,10 +2954,14 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
             pendingAbductions.push(rec);
             continue;
           }
-          const pullSpd = 16.0;
-          org.pos[0] += (toUfoX / Math.max(0.1, d3)) * pullSpd * dtSafe;
-          org.pos[1] += Math.max(6.5, (toUfoY / Math.max(0.1, d3)) * pullSpd) * dtSafe;
-          org.pos[2] += (toUfoZ / Math.max(0.1, d3)) * pullSpd * dtSafe;
+          const pullSpd = 26.0;
+          const invD3 = 1.0 / Math.max(0.1, d3);
+          const vyPull = toUfoY > 1.5
+            ? Math.max(4.5, toUfoY * invD3 * pullSpd)
+            : toUfoY * invD3 * pullSpd;
+          org.pos[0] += toUfoX * invD3 * pullSpd * dtSafe;
+          org.pos[1] += vyPull * dtSafe;
+          org.pos[2] += toUfoZ * invD3 * pullSpd * dtSafe;
           org.yaw += 2.6 * dtSafe;
         } else {
           org.abducting = false;

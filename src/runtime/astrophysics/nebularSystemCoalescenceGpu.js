@@ -277,81 +277,117 @@ fn step_coalesce_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (p.info.w < 0.5) { return; }
 
   let dt = params.dt;
-  let u = clamp(p.vel_st.w, 0.002, 0.998);
+  var pos = p.pos_m.xyz;
+  var vel = p.vel_st.xyz;
+  let r_xz = max(0.35, length(pos.xz));
+  let r_3d = max(0.35, length(pos));
+  let u = clamp((r_xz - 0.88) / 8.72, 0.002, 0.998);
   let nb = i32(params.radial_bins);
-  let bf = u * f32(params.radial_bins) - 0.5;
-  let bi = clamp(i32(round(bf)), 0, nb - 1);
+  let bi = clamp(i32(floor(u * f32(params.radial_bins))), 0, nb - 1);
 
-  // 1. Self-gravitational + streaming-instability radial clumping + Lindblad tidal gap clearing!
-  var f_clump = 0.0;
-  var f_gap = 0.0;
-  let span_bins = max(3, i32(round(3.0 * (f32(params.radial_bins) / 64.0))));
-  for (var db = -span_bins; db <= span_bins; db = db + 1) {
+  // 1. TRUE 3D Newtonian Central Star Gravity + Canonical 3D Schroeder Scale-Atlas Multipole Disk Self-Gravity!
+  //    Visual scale: r_vis in [0.88..9.60], GM_vis = 24.0 * M_star^0.55 -> realistic Keplerian differential rotation
+  //    producing sweeping logarithmic spiral density waves & Jeans gravitational fragmentation over 25-50+ orbits!
+  let gm_star = 24.0 * pow(max(0.08, params.star_mass_solar), 0.55);
+  let r_soft = sqrt(r_3d * r_3d + 0.16);
+  let a_star = -pos * (gm_star / (r_soft * r_soft * r_soft));
+
+  // Canonical 3D SS hierarchical multipole self-gravity (excites genuine non-axisymmetric spiral arms & Hill clumps!)
+  let ss_g = clamp(ss_grav_acc[i].xyz, vec3<f32>(-4.5), vec3<f32>(4.5));
+  let ss_mag = length(ss_g);
+
+  // 2. Broad, Smooth Disk Gas Pressure Gradient (-grad P / rho) & Lindblad Tidal Gap Clearing (ZERO 1-bin vinyl rings!)
+  //    Uses a wide physical Hill-scale smoothing stencil (~10% of disk radius) so pressure prevents artificial thin rings!
+  let r_hat_xz = pos.xz / r_xz;
+  let t_hat_xz = vec2<f32>(-r_hat_xz.y, r_hat_xz.x);
+  var f_press_r = 0.0;
+  var f_gap_r = 0.0;
+  let smooth_span = max(4, i32(round(0.075 * f32(params.radial_bins))));
+  for (var db = -smooth_span; db <= smooth_span; db = db + 1) {
     if (db == 0) { continue; }
     let bj = clamp(bi + db, 0, nb - 1);
     let m_j = bin_summary[u32(bj) * 2u + 0u].y;
     let gap_j = bin_azim[u32(bj)].w;
-    let d_u = (f32(bj) + 0.5) / f32(params.radial_bins) - u;
-    let norm_db = abs(f32(db)) * (64.0 / f32(params.radial_bins));
-    let w_kern = exp(-norm_db * 0.72);
-    f_clump = f_clump + sign(d_u) * m_j * w_kern;
-    // Lindblad tidal torque: massive gas-giant cores repel surrounding dust outside 1 Hill width to carve Cassini gaps!
-    if (gap_j > 0.08 && norm_db > 1.15 && norm_db < 3.2) {
-      f_gap = f_gap - sign(d_u) * gap_j * exp(-(norm_db - 1.8) * (norm_db - 1.8) * 1.4) * 18.0;
+    let frac_d = f32(db) / f32(smooth_span);
+    // Hydrodynamic gas pressure gradient repels sharp narrow ring spikes (Toomre acoustic stabilization!)
+    let w_p = exp(-frac_d * frac_d * 2.2) * frac_d;
+    f_press_r = f_press_r - m_j * w_p;
+    // Lindblad resonant torque around genuinely massive gas-giant cores carves broad clean planetary gaps
+    let norm_d = abs(frac_d);
+    if (gap_j > 0.12 && norm_d > 0.28 && norm_d < 0.95) {
+      f_gap_r = f_gap_r - sign(frac_d) * gap_j * exp(-pow((norm_d - 0.55) / 0.22, 2.0)) * 0.45;
     }
   }
   let local_gas_env = bin_summary[u32(bi) * 2u + 1u].w;
   let local_az = bin_azim[u32(bi)];
+  let local_m = bin_summary[u32(bi) * 2u + 0u].y;
 
-  // 2. Sub-Keplerian aerodynamic drift (pebbles drift gently inward until trapped at snow-line / peak pressure bumps!)
+  // 3. Sub-Keplerian Gas Headwind Drag, Shakura-Sunyaev alpha-Viscosity & Condensation-Front Pressure Traps!
   let r_au = u_to_r_au(u);
-  let temp_k = eval_disk_temp_k(r_au);
+  let t_rad_k = eval_disk_temp_k(r_au);
   let ice_f = p.thermo.y;
-  var drift_u = 0.0;
+  let v_kep = sqrt(gm_star / r_xz);
+  let v_circ_vec = vec3<f32>(t_hat_xz.x * v_kep, 0.0, t_hat_xz.y * v_kep);
+  let v_rel = vel - v_circ_vec;
+
+  // Smooth condensation pressure traps right at Silicate sublimation front (1250 K) & H2O Snow Line (170 K)
+  let snow_trap = exp(-pow((t_rad_k - 170.0) / 42.0, 2.0));
+  let sil_trap = exp(-pow((t_rad_k - 1220.0) / 180.0, 2.0));
+  let gas_decay = exp(-f32(params.step_index) * 0.00045 * pow(max(0.05, params.star_lum_solar), 0.16));
+  var a_drag = vec3<f32>(0.0);
   if (params.enable_drag != 0u) {
-    // Pressure bump trapping right at the H2O snow line & silicate sublimation cliff!
-    let snow_trap = exp(-pow((temp_k - 170.0) / 36.0, 2.0));
-    let sil_trap  = exp(-pow((temp_k - 1200.0) / 160.0, 2.0));
-    let drag_mag = (0.018 + 0.022 * ice_f) * (1.0 - 0.85 * max(snow_trap, sil_trap));
-    drift_u = -drag_mag;
+    // Aerodynamic circularization + vertical midplane damping + gentle radial drift toward condensation traps
+    let drag_k = (0.38 + 0.24 * ice_f) * gas_decay * params.gas_fraction;
+    let drift_in = -(0.095 + 0.08 * ice_f) * (1.0 - 0.88 * max(snow_trap, sil_trap)) * gas_decay;
+    a_drag = -v_rel * drag_k + vec3<f32>(r_hat_xz.x * drift_in, -pos.y * (0.65 * gas_decay), r_hat_xz.y * drift_in);
   }
 
-  // Soft restoring wall at Holman-Wiegert dynamical stability boundaries [0.02 .. 0.98]
-  var wall_f = 0.0;
-  if (u < 0.03) { wall_f = (0.03 - u) * 2.5; }
-  if (u > 0.97) { wall_f = (0.97 - u) * 2.5; }
-
-  // Radial velocity in log-radius u-space + Canonical 3D Schroeder Simulation (SS) Hierarchical Multipole Disk Self-Gravity!
-  let phi_prev = atan2(p.pos_m.z, p.pos_m.x);
-  let r_hat_xz = vec2<f32>(cos(phi_prev), sin(phi_prev));
-  let t_hat_xz = vec2<f32>(-r_hat_xz.y, r_hat_xz.x);
-  let ss_g = clamp(ss_grav_acc[i].xyz, vec3<f32>(-2.5), vec3<f32>(2.5));
-  let ss_g_rad = dot(vec2<f32>(ss_g.x, ss_g.z), r_hat_xz);
-  let ss_g_tan = dot(vec2<f32>(ss_g.x, ss_g.z), t_hat_xz);
-
-  var vu = p.vel_st.y;
-  let bin_scale_norm = 64.0 / f32(params.radial_bins);
-  let a_u = (f_clump + f_gap) * params.clump_strength * 0.00018 * bin_scale_norm + ss_g_rad * 0.045 + drift_u + wall_f;
-  vu = (vu + a_u * dt) * exp(-2.2 * dt);
-  let u_new = clamp(u + vu * dt, 0.005, 0.995);
-  let r_new_au = u_to_r_au(u_new);
-
-  // Keplerian azimuthal orbital advance + 3D Schroeder Scale-Atlas Spiral Torque + 2D Hill Embryo Condensation!
-  let omega_vis = sqrt(max(0.08, params.star_mass_solar) / max(0.08, pow(r_new_au, 1.35))) * 1.45;
-  var phi_new = phi_prev + (omega_vis + clamp(ss_g_tan * 0.12, -0.35, 0.35)) * dt;
+  // Soft 2D Hill-sphere azimuthal embryo accretion pull ONLY inside mature coherent clumps
+  let phi_cur = atan2(pos.z, pos.x);
   let peak_phi = atan2(local_az.y, local_az.x);
-  let d_phi_raw = peak_phi - phi_prev;
-  let d_phi = atan2(sin(d_phi_raw), cos(d_phi_raw));
-  let embryo_pull = smoothstep(20.0, 75.0, bin_summary[u32(bi) * 2u + 0u].y) * (0.20 + 0.80 * local_az.z);
-  phi_new = phi_new + clamp(d_phi, -0.35, 0.35) * embryo_pull * 0.65 * dt;
+  let d_phi = atan2(sin(peak_phi - phi_cur), cos(peak_phi - phi_cur));
+  let hill_pull = smoothstep(26.0, 88.0, local_m) * local_az.z * clamp(d_phi, -0.45, 0.45) * 0.85;
 
-  // Vertical settling toward disk midplane driven by stellar vertical gravity + 3D SS disk self-gravity!
-  let r_vis = 0.92 + u_new * 8.6;
-  let y_new = clamp(p.pos_m.y * exp(-1.15 * dt) + ss_g.y * 0.015 * dt, -1.6, 1.6);
+  // Soft inner/outer Holman-Wiegert boundary confinement
+  var f_wall = 0.0;
+  if (r_xz < 0.96) { f_wall = (0.96 - r_xz) * 14.0; }
+  if (r_xz > 9.45) { f_wall = (9.45 - r_xz) * 8.0; }
 
-  p.pos_m = vec4<f32>(cos(phi_new) * r_vis, y_new, sin(phi_new) * r_vis, p.pos_m.w);
-  p.vel_st = vec4<f32>(-sin(phi_new) * omega_vis * r_vis, vu, cos(phi_new) * omega_vis * r_vis, u_new);
-  p.thermo = vec4<f32>(eval_disk_temp_k(r_new_au), ice_f, local_gas_env, r_new_au);
+  let a_hydro_r = clamp((f_press_r * 0.0042 + f_gap_r) * params.clump_strength + f_wall, -4.5, 4.5);
+  let a_tot = a_star + ss_g + a_drag
+    + vec3<f32>(r_hat_xz.x * a_hydro_r + t_hat_xz.x * hill_pull, 0.0, r_hat_xz.y * a_hydro_r + t_hat_xz.y * hill_pull);
+
+  // Symplectic Velocity-Verlet / Semi-Implicit Leapfrog update in full 3D Cartesian space!
+  vel = vel + a_tot * dt;
+  // Cap extreme inner-edge velocities for CFL stability while preserving elliptical/spiral orbits
+  let v_spd = length(vel);
+  if (v_spd > 16.0) { vel = vel * (16.0 / v_spd); }
+  pos = pos + vel * dt;
+
+  // Gentle vertical confinement & radial clamp within disk box
+  let r_new_xz = max(0.75, length(pos.xz));
+  if (r_new_xz > 9.85) {
+    let sc_b = 9.85 / r_new_xz;
+    pos.x = pos.x * sc_b;
+    pos.z = pos.z * sc_b;
+    vel.x = vel.x * 0.85;
+    vel.z = vel.z * 0.85;
+  } else if (r_new_xz < 0.82) {
+    let sc_b = 0.82 / r_new_xz;
+    pos.x = pos.x * sc_b;
+    pos.z = pos.z * sc_b;
+  }
+  pos.y = clamp(pos.y, -1.8, 1.8);
+
+  let u_new = clamp((length(pos.xz) - 0.88) / 8.72, 0.002, 0.998);
+  let r_new_au = u_to_r_au(u_new);
+  // Real spiral-shock & accretion compressional heating (makes spiral wakes & accreting protoplanets glow!)
+  let shock_heat = clamp(ss_mag * 185.0 + length(v_rel) * 65.0, 0.0, 950.0);
+  let temp_live = eval_disk_temp_k(r_new_au) + shock_heat;
+
+  p.pos_m = vec4<f32>(pos, p.pos_m.w);
+  p.vel_st = vec4<f32>(vel, u_new);
+  p.thermo = vec4<f32>(temp_live, ice_f, local_gas_env, r_new_au);
   parcels[i] = p;
 }
 
@@ -596,38 +632,48 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   const snowLineAu = Math.pow(t1Au / 170.0, 2);
 
   const rand = mulberry32(seed);
-  // Seed initial rotating dusty nebular disk with subtle acoustic/spiral density perturbations
-  // (real protoplanetary disks have ~6-10% turbulent pressure ripples that seed streaming instability!)
+  // Seed initial flared 3D rotating protoplanetary nebula with natural m=2/m=3 spiral acoustic
+  // modes and Toomre-Q thermal velocity dispersion (ZERO artificial concentric vinyl rings!)
   const initData = new Float32Array(nParcels * PARCEL_STRIDE_FLOATS);
-  const nSeeds = 5 + (seed % 4);
-  const ripplePhases = Array.from({ length: nSeeds }, () => rand() * Math.PI * 2);
-  const rippleFreqs = Array.from({ length: nSeeds }, (_, k) => 4.0 + k * 3.1 + rand() * 1.4);
+  const gmStarVis = 24.0 * Math.pow(Math.max(0.08, mStar), 0.55);
+  const armPhase0 = rand() * Math.PI * 2;
+  const armPhase1 = rand() * Math.PI * 2;
+  const armCount = 2 + (seed % 2); // 2- or 3-arm grand-design protoplanetary spiral instability
 
   for (let i = 0; i < nParcels; i += 1) {
-    // Quasi-uniform log-radius sampling with weak natural turbulent density fluctuations
-    let u = (i + rand()) / nParcels;
-    let deltaU = 0;
-    for (let k = 0; k < nSeeds; k += 1) {
-      deltaU += Math.sin(u * Math.PI * rippleFreqs[k] + ripplePhases[k]) * 0.012;
-    }
-    u = Math.max(0.01, Math.min(0.99, u + deltaU));
+    // Smooth Hayashi Minimum-Mass Solar Nebula surface-density distribution + gentle spiral wave seed
+    const u0 = (i + rand()) / nParcels;
+    const u = Math.max(0.015, Math.min(0.985, Math.pow(u0, 0.92)));
+    const rVis = 0.88 + u * 8.72;
+    let phi = rand() * Math.PI * 2;
+    // Slight logarithmic spiral overdensity seeding m=2..3 density waves (NOT concentric circles!)
+    const spiralArg = armCount * phi - 3.6 * Math.log(Math.max(0.5, rVis)) + armPhase0;
+    phi += Math.sin(spiralArg) * 0.16 + Math.sin(2.0 * phi - 2.4 * Math.log(Math.max(0.5, rVis)) + armPhase1) * 0.08;
     const rAu = rMin * Math.pow(rMax / rMin, u);
-    const phi = rand() * Math.PI * 2;
-    const rVis = 0.92 + u * 8.6;
-    const hScale = 0.045 * rVis * (0.4 + 0.6 * u);
-    const y = (rand() - 0.5) * 2.0 * hScale;
-    const omega = Math.sqrt(mStar / Math.max(0.08, Math.pow(rAu, 1.35))) * 1.45;
+    const hScale = (0.055 + 0.045 * u) * rVis;
+    // Gaussian-like vertical nebula disk flare
+    const gY = (rand() + rand() + rand() - 1.5) * 0.72;
+    const y = gY * hScale;
+    const vKep = Math.sqrt(gmStarVis / Math.max(0.5, rVis));
+    // Realistic 4% epicyclic radial dispersion (Toomre Q ~ 1.15)
+    const vRad = (rand() - 0.5) * 0.08 * vKep;
+    const vTan = vKep * (0.985 + (rand() - 0.5) * 0.04);
+    const cosP = Math.cos(phi);
+    const sinP = Math.sin(phi);
+    const vx = -sinP * vTan + cosP * vRad;
+    const vy = (rand() - 0.5) * 0.06 * vKep * (hScale / Math.max(0.5, rVis));
+    const vz = cosP * vTan + sinP * vRad;
     const tempK = Math.max(20, t1Au / Math.sqrt(Math.max(0.02, rAu)));
-    const iceF = tempK < 170 ? 0.72 : 0.04;
+    const iceF = tempK < 170 ? 0.78 : (tempK < 210 ? 0.35 : 0.04);
 
     const o = i * PARCEL_STRIDE_FLOATS;
-    initData[o + 0] = Math.cos(phi) * rVis;
+    initData[o + 0] = cosP * rVis;
     initData[o + 1] = y;
-    initData[o + 2] = Math.sin(phi) * rVis;
+    initData[o + 2] = sinP * rVis;
     initData[o + 3] = 0.8 * met;
-    initData[o + 4] = -Math.sin(phi) * omega * rVis;
-    initData[o + 5] = (rand() - 0.5) * 0.02;
-    initData[o + 6] = Math.cos(phi) * omega * rVis;
+    initData[o + 4] = vx;
+    initData[o + 5] = vy;
+    initData[o + 6] = vz;
     initData[o + 7] = u;
     initData[o + 8] = tempK;
     initData[o + 9] = iceF;
@@ -649,7 +695,7 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
     computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-nebular-sys-coalesce-${entryPoint}.v3-ss`,
+    cacheKey: `ulg-nebular-sys-coalesce-${entryPoint}.v4-ss-3d`,
     label: `${label}-${entryPoint}`,
     code: nebularSystemCoalescenceWgsl,
     entryPoint,
@@ -685,10 +731,12 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   });
   ssGravity.writeParams({
     count: nParcels,
-    gravityG: 0.085 / Math.max(128.0, nParcels * Math.max(0.15, met) * 0.4),
-    softening2: 0.18,
+    // Physical Toomre Q ~ 1.1 self-gravitating disk coupling so SS multipole gravity genuinely
+    // amplifies logarithmic spiral density waves & coalesces orbiting protoplanetary embryos!
+    gravityG: 3.4 / Math.max(128.0, nParcels * Math.max(0.18, met) * 0.45),
+    softening2: 0.22,
     boxHalf: 11.5,
-    theta2: 0.72
+    theta2: 0.68
   });
 
   const bg = createCachedExplicitBindGroup(device, {

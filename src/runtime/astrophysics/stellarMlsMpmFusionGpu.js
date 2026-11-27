@@ -874,9 +874,10 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
   const wgGrid = Math.ceil(gridTotal / 64);
   const wgPts = Math.ceil(n / 64);
 
-  async function step({ dt = 0.015, timeAccel = 2.0, readTelemetry = true } = {}) {
+  async function step({ dt = 0.015, timeAccel = 2.0, substeps = 1, readTelemetry = true } = {}) {
     if (disposed) return lastTelemetry;
-    stepIndex += 1;
+    const nSub = Math.max(1, Math.min(12, Math.trunc(Number(substeps) || 1)));
+    stepIndex += nSub;
     const dtSafe = Math.max(0.004, Math.min(0.032, Number(dt) || 0.015));
     const accel = Math.max(0.25, Math.min(12.0, Number(timeAccel) || 2.0));
 
@@ -902,17 +903,19 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
-    // ONE coalesced submit per step:
+    // ONE coalesced submit per call (even across multi-substep batches!):
     //   Schroeder Scale-Atlas 3D Multipole Gravity -> Clear -> P2G -> 4-Channel Gate 1 Nuclear EOS/Burn -> Momentum -> G2P!
     const enc = device.createCommandEncoder({ label: `${label}-enc-${stepIndex}` });
     const pass = enc.beginComputePass({ label: `${label}-mpm-pass` });
-    ssGravity.encodeIntoPass(pass, { srcBuffer: particleBuf, count: n });
-    pass.setBindGroup(0, bg);
-    pass.setPipeline(clearPipe.pipeline); pass.dispatchWorkgroups(wgClear);
-    pass.setPipeline(p2gPipe.pipeline); pass.dispatchWorkgroups(wgPts);
-    pass.setPipeline(eosPipe.pipeline); pass.dispatchWorkgroups(wgGrid);
-    pass.setPipeline(momPipe.pipeline); pass.dispatchWorkgroups(wgGrid);
-    pass.setPipeline(g2pPipe.pipeline); pass.dispatchWorkgroups(wgPts);
+    for (let s = 0; s < nSub; s += 1) {
+      ssGravity.encodeIntoPass(pass, { srcBuffer: particleBuf, count: n });
+      pass.setBindGroup(0, bg);
+      pass.setPipeline(clearPipe.pipeline); pass.dispatchWorkgroups(wgClear);
+      pass.setPipeline(p2gPipe.pipeline); pass.dispatchWorkgroups(wgPts);
+      pass.setPipeline(eosPipe.pipeline); pass.dispatchWorkgroups(wgGrid);
+      pass.setPipeline(momPipe.pipeline); pass.dispatchWorkgroups(wgGrid);
+      pass.setPipeline(g2pPipe.pipeline); pass.dispatchWorkgroups(wgPts);
+    }
     pass.end();
 
     const doRead = readTelemetry && !mapInFlight && telReadBuf.mapState === 'unmapped';
@@ -1084,6 +1087,9 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
     totalMassSolar,
     get stepIndex() { return stepIndex; },
     getResidentBuffer: () => particleBuf,
+    getResidentGridBuffer: () => gridStateBuf,
+    boxHalf,
+    rStar: effRStar,
     getTelemetry: () => lastTelemetry,
     exportSupernovaYields,
     readbackBodies,

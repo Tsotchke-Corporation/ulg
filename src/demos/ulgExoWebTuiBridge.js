@@ -37,11 +37,89 @@ function rgbLuminance(rgb) {
   return 0.299 * Number(rgb[0]) + 0.587 * Number(rgb[1]) + 0.114 * Number(rgb[2]);
 }
 
+const BUILTIN_QUERY_THEMES = Object.freeze({
+  paper: {
+    id: 'paper',
+    label: 'Paper',
+    background: [244, 240, 232],
+    surface: [236, 230, 219],
+    surfaceStrong: [224, 216, 202],
+    border: [164, 152, 134],
+    text: [26, 30, 36],
+    muted: [88, 96, 108],
+    accent: [18, 94, 138],
+    onAccent: [250, 252, 255],
+    isLight: true,
+    success: [22, 128, 72],
+    warning: [168, 106, 12],
+    danger: [184, 38, 52]
+  },
+  section9: {
+    id: 'section9',
+    label: 'Section 9',
+    background: [7, 13, 20],
+    surface: [12, 22, 34],
+    surfaceStrong: [19, 34, 52],
+    border: [54, 118, 102],
+    text: [226, 246, 240],
+    muted: [132, 168, 160],
+    accent: [86, 240, 184],
+    onAccent: [4, 16, 13],
+    isLight: false,
+    success: [75, 232, 154],
+    warning: [255, 190, 79],
+    danger: [255, 107, 125]
+  },
+  amber: {
+    id: 'amber',
+    label: 'Amber',
+    background: [14, 10, 6],
+    surface: [24, 17, 10],
+    surfaceStrong: [36, 26, 14],
+    border: [152, 98, 28],
+    text: [255, 226, 176],
+    muted: [192, 148, 86],
+    accent: [255, 176, 48],
+    onAccent: [18, 11, 4],
+    isLight: false,
+    success: [142, 220, 96],
+    warning: [255, 206, 86],
+    danger: [255, 96, 84]
+  },
+  matrix: {
+    id: 'matrix',
+    label: 'Matrix',
+    background: [4, 12, 7],
+    surface: [8, 20, 12],
+    surfaceStrong: [14, 32, 20],
+    border: [36, 142, 72],
+    text: [212, 255, 222],
+    muted: [108, 178, 128],
+    accent: [64, 245, 128],
+    onAccent: [4, 18, 8],
+    isLight: false,
+    success: [64, 245, 128],
+    warning: [220, 212, 76],
+    danger: [255, 94, 108]
+  }
+});
+
 function dispatchCrtSyncEvent(enabled) {
   if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
   try {
     window.dispatchEvent(new CustomEvent('ulg-exowebtui-crt-change', {
       detail: { enabled: Boolean(enabled) }
+    }));
+  } catch {
+    // Ignore CustomEvent issues in constrained environments.
+  }
+}
+
+function dispatchShaderStackSyncEvent(stack) {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || !stack) return;
+  try {
+    window.dispatchEvent(new CustomEvent('ulg-exowebtui-shader-stack', {
+      detail: { stack }
     }));
   } catch {
     // Ignore CustomEvent issues in constrained environments.
@@ -143,8 +221,15 @@ export function initUlgExoWebTuiBridge({ labId = 'unknown', title = '' } = {}) {
     root.dataset.ulgCrt = '1';
   }
 
-  // Restore saved user theme preference if standalone
-  if (!isEmbedded) {
+  // Explicit ?theme= query parameter takes priority (e.g., ?theme=paper or ?theme=section9)
+  const themeQuery = String(params.get('theme') || '').trim().toLowerCase();
+  if (themeQuery && BUILTIN_QUERY_THEMES[themeQuery]) {
+    applyRetroThemeTokens({
+      ...BUILTIN_QUERY_THEMES[themeQuery],
+      ...(params.get('crt') === '1' ? { crt: true } : {})
+    });
+  } else if (!isEmbedded) {
+    // Restore saved user theme preference if standalone
     try {
       const saved = window.localStorage?.getItem('ulg-exowebtui-theme-json');
       if (saved) applyRetroThemeTokens(JSON.parse(saved));
@@ -182,6 +267,13 @@ export function initUlgExoWebTuiBridge({ labId = 'unknown', title = '' } = {}) {
         const crtOn = Boolean(data.enabled);
         root.dataset.ulgCrt = crtOn ? '1' : '0';
         dispatchCrtSyncEvent(crtOn);
+      } else if (data.type === 'ulg-exowebtui-shader-stack' && data.stack) {
+        const en = Array.isArray(data.stack.enabled) ? data.stack.enabled : [];
+        root.dataset.ulgShaders = en.join(',');
+        const crtOn = en.includes('crt') || en.includes('scanlines');
+        root.dataset.ulgCrt = crtOn ? '1' : '0';
+        dispatchCrtSyncEvent(crtOn);
+        dispatchShaderStackSyncEvent(data.stack);
       }
     });
 

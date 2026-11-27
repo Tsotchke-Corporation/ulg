@@ -15,12 +15,13 @@
 
 ---
 
-## 2. Live on Feature Branch `feat/cosmic-ufo-sandbox-weapons-mpm-multiplayer` (Awaiting Merge/Deploy Authorization)
+## 2. Shipped to `main` + Post-1.0 Multi-Track Deepening (`feat/post-1-0-all-four-tracks`)
 
 | Origin | Request Summary | Status |
 |---|---|---|
-| `step 18880` | Universal 60-foot (`18.3 m`) smooth silver UFO with glowing emerald-green glass bubble across `L0 → Surface`, yellow conical tractor beam (deploy/sample/harvest), 360° rim tunable full-EM laser + first-principles compound reactions, rim-launched guided missiles, antimatter beam (`E=2mc²`), mountain-scale terrain + 64 rigid boulders + Dormant-Zero GPU MLS-MPM deformable terrain, 3D Cockpit View + WebXR (`XRGPUBinding` + Stereo SBS VR), seedable URL share-links, PeerCompute multiplayer UFOs + locked `1.0×` timescale, Von Neumann probes & Kardashev progression | **IMPLEMENTED & VERIFYING ON VULKAN** (`plan/todo/cosmic-ufo-kardashev-roadmap.md`) |
-| `step 19124` (partial) | Improved Rover & UFO surface view distance (`1216 m × 1216 m`, `±608 m` visibility, `zFar = 2400 m`, elevated overhead 3D CFD clouds without camera whiteout) | **IMPLEMENTED ON BRANCH** (clipmap `±6 km` horizon extension tracked in Priority #3) |
+| `step 18880` | Universal 60-foot (`18.3 m`) smooth silver UFO, tractor beam, 360° rim tunable full-EM laser, guided missiles, antimatter beam, mountain terrain + GPU DLM boulders + Dormant-Zero GPU MLS-MPM deformable terrain, 3D Cockpit + WebXR, seedable URLs, PeerCompute multiplayer UFOs, Von Neumann probes & Kardashev progression | **MERGED TO `main` & DEPLOYED** + Phase 2 Sparse Chunk LRU, Tidal Roche Disruption & Kardashev II–III Dyson Radiative Balance complete on `feat/post-1-0-all-four-tracks` |
+| `step 19124` | `±6 km` 2-ring clipmap, Reversed-Z celestial sky, dynamic seasons, living worlds/xenobiology (`U12`), full-spectrum EM sensor (`P4`), ExoWebTUI Desktop (`U17–U19`), Universal GGX PBR + Waves D1–D5 dogfooding audit | **MERGED TO `main` & DEPLOYED** |
+| `2026-11-27` | Post-1.0 4-Track Deepening + Full PeerCompute/`@exotui` 5-Pass Desktop Shader Stack, Body-Radius-Relative Framing & Auto-Landing Threshold, 1:1 Abducted Organism Bio Lab Parity, Visual Polish & STUN/TURN/ICE WAN Stack | **IN PROGRESS ON `feat/post-1-0-all-four-tracks` (STRICT PUBLICATION HOLD)** |
 
 ---
 

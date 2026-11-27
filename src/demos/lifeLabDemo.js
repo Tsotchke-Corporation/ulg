@@ -60,16 +60,42 @@ function triggerLifeDownload(filename, text, mime = 'text/plain;charset=utf-8') 
   } catch {}
 }
 
+function getLifePlotPalette() {
+  const light = typeof document !== 'undefined' && document.documentElement?.dataset?.ulgThemeMode === 'light';
+  return light
+    ? {
+        bg: '#f4f0e8',
+        grid: 'rgba(18, 94, 138, 0.16)',
+        zero: 'rgba(26, 30, 36, 0.34)',
+        muted: '#4a5a68',
+        accent: '#0f7a56',
+        cyan: '#0c5c8a',
+        gold: '#a86a0c',
+        rose: '#b82542'
+      }
+    : {
+        bg: '#040910',
+        grid: 'rgba(52,211,153,0.14)',
+        zero: 'rgba(255,255,255,0.28)',
+        muted: '#8cb2ab',
+        accent: '#34d399',
+        cyan: '#56c2ff',
+        gold: '#facc15',
+        rose: '#fb7185'
+      };
+}
+
 function drawContactMapPlot(canvas, coordsF32, nRes, seqStr = '') {
   if (!canvas) return { contactCount: 0, longRangeContacts: 0, nRes: 0 };
   const ctx = canvas.getContext('2d');
+  const pal = getLifePlotPalette();
   const w = canvas.width;
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#040910';
+  ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, w, h);
   if (!coordsF32 || nRes < 2) {
-    ctx.fillStyle = '#8cb2ab';
+    ctx.fillStyle = pal.muted;
     ctx.font = '10px ui-monospace, monospace';
     ctx.fillText('Sampling live GPU residue contacts…', 24, h * 0.5);
     return { contactCount: 0, longRangeContacts: 0, nRes: 0 };
@@ -100,10 +126,10 @@ function drawContactMapPlot(canvas, coordsF32, nRes, seqStr = '') {
         }
         const t = Math.max(0, Math.min(1, 1 - d / cutoffA));
         ctx.fillStyle = sep >= 6
-          ? `rgba(250, 204, 21, ${(0.45 + 0.55 * t).toFixed(2)})` // Long-range tertiary contact (gold!)
-          : (sep >= 3 ? `rgba(52, 211, 153, ${(0.40 + 0.58 * t).toFixed(2)})` : `rgba(86, 194, 255, ${(0.25 + 0.45 * t).toFixed(2)})`);
+          ? `rgba(218, 152, 12, ${(0.55 + 0.45 * t).toFixed(2)})` // Long-range tertiary contact (gold!)
+          : (sep >= 3 ? `rgba(22, 168, 114, ${(0.45 + 0.52 * t).toFixed(2)})` : `rgba(42, 148, 224, ${(0.32 + 0.45 * t).toFixed(2)})`);
       } else if (d < cutoffA * 1.55) {
-        ctx.fillStyle = 'rgba(30, 58, 92, 0.28)';
+        ctx.fillStyle = 'rgba(30, 58, 92, 0.24)';
       } else {
         continue;
       }
@@ -111,20 +137,20 @@ function drawContactMapPlot(canvas, coordsF32, nRes, seqStr = '') {
       if (i !== j) ctx.fillRect(ox + i * cell, oy + j * cell, Math.max(1.2, cell), Math.max(1.2, cell));
     }
   }
-  ctx.strokeStyle = 'rgba(52, 211, 153, 0.35)';
+  ctx.strokeStyle = pal.grid;
   ctx.lineWidth = 1;
   ctx.strokeRect(ox, oy, sz, sz);
   // Right-side contact-map legend
   const lx = ox + sz + 10;
   ctx.font = 'bold 9.5px ui-monospace, monospace';
-  ctx.fillStyle = '#34d399';
+  ctx.fillStyle = pal.accent;
   ctx.fillText(`N=${nRes} (${seqStr.length || nRes}m)`, lx, oy + 12);
   ctx.font = '9px ui-monospace, monospace';
-  ctx.fillStyle = '#facc15';
+  ctx.fillStyle = pal.gold;
   ctx.fillText(`■ |i-j|≥6: ${longRangeContacts}`, lx, oy + 32);
-  ctx.fillStyle = '#34d399';
+  ctx.fillStyle = pal.accent;
   ctx.fillText(`■ Local: ${Math.max(0, contactCount - longRangeContacts)}`, lx, oy + 48);
-  ctx.fillStyle = '#8cb2ab';
+  ctx.fillStyle = pal.muted;
   ctx.fillText(`r < ${cutoffA.toFixed(1)} Å`, lx, oy + 66);
   ctx.fillText('Live GPU Map', lx, oy + 82);
   return { contactCount, longRangeContacts, nRes };
@@ -133,21 +159,22 @@ function drawContactMapPlot(canvas, coordsF32, nRes, seqStr = '') {
 function drawPhasePortraitPlot(canvas, traceMv = []) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
+  const pal = getLifePlotPalette();
   const w = canvas.width;
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#040910';
+  ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, w, h);
   const padL = 34; const padR = 10; const padT = 10; const padB = 20;
   const pw = w - padL - padR; const ph = h - padT - padB;
   const mapX = (v) => padL + ((v + 85) / 135) * pw;
   const mapY = (dv) => padT + ph - ((dv + 45) / 90) * ph;
-  ctx.strokeStyle = 'rgba(52,211,153,0.16)';
+  ctx.strokeStyle = pal.grid;
   ctx.lineWidth = 1;
   ctx.strokeRect(padL, padT, pw, ph);
   ctx.beginPath(); ctx.moveTo(padL, mapY(0)); ctx.lineTo(w - padR, mapY(0)); ctx.stroke();
   if (traceMv.length >= 3) {
-    ctx.strokeStyle = '#56c2ff';
+    ctx.strokeStyle = pal.cyan;
     ctx.lineWidth = 1.9;
     ctx.beginPath();
     for (let i = 1; i < traceMv.length; i += 1) {
@@ -160,10 +187,10 @@ function drawPhasePortraitPlot(canvas, traceMv = []) {
     ctx.stroke();
     const lastV = traceMv[traceMv.length - 1];
     const lastDv = Math.max(-44, Math.min(44, (lastV - traceMv[traceMv.length - 2]) * 3.0));
-    ctx.fillStyle = '#facc15';
+    ctx.fillStyle = pal.gold;
     ctx.beginPath(); ctx.arc(mapX(lastV), mapY(lastDv), 3.2, 0, Math.PI * 2); ctx.fill();
   }
-  ctx.fillStyle = '#8cb2ab';
+  ctx.fillStyle = pal.muted;
   ctx.font = '9px ui-monospace, monospace';
   ctx.fillText('+dV', 4, padT + 8);
   ctx.fillText('-dV', 4, padT + ph);
@@ -183,10 +210,11 @@ function layerForMode(modeId) {
 function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = null, hZero = false, labelX = '' }) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
+  const pal = getLifePlotPalette();
   const w = canvas.width;
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#040910';
+  ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, w, h);
 
   const padL = 36; const padR = 10; const padT = 10; const padB = 20;
@@ -195,21 +223,21 @@ function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = n
   const mapX = (x) => padL + ((x - xMin) / Math.max(1e-6, xMax - xMin)) * pw;
   const mapY = (y) => padT + ph - ((y - yMin) / Math.max(1e-6, yMax - yMin)) * ph;
 
-  ctx.strokeStyle = 'rgba(52,211,153,0.14)';
+  ctx.strokeStyle = pal.grid;
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const gy = padT + (i / 4) * ph;
     ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(w - padR, gy); ctx.stroke();
   }
   if (hZero && yMin < 0 && yMax > 0) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.strokeStyle = pal.zero;
     const y0 = mapY(0);
     ctx.beginPath(); ctx.moveTo(padL, y0); ctx.lineTo(w - padR, y0); ctx.stroke();
   }
 
   for (const s of series) {
     if (!s.pts || s.pts.length < 2) continue;
-    ctx.strokeStyle = s.color || '#34d399';
+    ctx.strokeStyle = s.color || pal.accent;
     ctx.lineWidth = s.width || 1.9;
     ctx.beginPath();
     for (let i = 0; i < s.pts.length; i += 1) {
@@ -222,14 +250,14 @@ function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = n
 
   if (vMarker !== null && Number.isFinite(vMarker)) {
     const mx = mapX(vMarker);
-    ctx.strokeStyle = '#fb7185';
+    ctx.strokeStyle = pal.rose;
     ctx.lineWidth = 1.4;
     ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(mx, padT); ctx.lineTo(mx, padT + ph); ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  ctx.fillStyle = '#8cb2ab';
+  ctx.fillStyle = pal.muted;
   ctx.font = '9px ui-monospace, monospace';
   ctx.fillText(yMax.toFixed(1), 2, padT + 7);
   ctx.fillText(yMin.toFixed(1), 2, padT + ph);

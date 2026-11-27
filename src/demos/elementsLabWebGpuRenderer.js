@@ -506,7 +506,7 @@ fn fs_atom(in: VsOut) -> FsOut {
   let ao = 0.82 + 0.18 * nz;
   let fog = clamp(1.0 - max(0.0, in.view_z - 3.6) * 0.10, 0.58, 1.0);
   let hdr = ((direct_key + direct_fill + direct_rim + env_ibl) * ao + albedo_lin * (in.glow * 0.65)) * fog;
-  let mapped = hdr / (hdr + vec3<f32>(0.78));
+  let mapped = ulg_aces_filmic(hdr * 1.08);
   let srgb = ulg_linear_to_srgb(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)));
 
   var out: FsOut;
@@ -2001,7 +2001,7 @@ fn fs_mol_bond(in: MolBondOut) -> @location(0) vec4<f32> {
     + ulg_pbr_env_hemi(n_cyl, v_cyl, alb_lin, f0_b, met_b, 0.30, vec3<f32>(0.24, 0.32, 0.44), vec3<f32>(0.12, 0.16, 0.22), vec3<f32>(0.04, 0.05, 0.08));
   let pulse = select(1.0, 0.85 + 0.25 * sin(u.cam_meta.w * 4.5), mode >= 0.5 && mode < 1.5);
   let hdr_b = lit_b * pulse;
-  let rgb = ulg_linear_to_srgb(clamp(hdr_b / (hdr_b + vec3<f32>(0.76)), vec3<f32>(0.0), vec3<f32>(1.0)));
+  let rgb = ulg_linear_to_srgb(clamp(ulg_aces_filmic(hdr_b * 1.08), vec3<f32>(0.0), vec3<f32>(1.0)));
   return vec4<f32>(rgb, 1.0);
 }
 

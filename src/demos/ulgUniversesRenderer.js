@@ -1819,7 +1819,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     w = core + halo;
   }
   rgb = em_sensor_map_rgb(rgb, in.em_sig.x, in.em_sig.y, in.em_sig.z, in.em_sig.w, in.em_gam);
-  let rgb_lin = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.0));
+  let rgb_lin = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.2));
   return vec4<f32>(rgb_lin * w * in.color.a, in.color.a * w);
 }
 `;
@@ -2483,7 +2483,7 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     let atm = vec3<f32>(0.58, 0.76, 1.0) * fresnel * in.color1.w;
     let sunset = vec3<f32>(0.95, 0.44, 0.16) * term_sunset * 0.14 * star_dir_l;
-    col = ulg_srgb_to_linear(base) * (vec3<f32>(0.014) + star_dir_l * (0.02 + 1.12 * ndl) * soft_term)
+    col = ulg_srgb_to_linear(base) * (vec3<f32>(0.003) + star_dir_l * (0.02 + 1.12 * ndl) * soft_term)
       + ulg_srgb_to_linear(sunset) + ulg_srgb_to_linear(atm) * (vec3<f32>(0.016) + star_dir_l * (0.14 + 0.92 * ndl))
       + ulg_srgb_to_linear(em_fx);
   } else if (kind == 1u || kind == 4u) {
@@ -2803,7 +2803,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let surf_lin = ulg_srgb_to_linear(surf);
     let diff_k = (vec3<f32>(1.0) - crust_f0 * 0.35) * (1.0 - crust_met * 0.68);
     let spec_boost = mix(0.65, 1.85, crust_met);
-    col = surf_lin * diff_k * (vec3<f32>(0.014) + star_dir_l * (0.02 + 1.15 * ndl_eff) * soft_term)
+    col = surf_lin * diff_k * (vec3<f32>(0.003) + star_dir_l * (0.02 + 1.15 * ndl_eff) * soft_term)
       + star_dir_l * (crust_ggx * spec_boost + vec3<f32>(water_spec * ndl * 1.15))
       + ulg_srgb_to_linear(sunset) + ulg_srgb_to_linear(atm) * (vec3<f32>(0.016) + star_dir_l * (0.14 + 0.95 * ndl))
       + ulg_srgb_to_linear(em_lightning + em_aurora + em_cities + em_volc);
@@ -2908,7 +2908,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let ice_rgh = select(mix(0.28, 0.62, crater_w * 0.5), clamp(sp_pbr1.x, 0.14, 0.92), has_sp_pbr);
     let ice_ggx = ulg_d_ggx(ndh_c, ice_rgh) * ulg_v_smith_ggx(ndv_c, max(1e-4, ndl_c), ice_rgh) * ulg_fresnel_schlick(vdh, ice_f0) * ndl_c * soft_term;
     let base_lin_3 = ulg_srgb_to_linear(base);
-    col = base_lin_3 * (1.0 - ice_met * 0.55) * (vec3<f32>(0.014) + star_dir_l * (0.02 + 1.12 * ndl_c) * soft_term)
+    col = base_lin_3 * (1.0 - ice_met * 0.55) * (vec3<f32>(0.003) + star_dir_l * (0.02 + 1.12 * ndl_c) * soft_term)
       + star_dir_l * ice_ggx * mix(0.95, 1.85, ice_met)
       + ulg_srgb_to_linear(atm) * (vec3<f32>(0.016) + star_dir_l * (0.15 + 0.92 * ndl))
       + ulg_srgb_to_linear(em_ice);
@@ -3770,10 +3770,10 @@ fn fs_main(in: VsOut) -> AstroVolOut {
       // Outer tenuous silicate-vapor & steam impact atmosphere outside the solid/liquid isosurface
       // (confined to physical atmospheric scale height & fading cleanly during late cooling crossfade!)
       let atm_h_fade = 1.0 - smoothstep(r_surf_lim, atm_outer_lim, r_body);
-      let vapor_col = select(vec3<f32>(0.95, 0.36, 0.08), vec3<f32>(0.42, 0.72, 1.0), has_ocean && age_f > 0.5);
+      let vapor_col = ulg_srgb_to_linear(select(vec3<f32>(0.95, 0.36, 0.08), vec3<f32>(0.42, 0.72, 1.0), has_ocean && age_f > 0.5));
       let dens_sc = clamp(dens * 1.4, 0.0, 0.28) * atm_h_fade * (1.0 - smoothstep(0.45, 0.90, age_f));
       let sigma = dens_sc * 0.42 * dt;
-      let emit = (vapor_col * dens_sc * 0.52 + vec3<f32>(1.0, 0.84, 0.45) * shock * atm_h_fade * 0.65) * dt;
+      let emit = (vapor_col * dens_sc * 0.52 + ulg_srgb_to_linear(vec3<f32>(1.0, 0.84, 0.45)) * shock * atm_h_fade * 0.65) * dt;
       accum = accum + trans * emit;
       trans = trans * exp(-sigma);
       if (trans < 0.03) { break; }

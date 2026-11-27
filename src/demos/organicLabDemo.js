@@ -73,13 +73,41 @@ function triggerTextDownload(filename, text, mime = 'text/plain;charset=utf-8') 
   } catch {}
 }
 
+function getOrganicPlotPalette() {
+  const light = typeof document !== 'undefined' && document.documentElement?.dataset?.ulgThemeMode === 'light';
+  return light
+    ? {
+        bg: '#f4f0e8',
+        grid: 'rgba(18, 94, 138, 0.16)',
+        zero: 'rgba(26, 30, 36, 0.34)',
+        text: '#24303c',
+        muted: '#52606e',
+        accent: '#0c5c8a',
+        pink: '#b8256a',
+        gold: '#a86a0c',
+        green: '#157a44'
+      }
+    : {
+        bg: '#050914',
+        grid: 'rgba(124,164,240,0.14)',
+        zero: 'rgba(255,255,255,0.28)',
+        text: '#e2e8f0',
+        muted: '#8fa4c4',
+        accent: '#56c2ff',
+        pink: '#f472b6',
+        gold: '#facc15',
+        green: '#34d399'
+      };
+}
+
 function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = null, hZero = false, labelX = '', labelY = '' }) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
+  const pal = getOrganicPlotPalette();
   const w = canvas.width;
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#050914';
+  ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, w, h);
 
   const padL = 34; const padR = 10; const padT = 10; const padB = 20;
@@ -89,21 +117,21 @@ function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = n
   const mapY = (y) => padT + ph - ((y - yMin) / Math.max(1e-6, yMax - yMin)) * ph;
 
   // Grid lines
-  ctx.strokeStyle = 'rgba(124,164,240,0.14)';
+  ctx.strokeStyle = pal.grid;
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const gy = padT + (i / 4) * ph;
     ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(w - padR, gy); ctx.stroke();
   }
   if (hZero && yMin < 0 && yMax > 0) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.strokeStyle = pal.zero;
     const y0 = mapY(0);
     ctx.beginPath(); ctx.moveTo(padL, y0); ctx.lineTo(w - padR, y0); ctx.stroke();
   }
 
   for (const s of series) {
     if (!s.pts || s.pts.length < 2) continue;
-    ctx.strokeStyle = s.color || '#56c2ff';
+    ctx.strokeStyle = s.color || pal.accent;
     ctx.lineWidth = s.width || 1.8;
     ctx.beginPath();
     for (let i = 0; i < s.pts.length; i += 1) {
@@ -116,14 +144,14 @@ function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = n
 
   if (vMarker !== null && Number.isFinite(vMarker)) {
     const mx = mapX(vMarker);
-    ctx.strokeStyle = '#f472b6';
+    ctx.strokeStyle = pal.pink;
     ctx.lineWidth = 1.4;
     ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(mx, padT); ctx.lineTo(mx, padT + ph); ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  ctx.fillStyle = '#8fa4c4';
+  ctx.fillStyle = pal.muted;
   ctx.font = '9px ui-monospace, monospace';
   ctx.fillText(yMax.toFixed(1), 3, padT + 7);
   ctx.fillText(yMin.toFixed(1), 3, padT + ph);
@@ -134,17 +162,18 @@ function drawLinePlot(canvas, { xMin, xMax, yMin, yMax, series = [], vMarker = n
 function drawMoLevelPlot(canvas, piRes, selectedMo) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
+  const pal = getOrganicPlotPalette();
   const w = canvas.width;
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#050914';
+  ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, w, h);
 
   if (!piRes || piRes.piAtomCount === 0) {
-    ctx.fillStyle = '#8fa4c4';
+    ctx.fillStyle = pal.muted;
     ctx.font = '11px Inter, sans-serif';
     ctx.fillText('Pure sp³ σ-framework (0 π-orbitals)', 34, h * 0.48);
-    ctx.fillStyle = '#56c2ff';
+    ctx.fillStyle = pal.accent;
     ctx.font = '10px ui-monospace, monospace';
     ctx.fillText('All valence electrons in localized σ-bonds', 28, h * 0.66);
     return;
@@ -158,11 +187,11 @@ function drawMoLevelPlot(canvas, piRes, selectedMo) {
 
   // E = 0 non-bonding reference line
   const y0 = mapY(0);
-  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+  ctx.strokeStyle = pal.zero;
   ctx.setLineDash([4, 3]);
   ctx.beginPath(); ctx.moveTo(32, y0); ctx.lineTo(w - 12, y0); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = '#64748b';
+  ctx.fillStyle = pal.muted;
   ctx.font = '9px ui-monospace, monospace';
   ctx.fillText('α(0)', 4, y0 + 3);
 
@@ -182,13 +211,13 @@ function drawMoLevelPlot(canvas, piRes, selectedMo) {
       const lx = x0 + j * (segW + 10);
       const isSel = moIdx === selectedMo;
       const isOcc = occ[moIdx] > 0.05;
-      ctx.strokeStyle = isSel ? '#facc15' : (isOcc ? '#56c2ff' : '#f472b6');
+      ctx.strokeStyle = isSel ? pal.gold : (isOcc ? pal.accent : pal.pink);
       ctx.lineWidth = isSel ? 3.0 : 2.0;
       ctx.beginPath(); ctx.moveTo(lx, y); ctx.lineTo(lx + segW, y); ctx.stroke();
 
       // Electron spin arrows
       const cx = lx + segW * 0.5;
-      ctx.fillStyle = '#e0f2fe';
+      ctx.fillStyle = pal.text;
       ctx.font = '11px ui-monospace, monospace';
       if (occ[moIdx] >= 1.8) ctx.fillText('↑↓', cx - 8, y - 3);
       else if (occ[moIdx] >= 0.8) ctx.fillText('↑', cx - 3, y - 3);
@@ -196,10 +225,10 @@ function drawMoLevelPlot(canvas, piRes, selectedMo) {
   }
 
   // Right-side summary badge
-  ctx.fillStyle = piRes.isAromatic4nPlus2 ? '#34d399' : '#f472b6';
+  ctx.fillStyle = piRes.isAromatic4nPlus2 ? pal.green : pal.pink;
   ctx.font = 'bold 9.5px ui-monospace, monospace';
   ctx.fillText(piRes.isAromatic4nPlus2 ? '4n+2 AROMATIC' : (piRes.homoLumoGapEv < 0.1 ? '4n DIRADICAL' : 'CONJUGATED'), w - 98, 13);
-  ctx.fillStyle = '#e2e8f0';
+  ctx.fillStyle = pal.text;
   ctx.font = '9px ui-monospace, monospace';
   ctx.fillText(`ΔE=${piRes.homoLumoGapEv.toFixed(2)}eV`, w - 98, h - 16);
   if (piRes.uvVisLambdaMaxNm > 0) {

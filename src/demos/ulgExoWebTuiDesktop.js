@@ -23,6 +23,12 @@ import {
   resolveVisualizationTheme,
   screenFrame
 } from '@exotui/src/viz/mod.ts';
+import {
+  ULG_DESKTOP_SHADER_CATALOG,
+  ULG_DESKTOP_SHADER_PRESETS,
+  ULG_DESKTOP_SHADER_STORAGE_KEY,
+  createUlgDesktopShaderStackController
+} from './ulgDesktopShaderStack.js';
 
 export const ULG_DESKTOP_APPS = Object.freeze([
   {
@@ -126,8 +132,10 @@ export function mountUlgExoWebTuiDesktop() {
   const tileBtn = document.getElementById('exo-tile-btn');
   const cascadeBtn = document.getElementById('exo-cascade-btn');
   const crtBtn = document.getElementById('exo-crt-btn');
+  const degaussBtn = document.getElementById('exo-degauss-btn');
   const consoleBtn = document.getElementById('exo-console-btn');
   const clockEl = document.getElementById('exo-clock');
+  const shaderOverlayEl = document.getElementById('exo-shader-overlay');
 
   // --- ExoWebTUI Theme & Wallpaper State ---
   let activeThemeSpec = shellThemeById('section9');
@@ -287,10 +295,36 @@ export function mountUlgExoWebTuiDesktop() {
     renderStartMenu();
   }
 
+  function broadcastShaderStackToIframes(stackSnap = null) {
+    const stack = stackSnap || shaderStack?.getSnapshot?.() || null;
+    if (!stack) return;
+    for (const st of winStates.values()) {
+      if (st.iframe?.contentWindow) {
+        try {
+          st.iframe.contentWindow.postMessage({ type: 'ulg-exowebtui-shader-stack', stack }, '*');
+        } catch {
+          // Ignore cross-origin or unloading frame errors.
+        }
+      }
+    }
+  }
+
   function setCrt(enabled) {
     crtEnabled = Boolean(enabled);
+    if (shaderStack) {
+      if (crtEnabled) {
+        const cur = shaderStack.getSnapshot().enabled;
+        if (cur.length === 0) {
+          shaderStack.applyPreset('trinitron');
+        } else if (!cur.includes('crt') && !cur.includes('scanlines')) {
+          shaderStack.setEnabledIds([...cur, 'crt', 'scanlines']);
+        }
+      } else {
+        shaderStack.setEnabledIds([]);
+      }
+    }
     document.documentElement.dataset.ulgCrt = crtEnabled ? '1' : '0';
-    crtBtn.classList.toggle('active', crtEnabled);
+    crtBtn?.classList.toggle('active', crtEnabled);
     try {
       window.localStorage?.setItem('ulg-exowebtui-crt', crtEnabled ? '1' : '0');
       window.localStorage?.setItem('ulg-exowebtui-theme-json', JSON.stringify(themePayload()));
@@ -298,6 +332,7 @@ export function mountUlgExoWebTuiDesktop() {
       // Ignore storage error.
     }
     broadcastThemeToIframes();
+    broadcastShaderStackToIframes();
     renderConsoleWindow();
   }
 
@@ -338,6 +373,7 @@ export function mountUlgExoWebTuiDesktop() {
 
   const wallpaperTheme = resolveVisualizationTheme({});
   let shellHandle = null;
+  let presenterRef = null;
   if (tuiRoot) {
     try {
       const presenter = webPresenter({
@@ -351,6 +387,7 @@ export function mountUlgExoWebTuiDesktop() {
           }
         }
       });
+      presenterRef = presenter;
       shellHandle = runShellApp(presenter, {
         init(p) {
           presentedSize = p?.size?.() || presentedSize;
@@ -423,6 +460,38 @@ export function mountUlgExoWebTuiDesktop() {
       console.warn('ExoWebTUI cell-canvas wallpaper fallback:', err);
     }
   }
+
+  // --- Full PeerCompute / @exotui 5-Pass Desktop Shader Stack ---
+  let shaderStack = null;
+  shaderStack = createUlgDesktopShaderStackController({
+    presenterShader: presenterRef?.shader || null,
+    overlayEl: shaderOverlayEl,
+    workspaceEl: windowsLayer,
+    onStateChange(snap) {
+      const anyOn = snap.enabled.length > 0;
+      const crtNow = snap.enabled.includes('crt') || snap.enabled.includes('scanlines');
+      crtEnabled = crtNow || anyOn;
+      if (crtBtn) {
+        crtBtn.classList.toggle('active', anyOn);
+        crtBtn.textContent = anyOn ? `FX (${snap.enabled.length})` : 'FX';
+      }
+      try {
+        window.localStorage?.setItem('ulg-exowebtui-crt', crtEnabled ? '1' : '0');
+        window.localStorage?.setItem('ulg-exowebtui-theme-json', JSON.stringify(themePayload()));
+      } catch {}
+      broadcastShaderStackToIframes(snap);
+    }
+  });
+  // Live magnetization meter update when console window is open and degauss shader is active
+  const magMeterTimer = window.setInterval(() => {
+    const fill = document.getElementById('exo-degauss-mag-fill');
+    const lbl = document.getElementById('exo-degauss-mag-pct');
+    if (fill && lbl && shaderStack) {
+      const pct = Math.round(shaderStack.getMagnetism() * 100);
+      fill.style.width = `${Math.max(2, Math.min(100, pct))}%`;
+      lbl.textContent = `${pct}%`;
+    }
+  }, 450);
 
   // --- Window Management Helpers ---
   function clampRect(rect) {
@@ -511,6 +580,48 @@ export function mountUlgExoWebTuiDesktop() {
       return `<button type="button" class="exo-bar-btn ${st.open && !st.minimized ? 'active' : ''}" data-exo-launch="${a.id}">${a.icon} ${a.shortLabel} [${tag}]</button>`;
     }).join('');
 
+    const shaderSnap = shaderStack ? shaderStack.getSnapshot() : { enabled: [], options: {}, magnetism: 0.02 };
+    const enabledShaderSet = new Set(shaderSnap.enabled || []);
+    const presetBtns = ULG_DESKTOP_SHADER_PRESETS.map((pr) => {
+      const isMatch = pr.enabled.length === enabledShaderSet.size
+        && pr.enabled.every((id) => enabledShaderSet.has(id));
+      return `<button type="button" class="exo-bar-btn ${isMatch ? 'active' : ''}" data-exo-shader-preset="${pr.id}">${pr.label}</button>`;
+    }).join('');
+    const shaderCardsHtml = ULG_DESKTOP_SHADER_CATALOG.map((def) => {
+      const on = enabledShaderSet.has(def.id);
+      const opts = shaderSnap.options?.[def.id] || {};
+      const knobsHtml = (def.options ?? []).map((opt) => {
+        const val = Number(opts[opt.key] ?? opt.value);
+        const prec = opt.step < 0.001 ? 4 : (opt.step < 0.1 ? 2 : (opt.step < 1 ? 1 : 0));
+        return `
+          <label class="exo-knob-row">
+            <span>${opt.label}</span>
+            <input type="range" min="${opt.min}" max="${opt.max}" step="${opt.step}" value="${val}"
+              data-exo-shader-id="${def.id}" data-exo-shader-key="${opt.key}" />
+            <span class="exo-knob-val" data-exo-knob-val="${def.id}:${opt.key}">${val.toFixed(prec)}</span>
+          </label>
+        `;
+      }).join('');
+      const magPct = Math.round((shaderSnap.magnetism ?? 0.02) * 100);
+      const degaussExtra = def.id === 'degauss'
+        ? `<div class="exo-mag-bar-wrap">
+             <span style="color:var(--exo-muted);">Magnetization</span>
+             <div class="exo-mag-track"><div id="exo-degauss-mag-fill" class="exo-mag-fill" style="width:${Math.max(2, magPct)}%;"></div></div>
+             <span id="exo-degauss-mag-pct" style="font-weight:700;min-width:34px;text-align:right;">${magPct}%</span>
+             <button type="button" class="exo-bar-btn primary" data-exo-act="degauss">⚡ DEGAUSS</button>
+           </div>`
+        : '';
+      return `
+        <div class="exo-shader-card ${on ? 'enabled' : ''}">
+          <div class="exo-shader-head">
+            <span class="exo-shader-title">${def.label}</span>
+            <button type="button" class="exo-bar-btn ${on ? 'active' : ''}" data-exo-shader-toggle="${def.id}">${on ? 'ON' : 'OFF'}</button>
+          </div>
+          <div class="exo-shader-knobs">${knobsHtml}${degaussExtra}</div>
+        </div>
+      `;
+    }).join('');
+
     el.innerHTML = `
       <div class="exo-console-sec">
         <h3>▣ ULG // EXOWEB TUI WORKSPACE</h3>
@@ -518,14 +629,20 @@ export function mountUlgExoWebTuiDesktop() {
           Open Windows: <b style="color:var(--exo-text);">${openWindows.length}</b> ·
           Layout: <b style="color:var(--exo-accent);">${isMobileViewport() ? 'MOBILE SINGLE-WINDOW' : layoutMode.toUpperCase()}</b> ·
           Theme: <b style="color:var(--exo-text);">${activeThemeSpec.label}</b> ·
-          CRT: <b style="color:var(--exo-text);">${crtEnabled ? 'ON' : 'OFF'}</b>
+          Shaders: <b style="color:var(--exo-text);">${shaderSnap.enabled.length ? shaderSnap.enabled.join(' + ') : 'OFF'}</b>
         </div>
         <div class="exo-chip-grid">
           <button type="button" class="exo-bar-btn" data-exo-act="tile">⊞ Tile Open Labs</button>
           <button type="button" class="exo-bar-btn" data-exo-act="cascade">❐ Cascade Floating</button>
-          <button type="button" class="exo-bar-btn ${crtEnabled ? 'active' : ''}" data-exo-act="crt">📺 CRT Scanlines: ${crtEnabled ? 'ON' : 'OFF'}</button>
+          <button type="button" class="exo-bar-btn ${crtEnabled ? 'active' : ''}" data-exo-act="crt">📺 CRT Quick: ${crtEnabled ? 'ON' : 'OFF'}</button>
+          <button type="button" class="exo-bar-btn" data-exo-act="degauss">⚡ Degauss Coil</button>
           <a class="exo-bar-btn" href="./index.html" style="text-decoration:none;">↩ Landing Page</a>
         </div>
+      </div>
+      <div class="exo-console-sec">
+        <h3>📺 PEERCOMPUTE / @EXOTUI SHADER STACK (5-PASS WEBGL2 + LIVE LABS)</h3>
+        <div class="exo-chip-grid" style="margin-bottom:6px;">${presetBtns}</div>
+        ${shaderCardsHtml}
       </div>
       <div class="exo-console-sec">
         <h3>✦ QUICK LAUNCH ULG WEBGPU LABS</h3>
@@ -548,6 +665,37 @@ export function mountUlgExoWebTuiDesktop() {
     });
     el.querySelectorAll('[data-exo-launch]').forEach((btn) => {
       btn.addEventListener('click', () => openLab(btn.dataset.exoLaunch));
+    });
+    el.querySelectorAll('[data-exo-shader-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        shaderStack?.applyPreset(btn.dataset.exoShaderPreset);
+        renderConsoleWindow();
+      });
+    });
+    el.querySelectorAll('[data-exo-shader-toggle]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        shaderStack?.toggleShader(btn.dataset.exoShaderToggle);
+        renderConsoleWindow();
+      });
+    });
+    el.querySelectorAll('input[data-exo-shader-id]').forEach((inp) => {
+      inp.addEventListener('input', () => {
+        const sid = inp.dataset.exoShaderId;
+        const skey = inp.dataset.exoShaderKey;
+        const val = Number(inp.value);
+        shaderStack?.setOption(sid, skey, val);
+        const valEl = el.querySelector(`[data-exo-knob-val="${sid}:${skey}"]`);
+        if (valEl) {
+          const step = Number(inp.step) || 0.01;
+          const prec = step < 0.001 ? 4 : (step < 0.1 ? 2 : (step < 1 ? 1 : 0));
+          valEl.textContent = val.toFixed(prec);
+        }
+      });
+    });
+    el.querySelectorAll('[data-exo-act="degauss"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        shaderStack?.degauss();
+      });
     });
     el.querySelector('[data-exo-act="tile"]')?.addEventListener('click', () => tileAll());
     el.querySelector('[data-exo-act="cascade"]')?.addEventListener('click', () => cascadeAll());
@@ -588,6 +736,9 @@ export function mountUlgExoWebTuiDesktop() {
       iframe.addEventListener('load', () => {
         try {
           iframe.contentWindow?.postMessage({ type: 'ulg-exowebtui-theme', theme: themePayload() }, '*');
+          if (shaderStack) {
+            iframe.contentWindow?.postMessage({ type: 'ulg-exowebtui-shader-stack', stack: shaderStack.getSnapshot() }, '*');
+          }
         } catch {}
       });
       body.appendChild(iframe);
@@ -1079,6 +1230,7 @@ export function mountUlgExoWebTuiDesktop() {
     cascadeAll();
   });
   crtBtn.addEventListener('click', () => setCrt(!crtEnabled));
+  degaussBtn?.addEventListener('click', () => shaderStack?.degauss());
   consoleBtn.addEventListener('click', () => {
     setStartMenuOpen(false);
     const st = winStates.get('console');
@@ -1110,6 +1262,7 @@ export function mountUlgExoWebTuiDesktop() {
       openLab(String(data.labId), data.href || null);
     } else if (data.type === 'ulg-exowebtui-ready') {
       broadcastThemeToIframes();
+      broadcastShaderStackToIframes();
     }
   });
 
@@ -1123,14 +1276,31 @@ export function mountUlgExoWebTuiDesktop() {
   // --- Initial Boot ---
   renderDesktopIcons();
   applyTheme(activeThemeSpec.id);
-  setCrt(crtEnabled);
+  try {
+    const savedStackRaw = window.localStorage?.getItem(ULG_DESKTOP_SHADER_STORAGE_KEY);
+    if (savedStackRaw) {
+      shaderStack?.load(JSON.parse(savedStackRaw));
+    } else if (crtEnabled) {
+      shaderStack?.applyPreset('trinitron');
+    }
+  } catch {
+    if (crtEnabled) shaderStack?.applyPreset('trinitron');
+  }
 
   const params = new URLSearchParams(window.location.search);
   const openParam = params.get('open');
   const layoutParam = params.get('layout');
   const themeParam = params.get('theme');
+  const shaderPresetParam = params.get('shaderPreset');
+  const shadersParam = params.get('shaders');
   if (themeParam) applyTheme(themeParam);
-  if (params.get('crt') === '1') setCrt(true);
+  if (shaderPresetParam) {
+    shaderStack?.applyPreset(shaderPresetParam);
+  } else if (shadersParam) {
+    shaderStack?.setEnabledIds(shadersParam.split(',').map((s) => s.trim()).filter(Boolean));
+  } else if (params.get('crt') === '1') {
+    setCrt(true);
+  }
 
   const initialLabs = openParam
     ? openParam.split(',').map((s) => s.trim()).filter((id) => APP_BY_ID.has(id))
@@ -1161,6 +1331,23 @@ export function mountUlgExoWebTuiDesktop() {
     setWallpaper,
     setCrt,
     setStartMenuOpen,
+    getShaderStack: () => shaderStack?.getSnapshot() || null,
+    setShaderEnabled: (id, on) => {
+      const snap = shaderStack?.toggleShader(id, on);
+      renderConsoleWindow();
+      return snap;
+    },
+    setShaderOption: (id, key, val) => {
+      const snap = shaderStack?.setOption(id, key, val);
+      renderConsoleWindow();
+      return snap;
+    },
+    applyShaderPreset: (presetId) => {
+      const snap = shaderStack?.applyPreset(presetId);
+      renderConsoleWindow();
+      return snap;
+    },
+    degauss: () => shaderStack?.degauss() || null,
     getState: () => ({
       activeWinId,
       layoutMode,
@@ -1168,6 +1355,7 @@ export function mountUlgExoWebTuiDesktop() {
       themeId: activeThemeSpec.id,
       wallpaperId: activeWallpaperId,
       crtEnabled,
+      shaderStack: shaderStack?.getSnapshot() || null,
       startMenuOpen,
       hostInspection: windowHost.controller.inspect(),
       windows: [...winStates.values()].map((w) => ({
@@ -1179,6 +1367,8 @@ export function mountUlgExoWebTuiDesktop() {
       }))
     }),
     dispose: () => {
+      window.clearInterval(magMeterTimer);
+      try { shaderStack?.dispose?.(); } catch {}
       try { shellHandle?.dispose?.(); } catch {}
     }
   };

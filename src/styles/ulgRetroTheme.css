@@ -427,20 +427,92 @@ html[data-ulg-retro="1"][data-ulg-theme-mode="light"] body {
 
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] header,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .panel,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .sidebar,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .plot-pane,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .plot-card,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .dock,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .card,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .acc-group,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .help-popover,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .modal-panel,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .hud-top-left,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .stat-chip,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .pick-card,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .measure-banner,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] #gpu-hud,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .live-meter,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-glass,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-deck,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-drawer,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-card,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-modal-card,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-pop-menu,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-tour-hud,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-genesis-hud,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-compact-bar,
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-card,
-html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-modal {
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-modal,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-mini-hud,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-playback-bar,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-preset-card {
   background: var(--ulg-retro-surface) !important;
   color: var(--ulg-retro-text) !important;
   border-color: var(--ulg-retro-border) !important;
+  text-shadow: none !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] #gpu-hud-title,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] #gpu-hud-sub,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .hud-title,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ctrl-head b,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .chk-row,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .kv span:last-child,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .stat-chip,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .pick-card-meta,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .live-meter,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .acc-header,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .plot-hdr,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .plot-head,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .val-badge,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .stat-val,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .specimen-pill,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] select,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] option,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] code {
+  color: var(--ulg-retro-text) !important;
+  text-shadow: none !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .specimen-pill .pill-tag,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .stat-chip b,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .plot-head span:first-child,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .acc-header .acc-sub {
+  color: var(--ulg-retro-accent) !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .muted,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .stat-lbl,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .mode-btn small,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .plot-sub,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .hud-sub,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .kv span:first-child {
+  color: var(--ulg-retro-muted) !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] #canvas-reset-view-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] #canvas-about-sim-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .dock-reopen-tab,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .sm-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .el-cell,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .xeno-world-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .exo-shader-card {
+  background-color: var(--ulg-retro-surface-strong) !important;
+  color: var(--ulg-retro-text) !important;
+  border-color: var(--ulg-retro-border) !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .plot-canvas {
+  background: var(--ulg-retro-bg) !important;
 }
 
 html[data-ulg-retro="1"][data-ulg-theme-mode="light"] button,

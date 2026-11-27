@@ -88,6 +88,7 @@ struct RenderUniforms {
 
 const BACKDROP_WGSL = /* wgsl */ `
 ${COMMON_UNIFORMS_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 @group(0) @binding(0) var<uniform> u: RenderUniforms;
 
 struct VsOut {
@@ -109,10 +110,10 @@ fn fs_bg(in: VsOut) -> @location(0) vec4<f32> {
   let d = length(in.uv - vec2<f32>(0.5, 0.48));
   let vig = 1.0 - smoothstep(0.18, 1.05, d);
   let is_bio = u.extra_info.w > 0.5;
-  let core = select(vec3<f32>(0.025, 0.048, 0.105), vec3<f32>(0.018, 0.062, 0.088), is_bio);
-  let edge = select(vec3<f32>(0.008, 0.012, 0.024), vec3<f32>(0.006, 0.016, 0.024), is_bio);
+  let core = ulg_srgb_to_linear(select(vec3<f32>(0.025, 0.048, 0.105), vec3<f32>(0.018, 0.062, 0.088), is_bio));
+  let edge = ulg_srgb_to_linear(select(vec3<f32>(0.008, 0.012, 0.024), vec3<f32>(0.006, 0.016, 0.024), is_bio));
   let grid = sin(in.uv.x * 62.83) * sin(in.uv.y * 62.83);
-  let subtle = max(0.0, grid - 0.985) * 0.035;
+  let subtle = max(0.0, grid - 0.985) * 0.014;
   return vec4<f32>(mix(edge, core, vig) + vec3<f32>(subtle), 1.0);
 }
 `;
@@ -309,13 +310,13 @@ fn fs_org_bond(in: VsOut) -> @location(0) vec4<f32> {
     let dash = sin(in.along_across.x * 28.0 - u.cam_up_time.w * 5.0);
     if (dash < -0.15) { discard; }
     let pulse = clamp(in.bond_info.x, 0.0, 1.0);
-    return vec4<f32>(in.color * (0.65 + 0.85 * cy), 0.72 * pulse);
+    return vec4<f32>(ulg_srgb_to_linear(in.color) * (0.65 + 0.85 * cy), 0.72 * pulse);
   }
   if (in.bond_info.y > 0.5) {
     // Dashed glowing cyan H-bond beam
     let dash = sin(in.along_across.x * 36.0 - u.cam_up_time.w * 4.0);
     if (dash < 0.0) { discard; }
-    return vec4<f32>(in.color * (0.7 + 0.8 * cy), 0.92);
+    return vec4<f32>(ulg_srgb_to_linear(in.color) * (0.7 + 0.8 * cy), 0.92);
   }
   // Subtle double/aromatic dual-rail highlight when bond order >= 1.35!
   let ord = in.bond_info.x;

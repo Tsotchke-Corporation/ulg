@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..');
 const REQUIRED_SERVICE_ASSETS = Object.freeze([
+  'desktop.html',
   'elements-lab.html',
+  'organic-lab.html',
+  'life-lab.html',
   'universes.html',
   'plan/background-1.jpeg',
   'plan/background-2.jpg',

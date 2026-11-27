@@ -1,1 +1,1 @@
-import{installComputeWorkerHost as e}from"./workerTaskHost.js";e(self);
+import{t as e}from"./workerTaskHost-BK9c_B30.js";e(self);

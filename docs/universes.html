@@ -1323,6 +1323,7 @@
     body.deck-collapsed #uv-genesis-hud { left: calc((100vw - 56px) * 0.5); max-width: min(540px, calc(100vw - 88px)); }
     #uv-genesis-hud.active { display: flex; }
     #uv-genesis-hud.toast {
+      pointer-events: none;
       display: flex;
       min-width: 240px;
       border-color: rgba(52, 211, 153, 0.62);
@@ -1458,7 +1459,8 @@
         display: none;
       }
       .uv-topbar.mobile-tools-open {
-        background: rgba(6, 12, 24, 0.94);
+        z-index: 65;
+        background: rgba(6, 12, 24, 0.96);
         border: 1px solid var(--border-hi);
         border-radius: 12px;
         padding: 6px;
@@ -1467,6 +1469,7 @@
       .uv-topbar.mobile-tools-open .uv-top-row { flex-wrap: wrap; }
       .uv-topbar.mobile-tools-open .uv-quick-utils {
         display: flex;
+        flex-wrap: wrap;
         width: 100%;
         gap: 5px;
         margin-top: 2px;
@@ -1478,8 +1481,15 @@
       }
       .uv-topbar.mobile-tools-open .uv-epoch-zoom-row {
         display: flex;
+        flex-wrap: wrap;
         width: 100%;
         gap: 5px;
+      }
+      .uv-topbar.mobile-tools-open .uv-epoch-strip {
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
       }
       .uv-topbar.mobile-tools-open .uv-zoom-bar {
         width: 100%;
@@ -1604,6 +1614,8 @@
       #uv-surface-hud {
         left: 8px;
         right: 8px;
+        width: calc(100vw - 16px);
+        max-width: calc(100vw - 16px);
         bottom: calc(86px + env(safe-area-inset-bottom, 0px));
         padding: 6px 8px;
         gap: 4px;
@@ -1634,7 +1646,7 @@
       }
       .uv-touch-pads {
         right: 0;
-        bottom: calc(205px + env(safe-area-inset-bottom, 0px));
+        bottom: calc(256px + env(safe-area-inset-bottom, 0px));
         padding: 0 12px;
       }
       .uv-joy-pad { width: 92px; height: 92px; }
@@ -1671,12 +1683,45 @@
         max-width: calc(100vw - 16px);
       }
       #uv-surface-hud {
-        bottom: 8px;
-        right: min(336px, 48vw);
+        left: 8px;
+        right: 8px;
+        bottom: 6px;
+        padding: 4px 6px;
+        gap: 3px;
+        z-index: 32;
       }
+      #uv-surface-hud .uv-surf-info {
+        font-size: 9.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #uv-surface-hud .uv-surf-pill {
+        min-height: 28px;
+        padding: 3px 8px;
+        font-size: 10px;
+      }
+      body.surface-active #uv-command-deck.collapsed {
+        bottom: auto;
+        top: 6px;
+        right: 52px;
+        width: auto;
+        max-width: 190px;
+        padding: 0;
+        border-radius: 2px;
+      }
+      body.surface-active #uv-command-deck.collapsed .uv-deck-tabs {
+        display: none;
+      }
+      body.surface-active .uv-touch-pads {
+        bottom: 146px;
+        padding: 0 10px;
+      }
+      body.surface-active .uv-joy-pad { width: 76px; height: 76px; }
+      body.surface-active .uv-joy-knob { width: 32px; height: 32px; }
     }
   </style>
-  <script type="module" crossorigin src="./assets/universes-OLADNuwo.js"></script>
+  <script type="module" crossorigin src="./assets/universes-O3lkK2mf.js"></script>
 </head>
 <body>
   <canvas id="uv-canvas"></canvas>
@@ -2018,6 +2063,10 @@
         </button>
 
         <div class="uv-section-label">Other ULG Flagship Apps</div>
+        <a class="uv-help-item ulg-hide-when-embedded" href="./desktop.html">
+          <span class="uv-help-item-top"><span>▣ ExoWebTUI Multi-Lab Desktop ↗</span><small>WINDOWED</small></span>
+          <span class="uv-help-item-desc">Open all 5 ULG WebGPU labs side-by-side inside the retro ExoWebTUI desktop.</span>
+        </a>
         <a class="uv-help-item" href="./index.html">
           <span class="uv-help-item-top"><span>Studio Continuum ↗</span><small>10⁻³ → 10⁺² m</small></span>
           <span class="uv-help-item-desc">3D WebGPU MLS-MPM fluid, phase change, optics &amp; reactive continuum studio.</span>

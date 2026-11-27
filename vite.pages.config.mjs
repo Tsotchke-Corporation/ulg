@@ -191,6 +191,9 @@ function excludeUnusedPeerComputeInference() {
         || source.includes('peercompute-diffusion-ort')
         || source.includes('@wllama/')
         || source.includes('@kaminos/webgpu-inference-kit')
+        || source === 'bun-webgpu'
+        || source.endsWith('/runtime/bun_webgpu.ts')
+        || source.endsWith('/runtime/bun_webgpu.js')
         || (
           importer && importer.includes('/peercompute/') && !importer.includes('/networkManager/')
           && (
@@ -223,6 +226,7 @@ function excludeUnusedPeerComputeInference() {
         export const env = {};
         export const InferenceSession = null;
         export const Tensor = null;
+        export async function ensureBunWebGpuInitialized() {}
         export default {};
       `;
     }

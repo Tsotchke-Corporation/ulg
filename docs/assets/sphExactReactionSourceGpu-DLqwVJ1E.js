@@ -1,0 +1,1 @@
+var e=()=>{throw Error(`Superseded 63-limb exact-rational route retired in production WebGPU build; use canonical 9-limb 2^-149 integer ledger.`)},t=e,n=e;export{e as n,t as r,n as t};

@@ -1,0 +1,1 @@
+import{i as e}from"./sphResidentClockGpu-D80NBRWw.js";export{e as resolveSphResidentClockOrigin};

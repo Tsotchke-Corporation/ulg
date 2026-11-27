@@ -11,12 +11,14 @@
   [`Gate 4`](../done/gate4-studio-presentation.md), and
   [`Gate 5`](../done/gate5-planetary-to-supergalactic.md)), Section 3 GPU
   budgets, and Gate 6 Architecture 1.0 status.
-- **Completed archive (`plan/done/`):** `36` completed Scale-Ladder / Gate 0–6 /
-  Grand Campaign P1–P5 / Emergent Alien Ecosystems (`U12`) / Round-3 Anti-Pigeonhole,
-  LOD & Visible Seasons (`U15–U16`) / ExoWebTUI Multi-Window Desktop, Retro UI &
-  Mobile Fixes (`U17–U19`) / Full-Stack Scientific Audit (`U1–U14`) / Law-Graph
-  & Schroeder Integration plans are archived via `git mv` in [`plan/done/`](../done/)
-  (including [`exowebtui-retro-ui-and-mobile-plan.md`](../done/exowebtui-retro-ui-and-mobile-plan.md),
+- **Completed archive (`plan/done/`):** `37` completed Scale-Ladder / Gate 0–6 /
+  Cross-Layer Dogfooding Audit (Waves D1–D5) / Grand Campaign P1–P5 / Emergent
+  Alien Ecosystems (`U12`) / Round-3 Anti-Pigeonhole, LOD & Visible Seasons
+  (`U15–U16`) / ExoWebTUI Multi-Window Desktop, Retro UI & Mobile Fixes
+  (`U17–U19`) / Full-Stack Scientific Audit (`U1–U14`) / Law-Graph & Schroeder
+  Integration plans are archived via `git mv` in [`plan/done/`](../done/)
+  (including [`ulg-cross-layer-dogfooding-audit-2026-11-27.md`](../done/ulg-cross-layer-dogfooding-audit-2026-11-27.md),
+  [`exowebtui-retro-ui-and-mobile-plan.md`](../done/exowebtui-retro-ui-and-mobile-plan.md),
   [`emergent-alien-ecosystems-and-unique-complex-life-plan.md`](../done/emergent-alien-ecosystems-and-unique-complex-life-plan.md),
   [`round3-anti-pigeonhole-and-lod-audit-2026-11-27.md`](../done/round3-anti-pigeonhole-and-lod-audit-2026-11-27.md),
   [`full-stack-scientific-realism-audit-2026-11-26.md`](../done/full-stack-scientific-realism-audit-2026-11-26.md),
@@ -40,12 +42,11 @@
 
 ---
 
-## Remaining Standing Architecture Specs, Active Audits & Post-1.0 Operational Stretches (`8` Docs)
+## Remaining Standing Architecture Specs & Post-1.0 Operational Stretches (`7` Docs)
 
 | File | Category | Live-Code Reality (2026-11-27) & Remaining Scope |
 |---|---|---|
-| [`ulg-cross-layer-dogfooding-audit-2026-11-27.md`](ulg-cross-layer-dogfooding-audit-2026-11-27.md) | **ACTIVE Cross-Layer ULG Dogfooding Audit (`big dog` 2026-11-27, Waves D1–D5)** | 4-auditor audit at `HEAD 43dd21cd` enforcing the highest-level **Strict ULG Dogfooding** rule ([`AGENTS.md`](../../AGENTS.md) §1.6): fixes dead `spectralKIm`/metal-`F0` crush in `materialPbrOpticsBridge`, uploads `pbrOptics` to `SphereInstance`/terrain, fixes Elements Lab `uiState.Z`/`mdTempK` & linear/sRGB gamma across Universes/ChemBio/Studio, fixes `organicMolecularGraphGpu` 105-element collapse, wires live `U12` Stages 1/2/4/5, connects L3–L7 compound/RHF/nuclear/solvent closures, fixes ExoWebTUI Paper light theme & CRT/handoff seams, and closes Studio DAG/Law-IR/A3/LOD dogfooding gaps. |
-| [`prompt-audit-and-backlog.md`](prompt-audit-and-backlog.md) | Master Audit Log | Complete chronological audit of user requests reconciled against shipped code (`P1–P5`, Pass 2 LOD, Phase B–D, `U1–U19`, 6-stage Emergent Alien Ecosystems, ExoWebTUI Multi-Window Desktop, Retro UI, Mobile Audit, Wave 1 MLS-MPM optimizations, Star-System Planet Diversity, and Universal ULG Material-Physics Cook-Torrance GGX PBR). |
+| [`prompt-audit-and-backlog.md`](prompt-audit-and-backlog.md) | Master Audit Log | Complete chronological audit of user requests reconciled against shipped code (`P1–P5`, Pass 2 LOD, Phase B–D, `U1–U19`, 6-stage Emergent Alien Ecosystems, ExoWebTUI Multi-Window Desktop, Retro UI, Mobile Audit, Wave 1 MLS-MPM optimizations, Star-System Planet Diversity, Universal ULG Material-Physics Cook-Torrance GGX PBR, and Strict ULG Dogfooding Waves D1–D5). |
 | [`SS/README.md`](SS/README.md) & [`SS/schroeder-tree-and-algorithm-plan.md`](SS/schroeder-tree-and-algorithm-plan.md) | Standing Architecture | Canonical Schroeder Simulation (`SS`) immutable spatial epoch & 6 derived views contract. Zero private 4,096-bucket solid-fluid hashes remain (`Gate 6 Phase C`); linear-time `O(A)` atomic-claim phase-slot materializer (`1->8`/`8->1` + conservative APIC shear), `LawDagEpochScheduler`, declarative Law-IR → WGSL compiler (`ulg-gpu-abi`), live 40-OOM `createDynamicSchroederScaleAtlasRuntime` in `universes.html`, and `dynamicHierarchyLod: '1'` are live. Kept as standing SS architectural specification. |
 | [`scale-adaptive-law-activation-plan.md`](scale-adaptive-law-activation-plan.md) | Standing Architecture | Canonical Two Unifications (`SS` + Tier 0–3 Closure Economy) architectural specification. Kept as standing design authority. |
 | [`sol-critic.md`](sol-critic.md) | Standing Contract | Canonical coherent-solid (`SOL-0..SOL-6`) numerical contract (all 6 SOL gates live & verified on Vulkan; exact momentum-conserving FLIP unilateral solid-liquid slip wired into `sphMlsMpmGpuStep.js` & zero-private-grid SS solid-fluid contact/thermal landed in `Gate 6 Phase C`). Kept as standing solid-mechanics contract. |

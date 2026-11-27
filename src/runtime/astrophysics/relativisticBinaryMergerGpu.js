@@ -421,7 +421,7 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
 
   const wg = Math.ceil(n / 64);
 
-  function stepOrbit1Pn25Pn(dt) {
+  function stepOrbit1Pn25PnMicro(dt) {
     if (merged) {
       timeSinceMerge += dt;
       // Exponential quasinormal ringdown of GW strain after coalescence!
@@ -439,18 +439,15 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     const eta = m1Frac * m2Frac;
 
     // Exact Blanchet (2014) Eq. 203 Newtonian + 1PN conservative periastron precession acceleration:
-    //   a = -(GM/r^2) * [ (1 + (1/c^2)*((1+3*eta)*v^2 - (4+2*eta)*GM/r - 1.5*eta*rDot^2)) * r_hat
-    //                     - (1/c^2)*(4-2*eta)*rDot * v ]
     const gmOverR = gmTot / r;
-    const pn1Rad = invC2 * ((1.0 + 3.0 * eta) * v2 - (4.0 + 2.0 * eta) * gmOverR - 1.5 * eta * rDot * rDot);
-    const pn1Vel = invC2 * (4.0 - 2.0 * eta) * rDot;
+    const pn1Rad = Math.max(-0.65, Math.min(2.5, invC2 * ((1.0 + 3.0 * eta) * v2 - (4.0 + 2.0 * eta) * gmOverR - 1.5 * eta * rDot * rDot)));
+    const pn1Vel = Math.max(-2.0, Math.min(2.0, invC2 * (4.0 - 2.0 * eta) * rDot));
 
     // Exact 2.5PN Peters-Mathews gravitational-wave radiation-reaction drag (zero when invC5 == 0!)
-    // For steady Roche-lobe mass transfer (`rocheOverflow`), conservative angular-momentum transfer balances slow GW decay.
     const gwScale = rocheOverflow ? 0.02 : 22.0;
     const gwFactor = invC5 > 0 ? (8.0 / 5.0) * eta * (gmTot * gmTot / (r * r * r)) * invC5 * gwScale : 0.0;
-    const gwA = gwFactor * (3.0 * v2 + (17.0 / 3.0) * gmOverR);
-    const gwB = gwFactor * (v2 + 3.0 * gmOverR);
+    const gwA = Math.min(0.45 / Math.max(1e-4, dt), gwFactor * (3.0 * v2 + (17.0 / 3.0) * gmOverR));
+    const gwB = Math.min(0.45 / Math.max(1e-4, dt), gwFactor * (v2 + 3.0 * gmOverR));
 
     const invR3 = -gmTot / (r * r * r);
     const ax = invR3 * ((1.0 + pn1Rad) * rx - pn1Vel * r * vx) + (gwA * (rDot / r) * rx - gwB * vx);
@@ -461,7 +458,6 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     vRel[0] += ax * dt; vRel[1] += ay * dt; vRel[2] += az * dt;
     rRel[0] += vRel[0] * dt; rRel[1] += vRel[1] * dt; rRel[2] += vRel[2] * dt;
     if (rocheOverflow) {
-      // Tidal circularization damping in a semi-detached Roche-lobe overflowing binary
       const rNow = Math.max(minR, Math.hypot(rRel[0], rRel[1], rRel[2]));
       const corr = aNow / rNow;
       rRel[0] *= (0.94 + 0.06 * corr);
@@ -470,10 +466,9 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     }
 
     lastSep = Math.hypot(rRel[0], rRel[1], rRel[2]);
-    // Exact quadrupole gravitational-wave strain h_+ ~ eta * (GM / (r c^2)) * cos(2 phi) (scales cleanly as 1/r!)
     const phi = Math.atan2(rRel[2], rRel[0]);
     const omegaOrb = Math.sqrt(gmTot / Math.max(0.25, lastSep * lastSep * lastSep));
-    lastFGw = (omegaOrb / Math.PI); // f_GW = 2 * f_orb!
+    lastFGw = (omegaOrb / Math.PI);
     const hAmp = invC2 > 0 ? Math.min(1.6, 4.2 * eta * (gmTot / Math.max(0.45, lastSep)) * invC2) : 0.0;
     lastHPlus = hAmp * Math.cos(2 * phi);
     lastHCross = hAmp * Math.sin(2 * phi);
@@ -483,6 +478,18 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
       timeSinceMerge = 0.0;
       rRel = [0, 0, 0];
       vRel = [0, 0, 0];
+    }
+  }
+
+  function stepOrbit1Pn25Pn(dt) {
+    if (merged) { stepOrbit1Pn25PnMicro(dt); return; }
+    const r = Math.max(0.25, Math.hypot(rRel[0], rRel[1], rRel[2]));
+    const tOrb = Math.sqrt((r * r * r) / Math.max(1e-4, gmTot));
+    const microN = Math.max(1, Math.min(16, Math.ceil(dt / Math.max(1e-4, 0.06 * tOrb))));
+    const h = dt / microN;
+    for (let k = 0; k < microN; k += 1) {
+      stepOrbit1Pn25PnMicro(h);
+      if (merged) break;
     }
   }
 
@@ -579,12 +586,14 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     const pos = getBodyPositions();
     if (merged && wdCarbonOxygen) return []; // Type Ia detonation leaves ZERO central remnant!
     if (merged) {
+      // Prompt collapse to a Black Hole (kind=5) when total merged BNS mass exceeds Tolman-Oppenheimer-Volkoff M_TOV ~ 2.25 M_sun!
+      const remnantIsBh = !neutronRich || (m1Solar + m2Solar) > 2.25;
       return [{
         pos: [ox * worldScale, oy * worldScale, oz * worldScale],
         radius: Math.max(r1Sim, r2Sim) * 1.25 * worldScale,
-        color0: neutronRich ? [0.72, 0.88, 1.0] : [0, 0, 0],
-        color1: neutronRich ? [0.35, 0.65, 1.0] : [0, 0, 0],
-        kind: neutronRich ? 0 : 5,
+        color0: remnantIsBh ? [0, 0, 0] : [0.72, 0.88, 1.0],
+        color1: remnantIsBh ? [0, 0, 0] : [0.35, 0.65, 1.0],
+        kind: remnantIsBh ? 5 : 0,
         atm: 0
       }];
     }

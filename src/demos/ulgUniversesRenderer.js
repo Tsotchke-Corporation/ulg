@@ -2457,8 +2457,11 @@ fn fs_main(in: VsOut) -> FsOut {
       let sea_lvl_base = select(-1.5, cam.sph_geo.w, has_ocean);
       let sea_lvl = select(-1.5, sea_lvl_base - (1.0 - rainout_f) * 0.62, has_ocean);
       elev_center = elev_sph;
-      // Live Milankovitch orbital subsolar declination sin(delta) in space mode -> asymmetric winter/summer hemisphere seasons!
-      let sin_decl = select(0.0, clamp(cam.em_aux.z, -0.98, 0.98), (u32(round(max(0.0, cam.em_aux.w))) & 2u) == 0u);
+      // Live Milankovitch orbital subsolar declination sin(delta) + tidal-lock / biosphere flags!
+      let cam_flags = u32(round(max(0.0, cam.em_aux.w)));
+      let sin_decl = select(0.0, clamp(cam.em_aux.z, -0.98, 0.98), (cam_flags & 2u) == 0u);
+      let is_tidally_locked = (cam_flags & 4u) != 0u;
+      let has_biosphere = (cam_flags & 8u) != 0u;
       let lat_winter = -n_hit.y * sin_decl;
       // Subtle micro-grain (< 3%) ONLY for sub-texel rock crispness (never alters continents!)
       let micro_g = vnoise3(n_hit * 36.0 + seed_v) * 0.06;
@@ -2479,15 +2482,17 @@ fn fs_main(in: VsOut) -> FsOut {
           let h_land = clamp((elev_sph - sea_lvl) / max(0.32, 0.90 - sea_lvl), 0.0, 1.0);
           let sand_coast = vec3<f32>(0.72, 0.65, 0.46);
           let desert = vec3<f32>(0.70, 0.56, 0.34);
-          let savanna = vec3<f32>(0.40, 0.49, 0.22);
-          let lush_forest = mix(vec3<f32>(0.09, 0.34, 0.13), in.color0.rgb * 1.15, 0.38);
+          let savanna = mix(vec3<f32>(0.42, 0.38, 0.26), clamp(in.color0.rgb * 1.15 + vec3<f32>(0.14, 0.10, 0.02), vec3<f32>(0.0), vec3<f32>(1.0)), select(0.15, 0.65, has_biosphere));
+          // Emergent photobiology canopy tint (in.color0.rgb carries live host-star pigmentRgb on alien worlds; rock/regolith on sterile worlds!)
+          let abiotic_land = mix(vec3<f32>(0.28, 0.25, 0.22), vec3<f32>(0.46, 0.40, 0.34), crust_comp);
+          let lush_forest = select(abiotic_land, clamp(in.color0.rgb * 0.92 + vec3<f32>(0.02, 0.04, 0.02), vec3<f32>(0.03), vec3<f32>(0.88)), has_biosphere);
           let mtn_rock = mix(vec3<f32>(0.36, 0.33, 0.30), vec3<f32>(0.54, 0.51, 0.47), crust_comp);
           let raw_basalt = mix(vec3<f32>(0.10, 0.09, 0.10), vec3<f32>(0.24, 0.20, 0.18), crust_comp);
           // Rich multi-biome vegetation driven directly by GPU Hadley-cell & watershed moisture + live orbital seasonal phenology!
           let humid_w = clamp(moist_r * 1.10 - h_land * 0.24 + micro_g * 0.7, 0.0, 1.0);
           let mid_lat_s = smoothstep(0.18, 0.46, abs(n_hit.y)) * (1.0 - smoothstep(0.76, 0.94, abs(n_hit.y)));
-          let autumn_w = smoothstep(0.02, 0.22, lat_winter) * mid_lat_s;
-          let winter_dorm = smoothstep(0.18, 0.36, lat_winter) * mid_lat_s;
+          let autumn_w = smoothstep(0.02, 0.22, lat_winter) * mid_lat_s * select(0.0, 1.0, has_biosphere && !is_tidally_locked);
+          let winter_dorm = smoothstep(0.18, 0.36, lat_winter) * mid_lat_s * select(0.0, 1.0, has_biosphere && !is_tidally_locked);
           let lush_seasonal = mix(
             mix(lush_forest, vec3<f32>(0.68, 0.42, 0.14), autumn_w * 0.62),
             vec3<f32>(0.46, 0.42, 0.34),
@@ -2516,8 +2521,10 @@ fn fs_main(in: VsOut) -> FsOut {
             em_temp_k = mix(em_temp_k, 1450.0, v_glow);
           }
         }
-        // Asymmetric hemisphere-opposite seasonal snow & sea-ice advance/retreat driven by live obliquity & orbital phase!
-        let polar = smoothstep(0.75, 0.89, abs(n_hit.y) + lat_winter * 0.68 + elev_sph * 0.09 + micro_g) * bio_cool_f;
+        // Asymmetric hemisphere-opposite seasonal snow & sea-ice OR Eyeball-World permanent nightside ice shell!
+        let polar_seasonal = smoothstep(0.75, 0.89, abs(n_hit.y) + lat_winter * 0.68 + elev_sph * 0.09 + micro_g) * bio_cool_f;
+        let eyeball_night_ice = smoothstep(-0.22, 0.22, -raw_ndl + micro_g * 0.8) * bio_cool_f;
+        let polar = select(polar_seasonal, max(eyeball_night_ice, polar_seasonal * 0.35), is_tidally_locked);
         let ice_col = select(vec3<f32>(0.93, 0.96, 1.00), vec3<f32>(0.82, 0.92, 0.98), elev_sph < sea_lvl);
         surf = mix(surf, ice_col, polar);
         water_spec = water_spec * (1.0 - polar * 0.85);
@@ -2987,7 +2994,7 @@ struct VsOut {
   @location(4) world_pos: vec3<f32>,
   @location(5) center: vec3<f32>,
   @location(6) ring_n: vec3<f32>,
-  @location(7) shadow_info: vec2<f32>,
+  @location(7) shadow_info: vec4<f32>,
 };
 
 @vertex
@@ -3017,7 +3024,7 @@ fn vs_main(
   out.world_pos = world_pos;
   out.center = d.center_r_in.xyz;
   out.ring_n = n;
-  out.shadow_info = d.shadow_info.xy;
+  out.shadow_info = d.shadow_info;
   return out;
 }
 
@@ -3053,10 +3060,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(out_c * alpha, alpha);
   } else {
-    // Saturn / Exoplanet Cassini-division ring system (with planetary eclipse shadow & cold 85 K IR emission!)
+    // Planetary ring system with live moon-derived Lindblad resonance divisions (shadow_info.zw)!
     let u = clamp((r - in.r_in) / max(1e-4, in.r_out - in.r_in), 0.0, 1.0);
-    let c_x = (u - 0.60) * 32.0;
-    let e_x = (u - 0.88) * 55.0;
+    let gap1_u = select(0.60, clamp(in.shadow_info.z, 0.14, 0.90), in.shadow_info.z > 0.05);
+    let gap2_u = select(0.88, clamp(in.shadow_info.w, 0.18, 0.96), in.shadow_info.w > 0.05);
+    let c_x = (u - gap1_u) * 32.0;
+    let e_x = (u - gap2_u) * 55.0;
     let cassini = 1.0 - 0.88 * exp(-(c_x * c_x));
     let encke = 1.0 - 0.60 * exp(-(e_x * e_x));
     let ringlets = 0.72 + 0.28 * sin(u * 76.0) * cos(u * 27.0);
@@ -4419,6 +4428,8 @@ export function createUlgUniversesRenderer(device, canvas) {
     lightIsPoint = false, // True in L2 multi-planet view -> `lightDir` holds live host-star world pos for radial per-body illumination!
     coolingHeat = 0.0,    // Continuous post-SPH planetary cooling ramp [0..1] for focused SPH globe
     orbitalSeasonDecl = 0.0, // Live subsolar declination sin(delta) in [-1..+1] driving asymmetric L4/L2 orbital seasons!
+    orbitalTidallyLocked = false, // True on eyeball / tidally locked planets -> nightside glaciation shell
+    orbitalBiosphereViable = true, // False on sterile ocean/rock worlds -> disables fake Earth vegetation tinting
     ringShadow = null,    // Optional `{ normal, rInRatio, rOutRatio, sphereIndex }` casting ring shadows onto focused ringed planet!
     starLight = [1.0, 0.97, 0.92, 1.0], // Physical linear host-star RGB + perceptual inverse-square irradiance gain!
     mdCloud = null,
@@ -4443,8 +4454,11 @@ export function createUlgUniversesRenderer(device, canvas) {
       : [-6.42, -6.12, 0.0, 1.0];
     const baseAmbientTempK = Number(surfaceScene?.ambientTempK ?? surfaceScene?.env?.tempK ?? mdCloud?.tempK ?? 288.0);
     // Enable unified Reversed Logarithmic Depth Buffer (0.1 m -> 10^14 m) on ALL surface passes (bit 1 = 2.0)!
+    // In orbital/space mode (bit 1 = 0), bit 2 = tidally locked eyeball world, bit 3 = active biosphere!
     const isSurfaceMode = Boolean(surfaceScene && surfaceScene.env);
-    const logDepthFlag = isSurfaceMode ? 2.0 : 0.0;
+    const logDepthFlag = isSurfaceMode
+      ? 2.0
+      : ((orbitalTidallyLocked ? 4.0 : 0.0) + (orbitalBiosphereViable ? 8.0 : 0.0));
     const emAuxZ = isSurfaceMode
       ? Number(surfaceScene?.env?.skyOpticalDepth ?? 0.0)
       : Math.max(-0.985, Math.min(0.985, Number(orbitalSeasonDecl) || 0.0));
@@ -4500,8 +4514,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         diskStaging[o + 11] = d.kind ?? 0;
         diskStaging[o + 12] = Number(d.planetRadius) || 0;
         diskStaging[o + 13] = Number(d.oblateF) || 0;
-        diskStaging[o + 14] = 0;
-        diskStaging[o + 15] = 0;
+        diskStaging[o + 14] = Number(d.gap1U) || 0;
+        diskStaging[o + 15] = Number(d.gap2U) || 0;
       }
       device.queue.writeBuffer(diskBuf, 0, diskStaging.subarray(0, diskCount * 16));
     }

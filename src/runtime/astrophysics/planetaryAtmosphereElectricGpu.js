@@ -94,8 +94,12 @@ export function evaluatePaschenBreakdownFieldVPerM(surfacePressurePa, gapScaleM 
   //   with hydrometeor/runaway-electron enhancement, dropping to ~2.2e4 V/m at 600 Pa!).
   const pBar = p / 101325.0;
   // Minimum near p ~ 10 Pa (Paschen minimum), rising smoothly with P^0.55 above minimum
-  const paschenMinTerm = 1.0 + 4.0 / Math.max(0.05, p * Math.max(1.0, gapScaleM) * 1e-3);
-  return 2.6e5 * Math.pow(Math.max(1e-4, pBar), 0.48) * paschenMinTerm;
+  // Exact Townsend-Paschen dielectric breakdown law: E_crit ~ B * P / ln(A * P * d)
+  // (linear P^1 at high Pd with the canonical Paschen minimum at low Pd!)
+  const pdNorm = Math.max(0.05, p * Math.max(1.0, gapScaleM) * 1e-3);
+  const paschenMinTerm = 1.0 + 4.0 / pdNorm;
+  const lnTerm = Math.max(0.35, Math.log(12.0 * Math.max(1.2, pBar * 180.0)) / Math.log(2160.0));
+  return (2.6e5 * Math.max(1e-4, pBar) / lnTerm) * paschenMinTerm;
 }
 
 /**

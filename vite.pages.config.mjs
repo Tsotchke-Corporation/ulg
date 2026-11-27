@@ -11,6 +11,13 @@ const pagesPeercomputeRoot = (() => {
   }
   return fileURLToPath(new URL('../peercompute/peercompute', import.meta.url));
 })();
+const pagesExotuiRoot = (() => {
+  for (const base of ['../', '../../../../']) {
+    const candidate = fileURLToPath(new URL(`${base}exotui`, import.meta.url));
+    if (existsSync(candidate)) return realpathSync(candidate);
+  }
+  return fileURLToPath(new URL('../exotui', import.meta.url));
+})();
 const RETIRED_63_LIMB_MODULE_RE = /(?:^|\/)(?:sphExactRational(?:Quantity|Projection)Wgsl|sphExactPhaseCarrier(?:Stage|Quantity)Gpu|sphExactPhaseInitialQuantityGpu|sphExactG2pQuantity(?:Gpu|Wgsl)|sphExactHistory(?:P2g|G2p)(?:Gpu|Wgsl)|sphExactHistoryGasVolumeWgsl|sphExactMechanicsRefresh(?:Gpu|Wgsl)|sphExactThermalQuantityGpu|sphExactCarriedReactionGpu|sphExactReactionSourceGpu|sphExactReactionOutput(?:Gpu|Wgsl)|sphExactReactionChemistryBudget(?:Wgsl|Metadata)|sphExactPlacement[A-Za-z0-9_]*|sphExactAerosolQuantities|sphExactVaporAerosol(?:Quantities|Endpoints)Gpu|sphExactResidentProductHistoryWgsl)\.js$/;
 const RETIRED_63_LIMB_VIRTUAL_PREFIX = '\0ulg-pages-retired-63limb:';
 
@@ -225,6 +232,9 @@ function excludeUnusedPeerComputeInference() {
 export default defineConfig({
   base: './',
   resolve: {
+    alias: {
+      '@exotui': pagesExotuiRoot
+    },
     dedupe: ['three']
   },
   plugins: [excludeUnusedPeerComputeInference(), excludeRetiredProductionRoutes()],
@@ -244,6 +254,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         pages: fileURLToPath(new URL('./pages.html', import.meta.url)),
+        desktop: fileURLToPath(new URL('./desktop.html', import.meta.url)),
         elementsLab: fileURLToPath(new URL('./elements-lab.html', import.meta.url)),
         organicLab: fileURLToPath(new URL('./organic-lab.html', import.meta.url)),
         lifeLab: fileURLToPath(new URL('./life-lab.html', import.meta.url)),

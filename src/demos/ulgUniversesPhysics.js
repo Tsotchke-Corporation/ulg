@@ -4376,7 +4376,10 @@ export function createUlgUniversesPhysics(device, {
         starIndex: activeStarSite.starIndex,
         seed: (universeSeed + 409) >>> 0
       });
-      activeCausalSystem = synthesizeNebularPlanetarySystem(nextStarSys, { seedOverride: (universeSeed + 409) >>> 0 });
+      activeCausalSystem = synthesizeNebularPlanetarySystem(nextStarSys, {
+        seedOverride: (universeSeed + 409) >>> 0,
+        gpuCoalescedDisk: nebularAnnuliSnapshot || null
+      });
     }
     // Dynamically align the active scale's physical regime to the chosen cosmic epoch (when requested)!
     if (alignActiveLevel === 0) {

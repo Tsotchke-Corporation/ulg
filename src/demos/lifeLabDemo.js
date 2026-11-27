@@ -6,6 +6,8 @@
 //     template-replication-evolution@1, chemiosmotic-bioenergetics-electrophysiology@1,
 //     and reaction-diffusion-active-matter@1 dynamically orchestrated via Universal Law Graph!
 
+import { initUlgExoWebTuiBridge } from './ulgExoWebTuiBridge.js';
+initUlgExoWebTuiBridge({ labId: 'life', title: 'ULG Biophysics & Life Lab' });
 import { createAmphiphileMembraneSessionWebGpu } from '../runtime/biology/amphiphileMembraneGpu.js';
 import {
   POLYMER_SEQUENCE_TEMPLATES,

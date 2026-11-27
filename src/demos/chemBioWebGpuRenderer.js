@@ -1036,8 +1036,9 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
   }
 
   function resize(cssW, cssH, dpr = Math.min(2, window.devicePixelRatio || 1)) {
-    const w = Math.max(64, Math.round(cssW * dpr));
-    const h = Math.max(64, Math.round(cssH * dpr));
+    const maxDim = Math.max(512, Math.min(4096, Number(device?.limits?.maxTextureDimension2D) || 4096));
+    const w = Math.max(64, Math.min(maxDim, Math.round(cssW * dpr)));
+    const h = Math.max(64, Math.min(maxDim, Math.round(cssH * dpr)));
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;

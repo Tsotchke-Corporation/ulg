@@ -53,6 +53,7 @@ struct FractureParams {
 @group(0) @binding(9) var<storage, read_write> topo_state: array<atomic<u32>>;
 
 const NONE: u32 = 0xffffffffu;
+const CLEAVED: u32 = 0xfffffffeu;
 const FRAME_VEC4: u32 = 8u;
 const MEMBER_VEC4: u32 = 2u;
 
@@ -111,17 +112,11 @@ fn cleave_overstressed_bonds(@builtin(global_invocation_id) id: vec3<u32>) {
     let tau = ft_load / area;
 
     if (sigma_n > params.strength.x || tau > params.strength.y) {
-      atomicStore(&neighbors[i * 8u + face], NONE);
-      atomicStore(&neighbors[j * 8u + opposite_face(face)], NONE);
+      // Mark both half-edges with CLEAVED so init_components settles each member's
+      // Griffith surface-creation energy strictly on its own thread (zero write race!).
+      atomicStore(&neighbors[i * 8u + face], CLEAVED);
+      atomicStore(&neighbors[j * 8u + opposite_face(face)], CLEAVED);
       atomicAdd(&topo_state[1], 1u);
-      // Deposit half of Griffith surface cleavage energy gamma * A into each side's thermal u
-      let half_gamma = 0.5 * params.strength.z * area;
-      if (half_gamma > 0.0) {
-        let ti = member_thermo[i];
-        let tj = member_thermo[j];
-        member_thermo[i] = vec4<f32>(ti.x + half_gamma / m_i, ti.y, ti.z, ti.w);
-        member_thermo[j] = vec4<f32>(tj.x + half_gamma / m_j, tj.y, tj.z, tj.w);
-      }
     }
   }
 }
@@ -130,7 +125,24 @@ fn cleave_overstressed_bonds(@builtin(global_invocation_id) id: vec3<u32>) {
 fn init_components(@builtin(global_invocation_id) id: vec3<u32>) {
   let idx = id.x;
   if (idx < params.counts.x) {
-    let alive = members[idx * MEMBER_VEC4].w > 0.0;
+    let m_i = members[idx * MEMBER_VEC4].w;
+    let alive = m_i > 0.0;
+    if (alive) {
+      // Race-free per-member settlement of cleaved faces: clear CLEAVED -> NONE and
+      // deduct half of Griffith surface cleavage energy gamma * A from member thermal u.
+      var cleaved_area = 0.0;
+      for (var f = 0u; f < 6u; f = f + 1u) {
+        if (atomicLoad(&neighbors[idx * 8u + f]) == CLEAVED) {
+          atomicStore(&neighbors[idx * 8u + f], NONE);
+          cleaved_area += face_area(f >> 1u);
+        }
+      }
+      if (cleaved_area > 0.0 && params.strength.z > 0.0) {
+        let ti = member_thermo[idx];
+        let du = 0.5 * params.strength.z * cleaved_area / m_i;
+        member_thermo[idx] = vec4<f32>(ti.x - du, ti.y, ti.z, ti.w);
+      }
+    }
     atomicStore(&topo_state[comp_offset(idx)], select(NONE, idx, alive));
     atomicStore(&topo_state[root_body_offset(idx)], 0u);
   }
@@ -311,7 +323,7 @@ export function createSchroederSolidFractureStage({
     entryNames.map((entryPoint) => [
       entryPoint,
       createCachedExplicitComputePipeline(device, {
-        cacheKey: `ulg-sol5-fracture-${entryPoint}.v1`,
+        cacheKey: `ulg-sol5-fracture-${entryPoint}.v2`,
         label: `ulg-sol5-fracture-${entryPoint}`,
         code: schroederSolidFractureWgsl,
         entryPoint,

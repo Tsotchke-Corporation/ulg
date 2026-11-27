@@ -460,8 +460,11 @@ fn grid_momentum_step(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cz = c / (gn * gn);
   let dx_cell = (2.0 * p.box_half) / f32(gn - 1u);
   let cell_pos = vec3<f32>(f32(cx), f32(cy), f32(cz)) * dx_cell - vec3<f32>(p.box_half);
-  let r = max(0.18, length(cell_pos));
-  let r_hat = cell_pos / r;
+  let com_pos = ss_grav_acc[p.count].xyz;
+  let com_vel = ss_grav_acc[p.count + 1u].xyz;
+  let rel_pos = cell_pos - com_pos;
+  let r = max(0.18, length(rel_pos));
+  let r_hat = rel_pos / r;
 
   let xL = select(cx, cx - 1u, cx > 0u);
   let xR = select(cx, cx + 1u, cx + 1u < gn);
@@ -488,8 +491,6 @@ fn grid_momentum_step(@builtin(global_invocation_id) gid: vec3<u32>) {
   let acc_buoy = r_hat * (d_temp * 4.2 * buoy_zone);
 
   var v_next = g0.xyz + clamp(acc_press + acc_buoy + coriolis, vec3<f32>(-28.0), vec3<f32>(28.0)) * p.dt;
-  let com_pos = ss_grav_acc[p.count].xyz;
-  let com_vel = ss_grav_acc[p.count + 1u].xyz;
   v_next = v_next - com_vel * 0.65 - com_pos * (1.25 * p.dt);
   let edge_d = max(abs(cell_pos.x), max(abs(cell_pos.y), abs(cell_pos.z)));
   if (edge_d > p.box_half * 0.88) {
@@ -891,20 +892,23 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
 
     const ab = new ArrayBuffer(80);
     new Uint32Array(ab, 0, 4).set([n, effGridN, stepIndex, RADIAL_BINS]);
+    // Universal Gate-1 Q-value nuclear burn constants (ZERO prof.id material/class shortcuts:
+    // brown dwarfs naturally remain sub-ignition below the 3.5 MK Coulomb barrier, while
+    // massive / Pop-III cores ignite CNO, triple-alpha & alpha-capture purely from (T, rho, X_i)!)
     new Float32Array(ab, 16, 16).set([
       dtSafe,
       boxHalf,
       0.32,
       effRStar,
-      (burnConsts.ppThermalMeV / 26.2) * (prof.id === 'brown-dwarf' ? 0.08 : 1.45),
-      prof.id === 'blue-supergiant' || prof.generation === 1 ? 1.95 : 1.05,
-      (q3aMeV / 7.27) * ((prof.id === 'red-supergiant' || prof.id === 'agb-carbon' || prof.generation === 1) ? 2.15 : 0.75),
+      (burnConsts.ppThermalMeV / 26.2) * 1.45,
+      1.35,
+      (q3aMeV / 7.27) * 1.45,
       accel,
       prof.radPressCoeff,
       prof.surfaceCoolCoeff,
       prof.gasEosCoeff,
       0.996,
-      (qC12Alpha / 7.16) * (prof.generation === 1 || prof.id === 'red-supergiant' ? 1.85 : 0.70),
+      (qC12Alpha / 7.16) * 1.25,
       Math.max(2.0, effCoreT * 1e-6),
       0.0,
       0.0

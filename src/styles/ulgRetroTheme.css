@@ -1,0 +1,419 @@
+/* ULG Cohesive Retro Scientific Workstation / ExoWebTUI Theme (`src/styles/ulgRetroTheme.css`)
+ *
+ * Applied uniformly across Landing Page, ExoWebTUI Desktop, ULG Universes,
+ * Continuum Studio (MLS-MPM), Material Physics Lab, Organic Chemistry Lab,
+ * and Biophysics & Emergent Life Lab.
+ *
+ * Dynamically responds to live ExoWebTUI `ShellThemeSpec` variables
+ * (`--ulg-retro-bg`, `--ulg-retro-surface`, `--ulg-retro-accent`, etc.)
+ * and optional CRT scanlines (`html[data-ulg-crt="1"]`).
+ */
+
+:root {
+  --ulg-retro-font-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --ulg-retro-bg: #060b10;
+  --ulg-retro-surface: rgba(8, 15, 22, 0.94);
+  --ulg-retro-surface-strong: rgba(12, 22, 31, 0.97);
+  --ulg-retro-accent: #56f0b8;
+  --ulg-retro-accent-dim: rgba(86, 240, 184, 0.15);
+  --ulg-retro-cyan: #67d8ff;
+  --ulg-retro-amber: #ffbe4f;
+  --ulg-retro-danger: #ff6b7d;
+  --ulg-retro-success: #4be89a;
+  --ulg-retro-border: rgba(86, 240, 184, 0.34);
+  --ulg-retro-border-hi: rgba(103, 216, 255, 0.78);
+  --ulg-retro-text: #e2f6f0;
+  --ulg-retro-muted: #84a8a0;
+  --ulg-retro-bevel: inset 1px 1px 0 rgba(255, 255, 255, 0.08), inset -1px -1px 0 rgba(0, 0, 0, 0.68), 0 0 0 1px rgba(0, 0, 0, 0.55);
+  --ulg-retro-glow: 0 0 14px rgba(86, 240, 184, 0.16);
+}
+
+/* Optional lightweight CRT phosphor scanline mask (zero pointer interference, zero canvas blur) */
+html[data-ulg-crt="1"]::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 99999;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.20) 0px,
+      rgba(0, 0, 0, 0.20) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    radial-gradient(ellipse at center, transparent 62%, rgba(0, 0, 0, 0.34) 100%);
+}
+
+/* ===== SHARED RETRO LANDING GATE (index.html / pages.html) ===== */
+html[data-ulg-retro="1"] .ulg-studio-empty {
+  background:
+    radial-gradient(circle at 50% 34%, rgba(86, 240, 184, 0.085), transparent 56%),
+    linear-gradient(90deg, rgba(86, 240, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(86, 240, 184, 0.045) 1px, transparent 1px),
+    var(--ulg-retro-bg);
+  background-size: 100% 100%, 24px 24px, 24px 24px, 100% 100%;
+  overflow-y: auto;
+  justify-content: safe center;
+  padding: max(16px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+}
+
+html[data-ulg-retro="1"] .ulg-empty-card {
+  width: min(680px, 100%);
+  max-width: 680px;
+  padding: 22px 24px;
+  border-radius: 2px;
+  border: 1px solid var(--ulg-retro-border-hi);
+  background: var(--ulg-retro-surface);
+  box-shadow: var(--ulg-retro-bevel), 0 22px 54px rgba(0, 0, 0, 0.72), var(--ulg-retro-glow);
+  text-align: left;
+  position: relative;
+}
+
+html[data-ulg-retro="1"] .ulg-empty-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -22px -24px 18px;
+  padding: 7px 14px;
+  background: var(--ulg-retro-accent);
+  color: #04100d;
+  font-family: var(--ulg-retro-font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+html[data-ulg-retro="1"] .ulg-empty-eyebrow {
+  font-family: var(--ulg-retro-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--ulg-retro-amber);
+  margin: 0 0 6px;
+}
+
+html[data-ulg-retro="1"] .ulg-empty-title {
+  font-family: var(--ulg-retro-font-mono);
+  font-size: clamp(18px, 3.6vw, 24px);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ulg-retro-text);
+  margin: 0 0 10px;
+}
+
+html[data-ulg-retro="1"] .ulg-empty-copy {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ulg-retro-muted);
+  margin: 0 0 16px;
+}
+
+.ulg-exowebtui-prompt-box {
+  border: 1px solid var(--ulg-retro-accent);
+  background: linear-gradient(180deg, rgba(86, 240, 184, 0.10), rgba(8, 18, 26, 0.78));
+  padding: 14px 15px;
+  margin-bottom: 16px;
+  box-shadow: var(--ulg-retro-bevel), var(--ulg-retro-glow);
+}
+
+.ulg-exowebtui-prompt-q {
+  font-family: var(--ulg-retro-font-mono);
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ulg-retro-text);
+  margin: 0 0 6px;
+  letter-spacing: 0.03em;
+}
+
+.ulg-exowebtui-prompt-sub {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ulg-retro-muted);
+  margin: 0 0 12px;
+}
+
+.ulg-exowebtui-cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.ulg-landing-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 12px;
+  font-family: var(--ulg-retro-font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ulg-retro-muted);
+}
+
+.ulg-landing-divider::before,
+.ulg-landing-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--ulg-retro-border);
+}
+
+.ulg-landing-lab-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ulg-landing-lab-grid .ulg-btn {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  min-height: 40px;
+}
+
+.ulg-landing-lab-grid .ulg-landing-span-2 {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 640px) {
+  html[data-ulg-retro="1"] .ulg-studio-empty {
+    padding-top: max(68px, calc(env(safe-area-inset-top) + 56px));
+    justify-content: flex-start;
+  }
+  html[data-ulg-retro="1"] .ulg-empty-card {
+    padding: 16px 14px;
+  }
+  html[data-ulg-retro="1"] .ulg-empty-topbar {
+    margin: -16px -14px 14px;
+    padding: 6px 10px;
+    font-size: 10px;
+  }
+  .ulg-landing-lab-grid {
+    grid-template-columns: 1fr;
+  }
+  .ulg-exowebtui-cta-row {
+    flex-direction: column;
+  }
+  .ulg-exowebtui-cta-row .ulg-btn {
+    width: 100%;
+    justify-content: center;
+  }
+  html[data-ulg-retro="1"] .ulg-tabs {
+    gap: 4px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  html[data-ulg-retro="1"] .ulg-tab-btn {
+    padding: 6px 7px;
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+}
+
+/* ===== RETRO OVERRIDES FOR CONTINUUM STUDIO (ulgSimStudioStyles.css) ===== */
+html[data-ulg-retro="1"] .ulg-studio-root {
+  --ulg-bg: var(--ulg-retro-bg);
+  --ulg-surface: var(--ulg-retro-surface);
+  --ulg-surface-elevated: var(--ulg-retro-surface-strong);
+  --ulg-border: var(--ulg-retro-border);
+  --ulg-border-strong: var(--ulg-retro-border-hi);
+  --ulg-accent: var(--ulg-retro-accent);
+  --ulg-accent-dim: var(--ulg-retro-accent-dim);
+  --ulg-text: var(--ulg-retro-text);
+  --ulg-text-muted: var(--ulg-retro-muted);
+  --ulg-amber: var(--ulg-retro-amber);
+  --ulg-danger: var(--ulg-retro-danger);
+}
+
+html[data-ulg-retro="1"] .ulg-btn,
+html[data-ulg-retro="1"] .ulg-menu-btn,
+html[data-ulg-retro="1"] .ulg-modal,
+html[data-ulg-retro="1"] .ulg-card,
+html[data-ulg-retro="1"] .ulg-playback-bar,
+html[data-ulg-retro="1"] .ulg-mini-hud,
+html[data-ulg-retro="1"] .ulg-input,
+html[data-ulg-retro="1"] .ulg-select,
+html[data-ulg-retro="1"] .ulg-tab-btn,
+html[data-ulg-retro="1"] .ulg-status-pill,
+html[data-ulg-retro="1"] .ulg-preset-card,
+html[data-ulg-retro="1"] .ulg-pt-modal,
+html[data-ulg-retro="1"] .ulg-loading-card {
+  border-radius: 2px !important;
+  box-shadow: var(--ulg-retro-bevel);
+}
+
+html[data-ulg-retro="1"] .ulg-btn,
+html[data-ulg-retro="1"] .ulg-tab-btn,
+html[data-ulg-retro="1"] .ulg-status-pill,
+html[data-ulg-retro="1"] .ulg-modal-title,
+html[data-ulg-retro="1"] .ulg-mini-hud {
+  font-family: var(--ulg-retro-font-mono);
+  letter-spacing: 0.03em;
+}
+
+html[data-ulg-retro="1"] .ulg-btn-primary {
+  background: var(--ulg-retro-accent);
+  color: #04100d;
+  border-color: var(--ulg-retro-accent);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+html[data-ulg-retro="1"] .ulg-btn-primary:hover {
+  filter: brightness(1.1);
+}
+
+html[data-ulg-retro="1"] .ulg-btn:active {
+  transform: translateY(1px);
+}
+
+/* ===== RETRO OVERRIDES FOR ULG UNIVERSES (`universes.html`) ===== */
+html[data-ulg-retro="1"][data-ulg-lab="universes"] {
+  --bg: var(--ulg-retro-bg);
+  --panel: var(--ulg-retro-surface);
+  --panel-strong: var(--ulg-retro-surface-strong);
+  --border: var(--ulg-retro-border);
+  --border-hi: var(--ulg-retro-border-hi);
+  --text: var(--ulg-retro-text);
+  --muted: var(--ulg-retro-muted);
+  --accent: var(--ulg-retro-accent);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-glass,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-mode-switch,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-mode-btn,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-gamepad-pill,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-btn,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-chip,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-tab,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-deck,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-card,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-scale-pill,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-hud-btn,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-modal-card,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-pop-menu,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-tour-hud,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-genesis-hud,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-touch-btn,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] select,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] button {
+  border-radius: 2px !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-glass {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--ulg-retro-surface);
+  border-color: var(--ulg-retro-border);
+  box-shadow: var(--ulg-retro-bevel), 0 8px 24px rgba(0, 0, 0, 0.65);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-brand-title {
+  font-family: var(--ulg-retro-font-mono);
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+  color: var(--ulg-retro-accent);
+  text-shadow: 0 0 10px rgba(86, 240, 184, 0.35);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-btn,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-mode-btn,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-chip,
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-tab {
+  font-family: var(--ulg-retro-font-mono);
+  box-shadow: var(--ulg-retro-bevel);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-dot {
+  border-radius: 1px;
+}
+
+/* ===== RETRO OVERRIDES FOR ELEMENTS, ORGANIC & BIO LABS ===== */
+html[data-ulg-retro="1"][data-ulg-lab="elements"],
+html[data-ulg-retro="1"][data-ulg-lab="organic"],
+html[data-ulg-retro="1"][data-ulg-lab="life"] {
+  --bg: var(--ulg-retro-bg);
+  --panel: var(--ulg-retro-surface);
+  --card: var(--ulg-retro-surface-strong);
+  --border: var(--ulg-retro-border);
+  --accent: var(--ulg-retro-accent);
+  --text: var(--ulg-retro-text);
+  --muted: var(--ulg-retro-muted);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="elements"] header,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] header,
+html[data-ulg-retro="1"][data-ulg-lab="life"] header {
+  background: var(--ulg-retro-surface-strong);
+  border-bottom: 1px solid var(--ulg-retro-border-hi);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.7);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="elements"] header h1,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] header h1,
+html[data-ulg-retro="1"][data-ulg-lab="life"] header h1 {
+  font-family: var(--ulg-retro-font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 8px rgba(86, 240, 184, 0.25);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .hdr-btn,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .tab-btn,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .btn,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .card,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .help-popover,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .help-item,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .modal-panel,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .el-cell,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .chip,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .hdr-btn,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .specimen-pill,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .acc-group,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .mode-btn,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .ctrl-btn,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .hud-chip,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .help-popover,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .help-item,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .modal-panel,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .hdr-btn,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .specimen-pill,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .acc-group,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .mode-btn,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .ctrl-btn,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .hud-chip,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .help-popover,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .help-item,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .modal-panel,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .xeno-world-btn {
+  border-radius: 2px !important;
+  box-shadow: var(--ulg-retro-bevel);
+}
+
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .hdr-btn,
+html[data-ulg-retro="1"][data-ulg-lab="elements"] .tab-btn,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .hdr-btn,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .acc-header,
+html[data-ulg-retro="1"][data-ulg-lab="organic"] .specimen-pill,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .hdr-btn,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .acc-header,
+html[data-ulg-retro="1"][data-ulg-lab="life"] .specimen-pill {
+  font-family: var(--ulg-retro-font-mono);
+}
+
+/* Range inputs styled as crisp retro workstation sliders across all labs */
+html[data-ulg-retro="1"] input[type="range"] {
+  accent-color: var(--ulg-retro-accent);
+}
+
+/* Embedded ExoWebTUI compact tweak: hide redundant desktop switcher links when already inside desktop */
+html[data-ulg-embedded="exowebtui"] .ulg-hide-when-embedded {
+  display: none !important;
+}

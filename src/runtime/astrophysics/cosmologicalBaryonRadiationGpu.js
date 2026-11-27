@@ -332,6 +332,8 @@ struct CosmoTracer {
 @group(0) @binding(4) var<storage, read_write> lens_map: array<vec4<f32>>;
 // Telemetry: [0]=vec4(mean_xHII, max_temp_K, total_xray, total_sz_y), [1]=vec4(max_kappa, max_alpha, mean_rho_b, rms_dT)
 @group(0) @binding(5) var<storage, read_write> telemetry: array<vec4<f32>>;
+// Solved 3D periodic gravitational potential Phi(x,y,z) from Gate 0B 3D Radix-2 FFT Poisson solver!
+@group(0) @binding(6) var<storage, read> phi_fft: array<vec2<f32>>;
 
 var<workgroup> wg0: array<f32, 64>;
 var<workgroup> wg1: array<f32, 64>;
@@ -412,26 +414,37 @@ fn step_cosmo_baryon_rad(@builtin(global_invocation_id) gid: vec3<u32>) {
   let p_zm = czm.fluid.x * (czm.rad.x * 1e-6);
   let grad_p = vec3<f32>(p_xp - p_xm, p_yp - p_ym, p_zp - p_zm) * inv2dx;
 
-  // Local tidal pull toward dark-matter overdensity gradient (captures filament/cluster accretion!)
-  let grad_dm = vec3<f32>(
-    (cxp.rad.z - cxm.rad.z) * inv2dx,
-    (cyp.rad.z - cym.rad.z) * inv2dx,
-    (czp.rad.z - czm.rad.z) * inv2dx
-  );
-  let v_new = clamp(adv.fluid.yzw + (grad_dm * params.gravity_g - grad_p / max(0.08, rho_b) * 0.35) * dt, vec3<f32>(-18.0), vec3<f32>(18.0));
+  // True long-range 3D periodic FFT Poisson gravitational acceleration g = -grad(Phi)
+  // (replaces unphysical local +grad(rho_DM)! Uses Gate 0B 3D Radix-2 FFT solved Phi on power-of-2 grid)
+  let fft_n_i = i32(max(8u, u32(round(params.center_offset.w))));
+  let fn_f = f32(fft_n_i);
+  let u_g = (vec3<f32>(f32(ix) + 0.5, f32(iy) + 0.5, f32(iz) + 0.5) / f32(n)) * fn_f;
+  let fx0 = i32(floor(u_g.x)); let fy0 = i32(floor(u_g.y)); let fz0 = i32(floor(u_g.z));
+  let phi_xp = phi_fft[cidx(fx0 + 1, fy0, fz0, fft_n_i)].x;
+  let phi_xm = phi_fft[cidx(fx0 - 1, fy0, fz0, fft_n_i)].x;
+  let phi_yp = phi_fft[cidx(fx0, fy0 + 1, fz0, fft_n_i)].x;
+  let phi_ym = phi_fft[cidx(fx0, fy0 - 1, fz0, fft_n_i)].x;
+  let phi_zp = phi_fft[cidx(fx0, fy0, fz0 + 1, fft_n_i)].x;
+  let phi_zm = phi_fft[cidx(fx0, fy0, fz0 - 1, fft_n_i)].x;
+  let inv2dx_phi = 0.5 * fn_f / max(1.0, params.box_size);
+  let g_poisson = -vec3<f32>(phi_xp - phi_xm, phi_yp - phi_ym, phi_zp - phi_zm) * inv2dx_phi;
+  let is_cmb = (params.mode_flags & 1u) != 0u;
+  let is_reion = (params.mode_flags & 2u) != 0u;
+  var v_new = clamp(adv.fluid.yzw + (g_poisson * params.gravity_g - grad_p / max(0.08, rho_b) * 0.35) * dt, vec3<f32>(-18.0), vec3<f32>(18.0));
 
   // Ionizing UV radiative diffusion + Pop III star-forming halo sources (Reionization bubbles!)
   let lap_xhii = (cxp.rad.y + cxm.rad.y + cyp.rad.y + cym.rad.y + czp.rad.y + czm.rad.y - 6.0 * c0.rad.y);
-  let is_cmb = (params.mode_flags & 1u) != 0u;
-  let is_reion = (params.mode_flags & 2u) != 0u;
   var x_hii = adv.rad.y;
   var temp_k = adv.rad.x;
   var delta_sz = adv.rad.w;
 
   if (is_cmb) {
-    // Acoustic standing-wave baryon-photon oscillation around T_CMB(z)
-    let lap_d = (cxp.rad.w + cxm.rad.w + cyp.rad.w + cym.rad.w + czp.rad.w + czm.rad.w - 6.0 * c0.rad.w);
-    delta_sz = c0.rad.w + (0.045 * lap_d - 0.02 * div_v) * dt;
+    // True second-order hyperbolic baryon-photon acoustic wave (c_s^2 = 1/3):
+    //   dv/dt = -c_s^2 * grad(delta) + g_poisson,   d(delta)/dt = -div(v)
+    let grad_d = vec3<f32>(cxp.rad.w - cxm.rad.w, cyp.rad.w - cym.rad.w, czp.rad.w - czm.rad.w) * inv2dx;
+    let c_s2 = 0.3333333;
+    v_new = clamp(c0.fluid.yzw + (-c_s2 * grad_d + g_poisson * params.gravity_g * 0.15) * dt, vec3<f32>(-8.0), vec3<f32>(8.0));
+    delta_sz = clamp(c0.rad.w - div_v * dt, -2.5, 2.5);
     temp_k = params.cmb_temp_k * (1.0 + 0.09 * clamp(delta_sz, -1.2, 1.2));
   } else if (is_reion) {
     // Real ionization-front expansion: Pop III halos (rho_dm > 1.15) emit UV photons diffusing outward,
@@ -509,7 +522,7 @@ fn step_cosmo_tracers(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= params.tracer_count) { return; }
   var tr = tracers[i];
-  let half = params.box_size * 0.48;
+  let half = params.box_size * 0.5;
   let loc_p = tr.pos_m.xyz - params.center_offset.xyz;
   let c = sample_cell_trilin(loc_p);
 
@@ -517,9 +530,9 @@ fn step_cosmo_tracers(@builtin(global_invocation_id) gid: vec3<u32>) {
   var next_p = loc_p;
   if (!is_cmb) {
     next_p = loc_p + c.fluid.yzw * params.dt * 1.4;
-    if (abs(next_p.x) > half) { next_p.x = next_p.x - sign(next_p.x) * params.box_size * 0.94; }
-    if (abs(next_p.y) > half) { next_p.y = next_p.y - sign(next_p.y) * params.box_size * 0.94; }
-    if (abs(next_p.z) > half) { next_p.z = next_p.z - sign(next_p.z) * params.box_size * 0.94; }
+    if (abs(next_p.x) > half) { next_p.x = next_p.x - sign(next_p.x) * params.box_size; }
+    if (abs(next_p.y) > half) { next_p.y = next_p.y - sign(next_p.y) * params.box_size; }
+    if (abs(next_p.z) > half) { next_p.z = next_p.z - sign(next_p.z) * params.box_size; }
   }
   let xray = c.fluid.x * c.fluid.x * sqrt(max(1.0, c.rad.x * 1e-6));
   tr.pos_m = vec4<f32>(next_p + params.center_offset.xyz, tr.pos_m.w);
@@ -621,16 +634,63 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
     | (ic.epoch.redshiftZ >= 5.5 && ic.epoch.redshiftZ < 400 ? 2 : 0)
     | (clusterMergerMode ? 4 : 0);
 
+  const fftN = (n & (n - 1)) === 0 ? n : (n >= 24 ? 32 : 16);
+  const fftWs = createFft3dWorkspaceWebGpu(device, fftN);
+  const dxFft = ic.boxSizeMpc / fftN;
+  fftWs.writeAxisPoissonParams({ boxLength: ic.boxSizeMpc, smoothR2: (0.75 * dxFft) ** 2 });
+  const poissonWgsl = /* wgsl */ `
+struct PoissonU {
+  grid_n: u32,
+  fft_n: u32,
+  box_size: f32,
+  mean_rho: f32,
+};
+struct CosmoCell {
+  fluid: vec4<f32>,
+  rad: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> pu: PoissonU;
+@group(0) @binding(1) var<storage, read> cells_in: array<CosmoCell>;
+@group(0) @binding(2) var<storage, read_write> fft_buf: array<vec2<f32>>;
+
+@compute @workgroup_size(4, 4, 4)
+fn pack_poisson_rho(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let fn_u = pu.fft_n;
+  if (gid.x >= fn_u || gid.y >= fn_u || gid.z >= fn_u) { return; }
+  let gn = pu.grid_n;
+  let gx = min(gn - 1u, u32(floor((f32(gid.x) + 0.5) * f32(gn) / f32(fn_u))));
+  let gy = min(gn - 1u, u32(floor((f32(gid.y) + 0.5) * f32(gn) / f32(fn_u))));
+  let gz = min(gn - 1u, u32(floor((f32(gid.z) + 0.5) * f32(gn) / f32(fn_u))));
+  let c = cells_in[(gz * gn + gy) * gn + gx];
+  // Pack 4*pi*(rho_DM + 0.18*rho_b - mean_rho) into Gate 0B fft3dWebGpu Poisson solver!
+  let rhs = 12.566370614 * (c.rad.z + 0.18 * c.fluid.x - pu.mean_rho);
+  fft_buf[(gid.z * fn_u + gid.y) * fn_u + gid.x] = vec2<f32>(rhs, 0.0);
+}
+`;
+  const poissonBindings = [
+    computeBufferBinding(0, 'uniform'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'storage')
+  ];
+  const packRhoPipe = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-cosmo-baryon-pack-rho.v2',
+    label: `${label}-pack-rho`,
+    code: poissonWgsl,
+    entryPoint: 'pack_poisson_rho',
+    bindings: poissonBindings
+  });
+
   const bindings = [
     computeBufferBinding(0, 'uniform'),
     computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'storage'),
     computeBufferBinding(4, 'storage'),
-    computeBufferBinding(5, 'storage')
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-cosmo-baryon-rad-${entryPoint}.v1`,
+    cacheKey: `ulg-cosmo-baryon-rad-${entryPoint}.v2`,
     label: `${label}-${entryPoint}`,
     code: cosmoBaryonRadWgsl,
     entryPoint,
@@ -643,6 +703,13 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
   const telPipe = mkPipe('reduce_cosmo_baryon_telemetry');
 
   const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const poissonParamsBuf = device.createBuffer({ label: `${label}-poisson-u`, size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  {
+    const pab = new ArrayBuffer(16);
+    new Uint32Array(pab, 0, 2).set([n, fftN]);
+    new Float32Array(pab, 8, 2).set([ic.boxSizeMpc, ic.meanRho]);
+    device.queue.writeBuffer(poissonParamsBuf, 0, pab);
+  }
   const cellA = device.createBuffer({ label: `${label}-cellA`, size: ic.cells.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const cellB = device.createBuffer({ label: `${label}-cellB`, size: ic.cells.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const tracerBuf = device.createBuffer({ label: `${label}-tracers`, size: ic.tracers.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
@@ -654,7 +721,19 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
   device.queue.writeBuffer(cellB, 0, ic.cells);
   device.queue.writeBuffer(tracerBuf, 0, ic.tracers);
 
-  const mkBg = (src, dst, tag) => createCachedExplicitBindGroup(device, {
+  const mkPoissonBg = (src, tag) => createCachedExplicitBindGroup(device, {
+    layout: packRhoPipe.bindGroupLayout,
+    label: `${label}-pbg-${tag}`,
+    entries: [
+      { binding: 0, resource: { buffer: poissonParamsBuf } },
+      { binding: 1, resource: { buffer: src } },
+      { binding: 2, resource: { buffer: fftWs.bufferA } }
+    ]
+  });
+  const pbg0 = mkPoissonBg(cellA, '0');
+  const pbg1 = mkPoissonBg(cellB, '1');
+
+  const mkBg = (src, dst, phiB, tag) => createCachedExplicitBindGroup(device, {
     layout: stepPipe.bindGroupLayout,
     label: `${label}-bg-${tag}`,
     entries: [
@@ -663,11 +742,14 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
       { binding: 2, resource: { buffer: dst } },
       { binding: 3, resource: { buffer: tracerBuf } },
       { binding: 4, resource: { buffer: lensBuf } },
-      { binding: 5, resource: { buffer: telBuf } }
+      { binding: 5, resource: { buffer: telBuf } },
+      { binding: 6, resource: { buffer: phiB } }
     ]
   });
-  const bg0 = mkBg(cellA, cellB, '0');
-  const bg1 = mkBg(cellB, cellA, '1');
+  const bg0A = mkBg(cellA, cellB, fftWs.bufferA, '0A');
+  const bg0B = mkBg(cellA, cellB, fftWs.bufferB, '0B');
+  const bg1A = mkBg(cellB, cellA, fftWs.bufferA, '1A');
+  const bg1B = mkBg(cellB, cellA, fftWs.bufferB, '1B');
 
   let ping = 0;
   let stepIndex = 0;
@@ -691,6 +773,7 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
   });
 
   const wg3 = Math.ceil(n / 4);
+  const wgFft = Math.ceil(fftN / 4);
   const wg2 = Math.ceil(n / 8);
   const wgTr = Math.ceil(ic.tracerCount / 64);
 
@@ -700,7 +783,7 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
     new Float32Array(ab, 16, 12).set([
       ic.boxSizeMpc, dx, dt, ic.epoch.redshiftZ,
       ic.epoch.cmbTempK, effUvFlux, ic.meanRho, gravityG,
-      ic.centerOffset[0], ic.centerOffset[1], ic.centerOffset[2], 0
+      ic.centerOffset[0], ic.centerOffset[1], ic.centerOffset[2], fftN
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
   }
@@ -712,25 +795,45 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
     writeParams(dtSafe);
 
     const enc = device.createCommandEncoder({ label: `${label}-step-${stepIndex}` });
-    const pass = enc.beginComputePass({ label: `${label}-pass` });
+    let lastPhiOut = fftWs.bufferA;
     for (let s = 0; s < nSub; s += 1) {
-      pass.setBindGroup(0, ping === 0 ? bg0 : bg1);
+      // Solve exact 3D periodic Poisson potential ∇²Φ = 4π(ρ_DM + 0.18 ρ_b - ρ̄) on Gate 0B 3D FFT!
+      const pPack = enc.beginComputePass({ label: `${label}-pack-${s}` });
+      pPack.setBindGroup(0, ping === 0 ? pbg0 : pbg1);
+      pPack.setPipeline(packRhoPipe.pipeline);
+      pPack.dispatchWorkgroups(wgFft, wgFft, wgFft);
+      pPack.end();
+      lastPhiOut = fftWs.encodePoissonSolve(enc, { gradAxis: 0 });
+      const activeBg = ping === 0
+        ? (lastPhiOut === fftWs.bufferA ? bg0A : bg0B)
+        : (lastPhiOut === fftWs.bufferA ? bg1A : bg1B);
+
+      const pass = enc.beginComputePass({ label: `${label}-pass-${s}` });
+      pass.setBindGroup(0, activeBg);
       pass.setPipeline(stepPipe.pipeline);
       pass.dispatchWorkgroups(wg3, wg3, wg3);
       ping ^= 1;
-      pass.setBindGroup(0, ping === 0 ? bg0 : bg1);
+      const postTrBg = ping === 0
+        ? (lastPhiOut === fftWs.bufferA ? bg0A : bg0B)
+        : (lastPhiOut === fftWs.bufferA ? bg1A : bg1B);
+      pass.setBindGroup(0, postTrBg);
       pass.setPipeline(trPipe.pipeline);
       pass.dispatchWorkgroups(wgTr);
+      pass.end();
       stepIndex += 1;
     }
-    pass.setBindGroup(0, ping === 0 ? bg0 : bg1);
-    pass.setPipeline(projPipe.pipeline);
-    pass.dispatchWorkgroups(wg2, wg2);
-    pass.setPipeline(deflPipe.pipeline);
-    pass.dispatchWorkgroups(wg2, wg2);
-    pass.setPipeline(telPipe.pipeline);
-    pass.dispatchWorkgroups(1);
-    pass.end();
+    const postBg = ping === 0
+      ? (lastPhiOut === fftWs.bufferA ? bg0A : bg0B)
+      : (lastPhiOut === fftWs.bufferA ? bg1A : bg1B);
+    const postPass = enc.beginComputePass({ label: `${label}-post` });
+    postPass.setBindGroup(0, postBg);
+    postPass.setPipeline(projPipe.pipeline);
+    postPass.dispatchWorkgroups(wg2, wg2);
+    postPass.setPipeline(deflPipe.pipeline);
+    postPass.dispatchWorkgroups(wg2, wg2);
+    postPass.setPipeline(telPipe.pipeline);
+    postPass.dispatchWorkgroups(1);
+    postPass.end();
 
     const doTel = readTelemetry && !mapInFlight && telReadBuf.mapState === 'unmapped';
     if (doTel) {
@@ -774,7 +877,8 @@ export function createCosmologicalBaryonRadiationSessionWebGpu(device, {
   function dispose() {
     if (disposed) return;
     disposed = true;
-    for (const b of [paramsBuf, cellA, cellB, tracerBuf, lensBuf, telBuf, telReadBuf]) {
+    try { fftWs.dispose?.(); } catch {}
+    for (const b of [paramsBuf, poissonParamsBuf, cellA, cellB, tracerBuf, lensBuf, telBuf, telReadBuf]) {
       try { b.destroy(); } catch {}
     }
   }

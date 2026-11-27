@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en" data-ulg-retro="1" data-ulg-lab="desktop">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#060b10" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='4' fill='%23060b10' stroke='%2356f0b8' stroke-width='4'/%3E%3Crect x='10' y='12' width='20' height='18' fill='none' stroke='%2356f0b8' stroke-width='3'/%3E%3Crect x='34' y='12' width='20' height='18' fill='none' stroke='%2367d8ff' stroke-width='3'/%3E%3Crect x='10' y='34' width='44' height='18' fill='none' stroke='%23ffbe4f' stroke-width='3'/%3E%3C/svg%3E" />
+    <title>ULG // ExoWebTUI Multi-Lab Desktop Interface</title>
+    <style>
+      :root {
+        --exo-bg: #070d14;
+        --exo-surface: #0c1622;
+        --exo-surface-strong: #132234;
+        --exo-border: rgba(86, 240, 184, 0.42);
+        --exo-accent: #56f0b8;
+        --exo-on-accent: #04100d;
+        --exo-text: #e2f6f0;
+        --exo-muted: #84a8a0;
+        --exo-danger: #ff6b7d;
+        --exo-bar-h: 36px;
+        --exo-mobile-dock-h: 44px;
+        --exo-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        height: 100dvh;
+        overflow: hidden;
+        background: var(--exo-bg);
+        color: var(--exo-text);
+        font-family: var(--exo-mono);
+        user-select: none;
+        -webkit-text-size-adjust: 100%;
+        overscroll-behavior: none;
+      }
+
+      /* Real ExoWebTUI animated TUI cell-canvas wallpaper layer */
+      #exotui-canvas-root {
+        position: fixed;
+        inset: var(--exo-bar-h) 0 0 0;
+        z-index: 1;
+        overflow: hidden;
+        background: var(--exo-bg);
+      }
+      #exotui-canvas-root canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* Top ExoWebTUI Taskbar / Shelf */
+      #exo-topbar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: var(--exo-bar-h);
+        z-index: 1800;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 max(8px, env(safe-area-inset-right)) 0 max(6px, env(safe-area-inset-left));
+        background: var(--exo-surface);
+        border-bottom: 1px solid var(--exo-accent);
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.65);
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .exo-bar-btn {
+        appearance: none;
+        border: 1px solid var(--exo-border);
+        background: var(--exo-surface-strong);
+        color: var(--exo-text);
+        font-family: var(--exo-mono);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        padding: 4px 9px;
+        min-height: 28px;
+        border-radius: 2px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+        flex-shrink: 0;
+        box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.08), inset -1px -1px 0 rgba(0, 0, 0, 0.65);
+      }
+      .exo-bar-btn:hover {
+        border-color: var(--exo-accent);
+        color: #ffffff;
+      }
+      .exo-bar-btn.active,
+      .exo-bar-btn.primary {
+        background: var(--exo-accent);
+        border-color: var(--exo-accent);
+        color: var(--exo-on-accent);
+        font-weight: 800;
+      }
+
+      #exo-tab-strip {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      #exo-tab-strip::-webkit-scrollbar { display: none; }
+
+      .exo-tab-btn {
+        appearance: none;
+        border: 1px solid var(--exo-border);
+        background: rgba(0, 0, 0, 0.25);
+        color: var(--exo-muted);
+        font-family: var(--exo-mono);
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 9px;
+        min-height: 26px;
+        border-radius: 2px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+        flex-shrink: 0;
+        max-width: 196px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .exo-tab-btn.active {
+        background: var(--exo-accent);
+        border-color: var(--exo-accent);
+        color: var(--exo-on-accent);
+        font-weight: 800;
+      }
+      .exo-tab-btn.minimized {
+        opacity: 0.68;
+        border-style: dashed;
+      }
+
+      .exo-bar-tools {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        flex-shrink: 0;
+      }
+
+      #exo-clock {
+        font-size: 11px;
+        color: var(--exo-muted);
+        padding: 0 4px;
+        flex-shrink: 0;
+      }
+
+      /* Desktop Empty-State Quick Launcher Icons (visible behind/when all windows minimized) */
+      #exo-desktop-icons {
+        position: fixed;
+        top: calc(var(--exo-bar-h) + 14px);
+        left: 14px;
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        pointer-events: auto;
+      }
+      .exo-desktop-icon {
+        appearance: none;
+        border: 1px solid var(--exo-border);
+        background: rgba(8, 15, 22, 0.84);
+        color: var(--exo-text);
+        font-family: var(--exo-mono);
+        font-size: 10.5px;
+        font-weight: 700;
+        width: 108px;
+        padding: 8px 6px;
+        border-radius: 2px;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        text-align: center;
+        box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.08), 0 4px 14px rgba(0, 0, 0, 0.5);
+      }
+      .exo-desktop-icon:hover {
+        border-color: var(--exo-accent);
+        background: var(--exo-surface-strong);
+      }
+      .exo-desktop-icon .ico {
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      /* Multi-Window Layer */
+      #exo-windows-layer {
+        position: fixed;
+        top: var(--exo-bar-h);
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 20;
+        pointer-events: none;
+        overflow: hidden;
+      }
+
+      .exo-win {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        background: var(--exo-bg);
+        border: 1px solid var(--exo-border);
+        border-radius: 2px;
+        pointer-events: auto;
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.72), inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+        overflow: hidden;
+      }
+      .exo-win.active {
+        border-color: var(--exo-accent);
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.82), 0 0 0 1px var(--exo-accent);
+      }
+      .exo-win.hidden-win {
+        display: none;
+      }
+
+      .exo-win-titlebar {
+        height: 28px;
+        min-height: 28px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 0 6px 0 8px;
+        background: var(--exo-surface-strong);
+        color: var(--exo-muted);
+        border-bottom: 1px solid var(--exo-border);
+        cursor: move;
+        touch-action: none;
+      }
+      .exo-win.active .exo-win-titlebar {
+        background: var(--exo-accent);
+        color: var(--exo-on-accent);
+        border-bottom-color: var(--exo-accent);
+      }
+      .exo-win-title-text {
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .exo-win-controls {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        flex-shrink: 0;
+      }
+      .exo-win-ctl {
+        appearance: none;
+        border: 1px solid rgba(0, 0, 0, 0.35);
+        background: rgba(0, 0, 0, 0.22);
+        color: inherit;
+        font-family: var(--exo-mono);
+        font-size: 11px;
+        font-weight: 800;
+        width: 24px;
+        height: 20px;
+        padding: 0;
+        border-radius: 2px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .exo-win-ctl:hover {
+        background: rgba(255, 255, 255, 0.18);
+      }
+      .exo-win-ctl.close:hover {
+        background: var(--exo-danger);
+        color: #ffffff;
+      }
+
+      .exo-win-body {
+        position: relative;
+        flex: 1 1 auto;
+        min-height: 0;
+        background: #04080d;
+      }
+
+      .exo-win-iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: #04080d;
+      }
+      body.exo-dragging .exo-win-iframe,
+      body.exo-menu-open .exo-win-iframe {
+        pointer-events: none;
+      }
+
+      /* Focus-catcher on inactive background lab windows so clicking anywhere raises them */
+      .exo-win-focus-shield {
+        position: absolute;
+        inset: 0;
+        z-index: 4;
+        background: transparent;
+        cursor: pointer;
+        display: none;
+      }
+      .exo-win:not(.active) .exo-win-focus-shield {
+        display: block;
+      }
+
+      /* Resize handles for floating windows on desktop */
+      .exo-resize-handle {
+        position: absolute;
+        z-index: 8;
+        touch-action: none;
+      }
+      .exo-resize-e { top: 28px; right: 0; bottom: 10px; width: 6px; cursor: ew-resize; }
+      .exo-resize-s { left: 10px; right: 10px; bottom: 0; height: 6px; cursor: ns-resize; }
+      .exo-resize-se { right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+      .exo-resize-se::after {
+        content: "";
+        position: absolute;
+        right: 2px;
+        bottom: 2px;
+        width: 8px;
+        height: 8px;
+        border-right: 2px solid var(--exo-accent);
+        border-bottom: 2px solid var(--exo-accent);
+        opacity: 0.7;
+      }
+      .exo-win.maximized .exo-resize-handle,
+      .exo-win.tiled .exo-resize-handle {
+        display: none;
+      }
+
+      /* Native TUI Console / Theme Deck window content */
+      .exo-console-body {
+        position: absolute;
+        inset: 0;
+        padding: 12px;
+        overflow-y: auto;
+        background: var(--exo-surface);
+        color: var(--exo-text);
+        font-size: 11.5px;
+        line-height: 1.5;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .exo-console-sec {
+        border: 1px solid var(--exo-border);
+        background: rgba(0, 0, 0, 0.22);
+        padding: 10px;
+      }
+      .exo-console-sec h3 {
+        margin: 0 0 8px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--exo-accent);
+      }
+      .exo-chip-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      /* Floating Start Menu (box-drawing ExoWebTUI aesthetic over all windows) */
+      #exo-start-menu {
+        position: fixed;
+        top: calc(var(--exo-bar-h) + 4px);
+        left: 6px;
+        z-index: 2200;
+        width: min(360px, calc(100vw - 12px));
+        max-height: calc(100dvh - var(--exo-bar-h) - 16px);
+        overflow-y: auto;
+        background: var(--exo-surface);
+        border: 1px solid var(--exo-accent);
+        border-radius: 2px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(0, 0, 0, 0.8);
+        padding: 8px;
+        display: none;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #exo-start-menu.open {
+        display: flex;
+      }
+      .exo-menu-hdr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 4px 6px 6px;
+        border-bottom: 1px solid var(--exo-border);
+        font-size: 10.5px;
+        font-weight: 800;
+        color: var(--exo-accent);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .exo-menu-section {
+        font-size: 9.5px;
+        font-weight: 700;
+        color: var(--exo-muted);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        padding: 4px 6px 0;
+      }
+      .exo-menu-item {
+        appearance: none;
+        width: 100%;
+        text-align: left;
+        border: 1px solid transparent;
+        background: rgba(255, 255, 255, 0.025);
+        color: var(--exo-text);
+        font-family: var(--exo-mono);
+        padding: 8px 9px;
+        border-radius: 2px;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        text-decoration: none;
+      }
+      .exo-menu-item:hover {
+        background: var(--exo-surface-strong);
+        border-color: var(--exo-accent);
+      }
+      .exo-menu-item-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 11.5px;
+        font-weight: 800;
+      }
+      .exo-menu-item-top .tag {
+        font-size: 9.5px;
+        color: var(--exo-accent);
+        font-weight: 700;
+      }
+      .exo-menu-item-desc {
+        font-size: 10.5px;
+        color: var(--exo-muted);
+        line-height: 1.35;
+      }
+
+      /* Mobile Single-Window Bottom Switcher Dock */
+      #exo-mobile-dock {
+        display: none;
+      }
+
+      @media (max-width: 679px) {
+        :root {
+          --exo-bar-h: 40px;
+        }
+        #exo-desktop-icons,
+        #exo-tab-strip,
+        #exo-clock,
+        .exo-desktop-only {
+          display: none !important;
+        }
+        #exo-topbar {
+          justify-content: space-between;
+        }
+        #exo-mobile-active-title {
+          display: inline-block !important;
+          flex: 1 1 auto;
+          min-width: 0;
+          font-size: 11px;
+          font-weight: 800;
+          color: var(--exo-accent);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          text-align: center;
+        }
+        #exo-windows-layer {
+          bottom: var(--exo-mobile-dock-h);
+        }
+        .exo-win {
+          border-left: 0;
+          border-right: 0;
+          border-radius: 0;
+        }
+        .exo-win-titlebar {
+          display: none;
+        }
+        #exo-mobile-dock {
+          position: fixed;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          height: var(--exo-mobile-dock-h);
+          z-index: 1850;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+          background: var(--exo-surface);
+          border-top: 1px solid var(--exo-accent);
+          overflow-x: auto;
+          scrollbar-width: none;
+        }
+        #exo-mobile-dock::-webkit-scrollbar { display: none; }
+        .exo-dock-btn {
+          appearance: none;
+          border: 1px solid var(--exo-border);
+          background: var(--exo-surface-strong);
+          color: var(--exo-text);
+          font-family: var(--exo-mono);
+          font-size: 9.5px;
+          font-weight: 700;
+          padding: 5px 5px;
+          min-height: 34px;
+          border-radius: 2px;
+          white-space: nowrap;
+          flex: 1 1 0;
+          text-align: center;
+          cursor: pointer;
+        }
+        .exo-dock-btn.active {
+          background: var(--exo-accent);
+          border-color: var(--exo-accent);
+          color: var(--exo-on-accent);
+          font-weight: 800;
+        }
+        #exo-start-menu {
+          left: 0;
+          right: 0;
+          width: 100vw;
+          max-height: calc(100dvh - var(--exo-bar-h) - var(--exo-mobile-dock-h));
+          border-left: 0;
+          border-right: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header id="exo-topbar" role="toolbar" aria-label="ExoWebTUI Taskbar">
+      <button id="exo-start-btn" class="exo-bar-btn primary" type="button" aria-haspopup="menu" aria-expanded="false">⏻ ULG</button>
+      <span id="exo-mobile-active-title" style="display:none;">ULG // EXOWEB TUI</span>
+      <div id="exo-tab-strip" role="tablist" aria-label="Open Lab Windows"></div>
+      <div class="exo-bar-tools">
+        <button id="exo-tile-btn" class="exo-bar-btn exo-desktop-only" type="button" title="Tile all open lab windows side-by-side">⊞ TILE</button>
+        <button id="exo-cascade-btn" class="exo-bar-btn exo-desktop-only" type="button" title="Cascade floating lab windows">❐ FLOAT</button>
+        <button id="exo-crt-btn" class="exo-bar-btn" type="button" title="Toggle Retro CRT Scanlines">CRT</button>
+        <button id="exo-console-btn" class="exo-bar-btn" type="button" title="Themes, Wallpapers &amp; Window Manager">⚙</button>
+        <span id="exo-clock" aria-hidden="true">--:--</span>
+      </div>
+    </header>
+
+    <div id="exotui-canvas-root" aria-hidden="true"></div>
+
+    <div id="exo-desktop-icons" aria-label="ULG Lab Desktop Shortcuts"></div>
+
+    <main id="exo-windows-layer" aria-label="ExoWebTUI Workspace"></main>
+
+    <nav id="exo-mobile-dock" aria-label="Mobile Lab Switcher"></nav>
+
+    <aside id="exo-start-menu" role="menu" aria-label="ULG ExoWebTUI Start Menu"></aside>
+
+    <script type="module" src="/src/demos/ulgExoWebTuiDesktop.js"></script>
+  </body>
+</html>

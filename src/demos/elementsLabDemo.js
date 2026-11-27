@@ -7,6 +7,8 @@
 // `defaultSimulationModuleRegistry`) — ZERO fake animations, ZERO per-element
 // cheats, ZERO per-frame CPU MD position readbacks, fixed camera by default!
 
+import { initUlgExoWebTuiBridge } from './ulgExoWebTuiBridge.js';
+initUlgExoWebTuiBridge({ labId: 'elements', title: 'ULG Material Physics Lab' });
 import {
   ELEMENT_SYMBOLS,
   electronConfiguration,

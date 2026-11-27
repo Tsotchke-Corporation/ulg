@@ -769,8 +769,11 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     const baseLabel = `${sys.systemName} ${pLetter}`;
     let spec = null;
 
+    const gpuMassE = (gpuB && Number.isFinite(gpuB.totalMassEarth) && gpuB.totalMassEarth > 0.01)
+      ? gpuB.totalMassEarth
+      : null;
     if (archetype === 'earth-like') {
-      const mE = 0.68 + rand() * 0.95;
+      const mE = gpuMassE ? Math.max(0.35, Math.min(3.2, gpuMassE)) : (0.68 + rand() * 0.95);
       const rKm = Math.round(6371 * Math.pow(mE, 0.27));
       const pSurf = Math.round((0.65 + rand() * 1.15) * 101325);
       const tSurf = Math.max(268, Math.min(312, Math.round(tEqK + 28 + (rand() - 0.5) * 14)));
@@ -793,7 +796,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe-Ni Core · MgSiO₃ Mantle · Liquid H₂O Ocean · N₂/O₂ ${(pSurf / 1e5).toFixed(2)} bar`
       };
     } else if (archetype === 'ocean-super-earth') {
-      const mE = 2.2 + rand() * 3.8;
+      const mE = gpuMassE ? Math.max(1.2, Math.min(12.0, gpuMassE)) : (2.2 + rand() * 3.8);
       const rKm = Math.round(6371 * Math.pow(mE, 0.29) * 1.08);
       const pSurf = Math.round((1.5 + rand() * 4.5) * 101325);
       spec = {
@@ -815,7 +818,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe Core · High-P H₂O Ice-VII Mantle · Global Liquid Ocean (${mE.toFixed(1)} M⊕)`
       };
     } else if (archetype === 'carbon-world') {
-      const mE = 0.6 + rand() * 3.2;
+      const mE = gpuMassE ? Math.max(0.25, Math.min(10.0, gpuMassE)) : (0.6 + rand() * 3.2);
       const rKm = Math.round(6371 * Math.pow(mE, 0.27) * 0.96);
       const pSurf = tEqK > 550 ? 2.4e5 : 4.2e4;
       spec = {
@@ -837,7 +840,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe-C Core · Diamond/SiC Mantle · Graphite & Hydrocarbon Crust (C/O=${nebulaEnv.cToO.toFixed(2)})`
       };
     } else if (archetype === 'lava-world') {
-      const mE = 0.4 + rand() * 3.6;
+      const mE = gpuMassE ? Math.max(0.2, Math.min(10.0, gpuMassE)) : (0.4 + rand() * 3.6);
       const rKm = Math.round(6371 * Math.pow(mE, 0.27));
       spec = {
         name: `${baseLabel} (Lava World)`,
@@ -858,7 +861,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Molten Fe-Ni Core · Magma MgSiO₃ Ocean · Vaporized SiO/Na Exosphere`
       };
     } else if (archetype === 'iron-core') {
-      const mE = 0.05 + rand() * 0.45;
+      const mE = gpuMassE ? Math.max(0.05, Math.min(6.0, gpuMassE)) : (0.05 + rand() * 0.45);
       const rKm = Math.round(2200 + Math.pow(mE, 0.30) * 3200);
       spec = {
         name: `${baseLabel} (Iron World)`,
@@ -879,14 +882,14 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe-Ni Core 68% · Silicate Mantle 32% · Airless Cratered Regolith`
       };
     } else if (archetype === 'greenhouse') {
-      const mE = 0.65 + rand() * 1.8;
+      const mE = gpuMassE ? Math.max(0.4, Math.min(8.0, gpuMassE)) : (0.65 + rand() * 1.8);
       const rKm = Math.round(5600 + Math.pow(mE, 0.27) * 1600);
       const pSurf = Math.round((2.5 + rand() * 7.5) * 1e6);
       spec = {
         name: `${baseLabel} (Greenhouse)`,
         planetClass: 'greenhouse',
         subtitle: `Super-Greenhouse CO₂ World · ${aAu.toFixed(2)} AU`,
-        kind: 2,
+        kind: 1,
         massSolar: mE * EARTH_MASS_SOLAR,
         radiusKm: rKm,
         color0: [0.90, 0.78, 0.52],
@@ -902,7 +905,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       };
     } else if (archetype === 'arid-oxide' || archetype === 'super-earth') {
       const isSuper = archetype === 'super-earth';
-      const mE = isSuper ? (1.8 + rand() * 3.2) : (0.10 + rand() * 0.42);
+      const mE = gpuMassE ? Math.max(0.08, Math.min(10.0, gpuMassE)) : (isSuper ? (1.8 + rand() * 3.2) : (0.10 + rand() * 0.42));
       const rKm = Math.round(isSuper ? (6371 * Math.pow(mE, 0.27)) : (3000 + Math.pow(mE, 0.30) * 2100));
       const pSurf = isSuper ? Math.round((0.8 + rand() * 2.2) * 1e5) : Math.round(450 + rand() * 2400);
       spec = {
@@ -925,8 +928,8 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       };
     } else if (archetype === 'hot-jupiter' || archetype === 'gas-giant') {
       const isHot = archetype === 'hot-jupiter';
-      const mJup = isHot ? (0.35 + rand() * 2.4) : (0.22 + rand() * 3.1);
-      const rKm = Math.round((54000 + rand() * 24000) * (isHot ? 1.18 : 1.0));
+      const mJup = gpuMassE ? Math.max(0.12, Math.min(12.0, gpuMassE / 317.83)) : (isHot ? (0.35 + rand() * 2.4) : (0.22 + rand() * 3.1));
+      const rKm = Math.round((54000 + Math.pow(Math.min(4.0, mJup), 0.14) * 18000) * (isHot ? 1.16 : 1.0));
       const ringed = !isHot && rand() < 0.48;
       spec = {
         name: `${baseLabel} (${isHot ? 'Hot Jupiter' : (ringed ? 'Ringed Giant' : 'Gas Giant')})`,
@@ -950,8 +953,8 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `H₂ ${(88 + rand() * 7).toFixed(1)}% · He · Metallic H Mantle (${mJup.toFixed(2)} M_J)`
       };
     } else if (archetype === 'ice-giant') {
-      const mE = 10.0 + rand() * 14.0;
-      const rKm = Math.round(21000 + rand() * 7500);
+      const mE = gpuMassE ? Math.max(5.0, Math.min(48.0, gpuMassE)) : (10.0 + rand() * 14.0);
+      const rKm = Math.round(16500 + Math.pow(mE, 0.36) * 4200);
       const ringed = rand() < 0.28;
       const isDeepBlue = rand() < 0.52;
       spec = {
@@ -1016,6 +1019,22 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       }
       if (Number.isFinite(gpuB.radiusEarth) && gpuB.radiusEarth > 0) {
         spec.radiusKm = Math.max(1200, Math.round(gpuB.radiusEarth * 6371.0));
+      }
+      // Propagate continuous GPU-coalesced mineral/volatile composition into crust/surface/albedo (anti-pigeonhole!)
+      if (spec.kind === 1) {
+        const fe = Math.max(0, Math.min(1, Number(gpuB.feFrac) || 0.2));
+        const carb = Math.max(0, Math.min(1, Number(gpuB.carbonFrac) || 0.05));
+        const vol = Math.max(0, Math.min(1, Number(gpuB.volatileFrac) || 0.02));
+        if (spec.planetClass !== 'ocean-world') {
+          spec.volatileMassFrac = Number(Math.max(spec.volatileMassFrac || 0.005, vol).toFixed(4));
+        }
+        // Subtle continuous mineral color modulation from GPU Fe-oxide / graphite-carbon / silicate-ice inventory
+        const c0 = spec.color0 || [0.5, 0.45, 0.4];
+        spec.color0 = [
+          Number(Math.max(0.08, Math.min(0.96, c0[0] * (1.0 - carb * 0.35 + fe * 0.14))).toFixed(3)),
+          Number(Math.max(0.08, Math.min(0.96, c0[1] * (1.0 - carb * 0.38 - fe * 0.06))).toFixed(3)),
+          Number(Math.max(0.08, Math.min(0.96, c0[2] * (1.0 - carb * 0.25 + vol * 0.22))).toFixed(3))
+        ];
       }
       if (spec.ringed) {
         spec.ringInnerKm = Math.round(spec.radiusKm * 1.32);

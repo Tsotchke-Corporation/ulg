@@ -514,11 +514,12 @@ fn frank_tamm_linear_rgb(beta: f32, ior: f32) -> vec3<f32> {
   var cy = 0.0;
   var cz = 0.0;
   var norm = 0.0;
-  let peak_inv_l2 = 1.0 / (380.0 * 380.0);
-  // 10 nm CIE 1931 spectral quadrature of Frank-Tamm d^2N / (dx dlambda) ~ lambda^-2
+  let peak_inv_l3 = 1.0 / (380.0 * 380.0 * 380.0);
+  // 10 nm CIE 1931 spectral quadrature of Frank-Tamm radiant energy power
+  // d^2E / (dx dlambda) = (hc/lambda) * d^2N / (dx dlambda) ~ lambda^-3
   for (var k = 0u; k < 41u; k = k + 1u) {
     let nm = 380.0 + f32(k) * 10.0;
-    let spec = (1.0 / (nm * nm)) / peak_inv_l2;
+    let spec = (1.0 / (nm * nm * nm)) / peak_inv_l3;
     let wx = 1.056 * wyman_gauss(nm, 599.8, 37.9, 31.0)
       + 0.362 * wyman_gauss(nm, 442.0, 16.0, 26.7)
       - 0.065 * wyman_gauss(nm, 501.1, 20.4, 26.2);

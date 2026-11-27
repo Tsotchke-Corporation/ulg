@@ -381,21 +381,22 @@ fn cic_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
   let cell_len = L / nf;
   let g_eff = (params.grav_pref * cell_len * cell_len * cell_len) / (12.566370614 * max(params.mean_mass_cell, 1.0e-6));
 
-  // Hybrid TreePM short-range 3x3x3 cell-multipole correction:
+  // Hybrid TreePM short-range 5x5x5 cell-multipole correction matching r_cut <= 2.45 * cell_len
+  // (eliminates the 57% cell-face force cutoff jump of the old 3x3x3 stencil!):
   //   (a) exact self-COM subtraction in home cell, AND
   //   (b) uniform -mean_mass_cell peculiar background at EVERY cell center (including empty voids!)
   if (params.short_range_r_s > 0.0) {
     let r_s = params.short_range_r_s;
-    let r_cut = 3.6 * r_s;
+    let r_cut = min(3.6 * r_s, 2.45 * cell_len);
     let r_cut2 = r_cut * r_cut;
     let eps2 = (0.55 * cell_len) * (0.55 * cell_len);
-    for (var oz: i32 = -1; oz <= 1; oz = oz + 1) {
+    for (var oz: i32 = -2; oz <= 2; oz = oz + 1) {
       let nz = u32(((i32(iz0) + oz) % n_i + n_i) % n_i);
       let cz_c = (f32(nz) + 0.5) * cell_len - 0.5 * L;
-      for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
+      for (var oy: i32 = -2; oy <= 2; oy = oy + 1) {
         let ny = u32(((i32(iy0) + oy) % n_i + n_i) % n_i);
         let cy_c = (f32(ny) + 0.5) * cell_len - 0.5 * L;
-        for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
+        for (var ox: i32 = -2; ox <= 2; ox = ox + 1) {
           let nx = u32(((i32(ix0) + ox) % n_i + n_i) % n_i);
           let cx_c = (f32(nx) + 0.5) * cell_len - 0.5 * L;
           let nidx = (nz * n + ny) * n + nx;
@@ -730,9 +731,10 @@ fn generate_zeldovich_kspace(@builtin(global_invocation_id) id: vec3<u32>) {
   let kz = nz * dk;
   let k2 = kx * kx + ky * ky + kz * kz;
   let k_mag = sqrt(k2);
-  // Eisenstein-Hu-like primordial matter power spectrum P(k) ~ k / (1 + (k/k_eq)^2)^2
+  // Eisenstein-Hu primordial matter power spectrum with real 147 Mpc BAO acoustic wiggles!
   let ratio = k_mag / max(params.k_eq, 1.0e-6);
-  let pk = k_mag / ((1.0 + ratio * ratio) * (1.0 + ratio * ratio));
+  let bao_wiggle = 1.0 + 0.08 * sin(k_mag * 147.0) * exp(-pow(k_mag / 0.14, 1.4));
+  let pk = (k_mag / ((1.0 + ratio * ratio) * (1.0 + ratio * ratio))) * bao_wiggle;
   // Smooth Nyquist filter so small-scale modes are clean & isotropic
   let k_nyq = f32(half_n) * dk;
   let nyq_win = exp(-2.2 * (k_mag / k_nyq) * (k_mag / k_nyq));

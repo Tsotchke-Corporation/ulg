@@ -5,6 +5,8 @@
 //   - Nodes #17-19: organic-molecular-graph-hybridization@1, reactive-bond-order-md@1,
 //     and acid-base-catalysis-kinetics@1 dynamically orchestrated via Universal Law Graph!
 
+import { initUlgExoWebTuiBridge } from './ulgExoWebTuiBridge.js';
+initUlgExoWebTuiBridge({ labId: 'organic', title: 'ULG Organic Chemistry Lab' });
 import {
   ORGANIC_MOLECULE_INITIAL_CONDITIONS,
   buildOrganicMolecularGraph,

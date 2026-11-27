@@ -138,7 +138,7 @@ export function sampleOrbitalBodySurfaceAtNormal(nHit, bodySpec = {}, seedFloat 
     const [elevSph, crustComp, thermalV, moistR] = sampleSphGeologySnapshotJs(n, sphGeoSnapshot);
     elev = elevSph;
     detail = crustComp;
-    hasOcean = Boolean(sphGeoSnapshot.hasOcean) && hasOcean;
+    hasOcean = Boolean(sphGeoSnapshot.hasOcean) || (Number.isFinite(sphGeoSnapshot.seaLevelNorm) && sphGeoSnapshot.seaLevelNorm > -1.2);
     const seaLvlSph = Number.isFinite(sphGeoSnapshot.seaLevelNorm) ? sphGeoSnapshot.seaLevelNorm : 0.04;
     // CRITICAL: seaLevelOffsetM stays EXACT 0.0 on SPH worlds so the cropped SPH patch's
     // real zero-crossing `(elevSph - seaLevelNorm)` controls ocean vs shore vs land 1-to-1!

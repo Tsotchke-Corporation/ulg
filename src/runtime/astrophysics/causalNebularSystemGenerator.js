@@ -727,7 +727,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       } else if (inHz && !hasEarthLike && !isRedGiantHost && !isWhiteDwarfHost && sys.systemAgeGyr >= 0.35 && (gpuB.volatileFrac >= 0.01 || nebulaEnv.volatileInventory >= 0.35) && gpuB.totalMassEarth <= 2.4) {
         archetype = 'earth-like';
         hasEarthLike = true;
-      } else if (inHz && (gpuB.volatileFrac >= 0.08 || gpuB.totalMassEarth > 2.2)) {
+      } else if (inHz && (gpuB.volatileFrac >= 0.025 || (gpuB.totalMassEarth > 2.2 && nebulaEnv.volatileInventory >= 0.45))) {
         archetype = 'ocean-super-earth';
       } else if (tEqK > 380 && tEqK < 950 && (gpuB.volatileFrac > 0.005 || nebulaEnv.metallicitySolar > 0.25)) {
         archetype = 'greenhouse';
@@ -807,7 +807,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         color1: [0.04, 0.20, 0.56],
         atm: 0.78,
         surfacePressurePa: pSurf,
-        volatileMassFrac: 0.085,
+        volatileMassFrac: Number((0.085 + rand() * 0.095).toFixed(3)),
         particulateMassFrac: 0.004,
         tempK: Math.max(270, Math.min(345, tEqK + 36)),
         centralP: Math.round((420 + mE * 95) * 1e9),
@@ -1069,9 +1069,9 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         feFrac: gpuB.feFrac,
         silicateFrac: gpuB.silicateFrac,
         carbonFrac: gpuB.carbonFrac,
-        h2oIceFrac: gpuB.h2oIceFrac,
+        h2oIceFrac: Math.max(gpuB.h2oIceFrac || 0, spec.planetClass === 'ocean-world' ? (spec.volatileMassFrac || 0.085) : 0),
         superVolFrac: gpuB.superVolFrac,
-        volatileFrac: gpuB.volatileFrac,
+        volatileFrac: Math.max(gpuB.volatileFrac || 0, spec.volatileMassFrac || 0),
         gasEnvelopeFrac: gpuB.gasEnvelopeFrac,
         tEqK: gpuB.tEqK,
         starFluxWM2: gpuB.starFluxWM2,

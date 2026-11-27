@@ -1197,6 +1197,111 @@
       padding: 9px 11px; color: #e0f2fe; margin: 10px 0; white-space: pre-wrap;
     }
 
+    /* Floating Cinematic 40-OOM Guided Tour Chapter HUD (Top-Center, Zero Collision With Genesis/Surface HUD) */
+    #uv-tour-hud {
+      position: fixed;
+      top: 168px;
+      left: calc((100vw - var(--deck-w)) * 0.5);
+      transform: translateX(-50%);
+      z-index: 24;
+      display: none;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 340px;
+      max-width: min(560px, calc(100vw - var(--deck-w) - 36px));
+      padding: 8px 12px;
+      border-color: rgba(167, 139, 250, 0.58);
+      background: linear-gradient(155deg, rgba(10, 18, 40, 0.90), rgba(6, 11, 24, 0.94));
+      box-shadow: 0 12px 38px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.16);
+      pointer-events: auto;
+      transition: left 180ms ease;
+    }
+    body.deck-collapsed #uv-tour-hud {
+      left: calc((100vw - 56px) * 0.5);
+      max-width: min(580px, calc(100vw - 88px));
+    }
+    #uv-tour-hud.active { display: flex; }
+    .uv-tour-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .uv-tour-heading {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      flex: 1;
+    }
+    .uv-tour-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #38bdf8, #a78bfa);
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.85);
+      flex-shrink: 0;
+      animation: uvGenesisPulse 1.4s ease-in-out infinite;
+    }
+    #uv-tour-hud.paused .uv-tour-dot {
+      background: var(--gold);
+      box-shadow: 0 0 8px var(--gold);
+      animation: none;
+    }
+    #uv-tour-badge {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #c4b5fd;
+      background: rgba(139, 92, 246, 0.20);
+      border: 1px solid rgba(167, 139, 250, 0.42);
+      border-radius: 999px;
+      padding: 2px 7px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    #uv-tour-title {
+      font-size: 12px;
+      font-weight: 800;
+      color: #f8fafc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .uv-tour-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .uv-tour-controls .uv-btn {
+      padding: 3px 7px;
+      font-size: 10.5px;
+      min-height: 24px;
+    }
+    #uv-tour-caption {
+      font-family: var(--mono);
+      font-size: 10.2px;
+      color: #bae6fd;
+      line-height: 1.32;
+    }
+    .uv-tour-bar {
+      width: 100%;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.22);
+      overflow: hidden;
+    }
+    #uv-tour-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #38bdf8, #a78bfa, #34d399);
+      transition: width 120ms linear;
+    }
+
     /* Floating Live Observable GPU Genesis Progress & Root-Cache Toast HUD */
     #uv-genesis-hud {
       position: fixed;
@@ -1469,6 +1574,21 @@
         display: none;
       }
       .uv-bottom-left { display: none; }
+      #uv-tour-hud {
+        top: 96px;
+        left: 50%;
+        min-width: 0;
+        width: calc(100vw - 16px);
+        max-width: calc(100vw - 16px);
+        padding: 6px 9px;
+        gap: 3px;
+      }
+      body.deck-collapsed #uv-tour-hud { left: 50%; max-width: calc(100vw - 16px); }
+      #uv-tour-hud .uv-tour-top { gap: 5px; }
+      #uv-tour-badge { font-size: 8.8px; padding: 1px 5px; }
+      #uv-tour-title { font-size: 11px; }
+      #uv-tour-caption { font-size: 9.5px; }
+      #uv-tour-hud.active ~ #uv-genesis-hud { top: 178px; }
       #uv-genesis-hud {
         top: 94px;
         bottom: auto;
@@ -1537,6 +1657,19 @@
         width: auto;
         max-width: 52vw;
       }
+      #uv-tour-hud {
+        top: 78px;
+        left: 8px;
+        transform: none;
+        width: min(390px, calc(100vw - 336px));
+        max-width: calc(100vw - 336px);
+      }
+      body.deck-collapsed #uv-tour-hud {
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(460px, calc(100vw - 16px));
+        max-width: calc(100vw - 16px);
+      }
       #uv-surface-hud {
         bottom: 8px;
         right: min(336px, 48vw);
@@ -1578,7 +1711,7 @@
         <button id="uv-xr-btn" class="uv-btn" type="button" title="Enter native WebXR WebGPU headset mode or Side-by-Side Stereo VR Preview">🥽 XR</button>
         <button id="uv-share-btn" class="uv-btn" type="button" title="Copy a seedable URL link to your exact universe, epoch, star/planet, and multiplayer room">🔗 Share</button>
         <button id="uv-room-btn" class="uv-btn" type="button" title="Join or leave a PeerCompute multiplayer UFO room (locks timescale to 1.0x)">🌐 Solo</button>
-        <button id="uv-autopilot-btn" class="uv-btn" type="button" title="Toggle hands-free 40-OOM Autopilot tour">▶ Tour</button>
+        <button id="uv-autopilot-btn" class="uv-btn" type="button" title="Start or stop the physics-aware 40-OOM guided tour across every live WebGPU scale">▶ Tour</button>
       </div>
     </div>
 
@@ -1914,6 +2047,25 @@
       </section>
     </div>
   </aside>
+
+  <!-- Floating Cinematic 40-OOM Guided Tour Chapter HUD -->
+  <div id="uv-tour-hud" class="uv-glass" role="status" aria-live="polite" aria-label="Guided 40-OOM Tour Controls">
+    <div class="uv-tour-top">
+      <div class="uv-tour-heading">
+        <span class="uv-tour-dot" aria-hidden="true"></span>
+        <span id="uv-tour-badge">STOP 1/11 · L0</span>
+        <span id="uv-tour-title">Observable Universe (93 Gly)</span>
+      </div>
+      <div class="uv-tour-controls">
+        <button id="uv-tour-prev-btn" class="uv-btn subtle" type="button" title="Previous tour stop" aria-label="Previous tour stop">⏮</button>
+        <button id="uv-tour-pause-btn" class="uv-btn subtle" type="button" title="Pause or resume tour progression" aria-label="Pause or resume tour">⏸</button>
+        <button id="uv-tour-next-btn" class="uv-btn subtle" type="button" title="Next tour stop" aria-label="Next tour stop">⏭</button>
+        <button id="uv-tour-stop-btn" class="uv-btn danger" type="button" title="Exit tour and explore freely (Esc)" aria-label="Exit tour">⏹</button>
+      </div>
+    </div>
+    <div id="uv-tour-caption">FLRW 3D-FFT TreePM cosmic web expanding inside the Planck CMB last-scattering horizon.</div>
+    <div class="uv-tour-bar"><div id="uv-tour-bar-fill"></div></div>
+  </div>
 
   <!-- Floating Live Observable GPU Genesis Progress & Root-Cache HUD -->
   <div id="uv-genesis-hud" class="uv-glass" role="status" aria-live="polite">

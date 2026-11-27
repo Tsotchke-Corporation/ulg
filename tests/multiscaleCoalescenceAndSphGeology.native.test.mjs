@@ -596,7 +596,7 @@ test('L2 GPU Nebular Coalescence Multi-Seed Ensemble Diversity & 4K/32K/131K Sca
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 800, height: 600 } });
     const page = await ctx.newPage();
     await page.goto(`${BASE_URL}universes.html?seed=1`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    const report = await page.evaluate(async () => {
+    const fullReport = await page.evaluate(async () => {
       const adapter = await navigator.gpu.requestAdapter();
       const device = await adapter.requestDevice();
       const mod = await import('/src/runtime/astrophysics/nebularSystemCoalescenceGpu.js');
@@ -645,10 +645,94 @@ test('L2 GPU Nebular Coalescence Multi-Seed Ensemble Diversity & 4K/32K/131K Sca
         });
         sess.dispose();
       }
+
+      // U14 Regression Check: Causal Ocean World (incl. high-pressure 4.5 bar / 392 K Clausius-Clapeyron & inner-disk low cComp.volatileFrac!)
+      const sphMod = await import('/src/runtime/astrophysics/planetaryGenesisSphGpu.js');
+      const surfMod = await import('/src/runtime/astrophysics/planetarySurfaceVehiclesGpu.js');
+      const oceanSpec = {
+        id: 'planet-ocean-test',
+        name: 'Kepler-Ocean b (Ocean World)',
+        planetClass: 'ocean-world',
+        kind: 1,
+        massSolar: 3.4 * 3.00349e-6,
+        radiusKm: 9200,
+        color0: [0.16, 0.44, 0.56],
+        color1: [0.04, 0.20, 0.56],
+        atm: 0.78,
+        surfacePressurePa: 4.5 * 101325,
+        volatileMassFrac: 0.12,
+        tempK: 392,
+        coreZ: 26,
+        mantleZ: 8,
+        surfZ: 8,
+        coalescedComposition: { feFrac: 0.24, silicateFrac: 0.62, carbonFrac: 0.04, h2oIceFrac: 0.002, volatileFrac: 0.002, gpuCoalesced: true }
+      };
+      const oceanSph = sphMod.createPlanetaryGenesisSphSessionWebGpu(device, oceanSpec, {
+        parcelCount: 4096,
+        gridN: 32,
+        mapWidth: 128,
+        mapHeight: 64,
+        seed: 777
+      });
+      await oceanSph.step({ substeps: 32, erosionPasses: 8, updateSurfaceMap: true, readTelemetry: true });
+      await oceanSph.exportGeologyMapSnapshot();
+      const oceanSnap = oceanSph.getCachedGeologySnapshot();
+      let oceanPx = 0;
+      const totPx = oceanSnap.width * oceanSnap.height;
+      for (let k = 0; k < totPx; k += 1) {
+        if (oceanSnap.data[k * 4] < oceanSnap.seaLevelNorm) oceanPx += 1;
+      }
+      const oceanFrac = oceanPx / Math.max(1, totPx);
+      const oceanSurfEnv = surfMod.deriveSurfaceEnvironmentState(oceanSpec, { seed: 777 });
+      const oceanCheck = {
+        hasOcean: oceanSph.genesisParams.hasOcean,
+        seaLevelNorm: Number(oceanSph.genesisParams.seaLevelNorm.toFixed(3)),
+        oceanAreaFrac: Number(oceanFrac.toFixed(3)),
+        surfHasLiquidOcean: oceanSurfEnv.hasLiquidOcean,
+        surfSeaLevelM: oceanSurfEnv.seaLevelM
+      };
+      oceanSph.dispose();
+
+      // Ensure Earth retains balanced continents (~45-85% ocean, NOT drowned!)
+      const earthSpec = {
+        id: 'earth', name: 'Earth', kind: 1, massSolar: 3.00349e-6, radiusKm: 6371,
+        color0: [0.24, 0.48, 0.24], color1: [0.06, 0.26, 0.58], atm: 0.72,
+        surfacePressurePa: 101325, tempK: 288, coreZ: 26, mantleZ: 14, surfZ: 29
+      };
+      const earthSph = sphMod.createPlanetaryGenesisSphSessionWebGpu(device, earthSpec, {
+        planetaryAtmoState: { surfacePressurePa: 101325, volatileMassFrac: 0.69 },
+        parcelCount: 4096,
+        gridN: 32,
+        mapWidth: 128,
+        mapHeight: 64,
+        seed: 777
+      });
+      await earthSph.step({ substeps: 32, erosionPasses: 8, updateSurfaceMap: true, readTelemetry: true });
+      await earthSph.exportGeologyMapSnapshot();
+      const earthSnap = earthSph.getCachedGeologySnapshot();
+      let earthOceanPx = 0;
+      for (let k = 0; k < earthSnap.width * earthSnap.height; k += 1) {
+        if (earthSnap.data[k * 4] < earthSnap.seaLevelNorm) earthOceanPx += 1;
+      }
+      const earthOceanFrac = earthOceanPx / Math.max(1, earthSnap.width * earthSnap.height);
+      const earthCheck = {
+        hasOcean: earthSph.genesisParams.hasOcean,
+        seaLevelNorm: Number(earthSph.genesisParams.seaLevelNorm.toFixed(3)),
+        oceanAreaFrac: Number(earthOceanFrac.toFixed(3))
+      };
+      earthSph.dispose();
+
       device.destroy();
-      return out;
+      return { cases: out, oceanCheck, earthCheck };
     });
-    console.log('[NEBULAR_ENSEMBLE_VULKAN_REPORT]', JSON.stringify(report));
+    const report = fullReport.cases;
+    console.log('[NEBULAR_ENSEMBLE_VULKAN_REPORT]', JSON.stringify(fullReport));
+    assert.equal(fullReport.oceanCheck.hasOcean, true, `U14: Pelagic Ocean World must have hasOcean=true (got ${JSON.stringify(fullReport.oceanCheck)})`);
+    assert.ok(fullReport.oceanCheck.seaLevelNorm >= 0.34, `U14: Pelagic Ocean World seaLevelNorm must be deep pelagic >= 0.34 (got ${fullReport.oceanCheck.seaLevelNorm})`);
+    assert.ok(fullReport.oceanCheck.oceanAreaFrac >= 0.70, `U14: Pelagic Ocean World must have >= 70% global ocean coverage (got ${(fullReport.oceanCheck.oceanAreaFrac * 100).toFixed(1)}%)`);
+    assert.equal(fullReport.oceanCheck.surfHasLiquidOcean, true, `U14: Landed Ocean World at 4.5 bar / 392 K must have Clausius-Clapeyron liquid surface ocean!`);
+    assert.equal(fullReport.earthCheck.hasOcean, true, 'Earth must retain hasOcean=true');
+    assert.ok(fullReport.earthCheck.oceanAreaFrac >= 0.40 && fullReport.earthCheck.oceanAreaFrac <= 0.85, `Earth must retain balanced oceans & continents (got ${(fullReport.earthCheck.oceanAreaFrac * 100).toFixed(1)}% ocean)`);
     const s4 = report.find((r) => r.id === 'solar-4k');
     const s32 = report.find((r) => r.id === 'solar-32k');
     const s131 = report.find((r) => r.id === 'solar-131k');

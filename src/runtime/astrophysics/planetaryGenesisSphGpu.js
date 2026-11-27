@@ -121,11 +121,16 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
   const tempK = Math.max(30, Number(bodySpec.tempK) || 288);
   const pressurePa = Math.max(0, Number(planetaryAtmoState?.surfacePressurePa ?? bodySpec.surfacePressurePa) || 0);
   const cComp = bodySpec.coalescedComposition || null;
+  const bulkSpecVolatile = Math.max(0, Number(bodySpec.volatileMassFrac) || 0);
+  const cCompVolatile = Math.max(0, Number(cComp?.volatileFrac) || 0);
+  const atmoVolatile = Math.max(0, Number(planetaryAtmoState?.volatileMassFrac) || 0);
   const volatileFrac = Math.max(
     0,
     Math.min(
       0.6,
-      Number(cComp?.volatileFrac ?? planetaryAtmoState?.volatileMassFrac ?? bodySpec.volatileMassFrac) || 0
+      (bulkSpecVolatile > 0 || cCompVolatile > 0)
+        ? Math.max(bulkSpecVolatile, cCompVolatile)
+        : atmoVolatile
     )
   );
   const coreZ = Number(bodySpec.coreZ) || 26;
@@ -139,9 +144,19 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
   const isComet = Boolean(bodySpec.isComet);
   const isCryoWorld = planetaryMode === 'cryo-plumes' || isComet || (mantleZ === 8 && tempK < 210) || bodySpec.kind === 3;
   const isCarbonRich = (cComp?.carbonFrac >= 0.30) || cToO >= 0.80 || mantleZ === 6;
+  // Clausius-Clapeyron H2O liquid boiling point T_boil(P) (273 K at 611 Pa triple point, 373 K at 1 bar, 422 K at 4.5 bar, Tc = 647.1 K)
+  const tBoilWaterK = pressurePa >= 611
+    ? Math.max(273.16, Math.min(647.1, 373.15 / Math.max(0.55, 1.0 - 0.07632 * Math.log(Math.max(1e-4, pressurePa / 101325)))))
+    : 273.16;
   const hasOcean = !isMagmaOcean && !isComet && volatileFrac >= 0.012 && (
-    (tempK >= 235 && tempK <= 385 && pressurePa >= 600) ||
+    (tempK >= 235 && tempK <= tBoilWaterK && pressurePa >= 611) ||
     (tempK >= 82 && tempK <= 118 && pressurePa >= 2e4)
+  );
+  // Deep global pelagic Ocean World: bulk H2O/Ice-VII mantle (mantleZ=8) or high bulk water mass fraction (>= 7.5%)
+  // with liquid surface H2O (keeps Earth-like silicate worlds at ~68% ocean / 32% continents!)
+  const bulkWaterFrac = Math.max(bulkSpecVolatile, Number(cComp?.h2oIceFrac) || 0, cCompVolatile);
+  const isPelagicOceanWorld = hasOcean && tempK >= 235 && (
+    mantleZ === 8 || bulkWaterFrac >= 0.075 || bodySpec.planetClass === 'ocean-world'
   );
   const isMinorBody = Boolean(bodySpec.isMinorBody) || isComet || radiusKm < 600;
 
@@ -169,9 +184,11 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
     ? 0.04
     : Math.max(0.05, Math.min(1.0, radiogenicHeat * waterLubrication * (isMagmaOcean ? 1.25 : 0.92)));
 
-  // Buoyant felsic/continental crust fraction (granite requires hydrated silicate partial melting!)
+  // Buoyant felsic/continental crust fraction (granite requires hydrated silicate partial melting;
+  // deep pelagic ocean worlds submerge cratons beneath thick hydrospheres, leaving volcanic island arcs!)
   let felsicCrustFrac = 0.08;
-  if (hasOcean) felsicCrustFrac = 0.24 + Math.min(0.12, tectonicMobility * 0.12);
+  if (isPelagicOceanWorld) felsicCrustFrac = 0.09 + Math.min(0.06, tectonicMobility * 0.06);
+  else if (hasOcean) felsicCrustFrac = 0.24 + Math.min(0.12, tectonicMobility * 0.12);
   else if (isCryoWorld) felsicCrustFrac = 0.20;
   else if (isCarbonRich) felsicCrustFrac = 0.22;
   else if (tectonicMobility > 0.45) felsicCrustFrac = 0.16;
@@ -194,10 +211,14 @@ export function derivePlanetaryGenesisParams(bodySpec = {}, {
     ? Math.min(1.0, 0.55 + Math.min(0.45, pressurePa / 1.5e5))
     : (pressurePa > 5e4 && !isMagmaOcean ? 0.22 : 0.04);
 
-  // Sea level fraction in [-0.14..+0.28] normalized SPH elevation (Earth ~ +0.06 -> ~68% ocean / 32% continents!)
-  const seaLevelNorm = hasOcean
-    ? Math.max(-0.14, Math.min(0.28, 0.06 + (Math.min(0.15, volatileFrac) - 0.0004) * 1.25))
-    : -1.5;
+  // Sea level fraction in normalized SPH elevation:
+  //   - Silicate ocean worlds (Earth-like): [-0.14..+0.28] (~60-72% ocean / ~28-40% continents)
+  //   - Deep pelagic Ocean Worlds: [+0.36..+0.56] (~88-97% global ocean + emerging volcanic archipelagos)
+  const seaLevelNorm = !hasOcean
+    ? -1.5
+    : (isPelagicOceanWorld
+      ? Math.max(0.36, Math.min(0.56, 0.36 + Math.min(0.20, bulkWaterFrac) * 1.0))
+      : Math.max(-0.14, Math.min(0.28, 0.06 + (Math.min(0.15, volatileFrac) - 0.0004) * 1.25)));
 
   // Planetary spin Coriolis parameter (normalized to Earth 24h = 1.0; tidally locked slow worlds ~ 0.05!)
   const rotPeriodHr = Math.max(4.0, Number(bodySpec.rotationPeriodHr) || (bodySpec.tidallyLocked ? 480.0 : 24.0));
@@ -1146,8 +1167,8 @@ fn resolve_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
   let subtrop_dry = exp(-pow((abs_lat - 0.46) / 0.16, 2.0)) * 0.48;
   let temp_belt = exp(-pow((abs_lat - 0.88) / 0.32, 2.0)) * 0.72;
   let climate_rain = clamp(0.24 + itcz_rain + temp_belt - subtrop_dry, 0.12, 0.96);
-  let below_sea = select(0.0, smoothstep(params.sea_level_norm + 0.06, params.sea_level_norm - 0.14, elev), has_ocean);
-  let coast_humid = select(0.0, smoothstep(params.sea_level_norm + 0.42, params.sea_level_norm + 0.01, elev) * 0.44, has_ocean);
+  let below_sea = select(0.0, 1.0 - smoothstep(params.sea_level_norm - 0.14, params.sea_level_norm + 0.06, elev), has_ocean);
+  let coast_humid = select(0.0, (1.0 - smoothstep(params.sea_level_norm + 0.01, params.sea_level_norm + 0.42, elev)) * 0.44, has_ocean);
   let moisture = clamp(max(below_sea, select(0.0, climate_rain * 0.78 + coast_humid + water * 0.32, has_ocean)), 0.0, 1.0);
   let crust_comp = clamp(mix(felsic, 0.38, crater_ejecta * 0.68), 0.0, 1.0);
 

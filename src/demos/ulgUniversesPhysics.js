@@ -439,9 +439,12 @@ export function createRealisticSpiralGalaxyBodies({
   preset = 'disk',
   seed = 825,
   gravity = 1.0,
-  softening = 0.28,
+  softening = 0.65,
   centerOffset = [0, 0, 0],
-  galaxyEnv = null
+  galaxyEnv = null,
+  dmHaloMass = 2800.0,
+  dmScaleRadius = 6.8,
+  dmConcentration = 8.8
 } = {}) {
   const n = Math.max(256, Math.min(262144, Math.floor(count)));
   const bodies = new Float32Array(n * 8);
@@ -454,21 +457,31 @@ export function createRealisticSpiralGalaxyBodies({
   const ox = Number(centerOffset?.[0]) || 0;
   const oy = Number(centerOffset?.[1]) || 0;
   const oz = Number(centerOffset?.[2]) || 0;
+  const dmExtM = Math.max(0, Number(dmHaloMass) || 0);
+  const dmExtRs = Math.max(1.5, Number(dmScaleRadius) || 6.8);
+  const dmExtC = Math.max(3.0, Number(dmConcentration) || 8.8);
+  const dmExtNorm = Math.max(1e-4, Math.log(1 + dmExtC) - dmExtC / (1 + dmExtC));
+  const dmExtSoft2 = 1.60 * 1.60;
+  const evalExtNfwAccel = (r, mScale = 1.0) => {
+    if (dmExtM * mScale <= 1e-4) return 0;
+    const rSafe = Math.sqrt(r * r + dmExtSoft2);
+    const x = rSafe / dmExtRs;
+    const mEnc = (dmExtM * mScale) * Math.max(0, Math.log(1 + x) - x / (1 + x)) / dmExtNorm;
+    return (gravity * mEnc * r) / (rSafe * rSafe * rSafe);
+  };
 
-  const populateSingleGalaxy = (start, end, cx, cy, cz, cvx, cvy, cvz, tiltX, tiltZ, scaleR = 1.0) => {
+  const populateSingleGalaxy = (start, end, cx, cy, cz, cvx, cvy, cvz, tiltX, tiltZ, scaleR = 1.0, dmScale = 1.0) => {
     const subN = end - start;
-    // Balanced-mass flat-rotation galaxy tuned for smooth 32^3 CIC 3D-FFT PM + exact direct SMBH:
-    //   - DM halo gets 36% of particles -> m_dm / m_disk <= 2.3 (eliminates two-body disk heating!)
-    //   - Effective circular speed matched to smooth mesh potential + Toomre Q >= 1.5 epicyclic stability!
+    // Physically calibrated baryon + dark-matter galaxy matched 1-to-1 to live GPU (SS Multipole + NFW + SMBH):
     const mSmbh = 44.0 * scaleR;
     const mBulgeTotal = 135.0 * scaleR;
     const mDiskTotal = 290.0 * scaleR;
-    const mDmTotal = 780.0 * scaleR;
+    const mDmTotal = 620.0 * scaleR;
     const aBulge = 1.25 * scaleR;
     const rDisk = 3.2 * scaleR;
-    const aDm = 7.4 * scaleR;
-    const meshSoft = 1.05 * scaleR;
-    const smbhSoft = 0.72 * scaleR;
+    const aDm = 7.2 * scaleR;
+    const meshSoft = 0.95 * scaleR;
+    const smbhSoft = 0.75 * scaleR;
 
     const enclosedAccel = (r) => {
       const rSafe = Math.max(0.15 * scaleR, r);
@@ -479,7 +492,8 @@ export function createRealisticSpiralGalaxyBodies({
       const md = mDiskTotal * (1 - (1 + x) * Math.exp(-x));
       const mdm = mDmTotal * (rSafe * rSafe) / ((rSafe + aDm) * (rSafe + aDm));
       const aMesh = (gravity * (mb + md + mdm) * rSafe) / (rEff * rEff * rEff);
-      return aSmbh + aMesh;
+      const aNfw = evalExtNfwAccel(rSafe, dmScale);
+      return aSmbh + aMesh + aNfw;
     };
     const vCircAt = (r) => Math.sqrt(Math.max(0, r * enclosedAccel(r)));
 
@@ -599,8 +613,13 @@ export function createRealisticSpiralGalaxyBodies({
 
   if (preset === 'binary') {
     const half = n >> 1;
-    populateSingleGalaxy(0, half, -5.8, 0.9, -1.5, 1.35, -0.22, 1.05, 0.35, 0.18, 0.68);
-    populateSingleGalaxy(half, n, 5.8, -0.9, 1.5, -1.35, 0.22, -1.05, -0.42, -0.25, 0.68);
+    // Bound elliptical Toomre merger orbit matched to mutual (NFW + stellar) halo attraction!
+    const sepB = 12.0;
+    const mEffPair = Math.max(900, dmExtM * 0.65 + 750);
+    const vOrbPair = Math.sqrt((gravity * mEffPair) / sepB) * 0.44;
+    const vInPair = vOrbPair * 0.34;
+    populateSingleGalaxy(0, half, -5.8, 0.7, -1.6, vInPair, -0.25, vOrbPair, 0.35, 0.18, 0.68, 1.0);
+    populateSingleGalaxy(half, n, 5.8, -0.7, 1.6, -vInPair, 0.25, -vOrbPair, -0.42, -0.25, 0.68, 0.85);
   } else if (preset === 'barred') {
     // Grand-Design Barred Spiral (SBb/SBc): secular m=2 central stellar bar + 2 logarithmic spiral arms from bar tips!
     populateSingleGalaxy(0, n, 0, 0, 0, 0, 0, 0, 0, 0, 1.0);
@@ -1204,6 +1223,40 @@ export function createRealisticSpiralGalaxyBodies({
     populateSingleGalaxy(0, n, 0, 0, 0, 0, 0, 0, 0, 0, 1.0);
   }
 
+  // Exact Center-of-Mass & Zero-Momentum Rest-Frame Initialization across ALL 12 galaxy morphologies:
+  // eliminates asymmetric subhalo / merger / random-draw initial COM offset & linear momentum drift!
+  {
+    let mTot = 0;
+    let cx = 0; let cy = 0; let cz = 0;
+    let vx = 0; let vy = 0; let vz = 0;
+    for (let i = 0; i < n; i += 1) {
+      const o = i * 8;
+      const m = bodies[o + 3];
+      if (m > 0) {
+        mTot += m;
+        cx += (bodies[o] - ox) * m;
+        cy += (bodies[o + 1] - oy) * m;
+        cz += (bodies[o + 2] - oz) * m;
+        vx += bodies[o + 4] * m;
+        vy += bodies[o + 5] * m;
+        vz += bodies[o + 6] * m;
+      }
+    }
+    if (mTot > 1e-6) {
+      cx /= mTot; cy /= mTot; cz /= mTot;
+      vx /= mTot; vy /= mTot; vz /= mTot;
+      for (let i = 0; i < n; i += 1) {
+        const o = i * 8;
+        bodies[o] -= cx;
+        bodies[o + 1] -= cy;
+        bodies[o + 2] -= cz;
+        bodies[o + 4] -= vx;
+        bodies[o + 5] -= vy;
+        bodies[o + 6] -= vz;
+      }
+    }
+  }
+
   return bodies;
 }
 
@@ -1443,6 +1496,7 @@ export function createUlgUniversesPhysics(device, {
   let cosmoTelemetry = null;
   let cosmoFirstPk = null;
   let cosmoTargets = [];
+  let cosmoFocusMpc = [0, 0, 0];
   let cosmoBigBangMode = false;
   let cosmoBaryonSession = null;
   let cosmoBaryonTelemetry = null;
@@ -1726,9 +1780,10 @@ export function createUlgUniversesPhysics(device, {
       cosmoSession = null;
     }
     cosmoBigBangMode = Boolean(bigBang);
+    cosmoFocusMpc = [0, 0, 0];
     const activeSeed = (seedOverride ?? universeSeed) >>> 0;
-    const aStart = cosmoBigBangMode ? 0.045 : 0.16;
-    const daStep = cosmoBigBangMode ? 0.011 : 0.0085;
+    const aStart = cosmoBigBangMode ? 0.045 : 0.52;
+    const daStep = cosmoBigBangMode ? 0.0085 : 0.0012;
     // Run the periodic FLRW 2LPT + TreePM Cosmic Web at filament-resolving 1,425 Mpc (~4.65 Gly/tile, dx ~ 44 Mpc),
     // tiled seamlessly across the full 28,500 Mpc (93.0 Gly = 8.8e26 m) Observable Universe Lightcone sphere!
     const COSMO_TILE_MPC = 1425.0;
@@ -1751,7 +1806,7 @@ export function createUlgUniversesPhysics(device, {
       initialConditions: gpuIc
     });
     cosmoFirstPk = null;
-    const warmSteps = cosmoBigBangMode ? 1 : 6;
+    const warmSteps = cosmoBigBangMode ? 1 : 4;
     for (let w = 0; w < warmSteps; w += 1) {
       cosmoTelemetry = await nextCosmo.step({ readTelemetry: w === 0 || w === warmSteps - 1 });
       if (w === 0 && cosmoTelemetry?.powerSpectrumPk?.kBins?.length) {
@@ -1927,16 +1982,54 @@ export function createUlgUniversesPhysics(device, {
       ? describeCosmologicalGalaxyIcRegime(activeGalaxyEnv, activeSeed)
       : null;
     galaxyIcRegimeLabel = icRegime ? icRegime.label : (activeGalaxyEnv?.morphologyLabel || galaxyPreset);
+    const deltaHalo = Math.max(0.25, Math.min(4.5, Number(activeGalaxyEnv?.localOverdensity ?? activeGalaxyEnv?.overdensity) || 1.0));
+    const dmHaloMass = (galaxyPreset === 'globular' || galaxyPreset === 'open-cluster')
+      ? 0.0
+      : (galaxyPreset === 'irregular'
+        ? 900.0
+        : (galaxyPreset === 'binary'
+          ? 1850.0
+          : (galaxyPreset === 'sphere'
+            ? Math.round(2800.0 + deltaHalo * 900.0)
+            : Math.round(2400.0 + deltaHalo * 900.0))));
+    const dmScaleRadius = galaxyPreset === 'sphere' ? 5.6 : (galaxyPreset === 'irregular' ? 5.2 : 6.8);
+    const dmConcentration = galaxyPreset === 'sphere' ? 10.2 : 8.8;
+    const dmSecondaryMass = galaxyPreset === 'binary' ? 1580.0 : (icRegime?.isMerger ? dmHaloMass * (icRegime.massRatio || 0.72) : 0.0);
+
     const bodies0 = createRealisticSpiralGalaxyBodies({
       count: w.galaxyStars,
       preset: galaxyPreset,
       seed: activeSeed,
-      galaxyEnv: activeGalaxyEnv
+      galaxyEnv: activeGalaxyEnv,
+      dmHaloMass,
+      dmScaleRadius,
+      dmConcentration
     });
-    const deltaHalo = Math.max(0.25, Math.min(4.5, Number(activeGalaxyEnv?.localOverdensity ?? activeGalaxyEnv?.overdensity) || 1.0));
-    const dmHaloMass = galaxyPreset === 'globular' || galaxyPreset === 'open-cluster'
-      ? 120.0
-      : Math.round(2800.0 + deltaHalo * 1350.0);
+
+    const tiltToNormal = (tx, tz) => {
+      const cTx = Math.cos(tx); const sTx = Math.sin(tx);
+      const cTz = Math.cos(tz); const sTz = Math.sin(tz);
+      // Matches rot(0, 1, 0): y1 = cTx, z1 = sTx -> [-sTz * cTx, cTz * cTx, sTx]
+      return [-sTz * cTx, cTz * cTx, sTx];
+    };
+    let diskNormal = [0, 1, 0];
+    let diskNormalSecondary = [0, 1, 0];
+    if (galaxyPreset === 'lenticular') diskNormal = tiltToNormal(0.26, 0.0);
+    else if (galaxyPreset === 'proto') diskNormal = tiltToNormal(0.22, -0.14);
+    else if (galaxyPreset === 'dwarf-stream') diskNormal = tiltToNormal(0.14, 0.08);
+    else if (galaxyPreset === 'binary') {
+      diskNormal = tiltToNormal(0.35, 0.18);
+      diskNormalSecondary = tiltToNormal(-0.42, -0.25);
+    } else if (galaxyPreset === 'coalesce' && icRegime) {
+      if (icRegime.id === 'bullseye-ring-impact') {
+        diskNormal = tiltToNormal(icRegime.tiltX * 0.45, icRegime.tiltZ * 0.45);
+        diskNormalSecondary = tiltToNormal(1.15, -0.45);
+      } else {
+        diskNormal = tiltToNormal(icRegime.tiltX || 0, icRegime.tiltZ || 0);
+        diskNormalSecondary = tiltToNormal(-(icRegime.tiltX || 0) * 0.8 + 0.55, -(icRegime.tiltZ || 0) * 0.7 - 0.35);
+      }
+    }
+
     const secondSmbhIdx = galaxyPreset === 'binary'
       ? (w.galaxyStars >> 1)
       : (icRegime?.isMerger
@@ -1946,25 +2039,35 @@ export function createUlgUniversesPhysics(device, {
       device,
       initialBodies: bodies0,
       gridN: 32,
-      boxSize: 48.0,
+      boxSize: 36.0,
       secondSmbhIndex: secondSmbhIdx,
-      smbhSoftening: 0.72,
+      smbhSoftening: 0.75,
       dmHaloMass,
-      dmScaleRadius: galaxyPreset === 'sphere' ? 5.6 : 6.8,
-      dmConcentration: galaxyPreset === 'sphere' ? 10.5 : 8.8,
+      dmSecondaryMass,
+      dmScaleRadius,
+      dmConcentration,
+      diskNormal,
+      diskNormalSecondary,
       label: `ulg-universes-galaxy-ss-nfw-${w.galaxyStars}`
     });
-    if (['disk', 'barred', 'ring', 'lenticular', 'proto', 'coalesce'].includes(galaxyPreset)) {
-      // Calibrate strictly against live GPU (SS 3D Multipole + NFW Dark Matter Halo + SMBH) gravity!
-      // Steady disk galaxies lock to circular equilibrium (1.0); collapsing halos lock to sub-virial infall (0.76)
-      // while dispersion-supported ellipticals ('sphere') & globular clusters keep their 3D isotropic Jeans velocities!
-      await galaxyEngine.calibrateEquilibrium({
-        gravity: 1.0,
-        softening: 0.35,
-        virialScale: galaxyPreset === 'coalesce' ? 0.76 : 1.0
-      });
-    }
-    await galaxyEngine.step({ dt: runLiveCollapse ? 0.006 : 0.008, substeps: runLiveCollapse ? 2 : 2, gravity: 1.0, softening: 0.35, readback: false });
+    // Universal 3D GPU equilibrium calibration across ALL 12 galaxy morphologies:
+    //   mode 0 = 3D Tilted Toomre Disk (disk, barred, ring, lenticular, proto, dwarf-stream)
+    //   mode 1 = 3D Hernquist/King Jeans Spheroid (sphere, globular, open-cluster, irregular)
+    //   mode 2 = Bound Sub-Virial Cosmological Collapse (coalesce single)
+    //   mode 3 = Dual-Rest-Frame Binary Merger (binary, coalesce merger)
+    const calMode = secondSmbhIdx > 0
+      ? 3
+      : (galaxyPreset === 'coalesce'
+        ? 2
+        : (['sphere', 'globular', 'open-cluster', 'irregular'].includes(galaxyPreset) ? 1 : 0));
+    await galaxyEngine.calibrateEquilibrium({
+      gravity: 1.0,
+      softening: 0.65,
+      virialScale: calMode === 2 ? 0.82 : (calMode === 3 ? 0.98 : 1.0),
+      calMode,
+      preserveBar: galaxyPreset === 'barred'
+    });
+    await galaxyEngine.step({ dt: runLiveCollapse ? 0.0044 : 0.0044, substeps: 2, gravity: 1.0, softening: 0.65, readback: false });
 
     // Coupled live GPU 24^3 3D α-ω Galactic Dynamo driven strictly by live GPU galaxy particle velocities!
     galacticDynamoSession = createEmergent3dDynamoFieldWebGpu(device, {
@@ -3592,19 +3695,20 @@ export function createUlgUniversesPhysics(device, {
             readTelemetry: true
           });
         } else if (cosmoSession) {
-          // Gently decelerate cosmic evolution once a(t) reaches present epoch (~1.0) so web stays crisp!
+          // Perpetual visible FLRW cosmic expansion through present epoch into dark-energy Λ domination (NEVER dead-stops!)
           const aCur = cosmoSession.getState().aScale;
-          if (aCur < 1.15) {
-            cosmoTelemetry = await cosmoSession.step({ readTelemetry: true });
-          }
+          const baseDlnA = cosmoBigBangMode ? 0.011 : 0.0016;
+          const taper = 1.0 / (1.0 + 0.30 * Math.max(0, aCur - 1.6));
+          const daDyn = Math.max(0.00018, aCur * baseDlnA * taper * Math.max(0.15, Math.min(3.0, effScale)));
+          cosmoTelemetry = await cosmoSession.step({ daOverride: daDyn, readTelemetry: true });
         }
       } else if (activeLevel === 1 && galaxyEngine) {
         const galEng = galaxyEngine;
         const wL1 = getWorkloads();
         const isLiveGalGenesis = activeGenesisStage?.stage === 'l1-galaxy-collapse';
-        const dt = (isLiveGalGenesis ? 0.0082 : 0.0018) * Math.max(0.08, Math.min(3.0, effScale));
+        const dt = (isLiveGalGenesis ? 0.0048 : 0.0022) * Math.max(0.08, Math.min(3.0, effScale));
         const substeps = isLiveGalGenesis ? Math.max(2, wL1.l1SubstepsPerFrame || 2) : 1;
-        await galEng.step({ dt, substeps, gravity: 1.0, softening: 0.35, readback: false });
+        await galEng.step({ dt, substeps, gravity: 1.0, softening: 0.65, readback: false });
         const dyn = galacticDynamoSession;
         if (dyn && galEng === galaxyEngine) {
           const readB = (galEng.stepIndex % 4) === 0;
@@ -4428,8 +4532,8 @@ export function createUlgUniversesPhysics(device, {
     }
   }
   function setCosmoFocusMpc(posMpc) {
-    if (Array.isArray(posMpc) && posMpc.length >= 3 && cosmoTargets.length > 0) {
-      cosmoTargets[0] = { ...cosmoTargets[0], posMpc: [Number(posMpc[0]) || 0, Number(posMpc[1]) || 0, Number(posMpc[2]) || 0] };
+    if (Array.isArray(posMpc) && posMpc.length >= 3) {
+      cosmoFocusMpc = [Number(posMpc[0]) || 0, Number(posMpc[1]) || 0, Number(posMpc[2]) || 0];
     }
   }
   function setPlanetaryTriboelectric(enabled) {
@@ -4794,7 +4898,7 @@ export function createUlgUniversesPhysics(device, {
    * - Entering orbit around the selected body (`L4` planet / `L3` star) or landing on it (`surfaceActive`):
    *   smoothly transitions to the selected body's exact double-float co-moving orbital frame.
    */
-  function getSolarReferenceOriginAu(spanLog10M = 12.6, focusIdxOverride = null) {
+  function getSolarReferenceOriginAu(spanLog10M = 12.6, focusIdxOverride = null, { lockToTarget = false } = {}) {
     if (!solarEngine) {
       return { originAu: [0, 0, 0], barycenterAu: [0, 0, 0], focusPosAu: [0, 0, 0], orbitBlend: 0, frameMode: 'barycenter' };
     }
@@ -4806,12 +4910,18 @@ export function createUlgUniversesPhysics(device, {
     const focusSt = solarEngine.getMassiveBodyState64(safeIdx);
     const barycenterAu = computeSolarBarycenterAu();
 
-    // Blend window: stays 100% barycentric across the entire L2 solar-system overview,
-    // and smoothly locks into the selected body's co-moving frame only when zooming into orbit (L4/L3) or landing!
-    const hiSpan = isStar ? 10.1 : 9.45;
-    const loSpan = isStar ? 9.4 : 8.65;
+    // Scale blend window dynamically to the selected body's orbital distance so zooming IN on outer worlds
+    // (Saturn, Jupiter, Uranus, Halley) smoothly glides onto the target instead of letting it fly off-screen!
+    const rBodyAu = Math.hypot(
+      focusSt.posAu[0] - barycenterAu[0],
+      focusSt.posAu[1] - barycenterAu[1],
+      focusSt.posAu[2] - barycenterAu[2]
+    );
+    const dynHi = isStar ? 10.6 : Math.max(10.8, Math.min(13.8, Math.log10(Math.max(0.28, rBodyAu) * AU_METERS * 3.8)));
+    const hiSpan = dynHi;
+    const loSpan = dynHi - 1.15;
     let orbitBlend = 0.0;
-    if (surfaceActive || spanLog10M <= loSpan) {
+    if (surfaceActive || lockToTarget || spanLog10M <= loSpan) {
       orbitBlend = 1.0;
     } else if (spanLog10M < hiSpan) {
       const t = (hiSpan - spanLog10M) / (hiSpan - loSpan);
@@ -4882,6 +4992,7 @@ export function createUlgUniversesPhysics(device, {
       const off = worldScaleInfo.cosmoOffset ?? [0, 0, 0];
       return cosmoTargets.map((t) => ({
         ...t,
+        rawPosMpc: [...t.posMpc],
         pos: [
           (t.posMpc[0] - off[0]) * sc,
           (t.posMpc[1] - off[1]) * sc,
@@ -4894,6 +5005,7 @@ export function createUlgUniversesPhysics(device, {
       const off = worldScaleInfo.galaxyOffset ?? [0, 0, 0];
       return galaxyTargets.map((t) => ({
         ...t,
+        rawPos: [...t.pos],
         pos: [
           (t.pos[0] - off[0]) * sc,
           (t.pos[1] - off[1]) * sc,
@@ -5029,13 +5141,15 @@ export function createUlgUniversesPhysics(device, {
       if (!solarEngine) return [];
       const cat = getActiveSystemCatalog();
       const spanM = worldScaleInfo.solarSpanLog10M ?? 12.6;
-      const refOrigin = getSolarReferenceOriginAu(spanM);
+      const originAu = Array.isArray(worldScaleInfo.solarOriginAu)
+        ? worldScaleInfo.solarOriginAu
+        : getSolarReferenceOriginAu(spanM).originAu;
       const scaleAuToWorld = worldScaleInfo.solarScaleAuToWorld ?? 1.0;
       return cat.map((spec, idx) => {
         const st = solarEngine.getMassiveBodyState64(idx);
-        const relX = (st.posAu[0] - refOrigin.originAu[0]) * scaleAuToWorld;
-        const relY = (st.posAu[1] - refOrigin.originAu[1]) * scaleAuToWorld;
-        const relZ = (st.posAu[2] - refOrigin.originAu[2]) * scaleAuToWorld;
+        const relX = (st.posAu[0] - originAu[0]) * scaleAuToWorld;
+        const relY = (st.posAu[1] - originAu[1]) * scaleAuToWorld;
+        const relZ = (st.posAu[2] - originAu[2]) * scaleAuToWorld;
         const isStarBody = Boolean(spec.isStar) || idx === 0;
         return {
           id: spec.id,
@@ -5323,6 +5437,7 @@ export function createUlgUniversesPhysics(device, {
     get cosmoScaleFactorA() { return cosmoSession?.getState?.()?.aScale ?? 1.0; },
     get cosmoFirstPk() { return cosmoFirstPk; },
     get cosmoTargets() { return cosmoTargets; },
+    get cosmoFocusMpc() { return cosmoFocusMpc; },
     get cosmoBaryonSession() { return cosmoBaryonSession; },
     get cosmoBaryonTelemetry() { return cosmoBaryonTelemetry; },
     get galaxyEngine() { return galaxyEngine; },

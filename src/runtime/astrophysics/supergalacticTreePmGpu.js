@@ -1551,7 +1551,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   let initialLowKPower = null;
   let tileBoundsQuery = { xMin: -0.5 * boxLengthMpc, xMax: 0.5 * boxLengthMpc };
 
-  const writeUniforms = (customTileBounds = null) => {
+  const writeUniforms = (customTileBounds = null, stepDa = da) => {
     const tb = customTileBounds || tileBoundsQuery;
     const hA = friedmannHOverH0(aScale, { omegaM, omegaLambda });
     const gravPref = 1.5 * omegaM / Math.max(0.01, aScale);
@@ -1560,7 +1560,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     new Float32Array(ab, 16, 12).set([
       boxLengthMpc,
       aScale,
-      da,
+      stepDa,
       hA,
       omegaM,
       gravPref,
@@ -1572,7 +1572,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
       0
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
-    return { hA, gravPref };
+    return { hA, gravPref, stepDa };
   };
 
   /**
@@ -1602,10 +1602,13 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   let lastTelemetry = null;
   let disposed = false;
 
-  async function step({ readTelemetry = true } = {}) {
+  async function step({ readTelemetry = true, daOverride = null } = {}) {
     if (disposed) return lastTelemetry;
-    const { hA } = writeUniforms();
-    const curKickFac = da / (Math.max(0.01, aScale) * Math.max(0.05, hA));
+    const effDa = (daOverride != null && Number.isFinite(Number(daOverride)) && Number(daOverride) > 0)
+      ? Math.max(1e-5, Math.min(0.25, Number(daOverride)))
+      : da;
+    const { hA } = writeUniforms(null, effDa);
+    const curKickFac = effDa / (Math.max(0.01, aScale) * Math.max(0.05, hA));
 
     // ALL TreePM stages fused into ONE single CommandEncoder & ONE queue.submit!
     //   1. Clear -> CIC Deposit -> Prepare Poisson RHS
@@ -1660,7 +1663,8 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     lastSubmitsPerStep = 1;
 
     prevKickFac = curKickFac;
-    aScale = Math.min(1.5, aScale + da);
+    // Unbounded continuous FLRW expansion into the future Λ-dominated accelerating era (never dead-stops!)
+    aScale = Math.min(1e6, aScale + effDa);
     stepIndex += 1;
 
     if (!doRead) return readTelemetry ? lastTelemetry : null;

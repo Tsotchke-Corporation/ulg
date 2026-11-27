@@ -928,8 +928,10 @@ fn vs_main(
 
     let a_scale = select(1.0, max(0.02, cam.extra2.x), cam.extra2.x > 0.001);
     let bb_mode = clamp(cam.extra2.y, 0.0, 1.0);
-    // Exact linear FLRW metric expansion r_phys(t) = a(t) * x_comoving (no unphysical a^0.72 warp!)
-    let a_expand = mix(1.0, clamp(a_scale, 0.08, 1.12), bb_mode);
+    // Live FLRW metric expansion r_phys(t) = a(t) * x_comoving visible in BOTH Cosmic Web AND Big Bang modes!
+    // Smooth logarithmic continuation beyond a > 2.2 keeps expansion visibly alive forever without emptying the lightcone!
+    let a_web = select(max(0.18, a_scale), 2.2 + 1.45 * log(max(1.0, a_scale / 2.2)), a_scale > 2.2);
+    let a_expand = select(a_web, max(0.05, a_scale), bb_mode > 0.5);
     let rel_c = obs_pos - cam.extra1.xyz;
     let d_rel_c = length(rel_c);
     // Smooth spherical Observable-Universe Particle Horizon vignette at R_H = 46.5 Gly (14,250 Mpc)
@@ -2017,7 +2019,7 @@ fn fs_main(in: VsOut) -> FsOut {
         let t_end = select(t_exit, min(t_exit, t_f_ent), disc_f >= 0.0 && t_f_ent > t_enter);
         let gw_m = u32(round(cam.sph_geo.x));
         let gh_m = u32(round(cam.sph_geo.y));
-        let has_ocean_g = (kind == 1u || kind == 4u) && (in.color1.b > in.color1.r + 0.14);
+        let has_ocean_g = (kind == 1u || kind == 4u) && (cam.sph_geo.w > -1.2);
         let sea_lvl_g = select(-1.5, cam.sph_geo.w, has_ocean_g);
         var t_prev = t_enter;
         var t_lo = t_enter;
@@ -2406,7 +2408,7 @@ fn fs_main(in: VsOut) -> FsOut {
     // (real differentiated continents, subduction mountain chains, craters & eroded river basins — ZERO Perlin blobs!),
     // with distant multi-body fallback for tiny un-focused background planets in L2.
     let live_sph_geo = cam.sph_geo.x > 1.5 && in.inst_id == u32(round(cam.sph_geo.z));
-    let has_ocean = in.color1.b > in.color1.r + 0.14;
+    let has_ocean = select(in.color1.b > in.color1.r + 0.14, cam.sph_geo.w > -1.2, live_sph_geo);
     var surf = in.color0.rgb;
     var water_spec = 0.0;
     var bump_strength = 0.0;

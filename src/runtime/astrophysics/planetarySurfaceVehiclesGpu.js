@@ -163,7 +163,12 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     ? (pressurePa * molarMassKgPerMol) / (8.31446 * tempK)
     : 0.0;
 
-  const volatileFrac = Math.max(0, Number(atmo?.volatileMassFrac ?? bodySpec.volatileMassFrac) || 0);
+  const volatileFrac = Math.max(
+    0,
+    Number(atmo?.volatileMassFrac) || 0,
+    Number(bodySpec.volatileMassFrac) || 0,
+    Number(bodySpec.coalescedComposition?.volatileFrac) || 0
+  );
   const dustFrac = Math.max(0, Number(atmo?.particulateMassFrac ?? bodySpec.particulateMassFrac) || 0);
   // First-principles surface solvent & xenobiology classification (7-solvent Bains 2024 + full clade web!)
   const xenobiology = deriveXenobiologyProfile({
@@ -180,8 +185,11 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     seed,
     civTechK: Number.isFinite(Number(bodySpec.civTechK)) ? Number(bodySpec.civTechK) : undefined
   });
+  const tBoilWaterK = pressurePa >= 611
+    ? Math.max(273.16, Math.min(647.1, 373.15 / Math.max(0.55, 1.0 - 0.07632 * Math.log(Math.max(1e-4, pressurePa / 101325)))))
+    : 273.16;
   const hasLiquidWaterOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !isRogue
-    && pressurePa >= 611 && tempK >= 265 && tempK <= 365 && volatileFrac >= 0.015;
+    && pressurePa >= 611 && tempK >= 255 && tempK <= tBoilWaterK && volatileFrac >= 0.012;
   const hasExoticOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !hasLiquidWaterOcean
     && (xenobiology.solvent === 'CH4' || xenobiology.solvent === 'NH3' || xenobiology.solvent === 'H2SO4');
   const hasLiquidOcean = hasLiquidWaterOcean || hasExoticOcean;

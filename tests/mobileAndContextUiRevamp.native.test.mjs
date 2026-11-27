@@ -18,7 +18,9 @@ const RUN_NATIVE = process.env.ULG_RUN_NATIVE_WEBGPU === '1';
 const BASE_URL = process.env.ULG_UNIVERSES_URL || 'https://127.0.0.1:5173';
 const CAPTURE_DIR = process.env.ULG_CAPTURE_MOBILE_QA === '1'
   ? path.resolve(process.cwd(), 'scratch/mobile_after')
-  : null;
+  : (process.env.ULG_CAPTURE_TOUR_QA === '1'
+    ? path.resolve(process.cwd(), 'scratch/tour_qa')
+    : null);
 
 async function launchVulkanBrowser() {
   return chromium.launch({
@@ -172,6 +174,37 @@ test('Mobile-First & Context-First UI Revamp across ULG Universes + Bio/Organic/
       assert.equal(floraPick.picked, true, 'Must pick a live flora tree on Earth surface');
       assert.equal(floraPick.spot?.ctxType, 'flora', 'Picked tree must activate Flora Context Spotlight');
       await maybeShot(page, 'm05_universes_flora_spotlight.png');
+
+      // Also verify U8 Guided Tour HUD fits cleanly on 390x844 mobile portrait without overflowing!
+      await page.click('#uv-mobile-tools-btn');
+      await page.waitForTimeout(150);
+      await page.click('#uv-autopilot-btn');
+      await page.waitForTimeout(300);
+      const mobTour = await page.evaluate(() => {
+        const hud = document.getElementById('uv-tour-hud')?.getBoundingClientRect();
+        const top = document.getElementById('uv-topbar')?.getBoundingClientRect();
+        const deck = document.getElementById('uv-command-deck')?.getBoundingClientRect();
+        const st = window.__ulgUniversesDemo.getState();
+        return {
+          active: document.getElementById('uv-tour-hud')?.classList.contains('active'),
+          scrollW: document.documentElement.scrollWidth,
+          hudTop: hud?.top || 0,
+          hudBottom: hud?.bottom || 0,
+          hudRight: hud?.right || 0,
+          topBottom: top?.bottom || 0,
+          deckTop: deck?.top || 844,
+          tour: st.tour
+        };
+      });
+      assert.equal(mobTour.active, true, 'Starting Tour from mobile tools must activate #uv-tour-hud');
+      assert.equal(mobTour.tour?.active, true, 'Mobile tour state must be active');
+      assert.ok(mobTour.scrollW <= 392, `Mobile Tour HUD must not overflow horizontally (got ${mobTour.scrollW})`);
+      assert.ok(mobTour.hudRight <= 390, `Mobile Tour HUD right edge must fit inside 390px (got ${mobTour.hudRight})`);
+      assert.ok(mobTour.hudTop >= mobTour.topBottom - 2, `Mobile Tour HUD must sit cleanly below topbar (hudTop=${mobTour.hudTop}, topBottom=${mobTour.topBottom})`);
+      await maybeShot(page, 'm02b_universes_mobile_tour.png');
+      await page.click('#uv-tour-stop-btn');
+      await page.waitForTimeout(150);
+      assert.equal(await page.evaluate(() => window.__ulgUniversesDemo.getState().tour?.active), false, 'Mobile Stop Tour button must exit tour cleanly');
 
       // Rotate to Mobile Landscape (844x390) and verify clean side-dock layout!
       await page.setViewportSize({ width: 844, height: 390 });
@@ -364,6 +397,98 @@ test('Mobile-First & Context-First UI Revamp across ULG Universes + Bio/Organic/
       });
       await page.waitForTimeout(450);
       await maybeShot(page, 'd02_universes_desktop_alien.png');
+
+      // Verify U8 Physics-Aware 40-OOM Guided Tour on Desktop (1280x720)!
+      await page.evaluate(() => window.__ulgUniversesDemo.exitSurfaceView());
+      await page.waitForTimeout(250);
+      await page.click('#uv-autopilot-btn');
+      await page.waitForTimeout(350);
+      const t0 = await page.evaluate(() => {
+        const hud = document.getElementById('uv-tour-hud')?.getBoundingClientRect();
+        const top = document.getElementById('uv-topbar')?.getBoundingClientRect();
+        const deck = document.getElementById('uv-command-deck')?.getBoundingClientRect();
+        const st = window.__ulgUniversesDemo.getState();
+        return {
+          visible: document.getElementById('uv-tour-hud')?.classList.contains('active'),
+          hudTop: hud?.top || 0,
+          hudRight: hud?.right || 0,
+          topBottom: top?.bottom || 0,
+          deckLeft: deck?.left || 1280,
+          tour: st.tour,
+          gpuErrors: st.gpuErrorCount
+        };
+      });
+      assert.equal(t0.visible, true, 'Desktop Tour HUD must activate on ▶ Tour click');
+      assert.ok(t0.tour.stopCount >= 10, `Guided tour must include at least 10 curated stops (got ${t0.tour.stopCount})`);
+      assert.ok(t0.hudTop >= t0.topBottom - 2, `Desktop Tour HUD must sit cleanly below topbar (hudTop=${t0.hudTop}, topBottom=${t0.topBottom})`);
+      assert.ok(t0.hudRight <= t0.deckLeft + 2, `Desktop Tour HUD must not overlap Command Deck (hudRight=${t0.hudRight}, deckLeft=${t0.deckLeft})`);
+
+      // Pause/Resume + Next/Prev HUD controls
+      await page.click('#uv-tour-pause-btn');
+      assert.equal(await page.evaluate(() => window.__ulgUniversesDemo.getState().tour.paused), true, 'Tour pause button must pause progression');
+      await page.click('#uv-tour-pause-btn');
+      assert.equal(await page.evaluate(() => window.__ulgUniversesDemo.getState().tour.paused), false, 'Second pause click must resume tour');
+
+      // Jump to L3 Stellar Core stop & advance dwell past cutaway threshold to verify automatic 3D Octant Cutaway!
+      await page.evaluate(async () => {
+        await window.__ulgUniversesDemo.goToTourStop('stellar-core', { instant: true });
+        for (let i = 0; i < 4; i += 1) await window.__ulgUniversesDemo.stepOnce();
+        window.__ulgUniversesDemo.stepTourNow(3.5);
+        await window.__ulgUniversesDemo.stepOnce();
+      });
+      await page.waitForTimeout(300);
+      const tStar = await page.evaluate(() => window.__ulgUniversesDemo.getState());
+      assert.equal(tStar.level, 3, `Stellar tour stop must enter L3 (got L${tStar.level})`);
+      assert.equal(tStar.stellarCutaway, true, 'Stellar tour stop must automatically engage 3D Octant Core Cutaway mid-dwell');
+      await maybeShot(page, 't01_tour_l3_stellar_cutaway.png');
+
+      // Jump to L4 Ringed Giant (Saturn) and confirm stellarCutaway restored to false!
+      await page.evaluate(async () => {
+        await window.__ulgUniversesDemo.goToTourStop('ringed-giant', { instant: true });
+        for (let i = 0; i < 4; i += 1) await window.__ulgUniversesDemo.stepOnce();
+      });
+      await page.waitForTimeout(300);
+      const tSat = await page.evaluate(() => window.__ulgUniversesDemo.getState());
+      assert.equal(tSat.level, 4, 'Ringed giant tour stop must be at L4');
+      assert.equal(tSat.focusedSolarBody, 'saturn', 'Sol tour ringed-giant stop must frame Saturn');
+      assert.equal(tSat.stellarCutaway, false, 'Leaving stellar-core stop must cleanly restore stellarCutaway=false');
+      await maybeShot(page, 't02_tour_l4_saturn.png');
+
+      // Jump to L4 Planetary Surface stop and confirm tour STAYS ACTIVE during landed surface flyover!
+      await page.evaluate(async () => {
+        await window.__ulgUniversesDemo.goToTourStop('planetary-surface', { instant: true });
+        for (let i = 0; i < 4; i += 1) await window.__ulgUniversesDemo.stepOnce();
+        window.__ulgUniversesDemo.stepTourNow(1.2);
+      });
+      await page.waitForTimeout(350);
+      const tSurf = await page.evaluate(() => window.__ulgUniversesDemo.getState());
+      assert.equal(tSurf.surfaceActive, true, 'Planetary-surface tour stop must land on surface');
+      assert.equal(tSurf.tour.active, true, 'Tour must remain active during tour-initiated surface flyover (keepTour=true)');
+      await maybeShot(page, 't03_tour_l4_surface.png');
+
+      // Jump to L7 Atomic Nucleus and confirm surface exited cleanly back through L5-L7!
+      await page.evaluate(async () => {
+        await window.__ulgUniversesDemo.goToTourStop('atomic-nucleus', { instant: true });
+        for (let i = 0; i < 3; i += 1) await window.__ulgUniversesDemo.stepOnce();
+      });
+      await page.waitForTimeout(300);
+      const tNuc = await page.evaluate(() => window.__ulgUniversesDemo.getState());
+      assert.equal(tNuc.surfaceActive, false, 'Advancing past surface stop must cleanly lift back off surface');
+      assert.equal(tNuc.level, 7, `Atomic nucleus stop must reach L7 (got L${tNuc.level})`);
+      assert.equal(tNuc.gpuErrorCount, 0, 'Zero WebGPU errors across guided tour stops');
+      await maybeShot(page, 't04_tour_l7_nucleus.png');
+
+      // Click Stop Tour and confirm clean exit & HUD dismissal
+      await page.click('#uv-tour-stop-btn');
+      await page.waitForTimeout(150);
+      const tEnd = await page.evaluate(() => ({
+        visible: document.getElementById('uv-tour-hud')?.classList.contains('active'),
+        autopilot: window.__ulgUniversesDemo.getState().autopilot,
+        tourActive: window.__ulgUniversesDemo.getState().tour.active
+      }));
+      assert.equal(tEnd.visible, false, 'Stop Tour must dismiss #uv-tour-hud');
+      assert.equal(tEnd.autopilot, false, 'Stop Tour must set autopilot=false');
+      assert.equal(tEnd.tourActive, false, 'Stop Tour must set tour.active=false');
       await ctx.close();
     }
 

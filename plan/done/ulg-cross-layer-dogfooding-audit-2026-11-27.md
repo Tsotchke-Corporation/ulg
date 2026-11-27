@@ -2,7 +2,7 @@
 
 - **Baseline Audited:** `HEAD 43dd21cd` (`main`) by 4 parallel independent read-only auditors (`Material & PBR`, `Quantum/Nuclear/Chemistry/Optics`, `SS/Closures/Bio U12/PeerCompute`, `Renderers/Color-Space/ExoWebTUI`).
 - **Governing Mandate:** **Strict ULG Dogfooding — USE ULG TO BUILD ULG** ([`AGENTS.md`](../../AGENTS.md) §1 Rule 6 & [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) §1 Rule 1).
-- **Status:** **COMPLETE & FULL-STACK VULKAN-VERIFIED (2026-11-27)** on feature branch `feat/ulg-dogfooding-rule-and-audit` (`7a9f170e..27d8a991`, archived via `git mv` to `plan/done/` — **STRICT PUBLICATION HOLD ACTIVE** pending explicit authorization from `big dog`).
+- **Status:** **COMPLETE, FULL-STACK VULKAN-VERIFIED, MERGED TO `main` & GITHUB PAGES DEPLOYED (2026-11-27)** (`7a9f170e..7e43b31b` merged to `main` and deployed to `docs/` by explicit authorization from `big dog`).
 
 ---
 

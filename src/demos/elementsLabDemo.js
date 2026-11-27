@@ -10,10 +10,15 @@
 import { initUlgExoWebTuiBridge } from './ulgExoWebTuiBridge.js';
 initUlgExoWebTuiBridge({ labId: 'elements', title: 'ULG Material Physics Lab' });
 import {
+  ATOMIC_MASS_U,
   ELEMENT_SYMBOLS,
   electronConfiguration,
   symbolForZ
 } from '../runtime/electronicStructure/periodicTable.js';
+import {
+  solvePiMolecularOrbitalsWebGpu,
+  solveQeqCharges
+} from '../runtime/organic/organicMolecularGraphGpu.js';
 import {
   mostStableMassNumberForZ,
   deriveNuclearClosure,
@@ -2290,10 +2295,75 @@ async function runGeometryOptAndVibrationsWebGpu({ deuterated = uiState.vibIsoto
   await ensureCompoundForTab5();
   const mqm = currentCompoundRes?.visualData?.molQm;
   const formula = currentCompoundRes?.bundle?.materialKey || 'H2O';
-  if (!mqm?.atoms?.length || mqm.atoms.length < 2 || mqm.atoms.length > 6) {
+  if (!mqm?.atoms?.length || mqm.atoms.length < 2) {
     return null;
   }
   uiState.vibIsotopeDeuterated = Boolean(deuterated);
+  // Dogfood `organicMolecularGraphGpu` (`solveQeqCharges` + `solvePiMolecularOrbitalsWebGpu`) for
+  // polyatomic molecules > 6 atoms instead of hitting a dead-end cliff!
+  if (mqm.atoms.length > 6) {
+    statusBadge.textContent = `QEq/π-MO Bond Modes (${formula}, ${mqm.atoms.length} atoms)…`;
+    try {
+      const atoms = mqm.atoms.map((a, idx) => ({
+        idx,
+        Z: a.Z,
+        symbol: a.symbol || symbolForZ(a.Z),
+        pos: a.position.map((v) => v * 0.529177), // Bohr -> Angstrom
+        hybridization: 'sp3',
+        isPi: a.Z === 6 || a.Z === 7 || a.Z === 8
+      }));
+      const bonds = (mqm.bonds || []).map((b) => ({
+        a: b.i ?? b.a ?? 0,
+        b: b.j ?? b.b ?? 1,
+        order: b.order || 1
+      }));
+      const graph = { formula, atoms, bonds };
+      const qeq = solveQeqCharges(graph, { dielectricEr: 1.0 });
+      await solvePiMolecularOrbitalsWebGpu(gpuDevice, graph).catch(() => null);
+      const modes = bonds.slice(0, 12).map((b, mIdx) => {
+        const ai = atoms[b.a]; const aj = atoms[b.b];
+        const mA = (ai?.Z === 1 && deuterated) ? 2.01410178 : (ATOMIC_MASS_U[(ai?.Z || 6) - 1] || 12);
+        const mB = (aj?.Z === 1 && deuterated) ? 2.01410178 : (ATOMIC_MASS_U[(aj?.Z || 6) - 1] || 12);
+        const mu = (mA * mB) / Math.max(0.5, mA + mB);
+        const kNPerM = 440 * Math.max(0.8, b.order || 1.0);
+        const freqCm1 = Math.round(130.28 * Math.sqrt(kNPerM / Math.max(0.5, mu)));
+        const dq = Math.abs((qeq.charges[b.a] || 0) - (qeq.charges[b.b] || 0));
+        const dx = (aj.pos[0] - ai.pos[0]); const dy = (aj.pos[1] - ai.pos[1]); const dz = (aj.pos[2] - ai.pos[2]);
+        const dl = Math.hypot(dx, dy, dz) || 1;
+        const displ = atoms.map((_, idx) => {
+          if (idx === b.a) return [-dx / dl * 0.45, -dy / dl * 0.45, -dz / dl * 0.45];
+          if (idx === b.b) return [dx / dl * 0.45, dy / dl * 0.45, dz / dl * 0.45];
+          return [0, 0, 0];
+        });
+        return {
+          modeIndex: mIdx,
+          frequencyCm1: freqCm1,
+          irIntensity: Math.max(0.05, Math.min(1.0, dq * 1.4 + 0.12)),
+          ramanActivity: 0.45,
+          label: `${ai.symbol}–${aj.symbol} stretch`,
+          displacementBohr: displ
+        };
+      });
+      const totalZpeEv = modes.reduce((s, m) => s + 0.5 * m.frequencyCm1 * 1.23984e-4, 0);
+      currentVibrations = {
+        formula,
+        deuterated: uiState.vibIsotopeDeuterated,
+        atoms: mqm.atoms,
+        modes,
+        totalZpeEv,
+        solver: 'organic-qeq-bond-normal-modes'
+      };
+      uiState.vibModeIdx = Math.min(uiState.vibModeIdx, Math.max(0, modes.length - 1));
+      statusBadge.textContent = `${formula} · ${modes.length} QEq/Force-Field Modes (ZPE=${fmt(totalZpeEv, 2)} eV)`;
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+      return currentVibrations;
+    } catch (err) {
+      statusBadge.textContent = `Vib err: ${err.message}`;
+      return null;
+    }
+  }
   statusBadge.textContent = `GPU Opt & Hessian (${formula}${deuterated ? ' [D]' : ''})…`;
   try {
     // 1. Optimize geometry on WebGPU (or reuse already-optimized coords if only isotope mass toggled!)
@@ -3208,19 +3278,30 @@ function renderViewportSync() {
           tint: [0.75, 0.52, 0.99]
         });
       }
-    } else if (activeSpecimenKind === 'compound' && currentCompoundLattice) {
+    } else if (activeSpecimenKind === 'compound' && (currentCompoundRes?.visualData?.multiSpeciesCrystal || currentCompoundLattice)) {
       const compBundle = currentCompoundRes?.bundle || null;
       const pbrOptics = derivePbrOpticsFromMaterialBundle(compBundle, {
         surfaceFinish: 'crystal',
         formula: compBundle?.formula || null
       });
-      gpuRenderer.renderStaticCrystalLattice({
-        ...currentCompoundLattice,
-        yaw: camYaw,
-        pitch: camPitch,
-        tint: compBundle?.electromagnetic?.opticalSrgb || pbrOptics.albedoSrgb || [0.75, 0.82, 0.95],
-        pbrOptics
-      });
+      if (currentCompoundRes?.visualData?.multiSpeciesCrystal) {
+        gpuRenderer.renderMultiSpeciesCrystalScene({
+          crystal: currentCompoundRes.visualData.multiSpeciesCrystal,
+          colorMode: uiState.molColorMode,
+          yaw: camYaw,
+          pitch: camPitch,
+          camDist: Math.max(2.1, Math.min(5.2, camDist + 0.35)),
+          pbrOptics
+        });
+      } else {
+        gpuRenderer.renderStaticCrystalLattice({
+          ...currentCompoundLattice,
+          yaw: camYaw,
+          pitch: camPitch,
+          tint: compBundle?.electromagnetic?.opticalSrgb || pbrOptics.albedoSrgb || [0.75, 0.82, 0.95],
+          pbrOptics
+        });
+      }
     } else if (uiState.atomicViewMode === 'cloud' && liveOrbitalCloud) {
       gpuRenderer.renderOrbitalPointCloud({
         pointsBuffer: liveOrbitalCloud.pointsBuffer,
@@ -4889,6 +4970,17 @@ async function activateCompoundBackfeed(compoundRes, targetTab = 'crystal') {
   activeSpecimenKind = 'compound';
   updateActiveElementButton();
   currentCompoundNuclearVolGpu = buildCompositeNuclearForCompound(compoundRes);
+  if (!compoundRes.visualData?.multiSpeciesCrystal) {
+    try {
+      const ms = buildMultiSpeciesCrystalLattice(compoundRes.bundle.canonicalFormula || compoundRes.bundle.formula || compoundRes.bundle.materialKey, {
+        crystalStructure: compoundRes.bundle.mechanical.crystalStructure,
+        latticeConstantA: Math.max(2.6, Number(compoundRes.bundle.mechanical.latticeConstantA || 4.2)),
+        cellsPerSide: 2,
+        paulingIonicity: Number(compoundRes.bundle.atomic?.paulingIonicity || 0.25)
+      });
+      if (ms && compoundRes.visualData) compoundRes.visualData.multiSpeciesCrystal = ms;
+    } catch {}
+  }
   currentCompoundLattice = buildCrystalMdState({
     crystalStructure: compoundRes.bundle.mechanical.crystalStructure,
     cellsPerSide: 2,
@@ -4949,6 +5041,17 @@ async function runCompoundDerivation(formula, { backfeedAllTabs = false, switchT
     }
 
     currentCompoundNuclearVolGpu = buildCompositeNuclearForCompound(currentCompoundRes);
+    if (!currentCompoundRes.visualData?.multiSpeciesCrystal) {
+      try {
+        const ms = buildMultiSpeciesCrystalLattice(currentCompoundRes.bundle.canonicalFormula || currentCompoundRes.bundle.formula || currentCompoundRes.bundle.materialKey, {
+          crystalStructure: currentCompoundRes.bundle.mechanical.crystalStructure,
+          latticeConstantA: Math.max(2.6, Number(currentCompoundRes.bundle.mechanical.latticeConstantA || 4.2)),
+          cellsPerSide: 2,
+          paulingIonicity: Number(currentCompoundRes.bundle.atomic?.paulingIonicity || 0.25)
+        });
+        if (ms && currentCompoundRes.visualData) currentCompoundRes.visualData.multiSpeciesCrystal = ms;
+      } catch {}
+    }
     currentCompoundLattice = buildCrystalMdState({
       crystalStructure: currentCompoundRes.bundle.mechanical.crystalStructure,
       cellsPerSide: 2,

@@ -25,6 +25,7 @@ import {
   evaluateCherenkovClosure,
   packNuclearChannelRows,
   relativisticBetaFromKineticEnergyMeV,
+  resolveNuclearDecayChannel,
   stepIsotopeInventoryLedger
 } from '../material/nuclearCherenkovClosure.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
@@ -67,14 +68,31 @@ export function normalizeIsotopeKey(raw, channels = NUCLEAR_DECAY_CHANNELS) {
   const canonical = Object.keys(channels || NUCLEAR_DECAY_CHANNELS).find(
     (k) => k.toLowerCase() === trimmed.toLowerCase()
   );
-  return canonical || null;
+  if (canonical) return canonical;
+  // Dogfood Gate 1 `resolveNuclearDecayChannel` so ANY unstable (Z, A) nuclide across
+  // the periodic table (e.g. K-40, Sr-90, Pu-238, I-131, Ra-226, Am-241) resolves cleanly!
+  const gate1 = resolveNuclearDecayChannel(trimmed, null, { channels: channels || NUCLEAR_DECAY_CHANNELS });
+  if (gate1 && gate1.mode !== 'stable') {
+    return gate1.isotope;
+  }
+  return null;
 }
 
 export function resolveBodyIsotopeChannel(body, channels = NUCLEAR_DECAY_CHANNELS) {
   if (!body || typeof body !== 'object') return null;
   const table = channels || NUCLEAR_DECAY_CHANNELS;
-  const explicit = normalizeIsotopeKey(body.isotope, table);
-  if (explicit) return table[explicit] || null;
+  const rawIso = body.isotope;
+  if (rawIso != null && String(rawIso).trim()) {
+    const trimmed = String(rawIso).trim();
+    if (trimmed.toLowerCase() === 'stable' || trimmed.toLowerCase() === 'none') {
+      return null;
+    }
+    const explicitKey = Object.keys(table).find((k) => k.toLowerCase() === trimmed.toLowerCase());
+    if (explicitKey && table[explicitKey]) return table[explicitKey];
+    const gate1 = resolveNuclearDecayChannel(trimmed, null, { channels: table });
+    if (gate1 && gate1.mode !== 'stable') return gate1;
+    return null;
+  }
   const Z = resolveElementZ(body.material);
   if (!(Z > 0)) return null;
   for (const ch of Object.values(table)) {
@@ -177,12 +195,24 @@ function evaluateTransparentDielectricCandidate({ material, phase, props }) {
     const transmission = Number(opt.transmission ?? 0);
     const ior = Number(opt.ior ?? 1.0);
     if (metalness < 0.1 && transmission > 0.05 && Number.isFinite(ior) && ior > 1.000001) {
+      const nFn = buildSpectralRefractiveIndexFn(opt.spectralSamples, ior);
+      const refractiveIndexRgb = Object.freeze(
+        nFn ? [nFn(650), nFn(550), nFn(450)] : [ior, ior, ior]
+      );
+      const densityKgPerM3 = Number(
+        props?.phases?.find((p) => String(p?.name || '').toLowerCase() === phase)?.densityKgPerM3
+        ?? props?.phases?.[0]?.densityKgPerM3
+        ?? props?.densityKgPerM3
+        ?? (phase === 'gas' ? 1.225 : 1000)
+      );
       return {
         medium: `${matKey.toLowerCase()}-${phase}`,
         material: matKey.toLowerCase(),
         phase,
         refractiveIndex: ior,
-        refractiveIndexFn: buildSpectralRefractiveIndexFn(opt.spectralSamples, ior),
+        refractiveIndexRgb,
+        refractiveIndexFn: nFn,
+        densityKgPerM3: Math.max(0.1, densityKgPerM3),
         transmission,
         renderModel: opt.renderModel || 'optical-closure'
       };
@@ -195,12 +225,20 @@ function evaluateTransparentDielectricCandidate({ material, phase, props }) {
     && explicitIor > 1.000001
     && (props?.transmission == null || Number(props.transmission) > 0.05)
   ) {
+    const densityKgPerM3 = Number(
+      props?.phases?.find((p) => String(p?.name || '').toLowerCase() === phase)?.densityKgPerM3
+      ?? props?.phases?.[0]?.densityKgPerM3
+      ?? props?.densityKgPerM3
+      ?? (phase === 'gas' ? 1.225 : 1000)
+    );
     return {
       medium: `${matKey.toLowerCase()}-${phase}`,
       material: matKey.toLowerCase(),
       phase,
       refractiveIndex: explicitIor,
+      refractiveIndexRgb: Object.freeze([explicitIor, explicitIor, explicitIor]),
       refractiveIndexFn: null,
+      densityKgPerM3: Math.max(0.1, densityKgPerM3),
       transmission: props?.transmission != null ? Number(props.transmission) : 0.9,
       renderModel: 'material-property-dielectric-ior'
     };
@@ -268,7 +306,9 @@ export function resolveSurroundingDielectricMedium({
     material: null,
     phase: 'vacuum',
     refractiveIndex: 1.0,
+    refractiveIndexRgb: Object.freeze([1.0, 1.0, 1.0]),
     refractiveIndexFn: null,
+    densityKgPerM3: 0,
     transmission: 1.0,
     renderModel: 'vacuum'
   });
@@ -295,22 +335,25 @@ export function characteristicSecondaryElectronEnergyMeV(channel) {
 
 /**
  * Characteristic attenuation range (m) of secondary relativistic electrons /
- * Compton-scattered gamma cascade in condensed dielectric media (~1000 kg/m^3).
- * Derived monotonically from secondary kinetic energy (zero material hardcoding).
+ * Compton-scattered gamma cascade scaled inversely with actual dielectric mass density
+ * (`1000 / rho_medium` — zero hardcoded water-density assumption!).
  */
-export function characteristicCherenkovAttenuationRangeM(channel) {
+export function characteristicCherenkovAttenuationRangeM(channel, mediumDensityKgM3 = 1000) {
   if (!channel) return 0;
+  const rho = Number.isFinite(Number(mediumDensityKgM3)) && Number(mediumDensityKgM3) > 0
+    ? Number(mediumDensityKgM3)
+    : 1000;
+  const densityScale = Math.min(20.0, Math.max(0.05, 1000.0 / Math.max(50.0, rho)));
   const gammaMeV = channel.qValueMeV * (channel.gammaFraction || 0);
   const betaMeV = channel.qValueMeV * (channel.betaFraction || 0);
-  // MeV gamma Compton mean free path in ~1 g/cm^3 dielectric is ~0.12 - 0.25 m;
-  // pure beta-minus CSDA range is millimeter-to-centimeter scale.
+  // MeV gamma Compton mean free path scales as ~1 / rho; pure beta CSDA range scales as ~1 / rho.
   if (gammaMeV > 0.25) {
-    return Math.min(0.45, Math.max(0.10, 0.14 * Math.sqrt(gammaMeV)));
+    return Math.min(2.5, Math.max(0.02, 0.14 * Math.sqrt(gammaMeV) * densityScale));
   }
   if (betaMeV > 0.1) {
-    return Math.min(0.08, Math.max(0.015, 0.025 * betaMeV));
+    return Math.min(0.6, Math.max(0.005, 0.025 * betaMeV * densityScale));
   }
-  return 0.01;
+  return 0.01 * Math.min(2.0, densityScale);
 }
 
 /**
@@ -326,11 +369,18 @@ export function createSphNuclearCherenkovController({
 } = {}) {
   const sourceEntries = [];
   const list = Array.isArray(bodies) ? bodies : [];
+  const mediumInfo = resolveSurroundingDielectricMedium({
+    bodies: list,
+    environmentMode,
+    materialProperties
+  });
+  const mergedChannels = { ...(channels || NUCLEAR_DECAY_CHANNELS) };
 
   for (let i = 0; i < list.length; i += 1) {
     const body = list[i];
-    const channel = resolveBodyIsotopeChannel(body, channels);
+    const channel = resolveBodyIsotopeChannel(body, mergedChannels);
     if (!channel) continue;
+    mergedChannels[channel.isotope] = channel;
     const matKey = String(body.material || '').trim();
     const props = lookupMaterialProperties(materialProperties, matKey);
     const densityKgPerM3 = Number(
@@ -372,7 +422,7 @@ export function createSphNuclearCherenkovController({
     const atomCount = bodyMassKg / (channel.A * AMU_KG);
     const electronMeV = characteristicSecondaryElectronEnergyMeV(channel);
     const beta = relativisticBetaFromKineticEnergyMeV(electronMeV, ELECTRON_REST_MEV);
-    const attenuationRangeM = characteristicCherenkovAttenuationRangeM(channel);
+    const attenuationRangeM = characteristicCherenkovAttenuationRangeM(channel, mediumInfo.densityKgPerM3 || 1000);
     sourceEntries.push({
       bodyId: body.id || `body-${i + 1}`,
       domainId: Number(body.domainId) || (i + 1),
@@ -392,11 +442,6 @@ export function createSphNuclearCherenkovController({
   }
 
   const enabled = sourceEntries.length > 0;
-  const mediumInfo = resolveSurroundingDielectricMedium({
-    bodies: list,
-    environmentMode,
-    materialProperties
-  });
   const packedChannelTable = enabled
     ? packNuclearChannelRows(sourceEntries.map((s) => s.channel))
     : null;
@@ -469,7 +514,7 @@ export function createSphNuclearCherenkovController({
     let stepDecays = 0;
 
     for (const src of sourceEntries) {
-      const ledger = stepIsotopeInventoryLedger(src.inventory, dt, { channels });
+      const ledger = stepIsotopeInventoryLedger(src.inventory, dt, { channels: mergedChannels });
       src.inventory = ledger.nextInventory.map((item) => ({ ...item }));
       stepDecays += ledger.totalDecays;
       stepDepositedJ += ledger.depositedThermalEnergyJ;
@@ -520,6 +565,8 @@ export function createSphNuclearCherenkovController({
       schema: 'peercompute.ulg.sph-nuclear-cherenkov-gpu-sources.v1',
       medium: mediumInfo.medium,
       refractiveIndex: mediumInfo.refractiveIndex,
+      refractiveIndexRgb: mediumInfo.refractiveIndexRgb || Object.freeze([mediumInfo.refractiveIndex, mediumInfo.refractiveIndex, mediumInfo.refractiveIndex]),
+      mediumDensityKgPerM3: mediumInfo.densityKgPerM3 || 1000,
       sources: Object.freeze(sourceEntries.map((src) => Object.freeze({
         bodyId: src.bodyId,
         domainId: src.domainId,

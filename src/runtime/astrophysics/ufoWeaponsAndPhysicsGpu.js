@@ -13,6 +13,8 @@
 //   - Antimatter annihilation beam (`E = 2 m c^2`, 511 keV gamma flash + hadronic cascade plasma).
 //   - 360-degree dynamic rim emission from the exact saucer perimeter point facing the aim target!
 
+import { resolveCanonicalMaterialThermalOptics } from '../material/canonicalMaterialLookup.js';
+
 const C_LIGHT = 2.99792458e8;      // m/s
 const H_PLANCK_EV_S = 4.135667696e-15; // eV·s
 const SIGMA_SB = 5.670374419e-8;   // W / (m^2 K^4)
@@ -112,89 +114,7 @@ export function evaluateEmWavelengthInfo(log10Meters) {
 // 2. First-Principles Compound Light-Matter Interaction & Thermochemistry
 // =========================================================================
 function resolveMaterialOpticalThermalProfile(sample) {
-  const formula = String(sample?.formula || 'SiO2');
-  const id = String(sample?.id || '');
-  // Infer physical material family purely from chemical constituents (zero planet names!)
-  const isWaterIce = formula.includes('H₂O') || formula.includes('H2O') || id.includes('water') || id.includes('ice');
-  const isHydrocarbon = formula.includes('CH₄') || formula.includes('CH4') || id.includes('tholin') || id.includes('organic');
-  const isIronRich = formula.includes('Fe') || id.includes('ferric') || id.includes('magma');
-  const isMetallic = sample?.primaryZ === 26 || sample?.primaryZ === 28 || sample?.primaryZ === 29 || sample?.primaryZ === 79;
-
-  if (isWaterIce) {
-    return {
-      formula: 'H₂O',
-      polarDipole: 0.94,      // Strong microwave / far-IR rotational absorption!
-      irVibBandUm: 3.05,      // O-H stretch & H-O-H bend
-      bandGapEv: 7.4,         // Transparent to visible; absorbs deep UV!
-      visAbsorb: 0.09,
-      metallicity: 0.0,
-      tMeltK: 273.15,
-      tBoilK: 373.15,
-      tPlasmaK: 5200,
-      cpJPerKgK: 4180,
-      densityKgM3: 980,
-      meltDesc: 'Liquid H₂O melt pool',
-      boilDesc: 'Superheated H₂O steam geyser',
-      uvDesc: 'Photolysis: H₂O + hν → H• + •OH + H₂/O₂',
-      xrayDesc: 'Radiolytic H₂O K-shell plasma flash'
-    };
-  }
-  if (isHydrocarbon) {
-    return {
-      formula: 'CH₄ / C-H-O',
-      polarDipole: 0.14,
-      irVibBandUm: 3.35,      // C-H stretching fundamental
-      bandGapEv: 4.2,
-      visAbsorb: 0.56,
-      metallicity: 0.0,
-      tMeltK: 340,
-      tBoilK: 680,
-      tPlasmaK: 4600,
-      cpJPerKgK: 2200,
-      densityKgM3: 1150,
-      meltDesc: 'Pyrolytic hydrocarbon tar & vapor',
-      boilDesc: 'Thermal cracking: CH₄ → C(soot) + 2 H₂',
-      uvDesc: 'UV radical photopolymerization & ablation',
-      xrayDesc: 'Carbon K-edge Coulomb fragmentation'
-    };
-  }
-  if (isMetallic) {
-    return {
-      formula: 'Fe / Ni Alloy',
-      polarDipole: 0.05,
-      irVibBandUm: 8.0,
-      bandGapEv: 0.0,         // Free-electron Drude conductor!
-      visAbsorb: 0.36,
-      metallicity: 0.92,
-      tMeltK: 1811,
-      tBoilK: 3134,
-      tPlasmaK: 6400,
-      cpJPerKgK: 450,
-      densityKgM3: 7870,
-      meltDesc: 'Molten incandescent iron-alloy slag',
-      boilDesc: 'Vaporized metallic Fe plasma plume',
-      uvDesc: 'Photoelectric electron ejection & ablation',
-      xrayDesc: 'Fe K-alpha fluorescence & ionized plasma'
-    };
-  }
-  // Silicate / Basalt / Hematite / Anorthosite crust
-  return {
-    formula: isIronRich ? 'Fe₂O₃ · SiO₂' : 'SiO₂ · Mg₂SiO₄',
-    polarDipole: 0.16,
-    irVibBandUm: 9.6,         // Si-O antisymmetric stretch Reststrahlen band!
-    bandGapEv: isIronRich ? 2.15 : 8.6,
-    visAbsorb: isIronRich ? 0.72 : 0.42,
-    metallicity: isIronRich ? 0.18 : 0.02,
-    tMeltK: 1470,
-    tBoilK: 2950,
-    tPlasmaK: 6200,
-    cpJPerKgK: 840,
-    densityKgM3: 2900,
-    meltDesc: 'Molten silicate magma & vitrified glass',
-    boilDesc: 'Vaporizing SiO + O₂ rock plasma',
-    uvDesc: 'UV photo-desorption & silicate spallation',
-    xrayDesc: 'Si/O K-shell photoionization & shock crater'
-  };
+  return resolveCanonicalMaterialThermalOptics(sample || {});
 }
 
 export function evaluateLaserMaterialInteraction({

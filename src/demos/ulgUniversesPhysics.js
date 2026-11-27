@@ -132,6 +132,11 @@ import {
   createResidentTiledNBodyEngine
 } from './cosmicQuantumGpuKernels.js';
 import { deriveElementBundleWebGpu } from '../runtime/material/periodicTableEngineWebGpu.js';
+import { deriveCompoundBundleWebGpu } from '../runtime/material/recursiveCompoundPipeline.js';
+import {
+  getCompoundBundleFromAtlas,
+  normalizeChemicalFormula
+} from '../runtime/material/canonicalMaterialLookup.js';
 import {
   buildCrystalMdState,
   createMolecularDynamicsSessionWebGpu
@@ -141,7 +146,10 @@ import {
   sampleMolecularOrbitalCloudWebGpu
 } from '../runtime/electronicStructure/orbitalPointCloudWebGpu.js';
 import { solveMoleculeRhfWebGpu } from '../runtime/electronicStructure/molecularHartreeFockWebGpu.js';
-import { solveNuclearStructureWebGpu } from '../runtime/nuclear/nuclearStructureGpu.js';
+import {
+  mostStableMassNumberForZ,
+  solveNuclearStructureWebGpu
+} from '../runtime/nuclear/nuclearStructureGpu.js';
 import { createNuclearTunnelingTdseWebGpu } from '../runtime/material/photonShellOpticsWebGpu.js';
 import {
   createRelaySignalingTransport,
@@ -3230,13 +3238,30 @@ export function createUlgUniversesPhysics(device, {
       getElementBundle(zSurf, { relativistic: true, returnOrbitalWavefunctions: false })
     ]);
 
-    const getOrBuildAtlas = async (res) => {
-      const k = res.bundle.materialKey || res.bundle.symbol;
+    // Dogfood Gate 2 compound bundles from `foundation-polytope-atlas.json` for planetary
+    // silicate/water/ice/hydrogen interiors instead of collapsing compounds to monatomic elements!
+    const specRadiusM = Math.max(1e5, (Number(spec.radiusKm) || 6371) * 1000);
+    const specMassKg = Math.max(1e19, (Number(spec.massSolar) || 3.00349e-6) * 1.98847e30);
+    const isGiantInterior = specRadiusM >= 1.6e7 || spec.planetClass === 'gas-giant' || spec.planetClass === 'hot-jupiter' || spec.planetClass === 'ice-giant';
+    const isIcyMantle = spec.planetClass === 'ice-giant' || spec.planetClass === 'ocean-world' || spec.planetClass === 'icy-dwarf' || zMantle === 8;
+    const preferredMantleFormula = (spec.planetClass === 'gas-giant' || spec.planetClass === 'hot-jupiter' || zMantle === 1)
+      ? 'H2'
+      : (isIcyMantle ? 'H2O' : (zMantle === 12 ? 'MgO' : (zMantle === 6 ? 'CH4' : (zMantle === 7 ? 'NH3' : 'SiO2'))));
+    const preferredCoreFormula = zCore === 1 ? 'H2' : (zCore === 8 ? 'H2O' : (zCore === 14 ? 'SiO2' : null));
+    const mantleCompoundBundle = getCompoundBundleFromAtlas(preferredMantleFormula);
+    const coreCompoundBundle = preferredCoreFormula ? getCompoundBundleFromAtlas(preferredCoreFormula) : null;
+    const coreInteriorBundle = coreCompoundBundle || coreRes.bundle;
+    const mantleInteriorBundle = mantleCompoundBundle || mantleRes.bundle;
+    const coreMaterialLabel = coreCompoundBundle ? coreCompoundBundle.formula : coreRes.bundle.symbol;
+    const mantleMaterialLabel = mantleCompoundBundle ? mantleCompoundBundle.formula : mantleRes.bundle.symbol;
+
+    const getOrBuildAtlas = async (bundle) => {
+      const k = `${bundle.materialKey || bundle.symbol || bundle.formula}:planetary:${isGiantInterior ? '8tpa' : '1tpa'}`;
       if (planetaryAtlasCache.has(k)) return planetaryAtlasCache.get(k);
-      const atlas = await buildPlanetaryPolytopeAtlasWebGpu(device, res.bundle, {
+      const atlas = await buildPlanetaryPolytopeAtlasWebGpu(device, bundle, {
         minPressurePa: 1e4,
-        maxPressurePa: 1e12,
-        maxTemperatureK: 12000,
+        maxPressurePa: isGiantInterior ? 8e12 : 2e12,
+        maxTemperatureK: isGiantInterior ? 16000 : 12000,
         degrees: [4, 4],
         relativeTolerance: 3e-2,
         maxBisectDepth: 2
@@ -3246,13 +3271,10 @@ export function createUlgUniversesPhysics(device, {
     };
 
     const [coreAtlas, mantleAtlas] = await Promise.all([
-      getOrBuildAtlas(coreRes),
-      getOrBuildAtlas(mantleRes)
+      getOrBuildAtlas(coreInteriorBundle),
+      getOrBuildAtlas(mantleInteriorBundle)
     ]);
 
-    const specRadiusM = Math.max(1e5, (Number(spec.radiusKm) || 6371) * 1000);
-    const specMassKg = Math.max(1e19, (Number(spec.massSolar) || 3.00349e-6) * 1.98847e30);
-    const isGiantInterior = specRadiusM >= 1.6e7 || spec.planetClass === 'gas-giant' || spec.planetClass === 'hot-jupiter' || spec.planetClass === 'ice-giant';
     const centralP = Math.max(1e8, Math.min(isGiantInterior ? 8e12 : 2e12, Number(spec.centralP) || (isGiantInterior ? 1.5e12 : 360e9)));
     const surfP = Math.max(1e3, Math.min(1e8, Number(spec.surfacePressurePa) || 1e5));
     const coreMassFrac = Number.isFinite(Number(spec.coalescedComposition?.feFrac))
@@ -3271,8 +3293,8 @@ export function createUlgUniversesPhysics(device, {
       convergePasses: 4,
       maxProfileSamples: 128,
       layers: [
-        { name: `${coreRes.bundle.symbol} Core`, massFractionTarget: coreMassFrac, tempK: coreTempK, atlas: coreAtlas },
-        { name: `${mantleRes.bundle.symbol} Mantle`, massFractionTarget: Math.max(0.1, 1.0 - coreMassFrac), tempK: mantleTempK, atlas: mantleAtlas }
+        { name: `${coreMaterialLabel} Core`, massFractionTarget: coreMassFrac, tempK: coreTempK, atlas: coreAtlas },
+        { name: `${mantleMaterialLabel} Mantle`, massFractionTarget: Math.max(0.1, 1.0 - coreMassFrac), tempK: mantleTempK, atlas: mantleAtlas }
       ]
     });
 
@@ -3290,14 +3312,15 @@ export function createUlgUniversesPhysics(device, {
       {
         id: 'layer-core',
         level: 4,
-        name: `${spec.name} · ${coreRes.bundle.symbol} Core`,
-        subtitle: `Gate 2 Polytope Atlas · P_c = ${(centralP / 1e9).toFixed(0)} GPa · MoI = ${(planetaryResult?.moiFactor || 0.33).toFixed(3)}`,
+        name: `${spec.name} · ${coreMaterialLabel} Core`,
+        subtitle: `Gate 2 Polytope Atlas · P_c = ${(centralP / 1e9).toFixed(0)} GPa · T_c = ${coreTempK.toLocaleString()} K · MoI = ${(planetaryResult?.moiFactor || 0.33).toFixed(3)}`,
         pos: [0.45, 0.35, 0.45],
         radius: 0.7,
         sampleZ: zCore,
+        formula: coreMaterialLabel,
         rCoreNorm,
         rMantleNorm: 0.94,
-        tempK: 5200,
+        tempK: coreTempK,
         massLabel: `R = ${spec.radiusKm.toLocaleString()} km`,
         composition: spec.composition,
         nextLevel: 5
@@ -3305,16 +3328,17 @@ export function createUlgUniversesPhysics(device, {
       {
         id: 'layer-mantle',
         level: 4,
-        name: `${spec.name} · ${mantleRes.bundle.symbol} Mantle`,
-        subtitle: `High-Pressure Polytope Shell · T = 2,200 K`,
+        name: `${spec.name} · ${mantleMaterialLabel} Mantle`,
+        subtitle: `Gate 2 ${mantleMaterialLabel} Polytope Shell · T = ${mantleTempK.toLocaleString()} K`,
         pos: [1.35, 1.05, 1.35],
         radius: 0.7,
         sampleZ: zMantle,
+        formula: mantleMaterialLabel,
         rCoreNorm,
         rMantleNorm: 0.94,
-        tempK: 2200,
+        tempK: mantleTempK,
         massLabel: `g = ${(planetaryResult?.surfaceGravityMPerS2 || 9.8).toFixed(2)} m/s²`,
-        composition: `${mantleRes.bundle.symbol}/O Silicate Mantle`,
+        composition: mantleCompoundBundle ? `${mantleMaterialLabel} Gate 2 Compound Mantle` : `${mantleRes.bundle.symbol} Mantle`,
         nextLevel: 5
       },
       {
@@ -3325,6 +3349,7 @@ export function createUlgUniversesPhysics(device, {
         pos: [-1.8, 1.4, 1.5],
         radius: 0.7,
         sampleZ: zSurf,
+        formula: isIcyMantle ? 'H2O' : (zSurf === 14 ? 'SiO2' : surfRes.bundle.symbol),
         rCoreNorm,
         rMantleNorm: 0.94,
         tempK: spec.tempK || 288,
@@ -3560,14 +3585,90 @@ export function createUlgUniversesPhysics(device, {
     return planetaryGenesisSphTelemetry;
   }
 
+  const compoundMdCache = new Map();
+
   // ---- L5: Crystal & Fluid Molecular Dynamics ----
-  async function initMolecularDynamics({ Z = mdElementZ, tempK = null, phasePreset = null, gravity = mdGravity } = {}) {
+  async function initMolecularDynamics({ Z = mdElementZ, formula = null, tempK = null, phasePreset = null, gravity = mdGravity } = {}) {
     mdElementZ = Math.max(1, Math.min(118, Math.trunc(Number(Z) || 26)));
     mdGravity = Boolean(gravity);
     if (mdSession) {
       mdSession.destroy();
       mdSession = null;
     }
+
+    // Dogfood Gate 2 `deriveCompoundBundleWebGpu` whenever a compound formula (e.g. SiO2, H2O,
+    // CH4, NH3, CO2, NaCl, FeO, MgO) is sampled from a planet crust/ocean/atmosphere!
+    const cleanFormula = normalizeChemicalFormula(formula);
+    const isMultiElementCompound = cleanFormula.length >= 2 && (/\d/.test(cleanFormula) || /[A-Z].*[A-Z]/.test(cleanFormula));
+    let compoundRes = null;
+    if (isMultiElementCompound) {
+      try {
+        if (compoundMdCache.has(cleanFormula)) {
+          compoundRes = compoundMdCache.get(cleanFormula);
+        } else {
+          compoundRes = await deriveCompoundBundleWebGpu(device, cleanFormula, {
+            runLiveMd: false,
+            reactionContext: { source: 'ulg-universes-l5-compound-md' }
+          });
+          compoundMdCache.set(cleanFormula, compoundRes);
+        }
+      } catch {
+        compoundRes = null;
+      }
+    }
+
+    const c = quality.mdCells;
+    if (compoundRes?.visualData?.mdConfig && compoundRes?.bundle) {
+      const cfg = compoundRes.visualData.mdConfig;
+      const b = compoundRes.bundle;
+      const tMelt = Math.max(20, Number(b.thermodynamic.meltingPointK || 300));
+      const tBoil = Math.max(tMelt * 1.25 + 10, Number(b.thermodynamic.boilingPointK || tMelt * 2.2));
+      if (phasePreset === 'melt') {
+        mdPhasePreset = 'melt';
+        mdTempK = Math.round(tMelt * 1.42);
+      } else if (phasePreset === 'vapor') {
+        mdPhasePreset = 'vapor';
+        mdTempK = Math.round(tBoil * 1.38);
+      } else if (phasePreset === 'solid') {
+        mdPhasePreset = 'solid';
+        mdTempK = Math.max(20, Math.round(tMelt * 0.25));
+      } else if (tempK != null && Number.isFinite(Number(tempK))) {
+        mdTempK = Math.max(15, Math.round(Number(tempK)));
+      } else {
+        mdPhasePreset = 'solid';
+        mdTempK = Math.max(20, Math.round(tMelt * 0.25));
+      }
+      const init = buildCrystalMdState({
+        crystalStructure: cfg.crystalStructure,
+        cellsVec: [c, c, c],
+        latticeConstantA: Math.max(2.4, Number(cfg.latticeConstantA || 4.0)),
+        massU: Math.max(1, Number(cfg.massU || 18)),
+        temperatureK: mdTempK
+      });
+      mdSession = createMolecularDynamicsSessionWebGpu(device, {
+        ...init,
+        potentialModel: cfg.potentialModel,
+        epsilonEv: cfg.epsilonEv,
+        sigmaOrR0A: cfg.sigmaOrR0A,
+        alphaOrLambda: cfg.alphaOrLambda,
+        rcutA: cfg.rcutA,
+        eamAEv: cfg.eamAEv,
+        eamBeta: cfg.eamBeta,
+        swGamma: cfg.swGamma,
+        dtFs: cfg.dtFs,
+        targetTemperatureK: mdTempK,
+        thermostatCouplingFs: 20,
+        meltingPointK: tMelt,
+        bulkModulusGPa: Math.max(1, Number(b.mechanical?.bulkModulusPa || 20e9) / 1e9),
+        cohesiveEnergyEv: Math.max(0.05, Number(b.mechanical?.cohesiveEnergyEv || 1.2)),
+        crystalStructure: cfg.crystalStructure,
+        gravityEnabled: mdGravity
+      });
+      mdTelemetry = await mdSession.stepBatch(4, { readTelemetry: true, targetTemperatureK: mdTempK });
+      mdRdfHistory = mdTelemetry?.rdf ? Array.from(mdTelemetry.rdf) : [];
+      return;
+    }
+
     const res = await getElementBundle(mdElementZ, { relativistic: true, returnOrbitalWavefunctions: false });
     const bulk = res.visualData.bulk;
     const pot = res.visualData.thermo.potential;
@@ -3593,7 +3694,6 @@ export function createUlgUniversesPhysics(device, {
 
     const massU = Math.max(1, Number(b.nuclear.atomicMassU || 28));
     const dtFs = Math.min(2.0, Math.max(0.45, 0.09 * Math.sqrt(massU)));
-    const c = quality.mdCells;
     const init = buildCrystalMdState({
       crystalStructure: bulk.crystalStructure,
       cellsVec: [c, c, c],
@@ -3655,17 +3755,26 @@ export function createUlgUniversesPhysics(device, {
     if (quantumMode === 'molecule') {
       const spec = MOLECULE_SPECS[quantumMoleculeKey];
       moleculeRhfResult = await solveMoleculeRhfWebGpu(device, spec.atoms);
-      const posZeta = new Float32Array(spec.atoms.length * 4);
-      const weights = new Float32Array(spec.atoms.length * 4);
-      for (let i = 0; i < spec.atoms.length; i += 1) {
-        const a = spec.atoms[i];
-        posZeta.set([a.position[0], a.position[1], a.position[2], a.Z === 1 ? 1.24 : 2.25], i * 4);
-        weights.set([a.Z, i % 2 === 0 ? 1.0 : -0.85, i % 2 === 0 ? -0.9 : 1.0, 0], i * 4);
+      // Dogfood the live GPU-converged RHF AO/MO eigenvectors (`atomOrbitalParams`) directly
+      // instead of overwriting them with hardcoded alternating weights!
+      const rhfOrb = moleculeRhfResult?.atomOrbitalParams || null;
+      let posZeta = rhfOrb?.posZeta || null;
+      let weights = rhfOrb?.weights || null;
+      let boxHalfBohr = Number(rhfOrb?.boxHalfBohr) || 4.2;
+      if (!(posZeta instanceof Float32Array) || !(weights instanceof Float32Array) || posZeta.length < spec.atoms.length * 4) {
+        posZeta = new Float32Array(spec.atoms.length * 4);
+        weights = new Float32Array(spec.atoms.length * 4);
+        for (let i = 0; i < spec.atoms.length; i += 1) {
+          const a = spec.atoms[i];
+          posZeta.set([a.position[0], a.position[1], a.position[2], a.Z === 1 ? 1.24 : 2.25], i * 4);
+          const qMull = Number(moleculeRhfResult?.mullikenCharges?.[i]) || 0;
+          weights.set([a.Z, a.Z - qMull, 0.5, 0], i * 4);
+        }
       }
       orbitalCloud = sampleMolecularOrbitalCloudWebGpu(device, {
         posZeta,
         weights,
-        boxHalfBohr: 4.2,
+        boxHalfBohr,
         mode: 0,
         pointCount: Math.min(140000, quality.orbitalPoints),
         seed: (universeSeed ^ 0x6a09e667) >>> 0,
@@ -3699,7 +3808,9 @@ export function createUlgUniversesPhysics(device, {
   async function initAtomicNucleus({ Z = nuclearZ, A = null } = {}) {
     nuclearZ = Math.max(1, Math.min(118, Math.trunc(Number(Z) || 26)));
     const elChoice = UNIVERSES_ELEMENT_CHOICES.find((e) => e.Z === nuclearZ);
-    nuclearA = A != null ? Math.max(nuclearZ, Math.trunc(Number(A))) : (elChoice?.A || Math.round(nuclearZ * 2.15));
+    nuclearA = A != null
+      ? Math.max(nuclearZ, Math.trunc(Number(A)))
+      : (elChoice?.A || mostStableMassNumberForZ(nuclearZ));
     if (tdseSession) {
       tdseSession.destroy();
       tdseSession = null;
@@ -4340,6 +4451,7 @@ export function createUlgUniversesPhysics(device, {
     const zUse = Math.max(1, Math.min(118, Math.trunc(Number(sample.primaryZ) || 14)));
     await initMolecularDynamics({
       Z: zUse,
+      formula: sample.formula || null,
       phasePreset: sample.phasePreset || 'solid',
       tempK: Number.isFinite(Number(sample.tempK)) ? Number(sample.tempK) : null
     });

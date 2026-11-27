@@ -15,7 +15,12 @@
 //     White Dwarfs with ionized shells) consistently in L2 System, L4 Planetary Orbit, AND
 //     Planetary Surface celestial skies.
 
+import { blackbodyColorSrgb } from '../material/radiationClosure.js';
+import { srgbChannelToLinear } from '../material/materialPbrOpticsBridge.js';
+
 export const ULG_STARLIGHT_OPTICS_SCHEMA = 'ulg.astrophysics.starlight-and-exotic-optics.v1';
+
+const BLACKBODY_LIGHT_CACHE = new Map();
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
@@ -35,47 +40,28 @@ function cross3(a, b) {
 }
 
 /**
- * Continuous physical Planck blackbody linear illumination RGB from effective temperature `T_eff (K)`.
- * Normalized so G2V Solar 5778 K ~ `[1.00, 0.97, 0.91]`, M-dwarf 3000 K ~ `[1.00, 0.48, 0.22]`,
- * O/B 25000 K ~ `[0.66, 0.84, 1.00]`.
+ * Continuous physical Planck blackbody linear illumination RGB from effective temperature `T_eff (K)`
+ * derived directly from ULG's canonical `blackbodyColorSrgb(tempK)` (`radiationClosure.js`:
+ * exact Planck spectral radiance integrated against Wyman 2013 CIE 1931 color-matching functions).
  */
 export function starTemperatureToLightRgb(tempK) {
   const t = clamp(Number(tempK) || 5778, 1200, 50000);
-  // Exact CIE 1931 Planckian-locus linear-sRGB anchor interpolation (Mitchell Charity / CIE D65):
-  //   2400 K -> [1.00, 0.38, 0.10], 3000 K -> [1.00, 0.56, 0.24], 4200 K -> [1.00, 0.78, 0.52],
-  //   5778 K -> [1.00, 0.96, 0.91], 7500 K -> [0.90, 0.95, 1.00], 12000 K -> [0.76, 0.87, 1.00],
-  //   26000 K -> [0.64, 0.79, 1.00]
-  const anchors = [
-    [1200, [1.00, 0.16, 0.04]],
-    [2400, [1.00, 0.38, 0.10]],
-    [3000, [1.00, 0.56, 0.24]],
-    [4200, [1.00, 0.78, 0.52]],
-    [5778, [1.00, 0.96, 0.91]],
-    [7500, [0.90, 0.95, 1.00]],
-    [12000, [0.76, 0.87, 1.00]],
-    [26000, [0.64, 0.79, 1.00]],
-    [50000, [0.58, 0.74, 1.00]]
+  const bucket = Math.round(t / 10) * 10;
+  if (BLACKBODY_LIGHT_CACHE.has(bucket)) return [...BLACKBODY_LIGHT_CACHE.get(bucket)];
+  const srgb = blackbodyColorSrgb(t);
+  const lin = [
+    srgbChannelToLinear(srgb.r),
+    srgbChannelToLinear(srgb.g),
+    srgbChannelToLinear(srgb.b)
   ];
-  let rgb = anchors[anchors.length - 1][1];
-  for (let i = 0; i < anchors.length - 1; i += 1) {
-    const [t0, c0] = anchors[i];
-    const [t1, c1] = anchors[i + 1];
-    if (t <= t1) {
-      const u = clamp((Math.log(t) - Math.log(t0)) / Math.max(1e-6, Math.log(t1) - Math.log(t0)), 0, 1);
-      rgb = [
-        c0[0] + (c1[0] - c0[0]) * u,
-        c0[1] + (c1[1] - c0[1]) * u,
-        c0[2] + (c1[2] - c0[2]) * u
-      ];
-      break;
-    }
-  }
-  const peak = Math.max(0.01, rgb[0], rgb[1], rgb[2]);
-  return [
-    Number((rgb[0] / peak).toFixed(4)),
-    Number((rgb[1] / peak).toFixed(4)),
-    Number((rgb[2] / peak).toFixed(4))
+  const peak = Math.max(0.01, lin[0], lin[1], lin[2]);
+  const out = [
+    Number((lin[0] / peak).toFixed(4)),
+    Number((lin[1] / peak).toFixed(4)),
+    Number((lin[2] / peak).toFixed(4))
   ];
+  if (BLACKBODY_LIGHT_CACHE.size < 2048) BLACKBODY_LIGHT_CACHE.set(bucket, out);
+  return [...out];
 }
 
 /**

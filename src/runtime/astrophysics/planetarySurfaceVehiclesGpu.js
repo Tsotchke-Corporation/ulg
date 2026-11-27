@@ -37,6 +37,11 @@ import {
   resolveSolventIor
 } from '../material/materialPbrOpticsBridge.js';
 import {
+  deriveRayleighMieSkyRgb,
+  resolveGasMixtureProperties,
+  resolveSolventThermodynamics
+} from '../material/canonicalMaterialLookup.js';
+import {
   createPlanetaryAtmo3dCfdSessionWebGpu,
   evaluateAtmosphericChemistryAtAltitude
 } from './planetaryAtmosphere3dCfdGpu.js';
@@ -166,10 +171,20 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
   );
   // Apply chosen orbital landing-site latitude/biome temperature offset (polar ice cap vs arid plateau!)
   const tempK = Math.max(35, baseTempK + (Number(landingSite?.tempOffsetK) || 0));
-  // Effective molar mass (kg/mol): H2/He gas giants (~0.0024), CO2 thin/super-greenhouse (~0.044), N2/O2 (~0.029)
-  const molarMassKgPerMol = !hasSolidCrust
-    ? 0.0024
-    : (pressurePa > 2e6 || (pressurePa > 100 && pressurePa < 2e4) ? 0.044 : 0.029);
+  // Exact mole-fraction-weighted atmospheric molar mass from ULG's canonical periodic table!
+  const gasMix = resolveGasMixtureProperties({
+    hasSolidCrust,
+    pressurePa,
+    tempK,
+    radiusM,
+    volatileFrac: Math.max(
+      0,
+      Number(atmo?.volatileMassFrac) || 0,
+      Number(bodySpec.volatileMassFrac) || 0,
+      Number(bodySpec.coalescedComposition?.volatileFrac) || 0
+    )
+  }, tempK);
+  const molarMassKgPerMol = gasMix.molarMassKgMol;
   const rhoAtmKgM3 = pressurePa > 1e-3
     ? (pressurePa * molarMassKgPerMol) / (8.31446 * tempK)
     : 0.0;
@@ -196,22 +211,24 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     seed,
     civTechK: Number.isFinite(Number(bodySpec.civTechK)) ? Number(bodySpec.civTechK) : undefined
   });
-  const tBoilWaterK = pressurePa >= 611
-    ? Math.max(273.16, Math.min(647.1, 373.15 / Math.max(0.55, 1.0 - 0.07632 * Math.log(Math.max(1e-4, pressurePa / 101325)))))
-    : 273.16;
+  const h2oThermo = resolveSolventThermodynamics('H2O', tempK, pressurePa);
+  const tBoilWaterK = h2oThermo.tBoilK;
   const hasLiquidWaterOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !isRogue
     && pressurePa >= 611 && tempK >= 255 && tempK <= tBoilWaterK && volatileFrac >= 0.012;
   // Surface exotic oceans ONLY when the solvent is actually liquid at surface (T, P) — NEVER spawn a surface ocean from elevated 50 km cloud-deck aerosols (e.g. 737 K Venus H2SO4)!
+  const activeSolvThermo = resolveSolventThermodynamics(
+    xenobiology.solvent === 'none' ? 'H2O' : xenobiology.solvent,
+    tempK,
+    pressurePa
+  );
   const hasExoticOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !hasLiquidWaterOcean
     && !xenobiology.isCloudDeckHabitat
-    && ((xenobiology.solvent === 'CH4' && tempK >= 82 && tempK <= 125)
-      || (xenobiology.solvent === 'NH3' && tempK >= 190 && tempK <= 265)
-      || (xenobiology.solvent === 'H2SO4' && tempK >= 283 && tempK <= 605));
+    && ((xenobiology.solvent === 'CH4' && tempK >= 82 && tempK <= Math.max(125, activeSolvThermo.tBoilK))
+      || (xenobiology.solvent === 'NH3' && tempK >= 190 && tempK <= Math.max(265, activeSolvThermo.tBoilK))
+      || (xenobiology.solvent === 'H2SO4' && tempK >= 283 && tempK <= Math.max(605, activeSolvThermo.tBoilK)));
   const hasLiquidOcean = hasLiquidWaterOcean || hasExoticOcean;
   const oceanRgb = xenobiology.oceanRgb || [0.04, 0.24, 0.46];
-  const solventMeltTempK = xenobiology.solvent === 'CH4'
-    ? 90.7
-    : (xenobiology.solvent === 'NH3' ? 195.4 : (xenobiology.solvent === 'H2SO4' ? 283.5 : 273.15));
+  const solventMeltTempK = activeSolvThermo.tMeltK;
 
   // Coaxial rotorcraft drone (Ingenuity/Dragonfly class: m = 1.8 kg, dual 1.2m rotors, A_disk = 1.13 m^2)
   // Exact actuator-disk lift: T_max = 0.5 * rho_atm * A_disk * (C_T_eff * v_tip^2)
@@ -242,34 +259,18 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     ? Math.min(0.14, dustFrac * 0.22)
     : (pressurePa > 50 && pressurePa < 3e4 ? Math.min(1.0, 0.58 + dustFrac * 1.4) : Math.min(0.7, dustFrac * 0.8));
   const isDenseWarmHaze = !hasSolidCrust || pressurePa > 8e5 || (tempK < 130 && pressurePa > 5e4);
-  let skyZenithRgb;
-  let skyHorizonRgb;
-  if (isMagmaOcean) {
-    skyZenithRgb = [0.22, 0.07, 0.04];
-    skyHorizonRgb = [0.78, 0.30, 0.10];
-  } else if (skyOpticalDepth < 0.03) {
-    skyZenithRgb = [0.004, 0.007, 0.016];
-    skyHorizonRgb = [0.012, 0.018, 0.032];
-  } else if (isDenseWarmHaze) {
-    skyZenithRgb = [0.56 * c0[0] + 0.16, 0.48 * c0[1] + 0.12, 0.26 * c0[2] + 0.05];
-    skyHorizonRgb = [0.92 * c0[0] + 0.10, 0.78 * c0[1] + 0.08, 0.42 * c0[2] + 0.05];
-  } else {
-    // Blend classic Rayleigh blue vs Mie suspended mineral dust sky!
-    const rayZ = [0.07, 0.26, 0.72];
-    const rayH = [0.46, 0.72, 0.98];
-    const mieZ = [0.42, 0.22, 0.14];
-    const mieH = [0.84, 0.56, 0.36];
-    skyZenithRgb = [
-      (rayZ[0] * (1 - dustTint) + mieZ[0] * dustTint) * skyOpticalDepth,
-      (rayZ[1] * (1 - dustTint) + mieZ[1] * dustTint) * skyOpticalDepth,
-      (rayZ[2] * (1 - dustTint) + mieZ[2] * dustTint) * skyOpticalDepth
-    ];
-    skyHorizonRgb = [
-      (rayH[0] * (1 - dustTint) + mieH[0] * dustTint) * skyOpticalDepth,
-      (rayH[1] * (1 - dustTint) + mieH[1] * dustTint) * skyOpticalDepth,
-      (rayH[2] * (1 - dustTint) + mieH[2] * dustTint) * skyOpticalDepth
-    ];
-  }
+  // First-principles CIE-1931 wavelength-integrated Rayleigh + Mie planetary sky scattering
+  // via ULG's canonical `opticalClosure.spectralResponseToSrgb`!
+  const derivedSky = deriveRayleighMieSkyRgb({
+    skyOpticalDepth,
+    dustTint,
+    isMagmaOcean,
+    isDenseWarmHaze,
+    hazeRgb: c0,
+    hostStarTeffK: Number(bodySpec.hostStarTeffK) || 5778
+  });
+  const skyZenithRgb = derivedSky.skyZenithRgb;
+  const skyHorizonRgb = derivedSky.skyHorizonRgb;
 
   // Crater preservation factor: thin/airless worlds preserve sharp impact craters; dense/wet worlds erode them!
   const craterStrength = hasSolidCrust

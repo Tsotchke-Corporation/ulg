@@ -11,6 +11,10 @@ import {
   solvePhotobiologySpectrum,
   deriveRedoxAndBiosignatures
 } from './xenobiologyEcologyEngine.js';
+import {
+  resolveGasMixtureProperties,
+  resolveSolventThermodynamics
+} from '../material/canonicalMaterialLookup.js';
 
 export const ULG_PLANETARY_NICHE_ATLAS_SCHEMA = 'ulg.biology.planetary-niche-atlas.v1';
 
@@ -75,9 +79,15 @@ export function extractPlanetaryHabitatTensor(planetState = {}) {
   const omegaRadS = (2 * Math.PI) / (rotationPeriodHr * 3600);
   const coriolisParam = 2 * omegaRadS * Math.sin(Math.PI / 4);
 
+  const gasMix = resolveGasMixtureProperties({
+    hasSolidCrust,
+    pressurePa,
+    tempK,
+    volatileFrac
+  }, tempK);
   const rhoAtmKgM3 = Number.isFinite(Number(planetState.rhoAtmKgM3))
     ? Math.max(0, Number(planetState.rhoAtmKgM3))
-    : (pressurePa > 0 ? clamp((pressurePa * 0.029) / (8.31446 * Math.max(50, tempK)), 0, 120) : 0);
+    : (pressurePa > 0 ? clamp((pressurePa * gasMix.molarMassKgMol) / (8.31446 * Math.max(50, tempK)), 0, 120) : 0);
 
   const windMeanMS = Number.isFinite(Number(planetState.windMeanMS))
     ? Math.max(0, Number(planetState.windMeanMS))
@@ -167,13 +177,14 @@ export function extractPlanetaryHabitatTensor(planetState = {}) {
     ? clamp((rhoAtmKgM3 / 1.22) * Math.pow(9.81 / gravityMS2, 0.85), 0.0, 12.0)
     : 0.0;
 
-  // Fluid density & viscosity for Reynolds / Strouhal mechanics
-  const solventDensityKgM3 = solventInfo.solvent === 'CH4'
-    ? 450
-    : (solventInfo.solvent === 'NH3' ? 730 : (solventInfo.solvent === 'CO2-liq' ? 880 : (solventInfo.solvent === 'H2SO4' ? 1830 : 1015)));
-  const solventViscosityPaS = solventInfo.solvent === 'CH4'
-    ? 1.8e-4
-    : (solventInfo.solvent === 'H2SO4' ? 2.4e-2 : 1.05e-3);
+  // Fluid density & temperature-dependent Andrade viscosity from ULG canonical material lookup
+  const solvThermo = resolveSolventThermodynamics(
+    solventInfo.solvent === 'none' ? 'H2O' : solventInfo.solvent,
+    tempK,
+    Math.max(101325, pressurePa)
+  );
+  const solventDensityKgM3 = Number(solventInfo.densityKgM3) || solvThermo.densityKgM3;
+  const solventViscosityPaS = Number(solventInfo.viscosityPaS) || solvThermo.viscosityPaS;
 
   const deltaTDiurnalK = tidallyLocked
     ? clamp(45 + 110 / (1 + rhoAtmKgM3 * 1.4), 15, 180)

@@ -346,32 +346,137 @@ export async function mountOrganicLabDemo() {
           vMarker: thetaWrap, hZero: true, labelX: 'Rotor Angle θ (0..45°)'
         });
       } else if (currentMode === 'sn2-walden' || currentMode === 'diels-alder') {
-        el('p2-title').textContent = currentMode === 'sn2-walden' ? 'SN2 Reaction Barrier ΔG(ξ)' : 'Diels–Alder [4+2] Barrier ΔG(ξ)';
-        el('p2-sub').textContent = `ξ = ${reactProgress.toFixed(2)}`;
-        const pts = [];
-        const ea = currentMode === 'sn2-walden' ? 78.0 : 94.0;
-        const dgRxn = currentMode === 'sn2-walden' ? -18.0 : -142.0;
-        for (let i = 0; i <= 40; i += 1) {
-          const x = i / 40;
-          const b = 16 * x * x * (1 - x) * (1 - x) * ea + dgRxn * (3 * x * x - 2 * x * x * x);
-          pts.push([x, b]);
+        // Compute live molecular reaction energy profile directly from actual 3D graph geometries,
+        // Morse covalent bond-order + screened QEq electrostatics + Born solvation across xi in [0..1]!
+        el('p2-title').textContent = currentMode === 'sn2-walden' ? 'SN2 Force-Field + QEq ΔG(ξ)' : 'Diels–Alder [4+2] Force-Field ΔG(ξ)';
+        el('p2-sub').textContent = `ξ = ${reactProgress.toFixed(2)} (QEq+Morse)`;
+        const evalGraphEnergyKj = (g) => {
+          const q = solveQeqCharges(g, { dielectricEr });
+          const atoms = g.atoms || [];
+          const bonds = g.bonds || [];
+          let eBond = 0;
+          const bonded = new Set();
+          for (const b of bonds) {
+            const a0 = atoms[b.a]; const a1 = atoms[b.b];
+            if (!a0 || !a1) continue;
+            bonded.add(`${Math.min(b.a, b.b)}:${Math.max(b.a, b.b)}`);
+            const r = Math.hypot(a0.pos[0] - a1.pos[0], a0.pos[1] - a1.pos[1], a0.pos[2] - a1.pos[2]);
+            const r0 = ((a0.covalentRadiusA || 0.77) + (a1.covalentRadiusA || 0.77)) * (b.order >= 2 ? 0.88 : 1.0);
+            const dE = 340 * Math.max(0.4, b.order || 1.0);
+            const alpha = 1.85;
+            const mTerm = 1.0 - Math.exp(-alpha * (r - r0));
+            eBond += dE * (mTerm * mTerm - 1.0);
+          }
+          let eNonBond = 0;
+          for (let i = 0; i < atoms.length; i += 1) {
+            for (let j = i + 1; j < atoms.length; j += 1) {
+              if (bonded.has(`${i}:${j}`)) continue;
+              const ai = atoms[i]; const aj = atoms[j];
+              const r = Math.max(0.75, Math.hypot(ai.pos[0] - aj.pos[0], ai.pos[1] - aj.pos[1], ai.pos[2] - aj.pos[2]));
+              const sig = Math.max(2.1, ((ai.vdwRadiusA || 1.55) + (aj.vdwRadiusA || 1.55)) * 0.78);
+              const sr = sig / r;
+              const sr6 = Math.pow(Math.min(2.2, sr), 6);
+              eNonBond += 0.45 * (sr6 * sr6 - 2.0 * sr6);
+              const qi = q.charges[i] || 0;
+              const qj = q.charges[j] || 0;
+              eNonBond += (1389.35 * qi * qj) / (Math.max(1.0, dielectricEr) * r);
+            }
+          }
+          return eBond + eNonBond + (q.bornSolvationKjMol || 0);
+        };
+        const rawPts = [];
+        for (let i = 0; i <= 24; i += 1) {
+          const xi = i / 24;
+          const gXi = buildOrganicMolecularGraph(currentMode, { reactionProgress: xi, pH });
+          rawPts.push([xi, evalGraphEnergyKj(gXi)]);
         }
+        const e0 = rawPts[0][1];
+        const pts = rawPts.map(([xi, e]) => [xi, Math.max(-220, Math.min(220, e - e0))]);
+        const ys = pts.map((p) => p[1]);
+        const yMin = Math.min(-25, ...ys) - 12;
+        const yMax = Math.max(35, ...ys) + 14;
         drawLinePlot(plot2, {
-          xMin: 0, xMax: 1, yMin: Math.min(-30, dgRxn - 15), yMax: ea + 18,
+          xMin: 0, xMax: 1, yMin, yMax,
           series: [{ pts, color: '#facc15', width: 2.1 }],
           vMarker: reactProgress, hZero: true, labelX: 'Reaction Coordinate ξ'
         });
       } else if (currentMode === 'butane' || currentMode === 'cyclohexane') {
-        el('p2-title').textContent = 'sp³ Torsional Energy V(φ)';
-        el('p2-sub').textContent = 'kJ/mol';
-        const pts = [];
-        for (let deg = -180; deg <= 180; deg += 6) {
-          const rad = (deg * Math.PI) / 180;
-          const v = 5.4 * (1 + Math.cos(3 * rad)) + 4.8 * (1 + Math.cos(rad)) + 1.9 * Math.exp(-Math.pow(rad / 0.45, 2));
-          pts.push([deg, v]);
+        // Compute live sp3 dihedral steric + QEq electrostatic conformational energy scan V(phi)
+        // directly by rotating the real 3D substituent coordinates around the central C-C bond!
+        el('p2-title').textContent = '3D Steric + QEq Torsion V(φ)';
+        el('p2-sub').textContent = 'kJ/mol (live scan)';
+        const atoms = graph.atoms || [];
+        const qBase = currentQeq?.charges || [];
+        const rawPts = [];
+        // Identify central heavy-atom torsion bond (atoms 1-2 in butane / ring C-C in cyclohexane)
+        const cAtoms = atoms.map((a, idx) => ({ a, idx })).filter((x) => x.a.Z === 6);
+        const iB = cAtoms.length >= 3 ? cAtoms[1].idx : 0;
+        const iC = cAtoms.length >= 3 ? cAtoms[2].idx : Math.min(1, atoms.length - 1);
+        const pB = atoms[iB]?.pos || [0, 0, 0];
+        const pC = atoms[iC]?.pos || [1, 0, 0];
+        const axRaw = [pC[0] - pB[0], pC[1] - pB[1], pC[2] - pB[2]];
+        const axLen = Math.hypot(axRaw[0], axRaw[1], axRaw[2]) || 1;
+        const ax = [axRaw[0] / axLen, axRaw[1] / axLen, axRaw[2] / axLen];
+        // Partition atoms on the iC side of the bond via BFS
+        const rotSet = new Set([iC]);
+        const adj = new Map();
+        for (const b of (graph.bonds || [])) {
+          if ((b.a === iB && b.b === iC) || (b.a === iC && b.b === iB)) continue;
+          if (!adj.has(b.a)) adj.set(b.a, []);
+          if (!adj.has(b.b)) adj.set(b.b, []);
+          adj.get(b.a).push(b.b);
+          adj.get(b.b).push(b.a);
         }
+        const queue = [iC];
+        while (queue.length) {
+          const cur = queue.shift();
+          for (const nb of (adj.get(cur) || [])) {
+            if (nb !== iB && !rotSet.has(nb)) {
+              rotSet.add(nb);
+              queue.push(nb);
+            }
+          }
+        }
+        const bondedPairs = new Set((graph.bonds || []).map((b) => `${Math.min(b.a, b.b)}:${Math.max(b.a, b.b)}`));
+        for (let deg = -180; deg <= 180; deg += 10) {
+          const rad = (deg * Math.PI) / 180;
+          const cosA = Math.cos(rad);
+          const sinA = Math.sin(rad);
+          const posRot = atoms.map((a, idx) => {
+            if (!rotSet.has(idx)) return a.pos;
+            const v = [a.pos[0] - pB[0], a.pos[1] - pB[1], a.pos[2] - pB[2]];
+            const dotAV = ax[0] * v[0] + ax[1] * v[1] + ax[2] * v[2];
+            const cr = [ax[1] * v[2] - ax[2] * v[1], ax[2] * v[0] - ax[0] * v[2], ax[0] * v[1] - ax[1] * v[0]];
+            return [
+              pB[0] + v[0] * cosA + cr[0] * sinA + ax[0] * dotAV * (1 - cosA),
+              pB[1] + v[1] * cosA + cr[1] * sinA + ax[1] * dotAV * (1 - cosA),
+              pB[2] + v[2] * cosA + cr[2] * sinA + ax[2] * dotAV * (1 - cosA)
+            ];
+          });
+          // Intrinsic hyperconjugative C-C barrier + real 3D non-bonded LJ steric + QEq Coulomb across rotated pairs
+          let ePhi = 5.8 * (1 + Math.cos(3 * rad));
+          for (let i = 0; i < atoms.length; i += 1) {
+            if (rotSet.has(i)) continue;
+            for (const j of rotSet) {
+              if (bondedPairs.has(`${Math.min(i, j)}:${Math.max(i, j)}`)) continue;
+              const r = Math.max(0.85, Math.hypot(
+                posRot[i][0] - posRot[j][0],
+                posRot[i][1] - posRot[j][1],
+                posRot[i][2] - posRot[j][2]
+              ));
+              const sig = ((atoms[i].vdwRadiusA || 1.2) + (atoms[j].vdwRadiusA || 1.2)) * 0.88;
+              const sr6 = Math.pow(Math.min(2.1, sig / r), 6);
+              ePhi += 0.22 * (sr6 * sr6 - 2.0 * sr6);
+              ePhi += (1389.35 * (qBase[i] || 0) * (qBase[j] || 0)) / (Math.max(1.0, dielectricEr) * r);
+            }
+          }
+          rawPts.push([deg, ePhi]);
+        }
+        const eMin = Math.min(...rawPts.map((p) => p[1]));
+        const pts = rawPts.map(([deg, e]) => [deg, Math.min(48, Math.max(0, e - eMin))]);
+        const yMax = Math.max(18, Math.ceil(Math.max(...pts.map((p) => p[1])) + 3));
         drawLinePlot(plot2, {
-          xMin: -180, xMax: 180, yMin: 0, yMax: 24,
+          xMin: -180, xMax: 180, yMin: 0, yMax,
           series: [{ pts, color: '#34d399', width: 2.0 }],
           labelX: 'Dihedral φ (deg)'
         });

@@ -25,6 +25,7 @@ import {
   LAW_SPATIAL_AUTHORITIES
 } from '../sph/lawAdapterContract.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
+import { resolveSolventThermodynamics } from '../material/canonicalMaterialLookup.js';
 import { buildDevelopmentalGenome } from './developmentalGenome.js';
 
 export const ULG_XENOBIOLOGY_ECOLOGY_SCHEMA = 'ulg.biology.xenobiology-ecology.v2';
@@ -207,14 +208,17 @@ export function classifySolventBains2024({
   // Liquid / Supercritical CO2 (Bains+ 2024 high-scoring non-protonating solvent on dry high-P worlds,
   // covering BOTH liquid CO2 >= 5.2 bar and supercritical scCO2 above 7.38 MPa / 304.1 K!)
   if (hasSolidCrust && P >= 5.2e5 && T >= 216 && T <= 360 && v < 0.012) {
+    const co2Thermo = resolveSolventThermodynamics('CO2', T, P);
     return Object.freeze({
       solvent: 'CO2-liq',
       formula: 'scCO₂',
       label: 'Liquid / Supercritical CO₂ Solvent',
       bainsScore: 0.71,
-      dielectricEr: 1.65,
-      tMeltK: 216.6,
-      tBoilK: 304.1,
+      dielectricEr: co2Thermo.dielectricEr,
+      tMeltK: co2Thermo.tMeltK,
+      tBoilK: co2Thermo.tBoilK,
+      viscosityPaS: co2Thermo.viscosityPaS,
+      densityKgM3: co2Thermo.densityKgM3,
       tDenatureK: 410.0,
       oceanRgb: [0.34, 0.44, 0.42],
       membraneType: 'Siloxane-Fluorocarbon Amphiphile Envelope',
@@ -229,11 +233,10 @@ export function classifySolventBains2024({
     });
   }
 
-  // Liquid Water (Aqueous — checked BEFORE H2SO4 cloud decks using real Clausius-Clapeyron T_boil(P),
+  // Liquid Water (Aqueous — checked BEFORE H2SO4 cloud decks using canonical ULG Clausius-Clapeyron T_boil(P),
   // while desiccated super-greenhouse worlds with P >= 50 bar & scarce water v <= 0.035 fall through to H2SO4 cloud decks!)
-  const tBoilWaterK = P >= 611
-    ? Math.max(273.16, Math.min(647.1, 373.15 / Math.max(0.55, 1.0 - 0.07632 * Math.log(Math.max(1e-4, P / 101325)))))
-    : 273.16;
+  const h2oThermo = resolveSolventThermodynamics('H2O', T, P);
+  const tBoilWaterK = h2oThermo.tBoilK;
   const isDesiccatedSuperGreenhouse = P >= 5.0e6 && v <= 0.035;
   if (hasSolidCrust && !isDesiccatedSuperGreenhouse && P >= 611 && T >= 255 && T <= tBoilWaterK && v >= 0.012) {
     return Object.freeze({
@@ -243,9 +246,11 @@ export function classifySolventBains2024({
       isCloudDeckHabitat: false,
       habitatAltitudeKm: 0,
       bainsScore: 0.96,
-      dielectricEr: 78.4,
-      tMeltK: 273.15,
-      tBoilK: Number(tBoilWaterK.toFixed(2)),
+      dielectricEr: h2oThermo.dielectricEr,
+      tMeltK: h2oThermo.tMeltK,
+      tBoilK: h2oThermo.tBoilK,
+      viscosityPaS: h2oThermo.viscosityPaS,
+      densityKgM3: h2oThermo.densityKgM3,
       tDenatureK: 355.0 + Math.max(0, (T - 295) * 0.65),
       oceanRgb: [0.04, 0.24, 0.48],
       membraneType: 'Phospholipid Bilayer',
@@ -262,6 +267,7 @@ export function classifySolventBains2024({
 
   // Concentrated H2SO4 Cloud Aerosols (Bains, Petkowski & Seager 2024: elevated 50 km cloud deck — NEVER a 737 K surface ocean!)
   if ((P >= 2.5e6 && T >= 295 && T <= 760) || (P >= 5e5 && T > tBoilWaterK && T <= 760)) {
+    const h2so4Thermo = resolveSolventThermodynamics('H2SO4', Math.min(340, T), Math.min(2e5, P));
     return Object.freeze({
       solvent: 'H2SO4',
       formula: 'H₂SO₄',
@@ -269,9 +275,11 @@ export function classifySolventBains2024({
       isCloudDeckHabitat: true,
       habitatAltitudeKm: 50,
       bainsScore: 0.62,
-      dielectricEr: 101.0,
-      tMeltK: 283.5,
-      tBoilK: 610.0,
+      dielectricEr: h2so4Thermo.dielectricEr,
+      tMeltK: h2so4Thermo.tMeltK,
+      tBoilK: h2so4Thermo.tBoilK,
+      viscosityPaS: h2so4Thermo.viscosityPaS,
+      densityKgM3: h2so4Thermo.densityKgM3,
       tDenatureK: 475.0,
       oceanRgb: [0.64, 0.56, 0.24],
       membraneType: 'Sulfonated Aromatic Acidophile Vesicle',
@@ -286,16 +294,19 @@ export function classifySolventBains2024({
     });
   }
 
-  // Cryogenic Liquid Methane / Ethane (respects 2024 acrylonitrile cocrystal/cryomineral findings!)
-  if (hasSolidCrust && P >= 1.2e4 && T >= 82 && T <= 124) {
+  // Cryogenic Liquid Methane / Ethane (pressure-dependent T_boil(P) + 2024 acrylonitrile cocrystal/cryomineral findings!)
+  const ch4Thermo = resolveSolventThermodynamics('CH4', T, P);
+  if (hasSolidCrust && P >= 1.2e4 && T >= 82 && T <= Math.max(124, ch4Thermo.tBoilK)) {
     return Object.freeze({
       solvent: 'CH4',
       formula: 'CH₄/C₂H₆',
       label: 'Cryogenic Liquid Methane / Ethane',
       bainsScore: 0.44,
-      dielectricEr: 1.7,
-      tMeltK: 90.7,
-      tBoilK: 111.7,
+      dielectricEr: ch4Thermo.dielectricEr,
+      tMeltK: ch4Thermo.tMeltK,
+      tBoilK: ch4Thermo.tBoilK,
+      viscosityPaS: ch4Thermo.viscosityPaS,
+      densityKgM3: ch4Thermo.densityKgM3,
       tDenatureK: 148.0,
       oceanRgb: [0.18, 0.16, 0.10],
       membraneType: 'Cryomineral-Pore / Reverse-Amphiphile Shell (2024 Azoto-Cocrystal Caution)',
@@ -310,16 +321,19 @@ export function classifySolventBains2024({
     });
   }
 
-  // Liquid Ammonia-Water Eutectic
-  if (hasSolidCrust && P >= 5e3 && T >= 190 && T <= 258 && v >= 0.008) {
+  // Liquid Ammonia-Water Eutectic (pressure-dependent Clausius-Clapeyron T_boil(P))
+  const nh3Thermo = resolveSolventThermodynamics('NH3', T, P);
+  if (hasSolidCrust && P >= 5e3 && T >= 190 && T <= Math.max(258, nh3Thermo.tBoilK) && v >= 0.008) {
     return Object.freeze({
       solvent: 'NH3',
       formula: 'NH₃',
       label: 'Liquid Ammonia–Water Eutectic',
       bainsScore: 0.68,
-      dielectricEr: 22.0,
-      tMeltK: 195.4,
-      tBoilK: 239.8,
+      dielectricEr: nh3Thermo.dielectricEr,
+      tMeltK: nh3Thermo.tMeltK,
+      tBoilK: nh3Thermo.tBoilK,
+      viscosityPaS: nh3Thermo.viscosityPaS,
+      densityKgM3: nh3Thermo.densityKgM3,
       tDenatureK: 295.0,
       oceanRgb: [0.14, 0.26, 0.34],
       membraneType: 'Ammonophilic Reverse-Ether Amphiphile',
@@ -336,14 +350,17 @@ export function classifySolventBains2024({
 
   // Subsurface Hydrothermal Brine Ocean (Icy Moons)
   if (isCryoMoon || (hasSolidCrust && T >= 75 && T <= 180 && v >= 0.02)) {
+    const subH2o = resolveSolventThermodynamics('H2O', 278, Math.max(5e6, P));
     return Object.freeze({
       solvent: 'H2O-subsurface',
       formula: 'H₂O (Subsurface)',
       label: 'Subsurface Hydrothermal Brine Ocean',
       bainsScore: 0.78,
-      dielectricEr: 78.4,
-      tMeltK: 273.15,
-      tBoilK: 373.15,
+      dielectricEr: subH2o.dielectricEr,
+      tMeltK: subH2o.tMeltK,
+      tBoilK: subH2o.tBoilK,
+      viscosityPaS: subH2o.viscosityPaS,
+      densityKgM3: subH2o.densityKgM3,
       tDenatureK: 395.0,
       oceanRgb: [0.06, 0.34, 0.56],
       membraneType: 'Tetraether-Lipid Barophile Monolayer',

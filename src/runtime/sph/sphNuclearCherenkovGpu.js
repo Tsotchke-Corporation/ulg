@@ -92,9 +92,9 @@ struct NuclearTickParams {
   apply_thermal_heat: u32,
   exact_energy_enabled: u32,
   rigid_body_count: u32,
-  pad0: u32,
-  pad1: u32,
-  pad2: u32,
+  n_650: f32,
+  n_550: f32,
+  n_450: f32,
 };
 
 struct SourceSpec {
@@ -126,7 +126,7 @@ fn snc_clear(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicStore(&centroid_accum[base + 4u], 0);
   atomicStore(&centroid_accum[base + 5u], 0);
   if (s == 0u) {
-    cherenkov_sources[0u] = vec4<f32>(f32(params.source_count), 0.0, 0.0, 0.0);
+    cherenkov_sources[0u] = vec4<f32>(f32(params.source_count), params.n_650, params.n_550, params.n_450);
   }
 }
 
@@ -503,11 +503,18 @@ fn wyman_gauss(x: f32, mu: f32, s1: f32, s2: f32) -> f32 {
   return exp(-0.5 * t * t);
 }
 
-// First-principles Frank-Tamm d^2N / (dx dlambda) ~ lambda^-2 * (1 - 1 / (beta^2 * n^2))
+// First-principles spectral Frank-Tamm d^2N / (dx dlambda) ~ lambda^-2 * (1 - 1 / (beta^2 * n(lambda)^2))
+// with live Cauchy chromatic dispersion n(lambda) derived from the dielectric's (n_650, n_550, n_450)
 // integrated against Wyman 2013 CIE 1931 color matching functions -> linear sRGB!
-fn frank_tamm_linear_rgb(beta: f32, ior: f32) -> vec3<f32> {
-  let sin2 = 1.0 - 1.0 / max(1.0e-6, beta * beta * ior * ior);
-  if (!(sin2 > 0.0)) {
+fn frank_tamm_linear_rgb(beta: f32, ior: f32, n_rgb: vec3<f32>) -> vec3<f32> {
+  // Cauchy dispersion B = (n_450 - n_650) / (450^-2 - 650^-2), centered strictly at surface `ior` (550 nm)
+  let has_disp = n_rgb.x > 1.0001 && n_rgb.z > 1.0001;
+  let inv_l2_450 = 1.0 / (450.0 * 450.0);
+  let inv_l2_550 = 1.0 / (550.0 * 550.0);
+  let inv_l2_650 = 1.0 / (650.0 * 650.0);
+  let cauchy_b = select(0.0, clamp((n_rgb.z - n_rgb.x) / (inv_l2_450 - inv_l2_650), -2.5e4, 2.5e4), has_disp);
+  let n_max = max(ior, ior + max(0.0, cauchy_b) * (1.0 / (380.0 * 380.0) - inv_l2_550));
+  if (!(1.0 - 1.0 / max(1.0e-6, beta * beta * n_max * n_max) > 0.0)) {
     return vec3<f32>(0.0);
   }
   var cx = 0.0;
@@ -516,10 +523,13 @@ fn frank_tamm_linear_rgb(beta: f32, ior: f32) -> vec3<f32> {
   var norm = 0.0;
   let peak_inv_l3 = 1.0 / (380.0 * 380.0 * 380.0);
   // 10 nm CIE 1931 spectral quadrature of Frank-Tamm radiant energy power
-  // d^2E / (dx dlambda) = (hc/lambda) * d^2N / (dx dlambda) ~ lambda^-3
+  // d^2E / (dx dlambda) = (hc/lambda) * d^2N / (dx dlambda) ~ lambda^-3 * max(0, 1 - 1/(beta^2 * n(lambda)^2))
   for (var k = 0u; k < 41u; k = k + 1u) {
     let nm = 380.0 + f32(k) * 10.0;
-    let spec = (1.0 / (nm * nm * nm)) / peak_inv_l3;
+    let n_nm = max(1.0, ior + cauchy_b * (1.0 / (nm * nm) - inv_l2_550));
+    let sin2_nm = max(0.0, 1.0 - 1.0 / max(1.0e-6, beta * beta * n_nm * n_nm));
+    if (sin2_nm <= 0.0) { continue; }
+    let spec = ((1.0 / (nm * nm * nm)) / peak_inv_l3) * sin2_nm;
     let wx = 1.056 * wyman_gauss(nm, 599.8, 37.9, 31.0)
       + 0.362 * wyman_gauss(nm, 442.0, 16.0, 26.7)
       - 0.065 * wyman_gauss(nm, 501.1, 20.4, 26.2);
@@ -623,6 +633,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   let sigma_abs = -log(opt.attenuation_linear) / opt.attenuation_distance_m;
   var volume_radiance = vec3<f32>(0.0);
 
+  let header_disp = cherenkov_sources[0u].yzw;
   for (var s = 0u; s < source_count; s = s + 1u) {
     let pos_rad = cherenkov_sources[1u + s * 2u];
     let phys = cherenkov_sources[2u + s * 2u];
@@ -633,11 +644,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (!(active_flag > 0.5) || !(scale > 0.0)) {
       continue;
     }
-    let sin2_theta = 1.0 - 1.0 / max(1.0e-6, beta * beta * opt.ior * opt.ior);
-    if (!(sin2_theta > 0.0)) {
+    let spec_rgb = frank_tamm_linear_rgb(beta, opt.ior, header_disp);
+    if (dot(spec_rgb, spec_rgb) <= 1.0e-8) {
       continue;
     }
-    let spec_rgb = frank_tamm_linear_rgb(beta, opt.ior);
+    let sin2_theta = max(0.02, 1.0 - 1.0 / max(1.0e-6, beta * beta * opt.ior * opt.ior));
     let src_center = pos_rad.xyz;
     let src_radius = max(0.02, pos_rad.w);
     let falloff_r = max(0.07, src_radius * 0.85 + 0.04);
@@ -893,7 +904,13 @@ export function seedSphNuclearCherenkovSources(device, {
   state.remainingAtomsByKey.clear();
 
   const initBuf = new Float32Array(CHERENKOV_SOURCES_VEC4_COUNT * 4);
+  const nRgbInit = Array.isArray(nuclearDescriptor?.refractiveIndexRgb) && nuclearDescriptor.refractiveIndexRgb.length >= 3
+    ? nuclearDescriptor.refractiveIndexRgb
+    : [state.refractiveIndex, state.refractiveIndex, state.refractiveIndex];
   initBuf[0] = clamped.length;
+  initBuf[1] = Number(nRgbInit[0]) || 0;
+  initBuf[2] = Number(nRgbInit[1]) || 0;
+  initBuf[3] = Number(nRgbInit[2]) || 0;
   for (let i = 0; i < clamped.length; i += 1) {
     const s = clamped[i];
     const key = `${s.bodyId}:${s.domainId}:${s.isotope}`;
@@ -1047,17 +1064,23 @@ export function encodeSphNuclearDecayAndCherenkovTick(device, encoder, {
   state.totalDepositedThermalEnergyJ += stepDepositedJ;
   if (dt > 0) state.thermalPowerW = stepPowerW;
 
-  const pData = new Uint32Array([
+  const nRgbTick = Array.isArray(nuclearDescriptor?.refractiveIndexRgb) && nuclearDescriptor.refractiveIndexRgb.length >= 3
+    ? nuclearDescriptor.refractiveIndexRgb
+    : [state.refractiveIndex, state.refractiveIndex, state.refractiveIndex];
+  const pAb = new ArrayBuffer(32);
+  new Uint32Array(pAb, 0, 5).set([
     particleCount >>> 0,
     clamped.length >>> 0,
     dt > 0 ? 1 : 0,
     exactEnergyBuffer ? 1 : 0,
-    validRigid ? (validRigid.bodyCount >>> 0) : 0,
-    0,
-    0,
-    0
+    validRigid ? (validRigid.bodyCount >>> 0) : 0
   ]);
-  state.device.queue.writeBuffer(state.paramsBuffer, 0, pData);
+  new Float32Array(pAb, 20, 3).set([
+    Number(nRgbTick[0]) || 0,
+    Number(nRgbTick[1]) || 0,
+    Number(nRgbTick[2]) || 0
+  ]);
+  state.device.queue.writeBuffer(state.paramsBuffer, 0, pAb);
   state.device.queue.writeBuffer(state.sourceSpecsBuffer, 0, specs);
 
   const exactBuf = exactEnergyBuffer || state.dummyExactEnergyBuffer;

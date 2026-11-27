@@ -33,6 +33,7 @@ import {
   LAW_SPATIAL_AUTHORITIES
 } from '../sph/lawAdapterContract.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
+import { resolveGasMixtureProperties } from '../material/canonicalMaterialLookup.js';
 
 export const ULG_PLANETARY_ATMO_3D_CFD_SCHEMA = 'ulg.astrophysics.planetary-atmosphere-3d-cfd-webgpu.v1';
 
@@ -190,21 +191,8 @@ export function deriveAtmosphericColumnProfile(bodySpec = {}, env = null) {
   const coRatio = clamp(Number(bodySpec.coRatio) || 0.55, 0.15, 1.8);
   const zEnhancement = Math.max(0.5, Number(bodySpec.metallicityEnhancement) || (hasSolidCrust ? 1.0 : (radiusM < 3.5e7 ? 25.0 : 3.5)));
 
-  // Thermodynamic gas properties from envelope state
+  // Bulk deep atmospheric chemical mole fractions (derived strictly from physical regime — ZERO body-name checks!)
   const isDeepFluid = !hasSolidCrust;
-  const molarMassKgMol = isDeepFluid
-    ? (radiusM < 3.5e7 ? 0.00265 : 0.00232) // H2/He + higher CH4/H2O enrichment on ice giants
-    : (basePressurePa > 2e6 || (basePressurePa > 50 && basePressurePa < 2e4)
-      ? 0.0438 // CO2-dominated
-      : (baseTempK < 130 && basePressurePa > 5e4 ? 0.0274 : 0.0289)); // N2/CH4 cryo vs N2/O2
-  const cpJKgK = isDeepFluid
-    ? 12100.0 // H2/He high specific heat
-    : (molarMassKgMol > 0.036 ? 845.0 : 1005.0);
-  const R_GAS = 8.31446;
-  const scaleHeightKm = (R_GAS * baseTempK) / (molarMassKgMol * gravityMS2 * 1000.0);
-  const dryLapseKPerKm = (gravityMS2 / cpJKgK) * 1000.0;
-
-  // Bulk deep atmospheric chemical mole fractions (derived strictly from physical regime!)
   let bulkComposition = [];
   if (isDeepFluid) {
     const isColdIceGiant = baseTempK < 105 || radiusM < 3.5e7;
@@ -251,7 +239,7 @@ export function deriveAtmosphericColumnProfile(bodySpec = {}, env = null) {
     // (abiotic ocean worlds retain realistic N2 / CO2 / H2O / Ar atmospheres with zero biogenic O2!)
     const h2oFrac = clamp(0.012 + volatileFrac * 0.14, 0.008, 0.038);
     const hasOxygenicLife = !env?.xenobiology
-      ? (bodySpec.id === 'earth' || (Number(bodySpec.civTechK) || 0) > 0)
+      ? (Boolean(bodySpec.hasOxygenicBiosphere) || (Number(bodySpec.biosphereViability) || 0) >= 0.30 || (Number(bodySpec.civTechK) || 0) > 0)
       : (env.xenobiology.biosphereViability >= 0.30 && env.xenobiology.solvent === 'H2O' && (env.xenobiology.zSchemePhotons || 0) >= 2);
     if (hasOxygenicLife) {
       bulkComposition = [
@@ -281,6 +269,17 @@ export function deriveAtmosphericColumnProfile(bodySpec = {}, env = null) {
   } else {
     bulkComposition = [];
   }
+
+  // Exact mole-fraction-weighted gas mixture thermodynamics derived from ULG's periodic table!
+  const gasMix = resolveGasMixtureProperties(
+    bulkComposition.length > 0 ? bulkComposition : { hasSolidCrust, pressurePa: basePressurePa, tempK: baseTempK, radiusM, volatileFrac },
+    baseTempK
+  );
+  const molarMassKgMol = gasMix.molarMassKgMol;
+  const cpJKgK = gasMix.cpJKgK;
+  const R_GAS = 8.31446;
+  const scaleHeightKm = (R_GAS * baseTempK) / (molarMassKgMol * gravityMS2 * 1000.0);
+  const dryLapseKPerKm = (gravityMS2 / cpJKgK) * 1000.0;
 
   // Explorable vertical altitude bounds (km relative to reference 1-bar / surface datum):
   //   - Gas/Ice Giants: dive from +65 km (~0.08 bar upper haze) down to -110 km (~25-45 bar deep abyss!)

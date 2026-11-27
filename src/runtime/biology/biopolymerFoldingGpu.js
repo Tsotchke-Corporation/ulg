@@ -26,6 +26,7 @@ import {
   LAW_SPATIAL_AUTHORITIES
 } from '../sph/lawAdapterContract.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
+import { resolveSolventThermodynamics } from '../material/canonicalMaterialLookup.js';
 
 export const ULG_BIOPOLYMER_FOLDING_SCHEMA = 'ulg.biology.biopolymer-folding-catalysis-webgpu.v1';
 
@@ -376,6 +377,8 @@ export function createBiopolymerFoldingSessionWebGpu(device, {
   hydrophobicCoupling = 1.6,
   hBondStrength = 1.25,
   dielectricEr = 78.4,
+  solventFormula = 'H2O',
+  solventViscosityPaS = null,
   solventPolarity = 1.0,
   tDenatureK = 360,
   tRefK = 300,
@@ -495,11 +498,18 @@ export function createBiopolymerFoldingSessionWebGpu(device, {
     const dtSafe = Math.max(0.006, Math.min(0.025, Number(dt) || 0.018));
     const seedF = ((seed % 997) * 0.19) + 2.3;
 
+    // Stokes-Einstein Langevin damping gamma_damp derived from ULG solvent Andrade viscosity eta(T)!
+    const solvThermo = resolveSolventThermodynamics(solventFormula, curTempK, 101325);
+    const effViscPaS = Number.isFinite(Number(solventViscosityPaS)) && Number(solventViscosityPaS) > 0
+      ? Number(solventViscosityPaS)
+      : solvThermo.viscosityPaS;
+    const gammaDamp = Math.max(1.4, Math.min(9.0, 3.0 * Math.pow(effViscPaS / 0.00089, 0.35)));
+
     const ab = new ArrayBuffer(64);
     new Uint32Array(ab, 0, 4).set([n, stepIndex + sub, 0, 0]);
     new Float32Array(ab, 16, 12).set([
       dtSafe, curTempK, curEpsHp, curHBond,
-      curEps, 3.0, seedF, Number(solventPolarity) < 0 ? -1.0 : 1.0,
+      curEps, gammaDamp, seedF, Number(solventPolarity) < 0 ? -1.0 : 1.0,
       Math.max(110, Number(tDenatureK) || 360), Math.max(75, Number(tRefK) || 300), 0, 0
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);

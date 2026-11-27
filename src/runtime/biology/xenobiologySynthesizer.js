@@ -152,6 +152,8 @@ export function deriveXenobiologyProfile({
     solvent: solv.solvent,
     solventFormula: solv.formula,
     solventLabel: solv.label,
+    isCloudDeckHabitat: Boolean(solv.isCloudDeckHabitat),
+    habitatAltitudeKm: Number(solv.habitatAltitudeKm) || 0,
     bainsScore: solv.bainsScore,
     oceanRgb: solv.oceanRgb,
     tMeltK: solv.tMeltK,

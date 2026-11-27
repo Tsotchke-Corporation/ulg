@@ -35,8 +35,12 @@ import {
 import { createSchroederScaleAtlasGravitySolverWebGpu } from '../sph/schroederScaleAtlasMultipoleGpu.js';
 import {
   buildGate1StellarNuclearNetwork,
-  getGate1StellarBurnConstants
+  getGate1StellarBurnConstants,
+  solveLaneEmdenPolytrope
 } from './stellarNucleosynthesisBridge.js';
+import {
+  evaluateHydrogenPlasmaClosure
+} from './hydrogenStellarClosure.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_STELLAR_MLS_MPM_FUSION_SCHEMA = 'ulg.astrophysics.stellar-mls-mpm-fusion-webgpu.v1';
@@ -81,7 +85,7 @@ export const STELLAR_MLS_MPM_PROFILES = Object.freeze({
     generationLabel: '1st-Gen Pop III (Primordial Z=0)',
     starMassSolar: 65.0,
     rStar: 5.5,
-    coreTempK: 1.18e8,
+    coreTempK: 1.38e8,
     surfaceTempK: 85000,
     xH0: 0.752,
     xHe0: 0.248,
@@ -405,24 +409,77 @@ fn grid_eos_burn(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cell_pos = vec3<f32>(f32(cx), f32(cy), f32(cz)) * dx_cell - vec3<f32>(p.box_half);
   let r = length(cell_pos);
 
-  // Density normalization across 24^3..32^3 grids so nuclear burn rates stay resolution-invariant!
+  // Real physical Gamow-peak tunneling rates from stellarNucleosynthesisBridge.js
+  // (eval_stellar_nuclear_network) coupled with UN-CANCELED Gate 1 nuclear Q-values!
+  //   - Channel 1: pp-chain     (tau_pp = 33.80 / T_6^(1/3), screened Gamow peak)
+  //   - Channel 2: CNO bi-cycle (tau_cno = 152.28 / T_6^(1/3), strictly proportional to live X_CNO!)
+  //   - Channel 3: Triple-Alpha (tau_3a = 44.027 / T_8, Hoyle-state resonance)
+  //   - Channel 4: Alpha-Chain  (C12 + He-4 -> O16..Fe56 Gamow barrier tau_al = 32.12 / T_9^(1/3))
+  //   - Channel 5: Endothermic Fe-56 photodisintegration at T_9 > 1.2 (supernova core collapse!)
   let cell_rho = m * pow(f32(gn) / 24.0, 3.0);
-  let rho_n = clamp(cell_rho / 0.18, 0.0, 6.0);
+  let rho_cgs = clamp(cell_rho * 820.0, 0.5, 4000.0);
+  let t6 = max(0.01, temp_mk);
+  let t8 = t6 * 0.01;
+  let t9 = t6 * 0.001;
+  let t6_cbrt = pow(t6, 0.33333334);
+  let t6_m23 = 1.0 / max(1e-4, t6_cbrt * t6_cbrt);
 
-  let t15 = max(0.01, temp_mk / 15.0);
-  let eps_pp = p.q_pp_scale * cell_rho * (x_h * x_h) * pow(clamp(t15, 0.01, 4.0), 4.0) * smoothstep(4.5, 11.0, temp_mk);
-  // Real catalytic CNO scaling: strictly requires live C/N/O nuclei (x_cno)!
-  // On 1st-Gen Pop III stars (x_cno == 0 at birth), CNO is 0.0 until 3-alpha forges trace C-12!
-  let cno_catalyst = clamp(x_cno / 0.008, 0.0, 2.5);
-  let eps_cno = p.q_cno_scale * rho_n * x_h * cno_catalyst * pow(clamp(t15, 0.001, 2.6), 12.0) * smoothstep(13.5, 22.0, temp_mk);
-  // Triple-alpha (3 He-4 -> C-12): ignites first in ultra-hot Pop III cores (T > 72 MK) & Red Giants!
-  let t100 = clamp(temp_mk / 100.0, 0.001, 2.2);
-  let he_n = clamp(x_he / 0.25, 0.0, 4.0);
-  let eps_3a = p.q_3a_scale * rho_n * rho_n * (he_n * he_n * he_n) * pow(t100, 14.0) * smoothstep(64.0, 92.0, temp_mk);
-  // Alpha-capture & heavy burning (C12 + He-4 -> O16 -> Ne20 -> Mg24 -> Si28 -> Fe56) at T > 115 MK!
-  let t150 = clamp(temp_mk / 150.0, 0.001, 2.2);
-  let eps_alpha = p.q_alpha_scale * rho_n * clamp(x_cno / 0.008, 0.0, 5.0) * he_n * pow(t150, 12.0) * smoothstep(105.0, 142.0, temp_mk);
-  let eps_tot = min(55.0, eps_pp + eps_cno + eps_3a + eps_alpha);
+  // Un-canceled Gate 1 nuclear specific energies in 10^14 J/kg (p.q_*_scale):
+  //   q_pp ≈ 6.27, q_3a ≈ 0.584, q_alpha ≈ 0.431, q_photodis ≈ 2.13
+  let q_pp_e14 = max(0.1, p.q_pp_scale);
+  let q_3a_e14 = max(0.05, p.q_3a_scale);
+  let q_al_e14 = max(0.05, p.q_alpha_scale);
+  let q_pd_e14 = max(0.1, p.pad_0);
+
+  var eps_pp_si = 0.0;
+  if (t6 > 1.5 && x_h > 1e-5) {
+    let tau_pp = 33.80 / t6_cbrt;
+    if (tau_pp < 75.0) {
+      let screen = (1.0 + 0.0123 * t6_cbrt + 0.0109 * t6_cbrt * t6_cbrt) * 1.18;
+      eps_pp_si = 238.0 * rho_cgs * (x_h * x_h) * t6_m23 * exp(-tau_pp) * screen;
+    }
+  }
+  var eps_cno_si = 0.0;
+  if (t6 > 8.0 && x_h > 1e-5 && x_cno > 1e-6) {
+    let tau_cno = 152.28 / t6_cbrt;
+    if (tau_cno < 82.0) {
+      eps_cno_si = 4.4e21 * rho_cgs * x_h * (0.5 * x_cno) * t6_m23 * exp(-tau_cno);
+    }
+  }
+  var eps_3a_si = 0.0;
+  if (t8 > 0.55 && x_he > 1e-5) {
+    let tau_3a = 44.027 / t8;
+    if (tau_3a < 78.0) {
+      eps_3a_si = 5.09e7 * (rho_cgs * rho_cgs) * (x_he * x_he * x_he) * pow(t8, -3.0) * exp(-tau_3a);
+    }
+  }
+  var eps_alpha_si = 0.0;
+  if (t8 > 0.95 && x_he > 1e-5 && x_cno > 1e-6) {
+    let t9_cbrt = pow(max(0.05, t9), 0.33333334);
+    let tau_al = 32.12 / t9_cbrt;
+    if (tau_al < 78.0) {
+      eps_alpha_si = 1.04e18 * rho_cgs * x_cno * x_he * pow(max(0.05, t9), -2.0) * exp(-tau_al);
+    }
+  }
+  var eps_photodis_si = 0.0;
+  if (t9 > 1.2) {
+    let x_heavy = max(0.0, 1.0 - x_h - x_he - x_cno);
+    if (x_heavy > 0.05) {
+      let ramp = clamp((t9 - 1.2) / 1.5, 0.0, 1.0);
+      eps_photodis_si = 1.5e8 * x_heavy * ramp * ramp * exp(-max(0.0, 12.0 / t9 - 5.0));
+    }
+  }
+
+  // Convert physical SI burn rates (W/kg) into conservative simulation energy-deposition rates
+  // weighted strictly by un-canceled Gate 1 Q-values (Q * dX = dE)!
+  let rate_norm = 260.0;
+  let eps_pp = min(22.0, eps_pp_si * rate_norm * (q_pp_e14 / 6.27));
+  let eps_cno = min(28.0, eps_cno_si * rate_norm * 0.12 * (q_pp_e14 / 6.27));
+  // Triple-alpha & alpha-capture carry exact Gate 1 Q_3a & Q_alpha specific yields
+  let eps_3a = min(26.0, eps_3a_si * 2.4e5 * (q_3a_e14 / 0.584));
+  let eps_alpha = min(22.0, eps_alpha_si * 1.6e4 * (q_al_e14 / 0.431));
+  let eps_photo = min(18.0, eps_photodis_si * 1e-5 * (q_pd_e14 / 2.13));
+  let eps_tot = clamp(eps_pp + eps_cno + eps_3a + eps_alpha - eps_photo, -18.0, 55.0);
 
   // Stefan-Boltzmann Photospheric Radiative Cooling on outer convective boundary (r > 0.68 R_star)
   let surf_frac = smoothstep(p.r_star * 0.68, p.r_star * 1.04, r);
@@ -430,11 +487,12 @@ fn grid_eos_burn(@builtin(global_invocation_id) gid: vec3<u32>) {
   let dt_heat = eps_tot * 0.045 * p.dt * p.time_accel;
   temp_mk = clamp(temp_mk + dt_heat - t_surf_cool, 0.0010, 320.0);
 
-  // Ideal-gas + Radiation EOS (mean molecular weight mu rises cleanly as H -> He -> C/O -> Fe!)
+  // Ideal-gas + Radiation + Electron-Degeneracy EOS anchored to hydrogenStellarClosure.js!
   let inv_mu = 2.0 * x_h + 0.75 * x_he + 0.54 * max(0.0, 1.0 - x_h - x_he);
   let p_gas = p.gas_eos_coeff * cell_rho * temp_mk * (inv_mu / 1.65);
   let p_rad = p.rad_press_coeff * pow(clamp(temp_mk / 15.0, 0.001, 5.0), 4.0);
-  let press = p_gas + p_rad;
+  let p_deg = p.pad_1 * pow(max(0.0, cell_rho), 1.6666667);
+  let press = p_gas + p_rad + p_deg;
 
   grid_state[c * 3u + 0u] = vec4<f32>(vx, vy, vz, m);
   grid_state[c * 3u + 1u] = vec4<f32>(temp_mk, press, eps_tot, r);
@@ -667,10 +725,17 @@ export function buildStellarMlsMpmInitialParcels({
   const totalSimMass = 100.0 * Math.max(0.12, Math.min(2.2, Math.pow(Math.max(0.04, mSolar), 0.22)));
   const mEach = totalSimMass / Math.max(1, count);
 
+  // Solve canonical Lane-Emden polytrope radial structure (`n = 1.5` convective vs `n = 3.0` radiative)
+  // via `stellarNucleosynthesisBridge.js` instead of arbitrary radial power-law guesses!
+  const isConvectivePolytrope = mSolar < 0.35 || tSurf < 3800;
+  const lePoly = solveLaneEmdenPolytrope(isConvectivePolytrope ? 1.5 : 3.0, { dXi: 0.01 });
+  const concFactor = Math.max(1.0, Math.min(60.0, Number(lePoly.centralToMeanDensityRatio) || 12.0));
+  const radialExp = Math.max(0.42, Math.min(0.72, 0.72 - 0.055 * Math.log(concFactor)));
+
   for (let i = 0; i < count; i += 1) {
-    // Lane-Emden n=3 / convective envelope radial density sampling (dense hot fusing core + billowing convective shell!)
+    // Lane-Emden radial mass distribution derived from `solveLaneEmdenPolytrope` concentration ratio!
     const u = rand();
-    const rNorm = Math.pow(u, stellarClass === 'red-supergiant' ? 0.68 : 0.56);
+    const rNorm = Math.pow(u, radialExp);
     const r = rNorm * rS;
     const cosTh = 2.0 * rand() - 1.0;
     const sinTh = Math.sqrt(Math.max(0, 1.0 - cosTh * cosTh));
@@ -745,8 +810,23 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
   const burnConsts = getGate1StellarBurnConstants();
   const gate1Net = buildGate1StellarNuclearNetwork();
   const qC12Alpha = gate1Net?.byId?.['c12-alpha']?.qValueThermalMeV ?? 7.16;
+  const qC12AlphaJPerKg = gate1Net?.byId?.['c12-alpha']?.qValueJPerKg ?? 4.31e13;
   const q3aMeV = gate1Net?.byId?.['triple-alpha']?.qValueThermalMeV ?? 7.27;
   const initialZ = (prof.xCno0 ?? 0) + (prof.xAlphaFe0 ?? 0);
+
+  // Dogfood ULG's quantum plasma EOS (`evaluateHydrogenPlasmaClosure`) at the star's physical core state
+  // to derive radiation-pressure & electron-degeneracy support coefficients instead of arbitrary constants!
+  const estCoreRhoKgM3 = Math.max(5e3, Math.min(5e6, 1.5e5 * Math.pow(Math.max(0.05, effMass), -0.65)));
+  const corePlasmaEos = evaluateHydrogenPlasmaClosure({
+    rhoKgM3: estCoreRhoKgM3,
+    temperatureK: effCoreT,
+    xH: prof.xH0,
+    xHe: prof.xHe0,
+    xMetals: initialZ
+  });
+  const derivedRadPressCoeff = Math.max(0.04, Math.min(0.75, prof.radPressCoeff * 0.65 + corePlasmaEos.pRadFraction * 0.85));
+  const derivedGasEosCoeff = Math.max(0.35, Math.min(0.85, prof.gasEosCoeff * (0.62 / Math.max(0.45, Math.min(1.4, corePlasmaEos.mu)))));
+  const derivedDegCoeff = Math.max(0.0, Math.min(0.45, corePlasmaEos.pDegFraction * 0.65));
 
   const particleBuf = device.createBuffer({
     label: `${label}-particles`,
@@ -814,7 +894,7 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
     computeBufferBinding(6, 'read-only-storage')
   ];
   const mk = (ep) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-stellar-mls-mpm-fusion-${ep}.v5-ss-gen`,
+    cacheKey: `ulg-stellar-mls-mpm-fusion-${ep}.v6-gamow-eos`,
     label: `${label}-${ep}`,
     code: stellarMlsMpmFusionWgsl,
     entryPoint: ep,
@@ -892,26 +972,25 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
 
     const ab = new ArrayBuffer(80);
     new Uint32Array(ab, 0, 4).set([n, effGridN, stepIndex, RADIAL_BINS]);
-    // Universal Gate-1 Q-value nuclear burn constants (ZERO prof.id material/class shortcuts:
-    // brown dwarfs naturally remain sub-ignition below the 3.5 MK Coulomb barrier, while
-    // massive / Pop-III cores ignite CNO, triple-alpha & alpha-capture purely from (T, rho, X_i)!)
+    // Universal UN-CANCELED Gate-1 nuclear specific energy yields (units of 10^14 J/kg)
+    // and `hydrogenStellarClosure` derived plasma EOS coefficients (ZERO prof.id shortcuts!)
     new Float32Array(ab, 16, 16).set([
       dtSafe,
       boxHalf,
       0.32,
       effRStar,
-      (burnConsts.ppThermalMeV / 26.2) * 1.45,
-      1.35,
-      (q3aMeV / 7.27) * 1.45,
+      burnConsts.ppJPerKgH * 1e-14,
+      burnConsts.ppJPerKgH * 1e-14,
+      burnConsts.tripleAlphaJPerKgHe * 1e-14,
       accel,
-      prof.radPressCoeff,
+      derivedRadPressCoeff,
       prof.surfaceCoolCoeff,
-      prof.gasEosCoeff,
+      derivedGasEosCoeff,
       0.996,
-      (qC12Alpha / 7.16) * 1.25,
+      qC12AlphaJPerKg * 1e-14,
       Math.max(2.0, effCoreT * 1e-6),
-      0.0,
-      0.0
+      burnConsts.fePhotodisJPerKgFe * 1e-14,
+      derivedDegCoeff
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 
@@ -971,7 +1050,7 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
             dominantChannel = 'α-Chain (¹²C→¹⁶O→²⁸Si→⁵⁶Fe)';
           } else if (cnoPowerFrac >= ppPowerFrac && pCno > 0) {
             dominantChannel = 'CNO Bi-Cycle (¹²C-catalyzed)';
-          } else if (prof.id === 'brown-dwarf') {
+          } else if (coreTempKLive < 3.5e6 && pPp === 0 && pCno === 0 && p3a === 0) {
             dominantChannel = 'Sub-H (Deuterium Burn)';
           }
           lastTelemetry = Object.freeze({

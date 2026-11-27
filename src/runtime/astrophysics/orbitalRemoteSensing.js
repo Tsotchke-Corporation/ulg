@@ -12,6 +12,10 @@
 //     thermochemistry & redox state so explorers can scout worlds BEFORE landing!
 
 import { deriveXenobiologyProfile } from '../biology/xenobiologySynthesizer.js';
+import {
+  resolveGasMixtureProperties,
+  resolveSolventThermodynamics
+} from '../material/canonicalMaterialLookup.js';
 
 export const ULG_ORBITAL_REMOTE_SENSING_SCHEMA = 'ulg.astrophysics.orbital-remote-sensing.v1';
 
@@ -107,9 +111,8 @@ export function analyzeOrbitalBodySpectroscopy(bodySpec, starSpec = null, {
   const isCryoMoon = Boolean(bodySpec.isCryoMoon)
     || planetaryMode === 'cryo-plumes'
     || (hasSolidCrust && isHydrostaticIceBody && tempK < 185 && volatileFrac >= 0.08 && pressurePa < 5000);
-  const tBoilWaterK = pressurePa >= 611
-    ? Math.max(273.16, Math.min(647.1, 373.15 / Math.max(0.55, 1.0 - 0.07632 * Math.log(Math.max(1e-4, pressurePa / 101325)))))
-    : 273.16;
+  const h2oThermo = resolveSolventThermodynamics('H2O', tempK, pressurePa);
+  const tBoilWaterK = h2oThermo.tBoilK;
   const effVolFrac = Math.max(volatileFrac, Number(bodySpec.coalescedComposition?.volatileFrac) || 0);
   const hasOcean = Boolean(bodySpec.hasOcean) || (
     hasSolidCrust && !isMagmaOcean && !isCryoMoon
@@ -120,7 +123,16 @@ export function analyzeOrbitalBodySpectroscopy(bodySpec, starSpec = null, {
   );
   const gravityMS2 = estimateGravityMS2(bodySpec);
   const stellarTeffK = Number(starSpec?.tempK ?? starSpec?.effectiveTempK) || 5778;
-  const rhoAtmKgM3 = pressurePa > 1 ? Math.min(80, (pressurePa * 0.029) / (8.3145 * Math.max(40, tempK))) : 0;
+  const gasMix = resolveGasMixtureProperties({
+    hasSolidCrust,
+    pressurePa,
+    tempK,
+    radiusKm,
+    volatileFrac: effVolFrac
+  }, tempK);
+  const rhoAtmKgM3 = pressurePa > 1
+    ? Math.min(80, (pressurePa * gasMix.molarMassKgMol) / (8.3145 * Math.max(40, tempK)))
+    : 0;
 
   // Deterministic physical hash for world xenobiology consistency (identical to surface landing!)
   const bodySeed = ((seed >>> 0) ^ ((String(bodySpec.id || bodySpec.name || 'w').length * 2654435761) >>> 0) ^ Math.round(tempK * 17)) >>> 0;

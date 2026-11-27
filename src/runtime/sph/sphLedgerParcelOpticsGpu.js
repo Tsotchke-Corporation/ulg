@@ -1,4 +1,5 @@
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { resolveSolventIor } from '../material/materialPbrOpticsBridge.js';
 
 // G2 integer ledger, Phase 6 optics (plan/todo/g2-integer-ledger-proposal.md):
 // condensate rendered from the parcels' own droplets. After the render-field
@@ -98,10 +99,13 @@ fn add_parcel_optics(@builtin(global_invocation_id) id: vec3<u32>) {
 
 /** Encode the parcel optics pass into an encoder that will then pack the medium. */
 export function encodeSphLedgerParcelOpticsWebGpu({ device, encoder, parcels, fieldRowsBuffer, fieldOffset,
-  resolution, fieldPadding, refEdgeM } = {}) {
+  resolution, fieldPadding, refEdgeM, materialKey = null, refractiveIndex = null } = {}) {
   if (!parcels?.count || !fieldRowsBuffer || !(resolution > 0) || !(refEdgeM > 0)) return null;
   const gasCellM = parcels.boxDimensionsM[0] / parcels.cellsPerAxis;
   if (!(gasCellM > 0)) throw new TypeError('Ledger parcel optics require the parcel gas-cell size');
+  const effIor = Number.isFinite(Number(refractiveIndex)) && Number(refractiveIndex) > 1.0
+    ? Number(refractiveIndex)
+    : resolveSolventIor(materialKey || parcels.materialKey || parcels.material || 'H2O');
   const pipeline = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-ledger-parcel-optics.v1',
     label: 'ulg-ledger-parcel-optics', code: sphLedgerParcelOpticsWgsl, entryPoint: 'add_parcel_optics',
     bindings: ['uniform', 'read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type)) });
@@ -109,7 +113,7 @@ export function encodeSphLedgerParcelOpticsWebGpu({ device, encoder, parcels, fi
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const words = new ArrayBuffer(48), u = new Uint32Array(words), f = new Float32Array(words);
   u.set([parcels.count, resolution, fieldOffset, 0], 0);
-  f.set([fieldPadding, refEdgeM, SPH_LEDGER_PARCEL_OPTICS.wavelengthM, SPH_LEDGER_PARCEL_OPTICS.refractiveIndex], 4);
+  f.set([fieldPadding, refEdgeM, SPH_LEDGER_PARCEL_OPTICS.wavelengthM, effIor], 4);
   f.set([SPH_LEDGER_PARCEL_OPTICS.asymmetry, gasCellM, 0, 0], 8);
   device.queue.writeBuffer(params, 0, words);
   const bindGroup = device.createBindGroup({ layout: pipeline.bindGroupLayout,

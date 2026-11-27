@@ -25,6 +25,7 @@ import {
   LAW_SPATIAL_AUTHORITIES
 } from '../sph/lawAdapterContract.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
+import { buildDevelopmentalGenome } from './developmentalGenome.js';
 
 export const ULG_XENOBIOLOGY_ECOLOGY_SCHEMA = 'ulg.biology.xenobiology-ecology.v2';
 
@@ -1122,6 +1123,40 @@ export function synthesizeWorldEcosystem({
     const fasta = mutateFasta(solv.sequence, spSeed, kingdom === 'fauna', kingdom === 'fungi');
     const anatomicalParts = buildAnatomicalParts(kingdom, bodyPlan, traits, skeleton, sensory, photo, redox);
 
+    // First-principles continuous Developmental Genome (Stage 3 — ZERO fixed template switches!)
+    const spMedium = bodyPlan === 'aero-gasbag' || isGasCloud
+      ? 'buoyant'
+      : (bodyPlan === 'wing-glider'
+        ? 'aerial'
+        : (bodyPlan === 'aquatic-swimmer' || solv.solvent === 'H2O-subsurface' ? 'aquatic' : 'terrestrial'));
+    const developmentalGenome = buildDevelopmentalGenome({
+      seed: spSeed,
+      kingdom,
+      trophicGuild,
+      niche: {
+        medium: spMedium,
+        tempK: T,
+        gravityMS2: g,
+        lightFluxNorm: isDarkWorld ? 0.28 : 0.95,
+        windMS: Math.max(2.0, 5.0 * Math.pow(T / 288, 0.5))
+      },
+      tensor: {
+        gravityMS2: g,
+        rhoAtmKgM3: rho,
+        tempK: T,
+        hasSolidCrust,
+        bucklingHeightScale,
+        aerialEase: rho > 0.02 ? (rho / 1.22) * Math.pow(9.81 / g, 0.85) : 0
+      },
+      colors: {
+        primaryRgb,
+        secondaryRgb,
+        accentRgb,
+        biolumRgb,
+        biolumIntensity
+      }
+    });
+
     // Human-readable morph class label
     const morphLabels = {
       'quadruped-cursorial': 'Cursorial Quadruped',
@@ -1150,7 +1185,8 @@ export function synthesizeWorldEcosystem({
       bodyPlan,
       trophicGuild,
       speciesName,
-      morphClass: morphLabels[bodyPlan] || bodyPlan,
+      morphClass: developmentalGenome.morphDescriptor || morphLabels[bodyPlan] || bodyPlan,
+      developmentalGenome,
       skeleton,
       sensoryOrgans: kingdom === 'fauna' ? sensory : Object.freeze(['Photoreceptor / Mechanosensor']),
       primaryRgb: Object.freeze(primaryRgb),

@@ -64,6 +64,7 @@ import {
   createSurfaceOceanWaveGpu
 } from './surfaceOceanWaveGpu.js';
 import {
+  buildSettlementTemplateFloats,
   createSurfaceFloraPlacementGpu
 } from './surfaceFloraPlacementGpu.js';
 import {
@@ -72,6 +73,8 @@ import {
   synthesizeAbductedSpecimenRecord
 } from '../biology/xenobiologySynthesizer.js';
 import { appendProceduralOrganismGeometry } from '../biology/xenobiologyAnatomyMesh.js';
+import { bakePlanetaryFloraAtlasWebGpu } from '../biology/organismSdfMorphogenesisGpu.js';
+import { createSurfaceEcosystemGpu } from '../biology/surfaceEcosystemGpu.js';
 
 export const ULG_PLANETARY_SURFACE_SCHEMA = 'ulg.astrophysics.planetary-surface-vehicles-webgpu.v1';
 
@@ -2123,6 +2126,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         morph: sp.bodyPlan === 'aero-gasbag' || sp.bodyPlan === 'wing-glider' ? 'glider' : sp.bodyPlan,
         trophicGuild: sp.trophicGuild,
         speciesRecord: sp,
+        developmentalGenome: sp.developmentalGenome || null,
         pos: [Math.cos(ang) * rad, 8.0 + ((oi % 4) - 1.5) * 7.5, Math.sin(ang) * rad],
         yaw: ang + 1.1,
         speed: sp.bodyPlan === 'wing-glider' ? 6.2 : 3.2,
@@ -2174,6 +2178,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         morph: isAerial ? 'glider' : sp.bodyPlan,
         trophicGuild: sp.trophicGuild,
         speciesRecord: sp,
+        developmentalGenome: sp.developmentalGenome || null,
         pos: [ox, ySpawn, oz],
         yaw: ang + 1.1,
         speed: isFauna ? (isAerial ? 5.2 : (sp.trophicGuild.includes('predator') ? 4.4 : 2.8 + (oi % 3) * 0.6)) : 0,
@@ -2192,6 +2197,38 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         seed: (sp.seed ^ Math.imul(oi + 17, 2654435761)) >>> 0
       });
     }
+  }
+
+  // Live WebGPU Multi-Trophic Surface Ecosystem AI (`surfaceEcosystemGpu.js`) &
+  // Per-Planet WebGPU 3D SDF Flora Atlas Baker (`organismSdfMorphogenesisGpu.js`)!
+  const surfaceEcoGpu = surfaceOrganisms.length > 0
+    ? createSurfaceEcosystemGpu(device, { maxAgents: Math.max(32, surfaceOrganisms.length), label: `${label}-eco-ai` })
+    : null;
+  if (surfaceEcoGpu) {
+    surfaceEcoGpu.seedAgents(surfaceOrganisms.map((o, idx) => ({
+      pos: o.pos,
+      yaw: o.yaw,
+      speed: o.speed || 2.8,
+      phase: o.phase || 0,
+      gaitFreqHz: o.developmentalGenome?.gaitFreqHz || o.traits?.strouhalHz || 1.1,
+      trophicGuild: o.trophicGuild,
+      medium: o.developmentalGenome?.medium || (o.bodyPlan === 'aquatic-swimmer' ? 'aquatic' : ((o.bodyPlan === 'aero-gasbag' || o.bodyPlan === 'wing-glider') ? 'aerial' : 'terrestrial')),
+      speciesIndex: idx,
+      senseRangeM: 34.0,
+      abducted: false
+    })));
+  }
+  if (isSolidSurfaceBio && Array.isArray(xeno?.species) && xeno.species.some((s) => s.developmentalGenome)) {
+    // Non-blocking GPU bake of THIS planet's unique developmental-genome flora/fungi into the hardware-instanced atlas!
+    bakePlanetaryFloraAtlasWebGpu(device, xeno.species, {
+      gridDim: 20,
+      maxVertsPerSpecies: 1200,
+      settlementFloats: buildSettlementTemplateFloats()
+    }).then((atlas) => {
+      if (!disposed && atlas?.floats?.length >= 24) {
+        floraGpu.replaceTemplateMesh(atlas.floats);
+      }
+    }).catch(() => {});
   }
 
   // Restore saved surface exploration pose cleanly when returning from sampled L5/L6/L7 views!
@@ -3326,6 +3363,23 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       tectN: TECTONIC_GRID_N,
       force: stepIndex === 1
     });
+    if (surfaceEcoGpu) {
+      surfaceEcoGpu.encodeStep(enc, {
+        dt: dtSafe,
+        gravity: env.gravityMS2,
+        seaLevel: env.seaLevelM,
+        sunElevDeg: Number(climate?.sunElevDeg ?? 35.0),
+        hasSolidCrust: Boolean(env.hasSolidCrust),
+        hasOcean: Boolean(env.hasLiquidOcean),
+        tractorActive,
+        focusPos: focus,
+        maxRadiusM: 240.0,
+        windVec: lastCfdTelemetry?.craftWindMS || [0, 0, 0],
+        rhoAtm: env.rhoAtmKgM3 || 1.22,
+        ufoPos: ufo.pos,
+        tractorRadiusM: 44.0
+      });
+    }
     const pass = enc.beginComputePass({ label: `${label}-pass` });
     pass.setBindGroup(0, bg);
     pass.setPipeline(terrainPipe.pipeline);
@@ -3485,6 +3539,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
     try { sphSurfacePatch?.dispose?.(); } catch {}
     try { oceanWaveGpu?.dispose(); } catch {}
     try { floraGpu?.dispose(); } catch {}
+    try { surfaceEcoGpu?.dispose(); } catch {}
     for (const b of [paramsBuf, terrainVertBuf, terrainIdxBuf, plumesBuf, telBuf, telReadBuf, vehicleVertBuf, fxVertBuf]) {
       try { b.destroy(); } catch {}
     }

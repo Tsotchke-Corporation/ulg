@@ -507,7 +507,7 @@ fn wyman_gauss(x: f32, mu: f32, s1: f32, s2: f32) -> f32 {
 // with live Cauchy chromatic dispersion n(lambda) derived from the dielectric's (n_650, n_550, n_450)
 // integrated against Wyman 2013 CIE 1931 color matching functions -> linear sRGB!
 fn frank_tamm_linear_rgb(beta: f32, ior: f32, n_rgb: vec3<f32>) -> vec3<f32> {
-  // Cauchy dispersion B = (n_450 - n_650) / (450^-2 - 650^-2), centered strictly at surface `ior` (550 nm)
+  // Cauchy dispersion B = (n_450 - n_650) / (450^-2 - 650^-2), centered strictly at surface ior (550 nm)
   let has_disp = n_rgb.x > 1.0001 && n_rgb.z > 1.0001;
   let inv_l2_450 = 1.0 / (450.0 * 450.0);
   let inv_l2_550 = 1.0 / (550.0 * 550.0);

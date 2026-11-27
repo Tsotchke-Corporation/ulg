@@ -4,6 +4,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { composeWgslVariantFromSource } from '../../../ulg-gpu-abi/src/wgslComposer.js';
 import { evaluatePolytopeAtlasWgsl } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 import { createSphExactMechanicsRefreshWgsl } from './sphExactMechanicsRefreshWgsl.js';
 import { prepareSphExactMechanicsRefresh } from './sphExactMechanicsRefreshGpu.js';
@@ -981,9 +982,18 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     && maxStorageSlots >= requiredPolytopeStorageSlots
   );
   const triadBinding = getTriadClosureGpuBinding(device);
-  const requiredTriadStorageSlots = 10 + (exact ? 1 : 0) + (usePolytopeAtlas ? 1 : 0);
+  const triadPackedBuf = triadBinding.packedTableAndMapBuffer ?? triadBinding.tableBuffer;
+  const triadTableSlot = exact
+    ? (usePolytopeAtlas ? 10 : 9)
+    : (usePolytopeAtlas ? 9 : 8);
+  const triadReceiptSlot = triadTableSlot + 1;
+  // Packed Triad table+map saves 1 read-only storage slot (2 slots instead of 3:
+  // 7 base + exact(0..1) + polytope(0..1) + triadPacked(1) + triadReceipt(1) <= 10/11).
+  const requiredTriadStorageSlots = 7 + (exact ? 1 : 0) + (usePolytopeAtlas ? 1 : 0) + 2;
   const useTriadEnvelopes = Boolean(
     triadBinding.active
+    && triadPackedBuf
+    && triadBinding.receiptBuffer
     && maxStorageSlots >= requiredTriadStorageSlots
   );
   const polytopeWgslSnippet = usePolytopeAtlas
@@ -1033,43 +1043,58 @@ fn eval_tier1_polytope_refresh(
 }
 `
     : '';
-  let refreshCode = baseRefreshCode;
+  const triadWgslSnippet = useTriadEnvelopes
+    ? triadClosureMechanicsRefreshWgsl({
+        packedMap: true,
+        tableBinding: triadTableSlot,
+        receiptBinding: triadReceiptSlot
+      })
+    : '';
+  const composedSlots = [];
+  const helperSnippets = [polytopeWgslSnippet, triadWgslSnippet].filter(Boolean);
+  if (helperSnippets.length > 0) {
+    composedSlots.push({
+      slot: 'closure-helpers',
+      match: 'fn material_bank_warm_input_anchor()',
+      code: `${helperSnippets.join('\n\n')}\n\nfn material_bank_warm_input_anchor()`
+    });
+  }
   if (usePolytopeAtlas) {
-    refreshCode = refreshCode
-      .replace(
-        'fn material_bank_warm_input_anchor()',
-        `${polytopeWgslSnippet}\n\nfn material_bank_warm_input_anchor()`
-      )
-      .replace(
-        '  let rest_density = thermo0.w;',
-        '  let prev_j_poly = out_mechanics[mechanics_base + 4u].z;\n  let rest_density = eval_tier1_polytope_refresh(thermo0.x, thermo0.y, thermo0.z, thermo0.w, phase_mechanics.sound_speed, prev_j_poly, thermo0.w);'
-      );
+    composedSlots.push({
+      slot: 'tier1-polytope-rest-density',
+      match: '  let rest_density = thermo0.w;',
+      code: '  let prev_j_poly = out_mechanics[mechanics_base + 4u].z;\n  let rest_density = eval_tier1_polytope_refresh(thermo0.x, thermo0.y, thermo0.z, thermo0.w, phase_mechanics.sound_speed, prev_j_poly, thermo0.w);'
+    });
   }
   if (useTriadEnvelopes) {
-    refreshCode = refreshCode
-      .replace(
-        'fn material_bank_warm_input_anchor()',
-        `${triadClosureMechanicsRefreshWgsl()}\n\nfn material_bank_warm_input_anchor()`
-      )
-      .replace(
-        '  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    phase_mechanics.solid,\n    phase_mechanics.status,\n    phase_mechanics.bulk,\n    phase_mechanics.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    phase_mechanics.lambda,\n    phase_mechanics.sound_speed,\n    phase_mechanics.eos_model,\n    phase_mechanics.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    phase_mechanics.dynamic_viscosity,\n    phase_mechanics.surface_tension,\n    row7.w\n  );',
-        '  let resolved_pm = apply_triad_a4_mechanics_envelopes(\n    thermo0.x,\n    thermo0.z,\n    state0.w / current_volume,\n    next_volume_ratio_j,\n    phase_mechanics\n  );\n  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    resolved_pm.solid,\n    resolved_pm.status,\n    resolved_pm.bulk,\n    resolved_pm.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    resolved_pm.lambda,\n    resolved_pm.sound_speed,\n    resolved_pm.eos_model,\n    resolved_pm.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    resolved_pm.dynamic_viscosity,\n    resolved_pm.surface_tension,\n    row7.w\n  );'
-      );
+    composedSlots.push({
+      slot: 'triad-a4-mechanics-envelopes',
+      match: '  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    phase_mechanics.solid,\n    phase_mechanics.status,\n    phase_mechanics.bulk,\n    phase_mechanics.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    phase_mechanics.lambda,\n    phase_mechanics.sound_speed,\n    phase_mechanics.eos_model,\n    phase_mechanics.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    phase_mechanics.dynamic_viscosity,\n    phase_mechanics.surface_tension,\n    row7.w\n  );',
+      code: '  let resolved_pm = apply_triad_a4_mechanics_envelopes(\n    thermo0.x,\n    thermo0.z,\n    state0.w / current_volume,\n    next_volume_ratio_j,\n    phase_mechanics\n  );\n  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    resolved_pm.solid,\n    resolved_pm.status,\n    resolved_pm.bulk,\n    resolved_pm.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    resolved_pm.lambda,\n    resolved_pm.sound_speed,\n    resolved_pm.eos_model,\n    resolved_pm.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    resolved_pm.dynamic_viscosity,\n    resolved_pm.surface_tension,\n    row7.w\n  );'
+    });
   }
+  const variantId = `${exact ? 'exact' : 'std'}${usePolytopeAtlas ? `-poly${polytopeBindingSlot}` : ''}${useTriadEnvelopes ? `-triadp${triadTableSlot}` : ''}`;
+  const refreshCode = composedSlots.length > 0
+    ? composeWgslVariantFromSource({
+        moduleId: 'mls-mpm-mechanics-refresh',
+        variantId,
+        baseSource: baseRefreshCode,
+        slots: composedSlots
+      }).code
+    : baseRefreshCode;
   const extraBindings = [
     ...(exact ? [computeBufferBinding(8, 'read-only-storage')] : []),
     ...(!exact && usePolytopeAtlas ? [computeBufferBinding(8, 'read-only-storage')] : []),
     ...(useTriadEnvelopes
       ? [
-          computeBufferBinding(9, 'read-only-storage'),
-          computeBufferBinding(10, 'read-only-storage'),
-          computeBufferBinding(11, 'storage')
+          computeBufferBinding(triadTableSlot, 'read-only-storage'),
+          computeBufferBinding(triadReceiptSlot, 'storage')
         ]
       : []),
     ...(exact && usePolytopeAtlas ? [computeBufferBinding(12, 'read-only-storage')] : [])
   ];
   const polytopeCacheSuffix = usePolytopeAtlas ? `-polytope-t1-v2-b${polytopeBindingSlot}` : '';
-  const triadCacheSuffix = useTriadEnvelopes ? '-triad-a4-v1' : '';
+  const triadCacheSuffix = useTriadEnvelopes ? `-triad-a4-packed-v2-b${triadTableSlot}` : '';
   const refreshPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-main${exact ? '-exact-quantities-v1' : ''}${polytopeCacheSuffix}${triadCacheSuffix}`,
     label: 'ulg-mls-mpm-mechanics-refresh',
@@ -1117,9 +1142,8 @@ fn eval_tier1_polytope_refresh(
     ...(!exact && usePolytopeAtlas ? [{ binding: 8, resource: { buffer: polytopeBinding.atlasBuffer } }] : []),
     ...(useTriadEnvelopes
       ? [
-          { binding: 9, resource: { buffer: triadBinding.tableBuffer } },
-          { binding: 10, resource: { buffer: triadBinding.materialMapBuffer } },
-          { binding: 11, resource: { buffer: triadBinding.receiptBuffer } }
+          { binding: triadTableSlot, resource: { buffer: triadPackedBuf } },
+          { binding: triadReceiptSlot, resource: { buffer: triadBinding.receiptBuffer } }
         ]
       : []),
     ...(exact && usePolytopeAtlas ? [{ binding: 12, resource: { buffer: polytopeBinding.atlasBuffer } }] : [])

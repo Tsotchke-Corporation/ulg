@@ -21,8 +21,30 @@ import {
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
 import { resolvePlanetarySurfacePbrOptics } from '../material/materialPbrOpticsBridge.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_SOLAR_SYSTEM_NBODY_SCHEMA = 'ulg.astrophysics.solar-system-nbody-webgpu.v1';
+
+export const SOLAR_SYSTEM_NBODY_LAW_ADAPTER = Object.freeze({
+  id: 'solar-system-nbody',
+  lawNodeId: 'law:astrophysics-symplectic-nbody-f32x2',
+  orderConstraint: 'after:protoplanetary-accretion',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['nbody-f32x2-bodies']),
+  writes: Object.freeze(['nbody-f32x2-bodies']),
+  accumulates: Object.freeze(['nbody-conservation-ledger']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['mass', 'linear-momentum', 'angular-momentum', 'symplectic-energy']),
+  validityDomain: Object.freeze({ doubleFloatProtectedTwoSum: true, maxDtSubYr: 0.00012 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e7, 1e16])
+});
 
 export const AU_METERS = 1.495978707e11;
 export const SOLAR_MASS_KG = 1.98847e30;
@@ -894,5 +916,48 @@ export function createSolarSystemNBodyEngineWebGpu(device, {
     computeConservationDiagnostics,
     step,
     dispose
+  });
+}
+
+export function registerSolarSystemNBodyModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('solar-system-nbody@1')) {
+    return registry.resolveModule('solar-system-nbody@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'solar-system-nbody', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/solarSystemNBodyGpu.js',
+      entryPoint: 'compute_nbody_accel',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      asteroidCount: { type: 'number', min: 0, max: 16384, required: false },
+      dtYr: { type: 'number', min: 1e-6, max: 0.05, required: false }
+    },
+    stateLayout: {
+      tensorId: 'solar-system-nbody-f32x2',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: SOLAR_BODY_STRIDE_FLOATS,
+      strideBytes: SOLAR_BODY_STRIDE_BYTES,
+      fields: ['pxHi', 'pyHi', 'pzHi', 'massSolar', 'pxLo', 'pyLo', 'pzLo', 'radiusAu', 'vx', 'vy', 'vz', 'kind', 'ax', 'ay', 'az', 'spin']
+    },
+    scaleRangeM: [1e7, 1e16],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_1_QUANTITATIVE,
+    lawAdapter: SOLAR_SYSTEM_NBODY_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createSolarSystemNBodySessionWebGpu(device, {
+        asteroidCount: Math.max(0, Math.trunc(Number(p.asteroidCount ?? 32)))
+      });
+      try {
+        await session.step({ dtYr: Number(p.dtYr ?? 0.0005), substeps: 2, readbackMassive: true });
+        const diag = session.computeConservationDiagnostics();
+        return createSimulationArtifact?.({ schema: ULG_SOLAR_SYSTEM_NBODY_SCHEMA, diagnostics: diag }) ?? diag;
+      } finally {
+        session.dispose();
+      }
+    }
   });
 }

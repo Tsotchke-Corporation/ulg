@@ -66,6 +66,10 @@ import {
   createSupergalacticTreePmSessionWebGpu
 } from '../runtime/astrophysics/supergalacticTreePmGpu.js';
 import {
+  createDistributedSpatialPartitioner,
+  encodeTileMultipolePayload
+} from '../services/distributedSpatialPartitioner.js';
+import {
   createNebularMhdCollapseSessionWebGpu
 } from '../runtime/astrophysics/nebularMhdCollapseGpu.js';
 import {
@@ -1781,6 +1785,10 @@ export function createUlgUniversesPhysics(device, {
     return res;
   }
 
+  let cosmoSpatialPartitioner = null;
+  let cosmoLocalPeerId = 'local-l0-host';
+  let cosmoLocalTileLease = null;
+
   // ---- L0: 2LPT IllustrisTNG / Millennium-Style Supergalactic Cosmic Web ----
   async function initCosmicWeb({ seedOverride = null, bigBang = false } = {}) {
     if (cosmoSession) {
@@ -1796,6 +1804,14 @@ export function createUlgUniversesPhysics(device, {
     // tiled seamlessly across the full 28,500 Mpc (93.0 Gly = 8.8e26 m) Observable Universe Lightcone sphere!
     const COSMO_TILE_MPC = 1425.0;
     const OBSERVABLE_UNIVERSE_MPC = 28500.0;
+    cosmoLocalPeerId = peerMesh?.peerId ? String(peerMesh.peerId) : `local-l0-${(activeSeed & 0xffff).toString(16)}`;
+    cosmoSpatialPartitioner = createDistributedSpatialPartitioner({
+      domainId: `ulg-universes-l0-${activeSeed}`,
+      boxLength: COSMO_TILE_MPC,
+      tileCount: 4,
+      leaseTtlMs: 60_000
+    });
+    cosmoLocalTileLease = cosmoSpatialPartitioner.claimTile(0, cosmoLocalPeerId);
     const w = getWorkloads();
     const gpuIc = await build2LptCosmologyICsWebGpu(device, {
       gridPerSide: w.cosmoGridPerSide,
@@ -5830,6 +5846,69 @@ export function createUlgUniversesPhysics(device, {
     disconnectPeerMesh,
     getPeerMeshState,
     dispatchPeerDerivation,
+    getCosmoSpatialPartitionerState() {
+      if (!cosmoSpatialPartitioner) return null;
+      return Object.freeze({
+        schema: cosmoSpatialPartitioner.schema,
+        localPeerId: cosmoLocalPeerId,
+        localTileClaimed: Boolean(cosmoLocalTileLease?.claimed),
+        localTileIndex: cosmoLocalTileLease?.tile?.index ?? null,
+        epoch: cosmoSpatialPartitioner.getEpoch(),
+        tileCount: cosmoSpatialPartitioner.tiles.length,
+        admittedRemoteTiles: cosmoSpatialPartitioner.getAdmittedTileSummaries({ excludePeerId: cosmoLocalPeerId }).length,
+        brokerSnapshot: cosmoSpatialPartitioner.broker.snapshot()
+      });
+    },
+    claimCosmoSpatialTile(tileIndex, peerId = cosmoLocalPeerId, opts = {}) {
+      if (!cosmoSpatialPartitioner) return Object.freeze({ claimed: false, reason: 'cosmo-uninitialized' });
+      return cosmoSpatialPartitioner.claimTile(tileIndex, peerId, opts);
+    },
+    admitRemoteCosmoTileMultipole({
+      tileIndex,
+      peerId,
+      token,
+      summaryEpoch,
+      payload = null,
+      totalMass = 0,
+      com = [0, 0, 0],
+      quadrupoleTrace = 0,
+      particleCount = 0,
+      scaleFactorA = 0,
+      stepIndex = 0
+    } = {}) {
+      if (!cosmoSpatialPartitioner) {
+        return Object.freeze({ accepted: false, reason: 'cosmo-uninitialized' });
+      }
+      const binaryPayload = payload ?? encodeTileMultipolePayload({
+        totalMass,
+        com,
+        quadrupoleTrace,
+        particleCount,
+        scaleFactorA,
+        stepIndex
+      });
+      const res = cosmoSpatialPartitioner.submitTileMultipoleSummary({
+        tileIndex,
+        peerId,
+        token,
+        summaryEpoch: summaryEpoch ?? cosmoSpatialPartitioner.getEpoch(),
+        payload: binaryPayload
+      });
+      if (res.accepted && cosmoSession) {
+        const remoteSummaries = cosmoSpatialPartitioner.getAdmittedTileSummaries({ excludePeerId: cosmoLocalPeerId });
+        cosmoSession.injectRemoteTileMultipoles(remoteSummaries);
+      }
+      return res;
+    },
+    evictCosmoSpatialPeer(peerId, opts = {}) {
+      if (!cosmoSpatialPartitioner) return Object.freeze({ tiles: [] });
+      const res = cosmoSpatialPartitioner.evictPeer(peerId, opts);
+      if (cosmoSession) {
+        const remoteSummaries = cosmoSpatialPartitioner.getAdmittedTileSummaries({ excludePeerId: cosmoLocalPeerId });
+        cosmoSession.injectRemoteTileMultipoles(remoteSummaries);
+      }
+      return res;
+    },
     dispose
   });
 }

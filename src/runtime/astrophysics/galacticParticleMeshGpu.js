@@ -25,8 +25,30 @@ import {
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
 import { createSchroederScaleAtlasGravitySolverWebGpu } from '../sph/schroederScaleAtlasMultipoleGpu.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_GALACTIC_PM_SCHEMA = 'ulg.astrophysics.galactic-ss-nfw-dm-webgpu.v1';
+
+export const GALACTIC_PARTICLE_MESH_LAW_ADAPTER = Object.freeze({
+  id: 'galactic-mhd-evolution',
+  lawNodeId: 'law:astrophysics-galactic-mhd-evolution',
+  orderConstraint: 'after:flrw-treepm-cosmology',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['galactic-stars-dm-ism', 'ss-scale-atlas-multipole', 'nfw-halo-potential']),
+  writes: Object.freeze(['galactic-stars-dm-ism']),
+  accumulates: Object.freeze(['galactic-com-telemetry']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['mass', 'linear-momentum', 'angular-momentum']),
+  validityDomain: Object.freeze({ minBodies: 64, metallicityNonNegative: true }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e18, 1e22])
+});
 
 const GPU_BUF = Object.freeze({
   MAP_READ: 0x0001,
@@ -688,5 +710,60 @@ export function createGalacticParticleMeshEngineWebGpu({
     readbackBodies,
     step,
     dispose
+  });
+}
+
+export function registerGalacticParticleMeshModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('galactic-mhd-evolution@1')) {
+    return registry.resolveModule('galactic-mhd-evolution@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'galactic-mhd-evolution', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/galacticParticleMeshGpu.js',
+      entryPoint: 'pm_kick_and_drift',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      count: { type: 'number', min: 64, max: 262144, required: false },
+      boxSize: { type: 'number', min: 4, max: 1000, required: false }
+    },
+    stateLayout: {
+      tensorId: 'galactic-ss-nfw-bodies',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 8,
+      strideBytes: 32,
+      fields: ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'popTag']
+    },
+    scaleRangeM: [1e18, 1e22],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: GALACTIC_PARTICLE_MESH_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const count = Math.max(64, Math.trunc(Number(p.count ?? 256)));
+      const init = new Float32Array(count * 8);
+      init[3] = 5.0;
+      for (let i = 1; i < count; i += 1) {
+        const ang = (i / count) * Math.PI * 2;
+        const r = 1.5 + (i % 12) * 0.45;
+        init[i * 8 + 0] = r * Math.cos(ang);
+        init[i * 8 + 2] = r * Math.sin(ang);
+        init[i * 8 + 3] = 0.01;
+        init[i * 8 + 4] = -Math.sin(ang);
+        init[i * 8 + 6] = Math.cos(ang);
+      }
+      const session = createGalacticParticleMeshWebGpu(device, {
+        bodies: init,
+        boxSize: Number(p.boxSize ?? 32)
+      });
+      try {
+        await session.step({ dt: 0.02, readback: false });
+        return createSimulationArtifact?.({ schema: ULG_GALACTIC_PM_SCHEMA, stepIndex: session.stepIndex, count }) ?? { stepIndex: session.stepIndex, count };
+      } finally {
+        session.dispose();
+      }
+    }
   });
 }

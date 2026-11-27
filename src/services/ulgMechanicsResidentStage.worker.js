@@ -46,9 +46,15 @@ import {
 import {
   LAW_FALLBACK_POLICY,
   approximateLaw,
+  compileDeclarativeLawIrToWgsl,
   compileLawToWgsl,
+  createRepresentedVolumePhaseRetargetLawIr,
+  createTaitEosCavitationLawIr,
   defineLawObject
 } from '../runtime/material/eshkolHigherOrderLawCompiler.js';
+import {
+  resolveSphWallReservoirAuthority
+} from '../runtime/thermalEnvironmentAuthority.js';
 import {
   buildRepresentativeParticlesStatus,
   summarizeRepresentedEntityDistribution
@@ -87,7 +93,8 @@ import {
   normalizePressureInterfaceGasCellFieldImport,
   scheduleSphGasCellEosFinalConsumerRelease,
   observeResidentProductHistoryLiveRowBound,
-  isExactQuiescentSphReactionTable
+  isExactQuiescentSphReactionTable,
+  createCanonicalMlsMpmLawDagEpochScheduler
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
   validateSphDispersedMediumGpuBufferAuthority
@@ -14108,8 +14115,38 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         controlPlaneYieldReceipt = scheduleControlPlaneTaskYielder.close();
       }
     }
+    // A3 thermal regional radiative closure is only consumed by `sphThermalGpuKernel.js`
+    // when thermal evolution is active AND wall/ambient radiative exchange is enabled.
+    // Gating it here eliminates wasted GPU command submits on non-thermal (`water-realtime`)
+    // and adiabatic (`iron-ice-quench`) lanes while keeping active thermal lanes live.
+    const a3ThermalConsumerActive = (() => {
+      const lawAct = resolveScheduleLawActivation();
+      if (!lawAct.thermal) return false;
+      const laneResOpts =
+        record.schroederLane?.residentStepOptions
+        || baseMechanicsOptions.residentStepOptions
+        || {};
+      const thermalOpts = laneResOpts.thermalStepOptions || {};
+      if (thermalOpts.ambientRadiationExchangeEnabled === false) return false;
+      const wallAuthRaw = thermalOpts.wallReservoirAuthority ?? laneResOpts.wallReservoirAuthority ?? null;
+      if (wallAuthRaw && typeof wallAuthRaw.exchangeEnabled === 'boolean') {
+        return wallAuthRaw.exchangeEnabled === true;
+      }
+      try {
+        const resolvedWall = resolveSphWallReservoirAuthority({
+          wallTemperaturesK: thermalOpts.wallTemperaturesK ?? laneResOpts.wallTemperaturesK,
+          wallReservoirAuthority: wallAuthRaw,
+          wallModel: thermalOpts.wallModel ?? laneResOpts.wallModel,
+          wallFaceHeatCapacitiesJPerK:
+            thermalOpts.wallFaceHeatCapacitiesJPerK ?? laneResOpts.wallFaceHeatCapacitiesJPerK ?? null
+        });
+        return resolvedWall.exchangeEnabled === true;
+      } catch {
+        return false;
+      }
+    })();
     let a3ThermalTickEncodedInBurst = false;
-    if (submitBurstOpened && !scheduleLoopError && !state.cancelRequested) {
+    if (a3ThermalConsumerActive && submitBurstOpened && !scheduleLoopError && !state.cancelRequested) {
       const lastA3ThermalStepPre = Number(record._a3ThermalLastTickStep);
       const laneStepPre = Number(record.schroederLane?.sphParticleUpload?.step ?? 0);
       const shouldRunA3InBurst = Boolean(
@@ -15638,7 +15675,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     }
     const lastA3ThermalStep = Number(record._a3ThermalLastTickStep);
     const shouldRunA3ThermalTick = Boolean(
-      !a3ThermalTickEncodedInBurst
+      a3ThermalConsumerActive
+      && !a3ThermalTickEncodedInBurst
       && (
         !Number.isFinite(lastA3ThermalStep)
         || stepCount > 8
@@ -15778,24 +15816,54 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             if (tRef > maxTempK) maxTempK = tRef;
           }
         }
-        const computedVolumeRatio =
+        const liveCandidate = thermalPotential?.candidate ?? null;
+        const liveMinTempK = Number(liveCandidate?.minTemperatureK ?? liveCandidate?.temperatureMinK);
+        const liveMaxTempK = Number(liveCandidate?.maxTemperatureK ?? liveCandidate?.temperatureMaxK);
+        const liveTempSpanK =
+          Number.isFinite(liveMinTempK) && Number.isFinite(liveMaxTempK) && liveMaxTempK > liveMinTempK
+            ? (liveMaxTempK - liveMinTempK)
+            : 0;
+        const liveEntityRatio = Number(record.representativeEntityStats?.maxMinEntityRatio);
+        const liveStepWallMs = Number(lastStepSummary?.stepElapsedMs);
+        const liveGpuMetricsUsed = Boolean(
+          liveTempSpanK > 0
+          || (Number.isFinite(liveEntityRatio) && liveEntityRatio > 1.0)
+          || Number.isFinite(liveStepWallMs)
+        );
+        const tableVolumeRatio =
           Number.isFinite(minRho) && minRho > 0 && maxRho > minRho
             ? Math.min(1000, maxRho / minRho)
             : (lawAct.gasBoundaryActionable ? 8.0 : 1.0);
-        const computedThermalGradientKPerM =
+        const computedVolumeRatio = Number.isFinite(liveEntityRatio) && liveEntityRatio > 1.0
+          ? Math.min(1000, Math.max(tableVolumeRatio, liveEntityRatio))
+          : tableVolumeRatio;
+        const tableThermalGradientKPerM =
           Number.isFinite(minTempK) && maxTempK > minTempK
             ? (maxTempK - minTempK) / minBoxEdgeM
             : (lawAct.thermal ? 600.0 : 0.0);
+        const computedThermalGradientKPerM = liveTempSpanK > 0
+          ? Math.max(tableThermalGradientKPerM, liveTempSpanK / minBoxEdgeM)
+          : tableThermalGradientKPerM;
         const activeInterfaceCount =
           (lawAct.reaction ? 1 : 0)
           + (lawAct.phaseVolumeInterfaceTransport ? 1 : 0)
-          + (lawAct.gasBoundaryActionable ? 1 : 0);
-        const lodDecision = record.dynamicHierarchyLodController.evaluateScheduleBoundary({
+          + (lawAct.gasBoundaryActionable ? 1 : 0)
+          + (twoLevelMechanicsLastStep ? 1 : 0);
+        const lodDecisionRaw = record.dynamicHierarchyLodController.evaluateScheduleBoundary({
           scheduleWallMs: wallMs,
           maxVolumeRatio: computedVolumeRatio,
           maxThermalGradientKPerM: computedThermalGradientKPerM,
           activeInterfaceCount,
           deviceLimits: record.workerDevice?.limits ?? null
+        });
+        const lodDecision = Object.freeze({
+          ...lodDecisionRaw,
+          telemetrySource: liveGpuMetricsUsed
+            ? 'live-gpu-schedule-telemetry'
+            : 'material-table-and-law-activation',
+          liveGpuMetricsUsed,
+          liveTempSpanK,
+          observedStepMs: Number.isFinite(liveStepWallMs) ? liveStepWallMs : null
         });
         record.lastDynamicHierarchyLodDecision = lodDecision;
         dynamicHierarchyLodStatus = lodDecision;
@@ -15864,12 +15932,20 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         dtS: laneDtS,
         thresholdFo: SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD
       });
-      const implicitActive = Boolean(requestedImplicitThermal || foEnv.exceedsExplicitStability);
+      const implicitRecommended = Boolean(requestedImplicitThermal || foEnv.exceedsExplicitStability);
+      // Report strictly honest execution telemetry: the resident worker evaluates
+      // the explicit-stability Fourier envelope here and does not dispatch an IMEX
+      // thermal PCG pass unless an explicit GPU IMEX pass executed in this schedule.
       implicitThermalStatus = Object.freeze({
         schema: foEnv.schema,
-        active: implicitActive,
+        active: false,
+        dispatchedOnGpu: false,
+        envelopeExceeded: Boolean(foEnv.exceedsExplicitStability),
+        recommended: implicitRecommended,
+        requested: Boolean(requestedImplicitThermal),
+        mode: 'advisory-envelope-only',
         reason: requestedImplicitThermal
-          ? 'explicit-request'
+          ? 'explicit-request-advisory-only'
           : (foEnv.exceedsExplicitStability ? 'fourier-envelope-exceeded' : 'explicit-stable'),
         maxFourierNumber: foEnv.maxFourierNumber,
         thresholdFo: foEnv.thresholdFo,
@@ -15877,8 +15953,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         evaluatedMaterials: foEnv.evaluatedCount,
         iterations: requestedImplicitThermal?.iterations ?? foEnv.recommendedIterations,
         theta: requestedImplicitThermal?.theta ?? 1.0,
-        passCount: 1,
-        skewSymmetricFluxConserved: true
+        passCount: 0,
+        skewSymmetricFluxConserved: false
       });
       globalThis.__ulgImplicitThermalStatus = implicitThermalStatus;
     } catch {
@@ -15926,6 +16002,81 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         record._compiledEshkolEnvelopeLaw = null;
       }
     }
+    // Compile & cache canonical declarative Law-IR WGSL modules once per lane/device
+    // (zero per-step GPU overhead) and run the canonical Law-DAG epoch scheduler
+    // to validate SS authority, hoisted spatial derived-view sharing, and lease drain.
+    if (!record._compiledLawIrModules) {
+      try {
+        const taitIr = compileDeclarativeLawIrToWgsl(createTaitEosCavitationLawIr(), {
+          includeEnvelopeWatch: true
+        });
+        const phaseRetargetIr = compileDeclarativeLawIrToWgsl(createRepresentedVolumePhaseRetargetLawIr(), {
+          includeEnvelopeWatch: true
+        });
+        let gpuShaderModuleValidated = false;
+        if (typeof record.workerDevice?.createShaderModule === 'function') {
+          try {
+            record.workerDevice.createShaderModule({
+              label: 'ulg-live-law-ir-tait-eos-cavitation',
+              code: taitIr.wgsl
+            });
+            record.workerDevice.createShaderModule({
+              label: 'ulg-live-law-ir-represented-volume-retarget',
+              code: phaseRetargetIr.wgsl
+            });
+            gpuShaderModuleValidated = true;
+          } catch {
+            gpuShaderModuleValidated = false;
+          }
+        }
+        record._compiledLawIrModules = Object.freeze({
+          schema: taitIr.schema,
+          valid: true,
+          moduleIds: Object.freeze([taitIr.lawId, phaseRetargetIr.lawId]),
+          wgslFingerprints: Object.freeze([taitIr.fingerprint, phaseRetargetIr.fingerprint]),
+          gpuShaderModuleValidated
+        });
+      } catch {
+        record._compiledLawIrModules = null;
+      }
+    }
+    let lawDagEpochStatus = null;
+    try {
+      const dagScheduler = createCanonicalMlsMpmLawDagEpochScheduler({
+        epochId: laneId || 'mls-mpm-ss-epoch',
+        epochGeneration: Math.max(1, laneStepAfterSchedule),
+        requireCanonicalSsAuthority: true
+      });
+      const hoistingEntries = Object.entries(dagScheduler.hoistingPlan || {});
+      for (const [adapterMode, stageIds] of hoistingEntries) {
+        if (!Array.isArray(stageIds) || stageIds.length === 0) continue;
+        for (let idx = 0; idx < stageIds.length; idx += 1) {
+          dagScheduler.acquireHoistedSpatialView(adapterMode, () => ({
+            adapterMode,
+            epochGeneration: Math.max(1, laneStepAfterSchedule),
+            canonicalEpochId: previousEpochSeal?.generationId ?? null
+          }));
+        }
+      }
+      dagScheduler.releaseHoistedViews();
+      const leaseSnapshot = dagScheduler.leaseScope.assertDrained({ requireAllReleased: true });
+      const dagSnap = dagScheduler.snapshot();
+      lawDagEpochStatus = Object.freeze({
+        schema: dagSnap.schema,
+        epochId: dagSnap.epochId,
+        epochGeneration: dagSnap.epochGeneration,
+        valid: Boolean(dagScheduler.validation?.valid),
+        zeroLegacyPrivateGrids: (dagScheduler.validation?.debt?.length ?? 0) === 0,
+        stageCount: dagSnap.stageCount,
+        hoistedViewBuilds: dagSnap.hoistedViewBuilds,
+        hoistedViewReuses: dagSnap.hoistedViewReuses,
+        leasedDrained: leaseSnapshot.live === 0,
+        compiledLawIr: record._compiledLawIrModules ?? null
+      });
+      globalThis.__ulgLawDagEpochStatus = lawDagEpochStatus;
+    } catch {
+      lawDagEpochStatus = null;
+    }
     const compiledEshkolLaw = record._compiledEshkolEnvelopeLaw;
     const lawEnvelopeWatchStatus = Object.freeze({
       schema: 'peercompute.ulg.eshkol-envelope-watch-status.v1',
@@ -15935,12 +16086,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       compiledWgslHash: compiledEshkolLaw?.wgslHash ?? null,
       compiledDomainHash: compiledEshkolLaw?.domainHash ?? null,
       compiledSourceHash: compiledEshkolLaw?.sourceHash ?? null,
+      compiledLawIrActive: Boolean(record._compiledLawIrModules?.valid),
+      compiledLawIrModules: record._compiledLawIrModules?.moduleIds ?? Object.freeze([]),
+      compiledLawIrGpuValidated: Boolean(record._compiledLawIrModules?.gpuShaderModuleValidated),
       generation: Number(triadStatus?.generation ?? compiledEshkolLaw?.generation ?? 0),
       functionCount: Number(triadStatus?.functionCount ?? globalThis.__ulgA4GasResponseStatus?.functionCount ?? 0),
       fallbackPolicy: compiledEshkolLaw?.fallbackPolicy ?? LAW_FALLBACK_POLICY.ASYNC,
       homogeneityPredicatesActive: Boolean(compiledEshkolLaw?.hasHomogeneityGate ?? true),
       domainHashBound: Boolean(compiledEshkolLaw?.domainHash),
-      fourierEnvelopeExceeded: Boolean(implicitThermalStatus?.active)
+      fourierEnvelopeExceeded: Boolean(implicitThermalStatus?.envelopeExceeded ?? implicitThermalStatus?.active)
     });
     globalThis.__ulgLawEnvelopeWatchStatus = lawEnvelopeWatchStatus;
     if (!record.representativeEntityStats && scheduleSourceSphParticleState) {
@@ -16014,6 +16168,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         dynamicHierarchyLod: dynamicHierarchyLodStatus,
         scaleAtlas: scaleAtlasStatus,
         implicitThermal: implicitThermalStatus,
+        lawDagEpoch: lawDagEpochStatus,
         lawEnvelopeWatch: lawEnvelopeWatchStatus,
         representativeParticles: representativeParticlesStatus,
         chainDeepening: chainDeepeningStatus,

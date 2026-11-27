@@ -24,9 +24,30 @@ import { solveAtom } from '../electronicStructure/radialKohnSham.js';
 import {
   createSchroederScaleAtlasGravitySolverWebGpu
 } from '../sph/schroederScaleAtlasMultipoleGpu.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_GALACTIC_ISM_COOLING_SCHEMA = 'ulg.astrophysics.galactic-ism-webgpu.v1';
+
+export const GALACTIC_ISM_COOLING_LAW_ADAPTER = Object.freeze({
+  id: 'galactic-ism-cooling',
+  lawNodeId: 'law:astrophysics-galactic-ism-cooling',
+  orderConstraint: 'after:galactic-mhd-evolution',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['galactic-ism-sph-parcels', 'gate1-atomic-cooling-anchors', 'ss-scale-atlas-multipole']),
+  writes: Object.freeze(['galactic-ism-sph-parcels']),
+  accumulates: Object.freeze(['galactic-ism-cooling-telemetry']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['mass', 'linear-momentum']),
+  validityDomain: Object.freeze({ pingPongBuffered: true, compressibleIsmHydroEnabled: true }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e17, 1e22])
+});
 
 const HA_TO_EV = 27.211386245988;
 const EV_TO_K = 11604.51812;
@@ -513,4 +534,46 @@ export async function runGalacticIsmWebGpu(device, {
     dummyAtlasBuf?.destroy();
     for (const b of [pBuf, bufA, bufB, hydroBuf, rBuf]) b.destroy();
   }
+}
+
+export function registerGalacticIsmCoolingModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('galactic-ism-cooling@1')) {
+    return registry.resolveModule('galactic-ism-cooling@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'galactic-ism-cooling', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/galacticIsmCoolingGpu.js',
+      entryPoint: 'step_galactic_ism',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      metallicityZ: { type: 'number', min: 0, max: 0.1, required: false },
+      steps: { type: 'number', min: 1, max: 64, required: false }
+    },
+    stateLayout: {
+      tensorId: 'galactic-ism-sph-parcels',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 12,
+      strideBytes: 48,
+      fields: ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'tempK', 'density', 'metallicityZ', 'coolingRate', 'speciesTag']
+    },
+    scaleRangeM: [1e17, 1e22],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: GALACTIC_ISM_COOLING_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const out = await runGalacticIsmStepWebGpu(device, {
+        bodies: p.bodies || [
+          { x: 0, y: 0, z: 0, mass: 1e6, vx: 0, vy: 0, vz: 0, tempK: 1e5, speciesTag: 3 },
+          { x: 4, y: 0, z: 0, mass: 1, vx: 0, vy: 1, vz: 0, tempK: 1.2e5, speciesTag: 2 }
+        ],
+        metallicityZ: Number(p.metallicityZ ?? 0.02),
+        steps: Math.max(1, Math.trunc(Number(p.steps ?? 2)))
+      });
+      return createSimulationArtifact?.({ schema: ULG_GALACTIC_ISM_COOLING_SCHEMA, result: out }) ?? out;
+    }
+  });
 }

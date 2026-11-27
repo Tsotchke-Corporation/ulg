@@ -21,9 +21,30 @@ import {
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
 import { createFft3dWorkspaceWebGpu } from '../gpuMath/fft3dWebGpu.js';
+import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_SUPERGALACTIC_TREEPM_SCHEMA = 'ulg.astrophysics.supergalactic-flrw-treepm.v1';
+
+export const SUPERGALACTIC_TREEPM_LAW_ADAPTER = Object.freeze({
+  id: 'flrw-treepm-cosmology',
+  lawNodeId: 'law:astrophysics-flrw-treepm-cosmology',
+  orderConstraint: 'root:cosmological-epoch',
+  adapterMode: LAW_ADAPTER_MODES.AGGREGATE_FAR,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['cosmo-particles', 'flrw-scale-factor', 'fft3d-poisson-grid']),
+  writes: Object.freeze(['cosmo-particles', 'fft3d-poisson-grid']),
+  accumulates: Object.freeze(['cosmo-power-spectrum-pk']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['comoving-mass', 'comoving-linear-momentum']),
+  validityDomain: Object.freeze({ aScaleMin: 0.01, aScaleMax: 2.5, comovingBoxMinMpc: 1.0 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.EXACT_SUBSTEP,
+  scaleRangeM: Object.freeze([1e22, 1e26])
+});
 
 const GPU_BUFFER_USAGE = Object.freeze({
   MAP_READ: 0x01,
@@ -1991,4 +2012,50 @@ export function createSupergalacticTreePmCosmicAdapter({
     },
     dispose() { session.destroy(); }
   };
+}
+
+export function registerSupergalacticTreePmModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('flrw-treepm-cosmology@1')) {
+    return registry.resolveModule('flrw-treepm-cosmology@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'flrw-treepm-cosmology', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/supergalacticTreePmGpu.js',
+      entryPoint: 'cic_kick_drift',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      boxLengthMpc: { type: 'number', min: 1.0, max: 50000, required: false },
+      aInit: { type: 'number', min: 0.01, max: 2.0, required: false }
+    },
+    stateLayout: {
+      tensorId: 'cosmo-treepm-particles',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 16,
+      strideBytes: 64,
+      fields: ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'overdensity', 'ax', 'ay', 'az', 'phi', 'r0', 'r1', 'r2', 'r3']
+    },
+    scaleRangeM: [1e22, 1e26],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: SUPERGALACTIC_TREEPM_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const session = createSupergalacticTreePmSessionWebGpu(device, {
+        gridPerSide: 8,
+        pmGridN: 16,
+        boxLengthMpc: Number(p.boxLengthMpc ?? 200),
+        aInit: Number(p.aInit ?? 0.35),
+        da: 0.01
+      });
+      try {
+        const tel = await session.step({ readTelemetry: true });
+        return createSimulationArtifact?.({ schema: ULG_SUPERGALACTIC_TREEPM_SCHEMA, telemetry: tel }) ?? tel;
+      } finally {
+        session.destroy();
+      }
+    }
+  });
 }

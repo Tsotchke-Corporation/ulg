@@ -97,6 +97,7 @@ function getOrCreateDeviceState(device) {
     triadByMaterialId: new Map(), // materialId -> { materialKey, sourceFingerprint, slices[5], g6DebyeSamples }
     tableBuffer: null,
     materialMapBuffer: null,
+    packedTableAndMapBuffer: null,
     receiptBuffer: null,
     tableByteLength: 0,
     materialCount: 0,
@@ -182,6 +183,23 @@ function rebuildDeviceBuffers(state) {
   });
   device.queue.writeBuffer(nextMap, 0, mapWords);
 
+  // Combined read-only buffer packing [tableFloats..., mapWordsAsF32..., bitcast(mapStart), bitcast(mapRowCount)]
+  // so downstream kernels stay within baseline WebGPU storage-buffer limits without extra bindings.
+  const packedWithMapWords = packed.length + mapWords.length + 2;
+  const packedWithMapBytes = new ArrayBuffer(packedWithMapWords * 4);
+  const packedWithMapF32 = new Float32Array(packedWithMapBytes);
+  const packedWithMapU32 = new Uint32Array(packedWithMapBytes);
+  packedWithMapF32.set(packed, 0);
+  packedWithMapU32.set(mapWords, packed.length);
+  packedWithMapU32[packed.length + mapWords.length] = packed.length >>> 0;
+  packedWithMapU32[packed.length + mapWords.length + 1] = materialIds.length >>> 0;
+  const nextPackedWithMap = device.createBuffer({
+    label: `ulg-triad-a4-packed-table-map-g${state.generation + 1}`,
+    size: Math.max(32, packedWithMapBytes.byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(nextPackedWithMap, 0, packedWithMapBytes);
+
   if (!state.receiptBuffer) {
     state.receiptBuffer = device.createBuffer({
       label: 'ulg-triad-a4-envelope-receipt',
@@ -197,8 +215,10 @@ function rebuildDeviceBuffers(state) {
 
   const prevTable = state.tableBuffer;
   const prevMap = state.materialMapBuffer;
+  const prevPackedWithMap = state.packedTableAndMapBuffer;
   state.tableBuffer = nextTable;
   state.materialMapBuffer = nextMap;
+  state.packedTableAndMapBuffer = nextPackedWithMap;
   state.tableByteLength = packed.byteLength;
   state.materialCount = materialIds.length;
   state.functionCount = slices.length;
@@ -214,6 +234,7 @@ function rebuildDeviceBuffers(state) {
 
   if (prevTable) retireBufferSafely(device, prevTable);
   if (prevMap) retireBufferSafely(device, prevMap);
+  if (prevPackedWithMap) retireBufferSafely(device, prevPackedWithMap);
   publishGlobalStatus(state);
   return true;
 }
@@ -345,6 +366,7 @@ export function getTriadClosureGpuBinding(device) {
       functionCount: 0,
       tableBuffer: null,
       materialMapBuffer: null,
+      packedTableAndMapBuffer: null,
       receiptBuffer: null,
       status: buildStatusSnapshot(state)
     });
@@ -356,6 +378,7 @@ export function getTriadClosureGpuBinding(device) {
     functionCount: state.functionCount,
     tableBuffer: state.tableBuffer,
     materialMapBuffer: state.materialMapBuffer,
+    packedTableAndMapBuffer: state.packedTableAndMapBuffer ?? state.tableBuffer,
     receiptBuffer: state.receiptBuffer,
     status: buildStatusSnapshot(state)
   });
@@ -408,9 +431,11 @@ export function destroyTriadClosureRegistry(device) {
   state.destroyed = true;
   if (state.tableBuffer) retireBufferSafely(device, state.tableBuffer);
   if (state.materialMapBuffer) retireBufferSafely(device, state.materialMapBuffer);
+  if (state.packedTableAndMapBuffer) retireBufferSafely(device, state.packedTableAndMapBuffer);
   if (state.receiptBuffer) retireBufferSafely(device, state.receiptBuffer);
   state.tableBuffer = null;
   state.materialMapBuffer = null;
+  state.packedTableAndMapBuffer = null;
   state.receiptBuffer = null;
   state.gasByMaterialId.clear();
   state.triadByMaterialId.clear();
@@ -423,11 +448,61 @@ export function destroyTriadClosureRegistry(device) {
  * strictly inside certified boxes (`ok == 1`), falling back cleanly to closed
  * form outside the box and counting hits/misses in `triad_envelope_receipt`.
  */
-export function triadClosureMechanicsRefreshWgsl() {
+export function triadClosureMechanicsRefreshWgsl({
+  packedMap = false,
+  tableBinding = 9,
+  mapBinding = 10,
+  receiptBinding = 11,
+  sharedReceiptVar = null,
+  sharedReceiptBaseWord = 0
+} = {}) {
+  const useSharedReceipt = Boolean(sharedReceiptVar);
+  const receiptVar = useSharedReceipt ? String(sharedReceiptVar) : 'triad_envelope_receipt';
+  const receiptWord = (idx) => `${receiptVar}[${Math.max(0, Math.trunc(Number(sharedReceiptBaseWord) || 0)) + idx}u]`;
+  const bindingsDecl = [
+    `@group(0) @binding(${tableBinding}) var<storage, read> triad_a4_table: array<f32>;`,
+    ...(packedMap ? [] : [`@group(0) @binding(${mapBinding}) var<storage, read> triad_material_map: array<vec4<u32>>;`]),
+    ...(useSharedReceipt ? [] : [`@group(0) @binding(${receiptBinding}) var<storage, read_write> triad_envelope_receipt: array<atomic<u32>>;`])
+  ].join('\n');
+  const lookupBody = packedMap
+    ? `  let total_words = arrayLength(&triad_a4_table);
+  if (total_words < 10u) { return out; }
+  let map_base = bitcast<u32>(triad_a4_table[total_words - 2u]);
+  let row_count = bitcast<u32>(triad_a4_table[total_words - 1u]);
+  for (var i = 0u; i < row_count; i = i + 1u) {
+    let base = map_base + i * 8u;
+    if (base + 7u >= total_words - 2u) { break; }
+    let mat_w = bitcast<u32>(triad_a4_table[base]);
+    if (mat_w == material_id) {
+      out.found = 1u;
+      out.helmholtz_slot = bitcast<u32>(triad_a4_table[base + 1u]);
+      out.solid_slot = bitcast<u32>(triad_a4_table[base + 2u]);
+      out.transport_base = bitcast<u32>(triad_a4_table[base + 3u]);
+      out.gas_sound_slot = bitcast<u32>(triad_a4_table[base + 4u]);
+      out.gas_visc_slot = bitcast<u32>(triad_a4_table[base + 5u]);
+      out.gas_cond_slot = bitcast<u32>(triad_a4_table[base + 6u]);
+      out.gas_dens_slot = bitcast<u32>(triad_a4_table[base + 7u]);
+      return out;
+    }
+  }`
+    : `  let row_count = arrayLength(&triad_material_map) / 2u;
+  for (var i = 0u; i < row_count; i = i + 1u) {
+    let r0 = triad_material_map[i * 2u];
+    if (r0.x == material_id) {
+      let r1 = triad_material_map[i * 2u + 1u];
+      out.found = 1u;
+      out.helmholtz_slot = r0.y;
+      out.solid_slot = r0.z;
+      out.transport_base = r0.w;
+      out.gas_sound_slot = r1.x;
+      out.gas_visc_slot = r1.y;
+      out.gas_cond_slot = r1.z;
+      out.gas_dens_slot = r1.w;
+      return out;
+    }
+  }`;
   return /* wgsl */ `
-@group(0) @binding(9) var<storage, read> triad_a4_table: array<f32>;
-@group(0) @binding(10) var<storage, read> triad_material_map: array<vec4<u32>>;
-@group(0) @binding(11) var<storage, read_write> triad_envelope_receipt: array<atomic<u32>>;
+${bindingsDecl}
 
 ${eshkolTriadClosuresWgsl('triad_a4_table')}
 
@@ -454,22 +529,7 @@ fn triad_lookup_material_slots(material_id: u32) -> TriadMaterialSlots {
   out.gas_visc_slot = TRIAD_ABSENT_SLOT;
   out.gas_cond_slot = TRIAD_ABSENT_SLOT;
   out.gas_dens_slot = TRIAD_ABSENT_SLOT;
-  let row_count = arrayLength(&triad_material_map) / 2u;
-  for (var i = 0u; i < row_count; i = i + 1u) {
-    let r0 = triad_material_map[i * 2u];
-    if (r0.x == material_id) {
-      let r1 = triad_material_map[i * 2u + 1u];
-      out.found = 1u;
-      out.helmholtz_slot = r0.y;
-      out.solid_slot = r0.z;
-      out.transport_base = r0.w;
-      out.gas_sound_slot = r1.x;
-      out.gas_visc_slot = r1.y;
-      out.gas_cond_slot = r1.z;
-      out.gas_dens_slot = r1.w;
-      return out;
-    }
-  }
+${lookupBody}
   return out;
 }
 
@@ -489,7 +549,7 @@ fn apply_triad_a4_mechanics_envelopes(
   if (slots.found == 0u) {
     return out;
   }
-  atomicAdd(&triad_envelope_receipt[0u], 1u);
+  atomicAdd(&${receiptWord(0)}, 1u);
 
   // 1. A4 2-D (T, P) Gas response closures (strict in-box, CFL-ceiling safe).
   if (base.eos_model == 2.0 && slots.gas_sound_slot != TRIAD_ABSENT_SLOT) {
@@ -499,17 +559,17 @@ fn apply_triad_a4_mechanics_envelopes(
     if (r_cs.y == 1.0 && r_cs.x > 0.0 && rf_finite(r_cs.x)) {
       // Never exceed the CFL-admitted sound speed cap on explicit lanes.
       out.sound_speed = min(r_cs.x, max(base.sound_speed, 1.0));
-      atomicAdd(&triad_envelope_receipt[4u], 1u);
+      atomicAdd(&${receiptWord(4)}, 1u);
     } else {
-      atomicAdd(&triad_envelope_receipt[5u], 1u);
+      atomicAdd(&${receiptWord(5)}, 1u);
     }
     if (base.dynamic_viscosity > 0.0 && slots.gas_visc_slot != TRIAD_ABSENT_SLOT) {
       let r_mu = rf_eval(slots.gas_visc_slot, vec3<f32>(temperature_k, p_est, 0.0));
       if (r_mu.y == 1.0 && r_mu.x > 0.0 && rf_finite(r_mu.x)) {
         out.dynamic_viscosity = r_mu.x;
-        atomicAdd(&triad_envelope_receipt[4u], 1u);
+        atomicAdd(&${receiptWord(4)}, 1u);
       } else {
-        atomicAdd(&triad_envelope_receipt[5u], 1u);
+        atomicAdd(&${receiptWord(5)}, 1u);
       }
     }
   }
@@ -527,9 +587,9 @@ fn apply_triad_a4_mechanics_envelopes(
       if (base.dynamic_viscosity > 0.0 && base.eos_model != 2.0) {
         out.dynamic_viscosity = tr.y;
       }
-      atomicAdd(&triad_envelope_receipt[3u], 1u);
+      atomicAdd(&${receiptWord(3)}, 1u);
     } else {
-      atomicAdd(&triad_envelope_receipt[5u], 1u);
+      atomicAdd(&${receiptWord(5)}, 1u);
     }
   }
 
@@ -537,12 +597,12 @@ fn apply_triad_a4_mechanics_envelopes(
   if (base.solid > 0.5 && slots.solid_slot != TRIAD_ABSENT_SLOT) {
     let sol = triad_eval_solid_hyperelastic(slots.solid_slot, volume_ratio_j, temperature_k);
     if (sol.w == 1.0) {
-      atomicAdd(&triad_envelope_receipt[2u], 1u);
+      atomicAdd(&${receiptWord(2)}, 1u);
       if (base.bulk > 0.0 && sol.z > 0.0 && sol.z <= base.bulk) {
         out.bulk = sol.z;
       }
     } else {
-      atomicAdd(&triad_envelope_receipt[5u], 1u);
+      atomicAdd(&${receiptWord(5)}, 1u);
     }
   }
 
@@ -551,12 +611,12 @@ fn apply_triad_a4_mechanics_envelopes(
     let v_spec = 1.0 / current_density;
     let helm = triad_eval_helmholtz(slots.helmholtz_slot, temperature_k, v_spec);
     if (helm.ok == 1u) {
-      atomicAdd(&triad_envelope_receipt[1u], 1u);
+      atomicAdd(&${receiptWord(1)}, 1u);
       if (base.bulk > 0.0 && helm.bulk_modulus_kt_pa > 0.0 && helm.bulk_modulus_kt_pa <= base.bulk) {
         out.bulk = helm.bulk_modulus_kt_pa;
       }
     } else {
-      atomicAdd(&triad_envelope_receipt[5u], 1u);
+      atomicAdd(&${receiptWord(5)}, 1u);
     }
   }
 

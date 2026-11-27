@@ -152,6 +152,21 @@ import {
   evaluateEmergentMhdDynamoActivation,
   registerEmergentMhdDynamoModule
 } from './astrophysics/emergentMhdDynamoGpu.js';
+import {
+  registerSupergalacticTreePmModule
+} from './astrophysics/supergalacticTreePmGpu.js';
+import {
+  registerGalacticParticleMeshModule
+} from './astrophysics/galacticParticleMeshGpu.js';
+import {
+  registerSolarSystemNBodyModule
+} from './astrophysics/solarSystemNBodyGpu.js';
+import {
+  registerPlanetaryStructureModule
+} from './astrophysics/planetaryStructureGpu.js';
+import {
+  registerGalacticIsmCoolingModule
+} from './astrophysics/galacticIsmCoolingGpu.js';
 
 export const ULG_UNIVERSAL_LAW_GRAPH_SCHEMA = 'peercompute.ulg.universal-law-graph.v1';
 
@@ -798,7 +813,12 @@ export function registerAllTopDownLawModules(registry) {
     registerSurfaceOceanWavesModule(registry),
     registerSurfaceDeformationMpmModule(registry),
     registerXenobiologyEcologyModule(registry),
-    registerSurfaceFloraModule(registry)
+    registerSurfaceFloraModule(registry),
+    registerSupergalacticTreePmModule(registry),
+    registerGalacticParticleMeshModule(registry),
+    registerSolarSystemNBodyModule(registry),
+    registerPlanetaryStructureModule(registry),
+    registerGalacticIsmCoolingModule(registry)
   ].filter(Boolean);
   return registered;
 }

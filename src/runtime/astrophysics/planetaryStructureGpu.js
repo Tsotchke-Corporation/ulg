@@ -28,6 +28,11 @@ import {
   createSchroederScaleAtlasGravitySolverWebGpu
 } from '../sph/schroederScaleAtlasMultipoleGpu.js';
 import {
+  LAW_ADAPTER_MODES,
+  LAW_FALLBACK_POLICIES,
+  LAW_SPATIAL_AUTHORITIES
+} from '../sph/lawAdapterContract.js';
+import {
   ULG_ACCURACY_TIERS,
   ULG_POLYTOPE_ATLAS_SCHEMA,
   evaluatePolytopeAtlasWgsl,
@@ -38,6 +43,22 @@ import {
 export const ULG_PLANETARY_INTERIOR_SCHEMA = 'ulg.astrophysics.planetary-interior-polytope.v1';
 export const ULG_PLANETARY_INTERIOR_GPU_SCHEMA = 'ulg.astrophysics.planetary-interior-webgpu.v1';
 export const ULG_PLANETARY_NBODY_GPU_SCHEMA = 'ulg.astrophysics.planetary-symplectic-gpu.v1';
+
+export const PLANETARY_STRUCTURE_LAW_ADAPTER = Object.freeze({
+  id: 'planetary-interior-polytope',
+  lawNodeId: 'law:astrophysics-planetary-hydrostatic-polytope',
+  orderConstraint: 'after:solar-system-nbody',
+  adapterMode: LAW_ADAPTER_MODES.CELL_LOCAL,
+  spatialAuthority: LAW_SPATIAL_AUTHORITIES.CANONICAL_SS_EPOCH,
+  reads: Object.freeze(['gate2-polytope-atlas-bank', 'planetary-mass-composition']),
+  writes: Object.freeze(['planetary-radial-hydrostatic-profile']),
+  accumulates: Object.freeze(['planetary-moi-and-core-radius']),
+  pairedVolumeState: 'not-applicable',
+  conservedQuantities: Object.freeze(['radial-mass', 'hydrostatic-balance']),
+  validityDomain: Object.freeze({ failClosedPolytopeBounds: true, maxPressurePa: 1e13 }),
+  fallbackPolicy: LAW_FALLBACK_POLICIES.FAIL_CLOSED,
+  scaleRangeM: Object.freeze([1e5, 1e8])
+});
 
 const G_SI = 6.67430e-11;
 const GPU_BUFFER_USAGE = Object.freeze({
@@ -792,4 +813,43 @@ export async function runSymplecticPlanetaryNBodyWebGpu(device, {
     dummyAtlasBuf?.destroy();
     for (const b of [pBuf, bodyBuf, accBuf, rBody]) b.destroy();
   }
+}
+
+export function registerPlanetaryStructureModule(registry) {
+  if (!registry || typeof registry.registerModule !== 'function') return null;
+  if (registry.hasModule?.('planetary-interior-polytope@1')) {
+    return registry.resolveModule('planetary-interior-polytope@1')?.descriptor || null;
+  }
+  return registry.registerModule({
+    method: { model: 'planetary-interior-polytope', version: 1 },
+    kernel: {
+      sourceModule: 'src/runtime/astrophysics/planetaryStructureGpu.js',
+      entryPoint: 'solve_planetary_hydrostatic',
+      workgroupSize: 64
+    },
+    parameterSchema: {
+      centralPressurePa: { type: 'number', min: 1e6, max: 1e13, required: false },
+      coreMassFraction: { type: 'number', min: 0, max: 1, required: false }
+    },
+    stateLayout: {
+      tensorId: 'planetary-radial-hydrostatic-profile',
+      dtype: 'f32',
+      layout: 'interleaved',
+      strideElements: 4,
+      strideBytes: 16,
+      fields: ['radiusM', 'pressurePa', 'densityKgM3', 'enclosedMassKg']
+    },
+    scaleRangeM: [1e5, 1e8],
+    accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    lawAdapter: PLANETARY_STRUCTURE_LAW_ADAPTER,
+    async stepCapsule(capsule, { createSimulationArtifact, device }) {
+      const p = capsule.input?.parameters || {};
+      const out = await solvePlanetaryInteriorWebGpu(device, {
+        centralPressurePa: Number(p.centralPressurePa ?? 3.6e11),
+        coreMassFraction: Number(p.coreMassFraction ?? 0.32),
+        ...(p.polytopeBank ? { polytopeBank: p.polytopeBank } : {})
+      });
+      return createSimulationArtifact?.({ schema: ULG_PLANETARY_INTERIOR_GPU_SCHEMA, result: out }) ?? out;
+    }
+  });
 }

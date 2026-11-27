@@ -611,7 +611,11 @@ export function mountUlgSimStudioApp({
         }
         const impT = globalThis.__ulgImplicitThermalStatus;
         if (impT) {
-          archLines.push(`Implicit Thermal PCG: active=${Boolean(impT.active)} Fo=${(Number(impT.maxFourierNumber) || 0).toFixed(3)} (thr=${impT.thresholdFo}) passes=${impT.passCount ?? 1} reason=${impT.reason}`);
+          archLines.push(`Implicit Thermal PCG: dispatched=${Boolean(impT.dispatchedOnGpu)} recommended=${Boolean(impT.recommended)} Fo=${(Number(impT.maxFourierNumber) || 0).toFixed(3)} (thr=${impT.thresholdFo}) passes=${impT.passCount ?? 0} reason=${impT.reason}`);
+        }
+        const dagEpoch = globalThis.__ulgLawDagEpochStatus;
+        if (dagEpoch) {
+          archLines.push(`Law-DAG Epoch: valid=${Boolean(dagEpoch.valid)} stages=${dagEpoch.stageCount ?? 0} hoisted=${dagEpoch.hoistedViewBuilds ?? 0} reuses=${dagEpoch.hoistedViewReuses ?? 0} lawIr=${Boolean(dagEpoch.compiledLawIr?.valid)}`);
         }
         const lawWatch = globalThis.__ulgLawEnvelopeWatchStatus;
         if (lawWatch) {

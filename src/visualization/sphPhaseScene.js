@@ -40900,6 +40900,10 @@ fn main(
           scene.userData.sphImplicitThermalStatus = workerArchStatus.implicitThermal;
           globalThis.__ulgImplicitThermalStatus = workerArchStatus.implicitThermal;
         }
+        if (workerArchStatus.lawDagEpoch) {
+          scene.userData.sphLawDagEpochStatus = workerArchStatus.lawDagEpoch;
+          globalThis.__ulgLawDagEpochStatus = workerArchStatus.lawDagEpoch;
+        }
         if (workerArchStatus.lawEnvelopeWatch) {
           scene.userData.sphLawEnvelopeWatchStatus = workerArchStatus.lawEnvelopeWatch;
           globalThis.__ulgLawEnvelopeWatchStatus = workerArchStatus.lawEnvelopeWatch;

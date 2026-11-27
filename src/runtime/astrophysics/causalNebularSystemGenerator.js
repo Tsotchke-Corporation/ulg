@@ -1249,7 +1249,16 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         spinAxisLonDeg,
         rotationPeriodHr: Number((8766.0 * Math.sqrt(Math.pow(aMoonAu, 3.0) / Math.max(1e-9, spec.massSolar))).toFixed(2)),
         tidallyLocked: true,
+        civTechK: 0.0,
         hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+        pbrOptics: resolvePlanetarySurfacePbrOptics({
+          surfZ: isVolcanicMoon ? 16 : (isHazyMoon ? 6 : (beyondSnow ? 8 : 14)),
+          feFrac: beyondSnow ? 0.08 : 0.24,
+          silicateFrac: beyondSnow ? 0.32 : 0.72,
+          carbonFrac: isHazyMoon ? 0.25 : 0.04,
+          volatileFrac: beyondSnow ? 0.60 : 0.01,
+          isIcy: beyondSnow && !isVolcanicMoon && !isHazyMoon
+        }),
         color0: isHazyMoon ? [0.86, 0.68, 0.34] : (isVolcanicMoon ? [0.92, 0.80, 0.30] : (beyondSnow ? [0.84, 0.86, 0.90] : [0.66, 0.65, 0.63])),
         color1: isHazyMoon ? [0.62, 0.44, 0.20] : (isVolcanicMoon ? [0.68, 0.44, 0.14] : (beyondSnow ? [0.54, 0.66, 0.78] : [0.40, 0.39, 0.38])),
         atm: isHazyMoon ? 0.78 : 0.0,

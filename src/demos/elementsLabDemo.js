@@ -3317,7 +3317,7 @@ function renderViewportSync() {
       const multiCry = activeSpecimenKind === 'compound'
         ? currentCompoundRes?.visualData?.multiSpeciesCrystal
         : currentElementCrystal;
-      const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentBundle;
+      const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentElementRes?.bundle;
       const pbrOptics = derivePbrOpticsFromMaterialBundle(activeBundle, { surfaceFinish: 'crystal', fallbackZ: uiState.Z });
       if (multiCry) {
         gpuRenderer.renderMultiSpeciesCrystalScene({
@@ -3342,7 +3342,7 @@ function renderViewportSync() {
         });
       }
     } else if (liveMdSession) {
-      const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentBundle;
+      const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentElementRes?.bundle;
       const pbrOptics = derivePbrOpticsFromMaterialBundle(activeBundle, { surfaceFinish: 'crystal', fallbackZ: uiState.Z });
       gpuRenderer.renderLiveMd({
         positionsBuffer: liveMdSession.positionsBuffer,
@@ -3358,7 +3358,7 @@ function renderViewportSync() {
     }
   } else if (currentTab === 'md' && liveMdSession) {
     const em = getActiveElectromagnetic();
-    const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentBundle;
+    const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentElementRes?.bundle;
     const tMelt = liveMdConfigMeta?.meltingPointK ?? 600;
     const mdPhase = (uiState.mdTempK || 300) >= tMelt ? 'liquid' : 'solid';
     const pbrOptics = derivePbrOpticsFromMaterialBundle(activeBundle, { phase: mdPhase, surfaceFinish: mdPhase === 'liquid' ? 'liquid' : 'crystal', fallbackZ: uiState.Z });

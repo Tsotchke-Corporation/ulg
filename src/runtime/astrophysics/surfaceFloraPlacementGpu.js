@@ -174,12 +174,18 @@ fn f_fbm2(x_in: f32, z_in: f32, s: f32) -> f32 {
 
 fn sample_tect(x: f32, z: f32) -> vec4<f32> {
   let span = max(1000.0, params.season_aux.z);
-  let u = clamp((x / span) + 0.5, 0.0, 0.999);
-  let v = clamp((z / span) + 0.5, 0.0, 0.999);
+  let u = clamp((x / span) + 0.5, 0.0, 0.9999);
+  let v = clamp((z / span) + 0.5, 0.0, 0.9999);
   let n = params.tect_n;
-  let ix = min(n - 1u, u32(floor(u * f32(n))));
-  let iy = min(n - 1u, u32(floor(v * f32(n))));
-  return tectonic_field[iy * n + ix];
+  let gf = vec2<f32>(u * f32(n - 1u), v * f32(n - 1u));
+  let i0 = vec2<u32>(u32(floor(gf.x)), u32(floor(gf.y)));
+  let i1 = vec2<u32>(min(n - 1u, i0.x + 1u), min(n - 1u, i0.y + 1u));
+  let f = fract(gf);
+  let c00 = tectonic_field[i0.y * n + i0.x];
+  let c10 = tectonic_field[i0.y * n + i1.x];
+  let c01 = tectonic_field[i1.y * n + i0.x];
+  let c11 = tectonic_field[i1.y * n + i1.x];
+  return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
 fn sample_def(x: f32, z: f32) -> vec4<f32> {
@@ -221,6 +227,21 @@ fn f_crater_field(x: f32, z: f32, scale: f32, s: f32) -> f32 {
 
 fn eval_ground_h(x: f32, z: f32) -> f32 {
   let r0 = length(vec2<f32>(x, z));
+  let def = sample_def(x, z);
+  let has_sph = (params.flags & 16u) != 0u;
+  if (has_sph) {
+    let pad_a = clamp((r0 - 12.0) / 26.0, 0.0, 1.0);
+    let pad_smooth = pad_a * pad_a * (3.0 - 2.0 * pad_a);
+    let tect = sample_tect(x, z);
+    let tect0 = sample_tect(0.0, 0.0);
+    let has_ocean = (params.flags & 2u) != 0u;
+    let ref_val = select(tect0.x, params.arch_cdf1.z, has_ocean);
+    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 1.55);
+    let micro = f_fbm2(x * 0.018, z * 0.018, params.seed_f + 4.9) * (params.terrain_amp * 0.14)
+      + f_fbm2(x * 0.048, z * 0.048, params.seed_f + 9.2) * (params.terrain_amp * 0.045);
+    let base_origin = select(0.0, max(params.sea_level + 1.6, clamp((tect0.x - ref_val) * (params.terrain_amp * 1.55), params.sea_level + 1.6, params.terrain_amp * 0.65)), has_ocean);
+    return base_origin * (1.0 - pad_smooth) + (sph_h + micro) * (0.24 + 0.76 * pad_smooth) + def.x;
+  }
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
   let apron = a * a * (3.0 - 2.0 * a);
   let rolling = f_fbm2(x * 0.0055, z * 0.0055, params.seed_f) * params.terrain_amp;
@@ -234,7 +255,6 @@ fn eval_ground_h(x: f32, z: f32) -> f32 {
   let tect = sample_tect(x, z);
   let tect_blend = smoothstep(240.0, 560.0, r0);
   let tect_h = tect.x * (params.terrain_amp * 0.42) * tect_blend;
-  let def = sample_def(x, z);
   return (rolling + ridge * 0.45 + detail + craters + tect_h) * (0.10 + 0.90 * apron) + def.x;
 }
 
@@ -616,7 +636,8 @@ export function createSurfaceFloraPlacementGpu(device, {
     const flags = (bioActive ? 1 : 0)
       | ((env.hasLiquidOcean || env.hasExoticOcean) ? 2 : 0)
       | (civActive ? 4 : 0)
-      | (xeno?.solvent && xeno.solvent !== 'H2O' ? 8 : 0);
+      | (xeno?.solvent && xeno.solvent !== 'H2O' ? 8 : 0)
+      | (env.hasSphGeology ? 16 : 0);
 
     // Cumulative CDF from world's derived floraArchWeights [6]
     const w = Array.isArray(xeno?.floraArchWeights) && xeno.floraArchWeights.length === 6
@@ -666,7 +687,7 @@ export function createSurfaceFloraPlacementGpu(device, {
     f32[31] = c3;
     f32[32] = c4;
     f32[33] = 1.0;
-    f32[34] = 0.0;
+    f32[34] = Number.isFinite(Number(env.sphSeaLevelNorm)) ? Number(env.sphSeaLevelNorm) : 0.0;
     f32[35] = 0.0;
     device.queue.writeBuffer(paramsBuf, 0, ab);
 

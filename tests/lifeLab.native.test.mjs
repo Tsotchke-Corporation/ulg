@@ -64,6 +64,8 @@ test('ULG Biophysics & Emergent Life Lab (life-lab.html) live Vulkan physics, nu
     await page.evaluate(() => window.__ulgLifeLab.setPaused(true));
 
     // 1. Amphiphile Self-Assembly (eps_hp=1.85) vs Null Limit (eps_hp=0.0) + 3D Protocell Vesicle
+    await page.evaluate(() => window.__ulgLifeLab.selectMode('lipid-soup'));
+    await page.evaluate(() => window.__ulgLifeLab.setParams({ memEpsHp: 1.85, memTempK: 300 }));
     const stLipOn = await page.evaluate(() => window.__ulgLifeLab.stepNow(22));
     assert.equal(stLipOn.gpuErrorCount, 0, `GPU errors on Lipid Soup: ${stLipOn.gpuErrors.join(' | ')}`);
     await snap(page, '01-amphiphile-self-assembly');

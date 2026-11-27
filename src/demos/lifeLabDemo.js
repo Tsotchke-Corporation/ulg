@@ -31,6 +31,7 @@ import { createChemBioWebGpuRenderer } from './chemBioWebGpuRenderer.js';
 import { LIFE_LAB_ABOUT_ULG, LIFE_MODE_DOCS } from './lifeLabDocs.js';
 import {
   XENOBIOLOGY_PLANET_PRESETS,
+  deriveOrganismTissueLabParameters,
   deriveXenobiologyProfile,
   parseXenobiologyFromSearch
 } from '../runtime/biology/xenobiologySynthesizer.js';
@@ -293,9 +294,97 @@ export async function mountLifeLabDemo() {
   let vivBeadCount = 0;
   let vivTool = 'probe';
   let activeVivariumSpecimen = null;
+  let activeOrganPart = null;
+  let activeOrganismDerived = null;
   let pendingBiopsyAction = null;
   const startTimeMs = performance.now();
   let orbitControls = null;
+
+  function syncOrganismSourceBanner() {
+    const banner = el('organism-source-banner');
+    const txt = el('organism-source-text');
+    const d = activeOrganismDerived;
+    if (!banner || !txt) return;
+    if (currentLayer === 'vivarium' || !d) {
+      banner.classList.remove('visible');
+      return;
+    }
+    const scaleTag = currentLayer === 'membrane'
+      ? d.membraneLabel
+      : (currentLayer === 'fold'
+        ? d.proteinName
+        : (currentLayer === 'evo'
+          ? d.genomeLabel
+          : (currentLayer === 'hh' ? d.bioenergeticLabel : d.morphLabel)));
+    txt.innerHTML = `🧬 <em>${d.speciesName}</em> · ${d.organLabel} <small>(${d.solventFormula} · ${d.baseTempK} K · ${scaleTag})</small>`;
+    banner.classList.add('visible');
+  }
+
+  function syncParamsFromActiveOrganism({ partId = null, partLabel = null, localTempK = null } = {}) {
+    if (!activeXenoProfile) activeXenoProfile = deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
+    if (!activeVivariumSpecimen) {
+      activeVivariumSpecimen = activeXenoProfile.abductedSpecimen
+        || (activeXenoProfile.species || []).find((s) => s.kingdom === 'fauna')
+        || (activeXenoProfile.species || [])[0]
+        || null;
+    }
+    if (partId !== null) activeOrganPart = { id: partId, label: partLabel || partId, localTempK };
+    const d = deriveOrganismTissueLabParameters(activeVivariumSpecimen, activeXenoProfile, {
+      partId: activeOrganPart?.id || null,
+      partLabel: activeOrganPart?.label || null,
+      localTempK: localTempK ?? activeOrganPart?.localTempK ?? null
+    });
+    activeOrganismDerived = d;
+
+    params.memTempK = d.memTempK;
+    params.memEpsHp = d.memEpsHp;
+    params.memOsmotic = d.memOsmotic;
+    params.foldSeq = d.foldSeq;
+    params.foldTempK = d.foldTempK;
+    params.foldEpsHp = d.foldEpsHp;
+    params.foldEpsHb = d.foldEpsHb;
+    params.evoMu = d.evoMu;
+    params.evoBeta = d.evoBeta;
+    params.evoStrongFrac = d.evoStrongFrac;
+    params.hhGNa = d.hhGNa;
+    params.hhGK = d.hhGK;
+    params.hhDeltaPsi = d.hhDeltaPsi;
+    params.hhDeltaPh = d.hhDeltaPh;
+    params.morphV0 = d.morphV0;
+    params.morphChemo = d.morphChemo;
+    params.morphDiffRatio = d.morphDiffRatio;
+
+    if (el('sl-mem-temp')) { el('sl-mem-temp').value = String(params.memTempK); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; }
+    if (el('sl-mem-eps')) { el('sl-mem-eps').value = String(params.memEpsHp); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); }
+    if (el('sl-mem-osm')) { el('sl-mem-osm').value = String(params.memOsmotic); el('val-mem-osm').textContent = params.memOsmotic.toFixed(2); }
+    if (el('inp-seq')) { el('inp-seq').value = params.foldSeq; }
+    if (el('val-fold-len')) { el('val-fold-len').textContent = `${params.foldSeq.length}-mer`; }
+    if (el('sl-fold-temp')) { el('sl-fold-temp').value = String(params.foldTempK); el('val-fold-temp').textContent = `${Math.round(params.foldTempK)} K`; }
+    if (el('sl-fold-eps')) { el('sl-fold-eps').value = String(params.foldEpsHp); el('val-fold-eps').textContent = params.foldEpsHp.toFixed(2); }
+    if (el('sl-fold-hb')) { el('sl-fold-hb').value = String(params.foldEpsHb); el('val-fold-hb').textContent = params.foldEpsHb.toFixed(2); }
+    if (el('sl-evo-mu')) { el('sl-evo-mu').value = String(params.evoMu); el('val-evo-mu').textContent = params.evoMu.toFixed(3); }
+    if (el('sl-evo-beta')) { el('sl-evo-beta').value = String(params.evoBeta); el('val-evo-beta').textContent = params.evoBeta.toFixed(2); }
+    if (el('sl-evo-fgc')) { el('sl-evo-fgc').value = String(params.evoStrongFrac); el('val-evo-fgc').textContent = params.evoStrongFrac.toFixed(2); }
+    if (el('sl-hh-gna')) { el('sl-hh-gna').value = String(params.hhGNa); el('val-hh-gna').textContent = `${Math.round(params.hhGNa)} mS`; }
+    if (el('sl-hh-gk')) { el('sl-hh-gk').value = String(params.hhGK); el('val-hh-gk').textContent = `${Math.round(params.hhGK)} mS`; }
+    if (el('sl-hh-psi')) { el('sl-hh-psi').value = String(params.hhDeltaPsi); el('val-hh-psi').textContent = `${Math.round(params.hhDeltaPsi)} mV`; }
+    if (el('sl-hh-dph')) { el('sl-hh-dph').value = String(params.hhDeltaPh); el('val-hh-dph').textContent = params.hhDeltaPh.toFixed(2); }
+    if (el('sl-m-v0')) { el('sl-m-v0').value = String(params.morphV0); el('val-m-v0').textContent = params.morphV0.toFixed(2); }
+    if (el('sl-m-chemo')) { el('sl-m-chemo').value = String(params.morphChemo); el('val-m-chemo').textContent = params.morphChemo.toFixed(2); }
+    if (el('sl-m-ratio')) { el('sl-m-ratio').value = String(params.morphDiffRatio); el('val-m-ratio').textContent = params.morphDiffRatio.toFixed(2); }
+
+    if (el('sub-viv-org')) el('sub-viv-org').textContent = `${d.speciesName} · ${d.solventFormula} · ${d.baseTempK} K`;
+    if (el('sub-mem-org')) el('sub-mem-org').textContent = `${d.membraneLabel} · ε=${d.memEpsHp}`;
+    if (el('sub-fold-org')) el('sub-fold-org').textContent = `${d.proteinName} (${d.foldSeq.length}-mer)`;
+    if (el('sub-evo-org')) el('sub-evo-org').textContent = `${d.genomeLabel} · μ=${d.evoMu}`;
+    if (el('sub-hh-org')) el('sub-hh-org').textContent = `${d.bioenergeticLabel} · g_Na=${d.hhGNa}`;
+    if (el('sub-morph-org')) el('sub-morph-org').textContent = `${d.morphLabel} · v₀=${d.morphV0}`;
+    if (el('val-viv-organ-src')) el('val-viv-organ-src').textContent = d.organLabel;
+    if (el('btn-fold-reset')) el('btn-fold-reset').textContent = `↺ Refold ${Math.round(params.foldTempK)} K`;
+
+    syncOrganismSourceBanner();
+    return d;
+  }
 
   function ensureVivariumGpuBuffers() {
     if (!vivSolidBuf) {
@@ -399,7 +488,9 @@ export async function mountLifeLabDemo() {
       morphogenesisActive: currentLayer === 'morph',
       activeAgentCount: currentLayer === 'morph' ? activeSession.agentCount : 0
     });
-    el('prov-laws').textContent = `${laws.active.length} active (${laws.active.map((l) => l.id.split('-')[0]).join(', ')})`;
+    el('prov-laws').textContent = currentLayer === 'vivarium'
+      ? '1 active (xenobiology-ecology)'
+      : `${laws.active.length} active (${laws.active.map((l) => l.id.split('-')[0]).join(', ')})`;
 
     if (currentLayer === 'vivarium') {
       const sp = activeSession.specimen || {};
@@ -714,8 +805,27 @@ export async function mountLifeLabDemo() {
     }
 
     const doc = LIFE_MODE_DOCS[modeId];
-    el('hud-title').textContent = doc?.title || modeId;
-    el('hud-sub').textContent = (doc?.whatYouSee || '').slice(0, 148) + '…';
+    const dOrg = activeOrganismDerived || syncParamsFromActiveOrganism();
+    if (currentLayer === 'vivarium') {
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Living Specimen'} · Interactive Bio-Aquarium`;
+      el('hud-sub').textContent = `Click any organ on ${dOrg?.speciesName || 'this organism'} (${dOrg?.solventFormula || 'H₂O'}, ${dOrg?.baseTempK || 288} K) to probe, heat, cool, stim, or biopsy into live GPU physics`;
+    } else if (currentLayer === 'membrane') {
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.membraneLabel || doc?.title || modeId}`;
+      el('hud-sub').textContent = `Live GPU amphiphile MD of ${dOrg?.speciesName || 'organism'}'s ${dOrg?.organLabel || 'somatic'} cell membrane (${dOrg?.baseTempK || params.memTempK} K, ε_hp=${params.memEpsHp.toFixed(2)})`;
+    } else if (currentLayer === 'fold') {
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.proteinName || doc?.title || modeId}`;
+      el('hud-sub').textContent = `Live GPU biopolymer folding of ${dOrg?.organLabel || 'tissue'} protein (${params.foldSeq.length}-mer @ ${Math.round(params.foldTempK)} K)`;
+    } else if (currentLayer === 'evo') {
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.genomeLabel || doc?.title || modeId}`;
+      el('hud-sub').textContent = `1,024-lineage GPU template replication & Eigen error threshold of ${dOrg?.speciesName || 'organism'}'s ${dOrg?.genomeLabel || 'XNA'} genome (μ=${params.evoMu.toFixed(3)})`;
+    } else if (currentLayer === 'hh') {
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.bioenergeticLabel || doc?.title || modeId}`;
+      el('hud-sub').textContent = `128² GPU Hodgkin–Huxley & chemiosmosis of ${dOrg?.speciesName || 'organism'}'s ${dOrg?.organLabel || 'excitable'} tissue (g_Na=${Math.round(params.hhGNa)} mS, Δψ=${Math.round(params.hhDeltaPsi)} mV)`;
+    } else {
+      el('hud-title').textContent = `${dOrg?.speciesName || 'Organism'} · ${dOrg?.morphLabel || doc?.title || modeId}`;
+      el('hud-sub').textContent = `128² GPU Turing reaction-diffusion + 2,048 active embryonic cells patterning ${dOrg?.speciesName || 'organism'} (v₀=${params.morphV0.toFixed(2)})`;
+    }
+    syncOrganismSourceBanner();
 
     if (currentLayer === 'vivarium') {
       if (!activeXenoProfile) activeXenoProfile = deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]);
@@ -766,7 +876,7 @@ export async function mountLifeLabDemo() {
       });
       await activeSession.step({ dt: 0.015, substeps: 8, readTelemetry: true });
     } else if (currentLayer === 'fold') {
-      const seq = customSeq || POLYMER_SEQUENCE_TEMPLATES[modeId]?.sequence || params.foldSeq;
+      const seq = customSeq || activeOrganismDerived?.foldSeq || POLYMER_SEQUENCE_TEMPLATES[modeId]?.sequence || params.foldSeq;
       params.foldSeq = seq;
       el('inp-seq').value = seq;
       el('val-fold-len').textContent = `${seq.length}-mer`;
@@ -1057,18 +1167,35 @@ export async function mountLifeLabDemo() {
     const t = activeSession.getTelemetry();
     histA.push(t.kleiberWatts);
     histB.push(t.arousal);
+    // Immediately synchronize ALL 5 molecular/cellular GPU layers to the clicked anatomical organ & its live temperature!
+    const derivedOrgan = syncParamsFromActiveOrganism({
+      partId: res.partId,
+      partLabel: res.partLabel,
+      localTempK: res.localTempK
+    });
     if (el('viv-anatomy-box')) {
       el('viv-anatomy-box').innerHTML = `<strong>${res.partLabel}</strong> (${res.localTempK} K)<br/>${res.reactionText}<br/><span style="color:#8cb2ab;">Tissue: ${res.tissue}</span>`;
     }
     const biopsyBtn = el('btn-viv-biopsy-jump');
     if (res.biopsyAction) {
-      pendingBiopsyAction = res.biopsyAction;
+      pendingBiopsyAction = {
+        ...res.biopsyAction,
+        fasta: derivedOrgan?.foldSeq || res.biopsyAction.fasta
+      };
       if (biopsyBtn) {
         biopsyBtn.style.display = 'inline-flex';
-        biopsyBtn.textContent = `🔬 Biopsy → ${res.biopsyAction.targetMode}`;
+        biopsyBtn.textContent = `🔬 ${res.partLabel.split(' ')[0]} → ${res.biopsyAction.layerLabel || 'Tissue Lab'} (${res.localTempK} K)`;
       }
     } else if (res.localTempK >= (t.tDenatureK - 10)) {
-      pendingBiopsyAction = { targetLayer: 'fold', targetMode: 'amphipathic-helix-bundle', tissueTempK: res.localTempK, fasta: activeSession.specimen?.fasta };
+      pendingBiopsyAction = {
+        partId: res.partId,
+        partLabel: res.partLabel,
+        targetLayer: 'fold',
+        layerLabel: 'Protein Denaturation',
+        targetMode: derivedOrgan?.recommendedFoldMode || 'amphipathic-helix-bundle',
+        tissueTempK: res.localTempK,
+        fasta: derivedOrgan?.foldSeq || activeSession.specimen?.fasta
+      };
       if (biopsyBtn) {
         biopsyBtn.style.display = 'inline-flex';
         biopsyBtn.textContent = `🔥 Watch ${res.localTempK} K Denaturation →`;
@@ -1244,10 +1371,12 @@ export async function mountLifeLabDemo() {
       const pAct = primaryByLayer[currentLayer] || primaryByLayer.membrane;
       const rId = resetByLayer[currentLayer] || 'btn-mem-reset';
       row.innerHTML = `
+        <button type="button" class="mobile-ctx-btn gold" data-mctx="organism">🫧 Organism</button>
         <button type="button" class="mobile-ctx-btn" data-mctx="play">${paused ? '▶ Play' : '⏸ Pause'}</button>
         <button type="button" class="mobile-ctx-btn ${pAct.cls}" data-mctx="primary">${pAct.lbl}</button>
-        <button type="button" class="mobile-ctx-btn" data-mctx="reset">↺ Reset</button>
-        <button type="button" class="mobile-ctx-btn" data-mctx="controls">☰ Controls</button>`;
+        <button type="button" class="mobile-ctx-btn" data-mctx="reset">↺ Native</button>
+        <button type="button" class="mobile-ctx-btn" data-mctx="controls">☰ Lab</button>`;
+      row.querySelector('[data-mctx="organism"]')?.addEventListener('click', () => { closeMobileDrawers(); void selectMode('organism-overview'); });
       row.querySelector('[data-mctx="play"]')?.addEventListener('click', () => el('btn-play')?.click());
       row.querySelector('[data-mctx="primary"]')?.addEventListener('click', () => el(pAct.id)?.click());
       row.querySelector('[data-mctx="reset"]')?.addEventListener('click', () => el(rId)?.click());
@@ -1274,6 +1403,8 @@ export async function mountLifeLabDemo() {
     const chosen = list[Number(el('sel-viv-species').value) || 0];
     if (chosen) {
       activeVivariumSpecimen = chosen;
+      activeOrganPart = null;
+      syncParamsFromActiveOrganism();
       void selectMode('organism-overview');
     }
   });
@@ -1281,24 +1412,48 @@ export async function mountLifeLabDemo() {
     const tk = Number(e.target.value);
     if (el('val-viv-temp')) el('val-viv-temp').textContent = `${Math.round(tk)} K`;
     activeSession?.setChamberTempK?.(tk);
+    syncParamsFromActiveOrganism({ localTempK: tk });
     updatePlotsAndHud();
   });
   el('btn-viv-reset')?.addEventListener('click', () => {
     activeSession?.reset?.();
+    activeOrganPart = null;
+    syncParamsFromActiveOrganism();
     uploadVivariumFrame();
     updatePlotsAndHud();
     renderCurrentScene();
   });
+  el('btn-back-to-organism')?.addEventListener('click', () => {
+    closeMobileDrawers();
+    void selectMode('organism-overview');
+  });
+  document.querySelectorAll('#viv-scale-zoom-row [data-org-zoom]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const d = activeOrganismDerived || syncParamsFromActiveOrganism();
+      const k = b.dataset.orgZoom;
+      const modeByKey = {
+        membrane: d.recommendedMemMode || 'protocell-vesicle',
+        fold: d.recommendedFoldMode || 'amphipathic-helix-bundle',
+        evo: 'quasispecies-evolution',
+        hh: d.recommendedHhMode || 'excitable-spiral',
+        morph: d.recommendedMorphMode || 'turing-spots'
+      };
+      closeMobileDrawers();
+      void selectMode(modeByKey[k] || 'protocell-vesicle', k === 'fold' ? d.foldSeq : null);
+    });
+  });
   el('btn-viv-biopsy-jump')?.addEventListener('click', () => {
     if (!pendingBiopsyAction) return;
-    if (pendingBiopsyAction.targetLayer === 'fold' && Number.isFinite(pendingBiopsyAction.tissueTempK)) {
-      params.foldTempK = Math.min(850, Math.max(100, pendingBiopsyAction.tissueTempK));
-      if (el('sl-fold-temp')) { el('sl-fold-temp').value = String(params.foldTempK); el('val-fold-temp').textContent = `${Math.round(params.foldTempK)} K`; }
-    }
-    void selectMode(pendingBiopsyAction.targetMode, pendingBiopsyAction.fasta || null);
+    const d = syncParamsFromActiveOrganism({
+      partId: pendingBiopsyAction.partId || null,
+      partLabel: pendingBiopsyAction.partLabel || null,
+      localTempK: pendingBiopsyAction.tissueTempK ?? null
+    });
+    closeMobileDrawers();
+    void selectMode(pendingBiopsyAction.targetMode, pendingBiopsyAction.targetLayer === 'fold' ? (pendingBiopsyAction.fasta || d.foldSeq) : null);
   });
 
-  // Layer 1 controls
+  // Layer 1 controls (reset returns to THIS ORGANISM's native membrane physics!)
   el('sl-mem-eps').addEventListener('input', (e) => { params.memEpsHp = Number(e.target.value); el('val-mem-eps').textContent = params.memEpsHp.toFixed(2); activeSession?.setHydrophobicCoupling?.(params.memEpsHp); updatePlotsAndHud(); });
   el('sl-mem-temp').addEventListener('input', (e) => { params.memTempK = Number(e.target.value); el('val-mem-temp').textContent = `${Math.round(params.memTempK)} K`; activeSession?.setTemperatureK?.(params.memTempK); });
   el('sl-mem-osm').addEventListener('input', (e) => { params.memOsmotic = Number(e.target.value); el('val-mem-osm').textContent = params.memOsmotic.toFixed(2); activeSession?.setOsmoticPressure?.(params.memOsmotic); });
@@ -1309,10 +1464,8 @@ export async function mountLifeLabDemo() {
   });
   el('btn-mem-null').addEventListener('click', () => { params.memEpsHp = 0.0; el('sl-mem-eps').value = '0'; el('val-mem-eps').textContent = '0.00'; activeSession?.setHydrophobicCoupling?.(0.0); updatePlotsAndHud(); });
   el('btn-mem-reset').addEventListener('click', () => {
-    params.memEpsHp = 1.85; params.memTempK = 300; params.memOsmotic = 0.0; params.memClipZ = 8.0;
-    el('sl-mem-eps').value = '1.85'; el('val-mem-eps').textContent = '1.85';
-    el('sl-mem-temp').value = '300'; el('val-mem-temp').textContent = '300 K';
-    el('sl-mem-osm').value = '0'; el('val-mem-osm').textContent = '0.00';
+    syncParamsFromActiveOrganism();
+    params.memClipZ = 8.0;
     if (el('sl-mem-clip')) { el('sl-mem-clip').value = '8.0'; el('val-mem-clip').textContent = 'Full'; }
     selectMode(currentMode);
   });
@@ -1389,11 +1542,8 @@ export async function mountLifeLabDemo() {
   el('sl-fold-hb').addEventListener('input', (e) => { params.foldEpsHb = Number(e.target.value); el('val-fold-hb').textContent = params.foldEpsHb.toFixed(2); activeSession?.setHBondStrength?.(params.foldEpsHb); });
   el('btn-fold-denature').addEventListener('click', () => { params.foldTempK = 750; el('sl-fold-temp').value = '750'; el('val-fold-temp').textContent = '750 K'; activeSession?.setTemperatureK?.(750); updatePlotsAndHud(); });
   el('btn-fold-reset').addEventListener('click', () => {
-    params.foldTempK = 300; params.foldEpsHp = 1.9; params.foldEpsHb = 1.4;
-    el('sl-fold-temp').value = '300'; el('val-fold-temp').textContent = '300 K';
-    el('sl-fold-eps').value = '1.9'; el('val-fold-eps').textContent = '1.90';
-    el('sl-fold-hb').value = '1.4'; el('val-fold-hb').textContent = '1.40';
-    selectMode(currentMode);
+    syncParamsFromActiveOrganism();
+    selectMode(currentMode, activeOrganismDerived?.foldSeq || null);
   });
 
   // Layer 3 controls
@@ -1401,7 +1551,7 @@ export async function mountLifeLabDemo() {
   el('sl-evo-beta').addEventListener('input', (e) => { params.evoBeta = Number(e.target.value); el('val-evo-beta').textContent = params.evoBeta.toFixed(2); activeSession?.setSelectionBeta?.(params.evoBeta); });
   el('sl-evo-fgc').addEventListener('input', (e) => { params.evoStrongFrac = Number(e.target.value); el('val-evo-fgc').textContent = params.evoStrongFrac.toFixed(2); updatePlotsAndHud(); });
   el('btn-evo-cat').addEventListener('click', () => { params.evoMu = 0.35; el('sl-evo-mu').value = '0.35'; el('val-evo-mu').textContent = '0.350'; activeSession?.setMutationRateMu?.(0.35); updatePlotsAndHud(); });
-  el('btn-evo-reset').addEventListener('click', () => { params.evoMu = 0.025; el('sl-evo-mu').value = '0.025'; el('val-evo-mu').textContent = '0.025'; selectMode(currentMode); });
+  el('btn-evo-reset').addEventListener('click', () => { syncParamsFromActiveOrganism(); selectMode(currentMode); });
 
   // Layer 4 controls
   el('sl-hh-gna').addEventListener('input', (e) => { params.hhGNa = Number(e.target.value); el('val-hh-gna').textContent = `${Math.round(params.hhGNa)} mS`; activeSession?.setGNa?.(params.hhGNa); updatePlotsAndHud(); });
@@ -1412,14 +1562,14 @@ export async function mountLifeLabDemo() {
   el('sl-hh-leak').addEventListener('input', (e) => { params.hhUncouplerLeak = Number(e.target.value); el('val-hh-leak').textContent = params.hhUncouplerLeak.toFixed(2); pushChem(); });
   el('btn-hh-stim').addEventListener('click', () => activeSession?.triggerStimulus?.());
   el('btn-hh-ttx').addEventListener('click', () => { params.hhGNa = 0; el('sl-hh-gna').value = '0'; el('val-hh-gna').textContent = '0 mS'; activeSession?.setGNa?.(0); updatePlotsAndHud(); });
-  el('btn-hh-reset').addEventListener('click', () => { params.hhGNa = 120; params.hhUncouplerLeak = 0; el('sl-hh-gna').value = '120'; el('val-hh-gna').textContent = '120 mS'; el('sl-hh-leak').value = '0'; el('val-hh-leak').textContent = '0.00'; selectMode(currentMode); });
+  el('btn-hh-reset').addEventListener('click', () => { params.hhUncouplerLeak = 0; el('sl-hh-leak').value = '0'; el('val-hh-leak').textContent = '0.00'; syncParamsFromActiveOrganism(); selectMode(currentMode); });
 
   // Layer 5 controls
   el('sl-m-v0').addEventListener('input', (e) => { params.morphV0 = Number(e.target.value); el('val-m-v0').textContent = params.morphV0.toFixed(2); activeSession?.setV0Propel?.(params.morphV0); });
   el('sl-m-chemo').addEventListener('input', (e) => { params.morphChemo = Number(e.target.value); el('val-m-chemo').textContent = params.morphChemo.toFixed(2); activeSession?.setChemoGain?.(params.morphChemo); updatePlotsAndHud(); });
   el('sl-m-ratio').addEventListener('input', (e) => { params.morphDiffRatio = Number(e.target.value); el('val-m-ratio').textContent = params.morphDiffRatio.toFixed(2); activeSession?.setDiffusionRatio?.(params.morphDiffRatio); });
   el('btn-m-null').addEventListener('click', () => { params.morphV0 = 0; params.morphChemo = 0; el('sl-m-v0').value = '0'; el('val-m-v0').textContent = '0.00'; el('sl-m-chemo').value = '0'; el('val-m-chemo').textContent = '0.00'; activeSession?.setV0Propel?.(0); activeSession?.setChemoGain?.(0); updatePlotsAndHud(); });
-  el('btn-m-reset').addEventListener('click', () => { params.morphV0 = 1.35; params.morphChemo = 2.20; params.morphDiffRatio = 2.00; el('sl-m-v0').value = '1.35'; el('val-m-v0').textContent = '1.35'; el('sl-m-chemo').value = '2.20'; el('val-m-chemo').textContent = '2.20'; el('sl-m-ratio').value = '2.00'; el('val-m-ratio').textContent = '2.00'; selectMode(currentMode); });
+  el('btn-m-reset').addEventListener('click', () => { syncParamsFromActiveOrganism(); selectMode(currentMode); });
 
   el('btn-play').addEventListener('click', () => {
     paused = !paused;
@@ -1496,12 +1646,15 @@ export async function mountLifeLabDemo() {
         : `${profile.worldName}: ${profile.membraneType} · ${(profile.species || []).length} Clades · ${biosig || profile.civStage}`;
     }
     activeVivariumSpecimen = abd || (profile.species || []).find((s) => s.kingdom === 'fauna') || (profile.species || [])[0] || null;
+    activeOrganPart = null;
+    // Derive ALL 5 biophysical simulation layers directly from this specific living organism!
+    const derived = syncParamsFromActiveOrganism();
     const modeToLoad = targetMode || (abd ? 'organism-overview' : (lp.recommendedMode || 'organism-overview'));
-    await selectMode(modeToLoad, modeToLoad.includes('fold') || modeToLoad.includes('helix') || modeToLoad.includes('hairpin') ? lp.foldSeq : null);
+    await selectMode(modeToLoad, modeToLoad.includes('fold') || modeToLoad.includes('helix') || modeToLoad.includes('hairpin') ? derived.foldSeq : null);
     if (el('pill-name')) {
       el('pill-name').textContent = abd
         ? `🛸 ${abd.speciesName} · ${profile.worldName}`
-        : `${profile.worldName} · ${profile.membraneType}`;
+        : `${derived.speciesName} · ${profile.worldName}`;
     }
     return profile;
   }
@@ -1520,7 +1673,9 @@ export async function mountLifeLabDemo() {
   if (urlXeno?.profile) {
     await applyXenobiologyProfile(urlXeno.profile, { targetMode: urlXeno.mode });
   } else {
-    await selectMode('lipid-soup');
+    // Always boot directly into a living macroscopic organism in the Bio-Aquarium so
+    // every single cellular & molecular simulation examined comes from the organism itself!
+    await applyXenobiologyProfile(deriveXenobiologyProfile(XENOBIOLOGY_PLANET_PRESETS[0]), { targetMode: 'organism-overview' });
   }
 
   let rafId = 0;
@@ -1550,6 +1705,8 @@ export async function mountLifeLabDemo() {
         hhShowPhasePortrait,
         contactMapStats: { ...lastContactMapStats },
         xenobiology: activeXenoProfile,
+        activeSpecimen: activeVivariumSpecimen,
+        organismDerivedParams: activeOrganismDerived,
         csvRowCount: csvRows.length,
         telemetry: activeSession?.getTelemetry?.() || null,
         gpuErrorCount: gpuErrors.length,
@@ -1572,6 +1729,8 @@ export async function mountLifeLabDemo() {
       const chosen = list[Math.max(0, Math.min(list.length - 1, Number(idx) || 0))];
       if (chosen) {
         activeVivariumSpecimen = chosen;
+        activeOrganPart = null;
+        syncParamsFromActiveOrganism();
         return selectMode('organism-overview').then(() => api.getState());
       }
       return Promise.resolve(api.getState());

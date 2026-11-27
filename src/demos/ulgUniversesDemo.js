@@ -740,7 +740,13 @@ export async function mountUlgUniversesDemo() {
         physics.applyRemoteCraterStamp(stamp);
       }
     },
+    onRemoteCosmicCacheEntry: (entry) => {
+      if (entry) void physics.ingestRemoteRootCacheEntry(entry);
+    },
     onStateChange: () => { syncMultiplayerChrome(); }
+  });
+  physics.setRootCachePeerPublisher((entry) => {
+    if (ufoMultiplayer.isConnected) ufoMultiplayer.broadcastCosmicCacheEntry(entry);
   });
 
   // P5 Orbital Space Weapons (L2/L4 missiles, laser/antimatter mining & catastrophic shatter)
@@ -1675,10 +1681,20 @@ export async function mountUlgUniversesDemo() {
               ? 'Pop III UV radiation percolating ionized <code>H II</code> bubbles through the neutral <code>z = 10</code> IGM.'
               : physics.cosmoMode === 'cluster-merger'
                 ? 'Shock-heated X-ray ICM gas (magenta-gold) colliding behind collisionless dark-matter lensing halos (blue).'
-                : `FLRW 3D-FFT TreePM running <code>${physics.quality.cosmoGridPerSide}³</code> particles on a <code>${physics.quality.cosmoFftN}³</code> periodic FFT mesh.`
-        }</div>`;
+                : `FLRW 3D-FFT TreePM running <code>${physics.quality.cosmoGridPerSide}³</code> particles on a <code>${physics.quality.cosmoFftN}³</code> periodic FFT mesh (${physics.cosmoTargets.filter((c) => c.gpuCoalescedHalo).length} live GPU-extracted halos).`
+        }</div>
+        <button id="uv-cosmo-bigbang-btn" class="uv-btn primary" type="button" style="justify-content:center;" title="Re-run FLRW cosmic expansion from early Big Bang perturbations to watch filaments &amp; galaxy halos coalesce">💥 Replay Big Bang Expansion (FLRW)</button>`;
       scaleControlsEl.querySelector('#uv-cosmo-mode')?.addEventListener('change', async (e) => {
         await physics.setCosmoMode(e.target.value);
+        selectDefaultTarget();
+        renderScaleControls();
+        updateInspectorCard();
+        renderNow(performance.now());
+      });
+      scaleControlsEl.querySelector('#uv-cosmo-bigbang-btn')?.addEventListener('click', async () => {
+        bigBangFlash = 1.0;
+        await physics.setCosmoMode('web');
+        await physics.initCosmicWeb({ bigBang: true });
         selectDefaultTarget();
         renderScaleControls();
         updateInspectorCard();
@@ -1690,6 +1706,7 @@ export async function mountUlgUniversesDemo() {
           <span>Morphology</span>
           <select id="uv-gal-preset-sel">
             <option value="disk" ${physics.galaxyPreset === 'disk' ? 'selected' : ''}>Grand-Design Spiral (Sc/Sb)</option>
+            <option value="coalesce" ${physics.galaxyPreset === 'coalesce' ? 'selected' : ''}>Live GPU Halo Collapse &amp; Coalescence</option>
             <option value="barred" ${physics.galaxyPreset === 'barred' ? 'selected' : ''}>Barred Spiral (SBb · Secular m=2 Bar)</option>
             <option value="ring" ${physics.galaxyPreset === 'ring' ? 'selected' : ''}>Cartwheel Collisional Ring Galaxy</option>
             <option value="lenticular" ${physics.galaxyPreset === 'lenticular' ? 'selected' : ''}>Lenticular Disk (S0 · Sombrero)</option>
@@ -1702,6 +1719,7 @@ export async function mountUlgUniversesDemo() {
             <option value="globular" ${physics.galaxyPreset === 'globular' ? 'selected' : ''}>Core-Collapsed Globular Cluster</option>
           </select>
         </div>
+        <button id="uv-gal-coalesce-btn" class="uv-btn primary" type="button" style="justify-content:center;" title="Collapse this cosmic-web dark-matter &amp; gas halo live on WebGPU to form a spinning galaxy">🌀 Form Galaxy (GPU Collapse)</button>
         <div class="uv-row">
           <span>Zoom Destination</span>
           <select id="uv-gal-branch">
@@ -1729,6 +1747,15 @@ export async function mountUlgUniversesDemo() {
         moteFocusLocked = false;
         selectDefaultTarget();
         renderScaleControls();
+        renderNow(performance.now());
+      });
+      scaleControlsEl.querySelector('#uv-gal-coalesce-btn')?.addEventListener('click', async () => {
+        await physics.triggerGalaxyCoalescence();
+        pickedGpuMote = null;
+        moteFocusLocked = false;
+        selectDefaultTarget();
+        renderScaleControls();
+        updateInspectorCard();
         renderNow(performance.now());
       });
       scaleControlsEl.querySelector('#uv-gal-branch')?.addEventListener('change', (e) => {
@@ -1793,7 +1820,8 @@ export async function mountUlgUniversesDemo() {
               <span>Gas Drag &amp; Drift</span>
               <input id="uv-disk-drag" type="checkbox" ${physics.protoplanetaryGasDrag ? 'checked' : ''} />
             </label>
-            <div style="font-size:11px;color:var(--muted);line-height:1.35;">Live GPU pebbles + DLM composite particle-rigid planetesimals condensing across the <code>${(physics.protoplanetarySession?.snowLineAu || 2.71).toFixed(2)} AU</code> H₂O snow line.</div>
+            <button id="uv-crystallize-disk-btn" class="uv-btn primary" type="button" style="justify-content:center;" title="Crystallize the live GPU-coalesced nebular disk peaks directly into orbiting N-body planets, asteroid belts &amp; comets">⏩ Crystallize Into N-Body Orbits</button>
+            <div style="font-size:11px;color:var(--muted);line-height:1.35;">Live GPU whole-system nebular coalescence condensing Fe, SiO₂, C, H₂O &amp; CO/CH₄ across the <code>${(physics.nebularCoalescenceSession?.snowLineAu || physics.protoplanetarySession?.snowLineAu || 2.71).toFixed(2)} AU</code> snow line.</div>
           ` : physics.solarMode === 'quasar-jet' ? `
             <div class="uv-row" title="Dimensionless Kerr spin parameter a* (0 = Schwarzschild, no BZ jet; 0.94 = blazing Blazar jet!)">
               <span>Kerr Spin a*</span>
@@ -1808,15 +1836,16 @@ export async function mountUlgUniversesDemo() {
             const fronts = cSys?.condensationFrontsAu;
             const archLbl = physics.useSolReference
               ? 'Sol Reference (G2V · 8 Planets)'
-              : `${cSys?.systemName || 'System'} · ${cSys?.architecture || 'single'} (${cSys?.starCount || 1}★, ${cSys?.planetCount || 0} planets${cSys?.hasEarthLike ? ', Earth-like!' : ''})`;
+              : `${cSys?.systemName || 'System'} · ${cSys?.architecture || 'single'} (${cSys?.starCount || 1}★, ${cSys?.planetCount || 0} worlds${cSys?.gpuCoalesced ? ' · GPU Coalesced' : ''})`;
             return `
             <div style="font-size:10.5px;color:#cbd5e1;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:6px 7px;line-height:1.35;">
               <div><strong>${archLbl}</strong></div>
               ${!physics.useSolReference && neb ? `<div style="color:var(--muted);margin-top:2px;">Nebula: <code>${neb.nebulaSummary}</code> · Snow <code>${fronts?.rSnowLineAu} AU</code> · HZ <code>${fronts?.rHzInnerAu}–${fronts?.rHzOuterAu} AU</code></div>` : `<div style="color:var(--muted);margin-top:2px;">Reference J2000 Solar System (exact astronomical radii: Earth = 0.00916 R☉).</div>`}
             </div>
             <div class="uv-seg-group">
-              <button id="uv-sample-star-btn" class="uv-seg-btn" type="button" title="Sample a new star from the live galaxy and synthesize its nebular planetary system">🎲 New Galactic Star</button>
-              <button id="uv-toggle-sol-btn" class="uv-seg-btn ${physics.useSolReference ? 'active' : ''}" type="button" title="Toggle between Causal Galactic Nebular Synthesis and Sol Reference System">${physics.useSolReference ? '🌌 Causal Nebular' : '☀ Sol Reference'}</button>
+              <button id="uv-sample-star-btn" class="uv-seg-btn" type="button" title="Sample a new star from the live galaxy and coalesce its whole planetary system on WebGPU">🎲 New Star</button>
+              <button id="uv-replay-nebula-btn" class="uv-seg-btn" type="button" title="Watch this star system coalesce live from a rotating multi-species GPU nebular disk">🌌 Nebular Birth</button>
+              <button id="uv-toggle-sol-btn" class="uv-seg-btn ${physics.useSolReference ? 'active' : ''}" type="button" title="Toggle between Causal GPU Nebular Coalescence and Sol Reference">${physics.useSolReference ? '🌌 Causal' : '☀ Sol'}</button>
             </div>
             <div class="uv-row">
               <span>Focus World</span>
@@ -1846,8 +1875,23 @@ export async function mountUlgUniversesDemo() {
           updateInspectorCard();
           renderNow(performance.now());
         });
+        scaleControlsEl.querySelector('#uv-replay-nebula-btn')?.addEventListener('click', async () => {
+          await physics.setSolarMode('formation');
+          selectDefaultTarget();
+          renderScaleControls();
+          updateInspectorCard();
+          renderNow(performance.now());
+        });
+        scaleControlsEl.querySelector('#uv-crystallize-disk-btn')?.addEventListener('click', async () => {
+          await physics.crystallizeCoalescedSystem();
+          selectDefaultTarget();
+          syncScaleChrome();
+          updateInspectorCard();
+          renderNow(performance.now());
+        });
         scaleControlsEl.querySelector('#uv-disk-drag')?.addEventListener('change', (e) => {
           physics.setProtoplanetaryGasDrag(e.target.checked);
+          physics.nebularCoalescenceSession?.setEnableGasDrag?.(e.target.checked);
         });
         scaleControlsEl.querySelector('#uv-kerr-spin')?.addEventListener('change', async (e) => {
           const v = Number(e.target.value);
@@ -1975,10 +2019,24 @@ export async function mountUlgUniversesDemo() {
           <span>Triboelectric Lightning</span>
           <input id="uv-tribo-toggle" type="checkbox" ${physics.planetaryTriboelectric ? 'checked' : ''} ${atmoAct?.triboelectricActive ? '' : 'disabled'} />
         </label>
-        <label class="uv-row" title="Slice an octant out of the planet to inspect the live GPU Polytope Atlas hydrostatic core &amp; mantle">
+        <label class="uv-row" title="Slice an octant out of the planet to inspect the live GPU Polytope Atlas hydrostatic core &amp; SPH mantle plumes">
           <span>3D Interior Cutaway</span>
           <input id="uv-cutaway-toggle" type="checkbox" ${physics.planetaryCutaway ? 'checked' : ''} />
         </label>
+        ${physics.planetaryGenesisSphSession ? (() => {
+          const st = physics.planetaryGenesisSphTelemetry;
+          const diffIdx = st ? Number(st.differentiationIndex || 0).toFixed(2) : '—';
+          const mobPct = Math.round((physics.planetaryGenesisSphSession.genesisParams?.tectonicMobility || 0) * 100);
+          return `
+        <label class="uv-row" title="Step 3D multi-material GPU SPH differentiation, mantle convection &amp; continental drift in real time">
+          <span>Live Geologic Time (SPH)</span>
+          <input id="uv-sph-live-toggle" type="checkbox" ${physics.planetaryGenesisLiveForm ? 'checked' : ''} />
+        </label>
+        <button id="uv-sph-replay-btn" class="uv-btn subtle" type="button" style="justify-content:center;" title="Reset to protoplanet and watch live 3D GPU SPH core sinking, mantle plumes, continental rafting &amp; impact cratering">🪐 Form / Evolve Planet (3D SPH)</button>
+        <div style="font-size:10.5px;color:#a7f3d0;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:6px;padding:5px 7px;line-height:1.35;">
+          <strong>3D GPU SPH Geology</strong> · Diff <code>${diffIdx}</code> · Mobility <code>${mobPct}%</code> · <code>${physics.planetaryGenesisSphSession.parcelCount.toLocaleString()}</code> parcels (0 Perlin continents)
+        </div>`;
+        })() : ''}
         <button id="uv-land-surface-btn" class="uv-btn primary" type="button" style="justify-content:center;" title="Land on the live GPU planetary surface with a 6-Wheel Jump-Rocket Rover and Coaxial Atmospheric Drone (Shortcut: L)">${physics.surfaceActive ? '🚀 Launch Back to Orbit (Esc)' : '🚙 Land on Surface (Rover + Drone)'}</button>
         <div style="font-size:10.5px;color:var(--muted);line-height:1.35;">Dynamic Law Graph: <code>${physics.surfaceActive ? 'planetary-surface-vehicles · ' : ''}${atmoAct?.anyActive ? atmoAct.activeLaws.join(' · ') : 'Vacuum body — atmospheric &amp; EM laws dormant (0 dispatches)'}</code></div>`;
       scaleControlsEl.querySelector('#uv-planetary-mode-sel')?.addEventListener('change', async (e) => {
@@ -2015,6 +2073,16 @@ export async function mountUlgUniversesDemo() {
       });
       scaleControlsEl.querySelector('#uv-cutaway-toggle')?.addEventListener('change', (e) => {
         physics.setPlanetaryCutaway(e.target.checked);
+      });
+      scaleControlsEl.querySelector('#uv-sph-live-toggle')?.addEventListener('change', (e) => {
+        physics.setPlanetaryGenesisLiveForm(e.target.checked);
+        renderNow(performance.now());
+      });
+      scaleControlsEl.querySelector('#uv-sph-replay-btn')?.addEventListener('click', async () => {
+        await physics.triggerPlanetSphGenesisReplay();
+        renderScaleControls();
+        updateInspectorCard();
+        renderNow(performance.now());
       });
     } else if (currentLevel === 5) {
       scaleControlsEl.innerHTML = `
@@ -2347,6 +2415,8 @@ export async function mountUlgUniversesDemo() {
         seed: physics.seed
       });
       await physics.initGalaxy({ galaxyEnvOverride: gEnv });
+    } else if (currentLevel === 0 && t?.galaxyEnv) {
+      await physics.initGalaxy({ galaxyEnvOverride: t.galaxyEnv });
     } else if (currentLevel === 0 && t?.morphology) {
       await physics.initGalaxy({ preset: t.morphology, metallicity: t.metallicity ?? 1.0 });
     } else if (currentLevel === 1) {
@@ -2551,7 +2621,7 @@ export async function mountUlgUniversesDemo() {
       const cl = physics.surfaceClimate;
       const hr = Number.isFinite(cl?.localHour) ? cl.localHour : 12.0;
       const ls = physics.surfaceLandingSite;
-      const sitePart = ls ? ` · <strong>${ls.biomeLabel}</strong> (${ls.latDeg.toFixed(1)}°, ${ls.lonDeg.toFixed(1)}°)` : '';
+      const sitePart = ls ? ` · <strong>${ls.biomeLabel || ls.label || 'Surface LZ'}</strong> (${ls.latDeg.toFixed(1)}°, ${ls.lonDeg.toFixed(1)}°)` : '';
       const abdPart = tel.abductingOrganismName
         ? ` · <span class="good">🛸 BEAMING ${tel.abductingOrganismName.toUpperCase()}…</span>`
         : (abductedSpecimens.length > 0 ? ` · <span class="good">🧬 Abducted: ${abductedSpecimens.length}</span>` : '');
@@ -5325,6 +5395,7 @@ export async function mountUlgUniversesDemo() {
     const lineChunks = [];
     let lightDir = [0.62, 0.55, 0.55];
     let atmoEm = null;
+    let sphGeology = null;
     let mdCloud = null;
     let nuclearVol = null;
     const post = {
@@ -5565,29 +5636,45 @@ export async function mountUlgUniversesDemo() {
           }
         }
       }
-    } else if (physics.solarMode === 'formation' && currentLevel === 2 && physics.protoplanetarySession) {
-      // L2 FORMATION MODE: Live Protoplanetary Accretion Disk + Snow Line + DLM Particle-Rigid Planetesimals!
+    } else if (physics.solarMode === 'formation' && currentLevel === 2 && (physics.nebularCoalescenceSession || physics.protoplanetarySession)) {
+      // L2 FORMATION MODE: Live Whole-System GPU Nebular Coalescence (Fe/SiO2/C/H2O/CO) + Snow Line + Coalesced Proto-Bodies!
       const wDisk = bandWeight(span, 9.6, 10.6, 15.6, 16.8);
       if (wDisk > 0.01) {
         const dScale = 0.92 * Math.pow(10, Math.max(-1.2, Math.min(1.2, 12.6 - span)));
-        particleClouds.push({
-          buffer: physics.protoplanetarySession.getResidentPebblesBuffer(),
-          count: physics.protoplanetarySession.pebbleCount,
-          mode: 6,
-          worldScale: dScale,
-          pointSize: Math.max(0.036, Math.min(0.13, 0.060 * dScale)),
-          alphaGain: 0.52 * wDisk,
-          extra1: [0, 0, 0, 0]
-        });
-        spheres.push(...physics.protoplanetarySession.getEmbryoRenderSpheres(dScale));
-        // Radiative H2O Snow Line circle guide (T = 170 K from Gate 2 Polytope!)
+        const nebSess = physics.nebularCoalescenceSession;
+        const diskSess = physics.protoplanetarySession;
+        if (nebSess) {
+          particleClouds.push({
+            buffer: nebSess.getResidentParcelsBuffer(),
+            count: nebSess.parcelCount,
+            mode: 6,
+            worldScale: dScale,
+            pointSize: Math.max(0.042, Math.min(0.14, 0.068 * dScale)),
+            alphaGain: 0.56 * wDisk,
+            extra1: [0, 0, 0, 0]
+          });
+          spheres.push(...nebSess.getCoalescedRenderSpheres(dScale));
+        } else if (diskSess) {
+          particleClouds.push({
+            buffer: diskSess.getResidentPebblesBuffer(),
+            count: diskSess.pebbleCount,
+            mode: 6,
+            worldScale: dScale,
+            pointSize: Math.max(0.036, Math.min(0.13, 0.060 * dScale)),
+            alphaGain: 0.52 * wDisk,
+            extra1: [0, 0, 0, 0]
+          });
+          spheres.push(...diskSess.getEmbryoRenderSpheres(dScale));
+        }
+        // Radiative H2O Snow Line circle guide (T = 170 K from Host Star L_*!)
         if (showOrbits) {
-          const rSnow = physics.protoplanetarySession.snowLineAu * dScale;
+          const rSnow = (nebSess?.snowLineAu || diskSess?.snowLineAu || 2.71) * dScale;
+          const rSnowVis = Math.min(9.2 * dScale, Math.max(1.2 * dScale, rSnow));
           const segs = 72;
           let prev = null;
           for (let s = 0; s <= segs; s += 1) {
             const a = (s / segs) * Math.PI * 2;
-            const pt = [Math.cos(a) * rSnow, 0, Math.sin(a) * rSnow];
+            const pt = [Math.cos(a) * rSnowVis, 0, Math.sin(a) * rSnowVis];
             if (prev) {
               lineChunks.push(...prev, 0.36, 0.84, 1.0, 0.45 * wDisk);
               lineChunks.push(...pt, 0.36, 0.84, 1.0, 0.45 * wDisk);
@@ -5827,6 +5914,43 @@ export async function mountUlgUniversesDemo() {
               civTechK: Number(spec.civTechK) || 0,
               dysonCoverage: 0,
               seed: i * 2.17 + 1.3
+            });
+          }
+          // Bind zero-copy 3D Multi-Material GPU SPH Planetary/Moon/Asteroid/Comet Geology directly onto the L4 globe!
+          // (Replaces Perlin fbm5 continents with real GPU SPH core/mantle/crust/cratering/erosion!)
+          if (isFocusL4 && physics.planetaryGenesisSphSession) {
+            sphGeology = {
+              buffer: physics.planetaryGenesisSphSession.getResidentSphGeologyBuffer(),
+              width: physics.planetaryGenesisSphSession.mapWidth,
+              height: physics.planetaryGenesisSphSession.mapHeight,
+              sphereIndex: sphereIdx,
+              seaLevelNorm: physics.planetaryGenesisSphSession.genesisParams?.seaLevelNorm ?? -1.5
+            };
+            // Render live 3D GPU SPH planetary genesis parcels (Fe core, mantle plumes, felsic continents, LHB impactors!)
+            // when Live Geologic Time replay OR 3D Interior Cutaway is active!
+            if (physics.planetaryGenesisLiveForm || isCutPlanet) {
+              particleClouds.push({
+                buffer: physics.planetaryGenesisSphSession.getResidentParcelsBuffer(),
+                count: physics.planetaryGenesisSphSession.parcelCount,
+                mode: 13,
+                worldScale: trueRWorld * (physics.planetaryGenesisLiveForm ? 1.04 : 0.98),
+                pointSize: Math.max(0.055, Math.min(0.24, trueRWorld * 0.048)),
+                alphaGain: (physics.planetaryGenesisLiveForm ? 0.62 : 0.44) * wSolar,
+                extra1: [wx, wy, wz, 0]
+              });
+            }
+          }
+          // Zooming into an active Comet renders live solar-flux sublimation outgassing coma & dual tail!
+          if (isFocusL4 && spec.isComet && physics.radWindL2Session) {
+            const cScale = Math.max(0.35, trueRWorld * 2.4);
+            particleClouds.push({
+              buffer: physics.radWindL2Session.getResidentParcelsBuffer(),
+              count: physics.radWindL2Session.particleCount,
+              mode: 8,
+              worldScale: cScale,
+              pointSize: Math.max(0.05, Math.min(0.16, 0.095 * cScale)),
+              alphaGain: 0.30 * wSolar,
+              extra1: [wx, wy, wz, 0]
             });
           }
           // Bind zero-copy live GPU spherical baroclinic atmosphere + triboelectric lightning + polar aurorae + CFD flow onto the focused world!
@@ -6176,6 +6300,7 @@ export async function mountUlgUniversesDemo() {
       particleClouds,
       spheres: spheres.length ? spheres : null,
       atmoEm,
+      sphGeology,
       lightDir,
       starLight: lastStarIllumination?.vec4 || [1.0, 0.97, 0.92, 1.0],
       mdCloud,
@@ -7782,6 +7907,41 @@ export async function mountUlgUniversesDemo() {
       await physics.setCosmoMode('web');
       await physics.initCosmicWeb({ bigBang: true });
       return this.setLog10Span(UNIVERSES_SCALES[0].log10SpanM);
+    },
+    async triggerPlanetSphGenesisReplay() {
+      const tel = await physics.triggerPlanetSphGenesisReplay();
+      renderScaleControls();
+      renderNow(performance.now());
+      return tel;
+    },
+    setPlanetaryGenesisLiveForm(enabled) {
+      const v = physics.setPlanetaryGenesisLiveForm(enabled);
+      renderScaleControls();
+      renderNow(performance.now());
+      return v;
+    },
+    getSphGenesisTelemetry() {
+      return physics.planetaryGenesisSphTelemetry || physics.planetaryGenesisSphSession?.getTelemetry?.() || null;
+    },
+    getRootLineageCacheStats() {
+      return physics.getRootLineageCacheStats();
+    },
+    getTargets(lvl = currentLevel) {
+      return physics.getTargetsForLevel(lvl, lastWorldScaleInfo);
+    },
+    async crystallizeCoalescedSystem() {
+      const sys = await physics.crystallizeCoalescedSystem();
+      selectDefaultTarget();
+      syncScaleChrome();
+      renderNow(performance.now());
+      return sys;
+    },
+    async triggerGalaxyCoalescence() {
+      const env = await physics.triggerGalaxyCoalescence();
+      selectDefaultTarget();
+      renderScaleControls();
+      renderNow(performance.now());
+      return env;
     },
     async reseed(nextSeed = null) {
       physics.setSeed(nextSeed ?? ((physics.seed + 7919) >>> 0));

@@ -107,18 +107,22 @@ export function deriveGalaxyEnvironmentFromCosmicContext({
   cosmicEpoch = null,
   regionPosMpc = [0, 0, 0],
   localOverdensity = 1.0,
+  tidalSpinLambda = null,
+  gpuCoalescedHalo = false,
   seed = 20261125
 } = {}) {
   const ep = cosmicEpoch || evaluateCosmicEpochState({ redshiftZ: 0.0 });
   const z = Number(ep.redshiftZ) || 0;
   const ageCosmicGyr = Math.max(0.05, Number(ep.cosmicAgeGyr) || 13.8);
-  const delta = Math.max(0.15, Math.min(8.0, Number(localOverdensity) || 1.0));
+  const delta = Math.max(0.15, Math.min(12.0, Number(localOverdensity) || 1.0));
+  const spinL = Number.isFinite(Number(tidalSpinLambda)) ? Math.max(0.005, Math.min(0.25, Number(tidalSpinLambda))) : null;
   const h = hashCoords(regionPosMpc[0] || 0, regionPosMpc[1] || 0, regionPosMpc[2] || 0, seed ^ 0x101);
   const rand = mulberry32(h);
 
-  // Realistic Dressler (1980) Morphology–Density Relation across Cosmic-Web overdensity & epoch z:
-  // Cluster cores -> Giant Ellipticals & Mergers; Groups -> Barred Spirals & Ellipticals;
-  // Filaments -> Grand-Design & Barred Spirals; Voids & Halos -> Globular Clusters & Dwarf Tidal Streams!
+  // Realistic Dressler (1980) Morphology–Density + Tidal-Torque Spin (Peebles 1969) Relation:
+  // Cluster cores (high delta, low spin) -> Giant Ellipticals & Mergers;
+  // High tidal-torque filaments -> Grand-Design & Barred Spirals;
+  // Voids & Halos -> Globular Clusters & Dwarf Tidal Streams!
   let morphology = 'disk';
   let morphologyLabel = 'Grand-Design Spiral';
   if (z >= 4.5) {
@@ -132,12 +136,15 @@ export function deriveGalaxyEnvironmentFromCosmicContext({
     const rF = rand();
     morphology = delta > 1.25 ? 'sphere' : (rF < 0.35 ? 'globular' : 'barred');
     morphologyLabel = morphology === 'sphere' ? 'Evolved Giant Elliptical (E2)' : (morphology === 'globular' ? 'Ancient Halo Globular Cluster' : 'Aging Barred Spiral');
-  } else if (delta > 2.15) {
+  } else if (delta > 2.15 && (spinL == null || spinL < 0.055)) {
     morphology = rand() < 0.68 ? 'sphere' : 'binary';
     morphologyLabel = morphology === 'sphere' ? 'Cluster-Core Giant Elliptical (E2)' : 'Interacting Major Merger Pair';
   } else if (delta < 0.68) {
     morphology = rand() < 0.52 ? 'globular' : 'dwarf-stream';
     morphologyLabel = morphology === 'globular' ? 'Metal-Poor Globular Cluster (GC)' : 'Void-Edge Dwarf & Tidal Stream';
+  } else if (spinL != null && spinL >= 0.068) {
+    morphology = delta > 1.65 ? 'barred' : 'disk';
+    morphologyLabel = morphology === 'barred' ? 'High-Spin Barred Spiral (SBb)' : 'High-Spin Grand-Design Spiral (Sc)';
   } else if (delta > 1.42) {
     const rG = rand();
     if (rG < 0.34) { morphology = 'sphere'; morphologyLabel = 'Group Elliptical / Lenticular (E4/S0)'; }
@@ -541,7 +548,7 @@ export function deriveStarSystemFromGalacticLocation({
  * (`isStar`, `binaryOrbitParent` / `parent`) so `solarSystemNBodyGpu.js` integrates 1, 2,
  * or 3 stars + all planets, moons, and asteroid belts natively on WebGPU `f32x2`!
  */
-export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = null } = {}) {
+export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = null, gpuCoalescedDisk = null } = {}) {
   const sys = starSystem || deriveStarSystemFromGalacticLocation();
   const seed = ((seedOverride ?? sys.seed) ^ 0x501a7) >>> 0;
   const rand = mulberry32(seed);
@@ -667,25 +674,62 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
   const isRedGiantHost = stars[0].stage === 'red-giant' || stars[0].stage === 'agb-superwind';
   const isWhiteDwarfHost = stars[0].stage === 'white-dwarf';
 
+  const gpuBodies = Array.isArray(gpuCoalescedDisk?.bodies) && gpuCoalescedDisk.bodies.length > 0 && canFormPlanets
+    ? gpuCoalescedDisk.bodies
+    : null;
+  const effectivePlanetCount = gpuBodies ? gpuBodies.length : planetCount;
+
   let aCursor = rMinStableAu * (1.08 + rand() * 0.45);
   let hasEarthLike = false;
   const planetIndices = [];
 
-  for (let p = 0; p < planetCount; p += 1) {
-    if (aCursor >= rMaxStableAu * 0.96) break;
-    const aAu = aCursor;
-    // Geometric Hill-sphere orbital spacing (1.52..2.15x per planet)
-    aCursor *= (1.52 + rand() * 0.62);
+  for (let p = 0; p < effectivePlanetCount; p += 1) {
+    const gpuB = gpuBodies ? gpuBodies[p] : null;
+    if (!gpuB && aCursor >= rMaxStableAu * 0.96) break;
+    const aAu = gpuB ? gpuB.aAu : aCursor;
+    // Geometric Hill-sphere orbital spacing (fallback only when no GPU nebular coalescence disk was provided)
+    if (!gpuB) aCursor *= (1.52 + rand() * 0.62);
 
-    const tEqK = Math.max(28, Math.round(278.0 * Math.pow(Math.max(1e-4, hostLumSolar), 0.25) / Math.sqrt(Math.max(0.02, aAu))));
+    const tEqK = gpuB
+      ? gpuB.tEqK
+      : Math.max(28, Math.round(278.0 * Math.pow(Math.max(1e-4, hostLumSolar), 0.25) / Math.sqrt(Math.max(0.02, aAu))));
+    const starFluxWM2 = gpuB
+      ? gpuB.starFluxWM2
+      : Number((1361.0 * Math.max(1e-4, hostLumSolar) / Math.max(4e-4, aAu * aAu)).toFixed(2));
     const beyondSnow = aAu >= rSnowLineAu;
     const beyondCo = aAu >= rCoIceAu;
     const inHz = aAu >= rHzInnerAu && aAu <= rHzOuterAu;
 
-    // Classify emergent planet type purely from nebular location, metallicity, C/O, temperature, and stochastic core accretion!
+    // Classify emergent planet type purely from GPU-coalesced material fractions (Fe/Silicate/C/H2O/Gas)
+    // driven by the host star's actual energy output L_*, or analytic nebular location in pure-JS mode!
     const roll = rand();
     let archetype = 'rocky-arid';
-    if (beyondSnow && roll < pGiantBase * 1.15 && !isWhiteDwarfHost) {
+    if (gpuB) {
+      if (gpuB.gasEnvelopeFrac >= 0.34 && !isWhiteDwarfHost && !isRedGiantHost) {
+        archetype = !beyondSnow && aAu < rSnowLineAu * 0.35 ? 'hot-jupiter' : 'gas-giant';
+      } else if (gpuB.gasEnvelopeFrac >= 0.10 && (gpuB.volatileFrac >= 0.38 || beyondSnow) && !isWhiteDwarfHost) {
+        archetype = 'ice-giant';
+      } else if (tEqK >= 950 || (isRedGiantHost && aAu < 1.8)) {
+        archetype = gpuB.feFrac > 0.36 ? 'iron-core' : 'lava-world';
+      } else if (gpuB.carbonFrac >= 0.32 && !beyondSnow) {
+        archetype = 'carbon-world';
+      } else if (inHz && !hasEarthLike && !isRedGiantHost && !isWhiteDwarfHost && sys.systemAgeGyr >= 0.35 && (gpuB.volatileFrac >= 0.01 || nebulaEnv.volatileInventory >= 0.35) && gpuB.totalMassEarth <= 2.4) {
+        archetype = 'earth-like';
+        hasEarthLike = true;
+      } else if (inHz && (gpuB.volatileFrac >= 0.08 || gpuB.totalMassEarth > 2.2)) {
+        archetype = 'ocean-super-earth';
+      } else if (tEqK > 380 && tEqK < 950 && (gpuB.volatileFrac > 0.005 || nebulaEnv.metallicitySolar > 0.25)) {
+        archetype = 'greenhouse';
+      } else if (beyondSnow) {
+        archetype = gpuB.totalMassEarth > 5.0 ? 'ice-giant' : 'icy-dwarf';
+      } else if (gpuB.feFrac >= 0.34 && gpuB.totalMassEarth < 0.7) {
+        archetype = 'iron-core';
+      } else if (tEqK < 250 && gpuB.totalMassEarth < 0.9) {
+        archetype = 'arid-oxide';
+      } else {
+        archetype = gpuB.totalMassEarth >= 1.5 ? 'super-earth' : 'arid-oxide';
+      }
+    } else if (beyondSnow && roll < pGiantBase * 1.15 && !isWhiteDwarfHost) {
       archetype = beyondCo || rand() < 0.38 ? 'ice-giant' : 'gas-giant';
     } else if (!beyondSnow && aAu < rSnowLineAu * 0.25 && roll < pGiantBase * 0.22 && !isRedGiantHost && !isWhiteDwarfHost) {
       // Type-II disk-migrated Hot Jupiter!
@@ -979,6 +1023,30 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       tidallyLocked,
       civTechK,
       hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+      starFluxWM2,
+      coalescedComposition: gpuB ? Object.freeze({
+        feFrac: gpuB.feFrac,
+        silicateFrac: gpuB.silicateFrac,
+        carbonFrac: gpuB.carbonFrac,
+        h2oIceFrac: gpuB.h2oIceFrac,
+        superVolFrac: gpuB.superVolFrac,
+        volatileFrac: gpuB.volatileFrac,
+        gasEnvelopeFrac: gpuB.gasEnvelopeFrac,
+        tEqK: gpuB.tEqK,
+        starFluxWM2: gpuB.starFluxWM2,
+        gpuCoalesced: true
+      }) : Object.freeze({
+        feFrac: spec.coreZ === 26 ? 0.32 : 0.16,
+        silicateFrac: spec.mantleZ === 14 ? 0.54 : 0.26,
+        carbonFrac: spec.mantleZ === 6 ? 0.48 : 0.08,
+        h2oIceFrac: beyondSnow ? 0.45 : (spec.volatileMassFrac || 0.02),
+        superVolFrac: beyondCo ? 0.28 : 0.0,
+        volatileFrac: beyondSnow ? 0.62 : (spec.volatileMassFrac || 0.02),
+        gasEnvelopeFrac: (archetype === 'gas-giant' || archetype === 'hot-jupiter') ? 0.78 : (archetype === 'ice-giant' ? 0.22 : 0.0),
+        tEqK,
+        starFluxWM2,
+        gpuCoalesced: false
+      }),
       ...spec
     });
     planetIndices.push(bodyIdx);
@@ -1028,10 +1096,12 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     }
   }
 
-  // Synthesize visitable, landable, mineable named Minor Bodies (Metallic Asteroid + Active Outgassing Comet) for EVERY star system!
-  const astAu = Number(Math.max(rMinStableAu * 1.35, Math.min(rMaxStableAu * 0.9, rSnowLineAu * 0.92)).toFixed(4));
+  // Synthesize visitable, landable, mineable named Minor Bodies (Metallic Asteroid + Active Outgassing Comet)
+  // inheriting their EXACT GPU-coalesced refractory/volatile composition from the disk zones!
+  const astZone = gpuCoalescedDisk?.asteroidZone || null;
+  const astAu = Number((astZone?.aAu || Math.max(rMinStableAu * 1.35, Math.min(rMaxStableAu * 0.9, rSnowLineAu * 0.92))).toFixed(4));
   const lHostSol = Math.max(0.01, stars.reduce((acc, s) => acc + (Number(s.luminositySolar) || 0), 0) || 1.0);
-  const astTeq = Math.max(45, Math.round(278 * Math.pow(lHostSol, 0.25) / Math.sqrt(Math.max(0.1, astAu))));
+  const astTeq = astZone?.tEqK || Math.max(45, Math.round(278 * Math.pow(lHostSol, 0.25) / Math.sqrt(Math.max(0.1, astAu))));
   catalog.push({
     id: 'belt-asteroid-1',
     name: `${sys.systemName} Belt Asteroid α`,
@@ -1055,17 +1125,33 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     isMetallicAsteroid: true,
     civTechK: 0,
     hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+    starFluxWM2: astZone?.starFluxWM2 ?? Number((1361 * lHostSol / Math.max(0.01, astAu * astAu)).toFixed(2)),
+    coalescedComposition: Object.freeze({
+      feFrac: astZone?.feFrac ?? 0.42,
+      silicateFrac: astZone?.silicateFrac ?? 0.48,
+      carbonFrac: astZone?.carbonFrac ?? 0.08,
+      h2oIceFrac: astZone?.volatileFrac ?? 0.02,
+      superVolFrac: 0.0,
+      volatileFrac: astZone?.volatileFrac ?? 0.02,
+      gasEnvelopeFrac: 0.0,
+      tEqK: astTeq,
+      gpuCoalesced: Boolean(astZone)
+    }),
     color0: [0.64, 0.62, 0.58],
     color1: [0.36, 0.38, 0.42],
     atm: 0.0,
     surfacePressurePa: 0,
-    volatileMassFrac: 0.04,
+    volatileMassFrac: astZone?.volatileFrac ?? 0.04,
     tempK: astTeq,
     centralP: 1.4e7,
     coreZ: 26, mantleZ: 28, surfZ: 26,
-    composition: 'Fe-Ni Metallic Ore · Olivine/Pyroxene Chondrite'
+    composition: astZone
+      ? `GPU-Coalesced Fe-Ni ${Math.round(astZone.feFrac * 100)}% · Silicate ${Math.round(astZone.silicateFrac * 100)}% · C ${Math.round(astZone.carbonFrac * 100)}%`
+      : 'Fe-Ni Metallic Ore · Olivine/Pyroxene Chondrite'
   });
-  const comAu = Number(Math.max(rSnowLineAu * 1.4, Math.min(18.0, rSnowLineAu * 2.8)).toFixed(4));
+  const comZone = gpuCoalescedDisk?.cometZone || null;
+  const comAu = Number((comZone?.aAu || Math.max(rSnowLineAu * 1.4, Math.min(18.0, rSnowLineAu * 2.8))).toFixed(4));
+  const comVol = Math.max(0.55, Math.min(0.92, comZone?.volatileFrac ?? 0.76));
   catalog.push({
     id: 'periodic-comet-1',
     name: `${sys.systemName} Comet 1P`,
@@ -1089,15 +1175,29 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     isComet: true,
     civTechK: 0,
     hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+    starFluxWM2: comZone?.starFluxWM2 ?? Number((1361 * lHostSol / Math.max(0.05, comAu * comAu)).toFixed(2)),
+    coalescedComposition: Object.freeze({
+      feFrac: comZone?.feFrac ?? 0.05,
+      silicateFrac: comZone?.silicateFrac ?? 0.16,
+      carbonFrac: comZone?.carbonFrac ?? 0.06,
+      h2oIceFrac: comZone?.h2oIceFrac ?? 0.48,
+      superVolFrac: comZone?.superVolFrac ?? 0.25,
+      volatileFrac: comVol,
+      gasEnvelopeFrac: 0.0,
+      tEqK: comZone?.tEqK ?? 62,
+      gpuCoalesced: Boolean(comZone)
+    }),
     color0: [0.74, 0.90, 1.0],
     color1: [0.38, 0.62, 0.88],
     atm: 0.18,
     surfacePressurePa: 0,
-    volatileMassFrac: 0.76,
-    tempK: 175,
+    volatileMassFrac: comVol,
+    tempK: Math.max(55, Math.min(220, comZone?.tEqK ? comZone.tEqK + 95 : 175)),
     centralP: 1e5,
     coreZ: 8, mantleZ: 6, surfZ: 8,
-    composition: 'H₂O Ice 75% · CO/CO₂/CH₄ Volatiles · Silicate Dust'
+    composition: comZone
+      ? `GPU-Coalesced H₂O Ice ${Math.round((comZone.h2oIceFrac || 0.48) * 100)}% · CO/CH₄ ${Math.round((comZone.superVolFrac || 0.25) * 100)}% · Silicate Dust`
+      : 'H₂O Ice 75% · CO/CO₂/CH₄ Volatiles · Silicate Dust'
   });
 
   // Pick a compelling default focus body (Earth-like if present, else first rocky/ocean planet, else first planet, else primary star!)
@@ -1117,6 +1217,8 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     hasEarthLike,
     earthLikeIndex: earthLikeIdx,
     defaultFocusIndex,
+    gpuCoalesced: Boolean(gpuBodies),
+    gpuCoalescedTelemetry: gpuCoalescedDisk?.telemetry || null,
     condensationFrontsAu: Object.freeze({
       rSilicateAu: Number(rSilicateAu.toFixed(3)),
       rHzInnerAu: Number(rHzInnerAu.toFixed(3)),

@@ -35,7 +35,9 @@ async function dragCanvas(page, selector, dx = 140, dy = -45) {
 }
 
 async function dragRangeToFraction(page, selector, frac) {
-  const box = await page.locator(selector).boundingBox();
+  const loc = page.locator(selector);
+  await loc.scrollIntoViewIfNeeded();
+  const box = await loc.boundingBox();
   assert.ok(box && box.width > 10, `Range slider ${selector} must be visible`);
   const y = box.y + box.height * 0.5;
   const xStart = box.x + box.width * 0.8;
@@ -537,6 +539,8 @@ test('Hand-Driven Full-Stack Soak across all 5 Flagship ULG WebGPU Demos (Vulkan
       await page.waitForTimeout(450);
 
       // 5A. Protocell Vesicle + REAL Drag on `#sl-mem-clip` 3D Bilayer Cutaway Slider!
+      await page.locator('.acc-header', { hasText: /Membrane/i }).first().click().catch(() => {});
+      await page.waitForTimeout(120);
       await page.locator('.mode-btn[data-mode="protocell-vesicle"]').click();
       await page.waitForTimeout(600);
       await dragRangeToFraction(page, '#sl-mem-clip', 0.45);

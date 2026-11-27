@@ -27,12 +27,12 @@
         font-family: Inter, system-ui, -apple-system, sans-serif;
         overflow: hidden;
       }
-      .shell { display: grid; grid-template-columns: 312px 1fr 318px; grid-template-rows: 44px 1fr; height: 100vh; }
+      .shell { display: grid; grid-template-columns: 312px 1fr 318px; grid-template-rows: 44px 1fr; height: 100dvh; width: 100vw; max-width: 100vw; overflow: hidden; }
       .shell.plots-collapsed { grid-template-columns: 312px 1fr 0px; }
       header {
         grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
         padding: 0 12px; background: #080d1a; border-bottom: 1px solid var(--border); gap: 8px;
-        position: relative; z-index: 45;
+        position: relative; z-index: 45; min-width: 0; max-width: 100vw; overflow: hidden;
       }
       .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; overflow: hidden; }
       header h1 { font-size: 12.5px; font-weight: 800; margin: 0; letter-spacing: 0.05em; color: var(--accent); white-space: nowrap; }
@@ -130,7 +130,10 @@
       .chk-row { display: flex; align-items: center; justify-content: space-between; font-size: 10.5px; color: #cbd5e1; cursor: pointer; }
       .chk-row input { accent-color: var(--accent); }
 
-      .stage-wrap { position: relative; width: 100%; height: 100%; overflow: hidden; background: #040710; }
+      .stage-wrap { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: #040710; }
+      .mobile-drawer-backdrop { display: none; }
+      .mobile-drawer-head { display: none; }
+      .mobile-context-bar { display: none; }
       #org-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
       #org-canvas:active { cursor: grabbing; }
       .stage-overlay {
@@ -239,14 +242,67 @@
       .error-banner.visible { display: flex; flex-direction: column; gap: 8px; }
 
       @media (max-width: 1020px) {
-        .shell { grid-template-columns: 1fr; }
-        .sidebar, .right-dock { display: none; position: fixed; top: 44px; bottom: 0; z-index: 90; width: min(320px, 88vw); }
+        .shell, .shell.plots-collapsed { grid-template-columns: minmax(0, 1fr); width: 100vw; max-width: 100vw; height: 100dvh; }
+        header { padding: 0 8px; gap: 6px; }
+        header h1 { display: none; }
+        .header-left { gap: 6px; min-width: 0; flex: 1; }
+        .specimen-pill { flex: 1 1 auto; min-width: 0; max-width: 100%; padding: 3px 8px; font-size: 10.5px; }
+        .header-actions { gap: 4px; flex-shrink: 0; }
+        .mobile-drawer-backdrop {
+          display: block; position: fixed; inset: 0; z-index: 82;
+          background: rgba(2, 6, 14, 0.72); backdrop-filter: blur(3px);
+          opacity: 0; pointer-events: none; transition: opacity 0.18s ease;
+        }
+        .mobile-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+        .sidebar, .right-dock {
+          display: none; position: fixed; top: 44px; bottom: 0; z-index: 90;
+          width: min(336px, 90vw); max-width: 90vw;
+          padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+          box-shadow: 0 12px 36px rgba(0, 0, 0, 0.78);
+        }
         .sidebar.mobile-open { display: flex; left: 0; }
         .right-dock.mobile-open { display: flex; right: 0; }
+        .shell.plots-collapsed .right-dock.mobile-open { display: flex; }
+        .mobile-drawer-head {
+          display: flex; align-items: center; justify-content: space-between; gap: 8px;
+          padding-bottom: 6px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .mobile-drawer-head span { font-size: 11px; font-weight: 800; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
         .hdr-btn.mobile-only { display: inline-flex; }
+
+        /* Context-First Floating Mobile Bottom Action Bar */
+        .mobile-context-bar {
+          display: flex; align-items: center; gap: 4px;
+          position: absolute; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); z-index: 24;
+          background: rgba(8, 13, 26, 0.90); border: 1px solid rgba(86, 194, 255, 0.42);
+          border-radius: 11px; padding: 6px 7px; backdrop-filter: blur(10px);
+          box-shadow: 0 8px 26px rgba(0, 0, 0, 0.62);
+          overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+        }
+        .mobile-context-bar::-webkit-scrollbar { display: none; }
+        .mobile-ctx-btn {
+          flex: 1 0 auto; min-height: 34px; padding: 5px 8px; border-radius: 8px;
+          font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap;
+          background: rgba(86, 194, 255, 0.14); border: 1px solid rgba(86, 194, 255, 0.36); color: #e2e8f0;
+          display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+        }
+        .mobile-ctx-btn.active { background: rgba(244, 114, 182, 0.32); border-color: var(--pink); color: #ffffff; }
+        .mobile-ctx-btn.mirror { background: linear-gradient(90deg, rgba(86,194,255,0.24), rgba(244,114,182,0.26)); border-color: rgba(244,114,182,0.56); }
+        .hud-bottom { bottom: calc(64px + env(safe-area-inset-bottom, 0px)); left: 8px; right: 8px; flex-direction: column; align-items: stretch; gap: 5px; }
+        .hud-badge-bar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 4px; }
+        .hud-badge-bar::-webkit-scrollbar { display: none; }
+        .stat-chip { flex-shrink: 0; padding: 3px 7px; font-size: 10px; }
+        .pick-card { max-width: 100%; }
+      }
+      @media (max-width: 640px) {
+        .hdr-btn .hdr-lbl { display: none; }
+        .hdr-btn { padding: 4px 8px; min-width: 30px; }
+        .specimen-pill .pill-tag { display: none; }
+        .hud-top-left { top: 6px; left: 8px; right: 8px; max-width: calc(100% - 16px); padding: 5px 8px; }
+        .hud-sub { display: none; }
       }
     </style>
-    <script type="module" crossorigin src="./assets/organicLab-BU85CdRn.js"></script>
+    <script type="module" crossorigin src="./assets/organicLab-8EBp8kCD.js"></script>
   </head>
   <body>
     <div id="org-shell" class="shell">
@@ -260,11 +316,12 @@
           </div>
         </div>
         <div class="header-actions">
-          <button id="about-btn" class="hdr-btn" type="button" title="Inspect governing equations, active WebGPU shaders, and experiments">ⓘ About</button>
-          <button id="toggle-plots-btn" class="hdr-btn" type="button" title="Show or hide the live scientific plot dock">📊 Plots</button>
+          <button id="about-btn" class="hdr-btn" type="button" title="Inspect governing equations, active WebGPU shaders, and experiments">ⓘ<span class="hdr-lbl"> About</span></button>
+          <button id="toggle-plots-btn" class="hdr-btn" type="button" title="Show or hide the live scientific plot dock">📊<span class="hdr-lbl"> Plots</span></button>
           <button id="help-btn" class="hdr-btn help-btn" type="button" aria-label="Help and Other ULG Flagship Apps">?</button>
         </div>
       </header>
+      <div id="mobile-drawer-backdrop" class="mobile-drawer-backdrop" aria-hidden="true"></div>
 
       <div id="help-popover" class="help-popover" role="menu">
         <div class="help-section-lbl">Documentation</div>
@@ -297,6 +354,10 @@
       </div>
 
       <aside id="org-sidebar" class="sidebar">
+        <div class="mobile-drawer-head">
+          <span>🧪 Organic Lab Controls</span>
+          <button id="mobile-sidebar-close" class="hdr-btn" type="button">✕ View 3D</button>
+        </div>
         <div class="card" id="speed-controls-card">
           <h3><span>Sim Speed &amp; Orbit</span><b id="val-sim-speed">0.25×</b></h3>
           <div class="ctrl-row">
@@ -465,6 +526,7 @@
             <div class="btn-row"><button id="pick-zoom" class="sm-btn" type="button">🎯 Focus &amp; Zoom</button></div>
           </div>
         </div>
+        <div id="mobile-context-bar" class="mobile-context-bar" aria-label="Context-First Mobile Chemistry Controls"></div>
         <div id="error-banner" class="error-banner">
           <h3 style="margin:0;color:#fca5a5;">WebGPU Initialization Error</h3>
           <p id="error-text" style="margin:0;color:#cbd5e1;font-size:12px;"></p>
@@ -472,6 +534,10 @@
       </main>
 
       <aside id="org-dock" class="right-dock">
+        <div class="mobile-drawer-head">
+          <span>📊 Live Quantum Plots</span>
+          <button id="mobile-dock-close" class="hdr-btn" type="button">✕ View 3D</button>
+        </div>
         <div class="plot-card">
           <div class="plot-head"><span id="p1-title">GPU π-MO Energy Levels</span><span id="p1-sub">eV</span></div>
           <canvas id="plot1" class="plot-canvas" width="296" height="118"></canvas>

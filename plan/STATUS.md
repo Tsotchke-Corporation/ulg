@@ -5,7 +5,7 @@ authoritative routing document — Unified 40-OOM Foundation-First Scale-Ladder
 Roadmap + Architecture 1.0) and [`AGENTS.md`](../AGENTS.md) (canonical
 self-contained repository rules + `plan/` routing map).
 
-- **2026-11-26 Mobile-First & Context-First UI Revamp across ULG Universes, Bio Lab, Organic Chem Lab & Material Physics Lab (`feat/mobile-first-context-aware-ui-revamp` — STRICT PUBLICATION HOLD ACTIVE pending explicit authorization from `big dog`):**
+- **2026-11-26 Mobile-First & Context-First UI Revamp across ULG Universes, Bio Lab, Organic Chem Lab & Material Physics Lab (`feat/mobile-first-context-aware-ui-revamp` → `main` + Pages Deploy authorized by `big dog`):**
   - **Context-First Entity Spotlight & Live Surface Organism Picking (`universes.html`, `src/demos/ulgUniversesDemo.js`, `src/runtime/astrophysics/planetarySurfaceVehiclesGpu.js`):**
     - Added live direct click/tap picking of surface **Aliens (Fauna)**, **Trees (Flora)**, and **Fungi** (`pickSurfaceOrganismAt`, `abductOrganismById`, animated 3D targeting reticle on `#uv-reticle-canvas`) with 1-tap `🛸 Abduct to Cargo`, `🫧 Bio Aquarium ↗`, and `🔬 Tissue → L5` actions.
     - Added dynamic `#uv-context-spotlight` adapting to all 7 entity contexts (Surface Alien / Flora / Fungus, Planet/Moon, Star/Pulsar/Black Hole/White Dwarf, Galaxy/Supercluster, Asteroid/Comet, Quantum/Crystal/Atom/Nucleus) + event-delegated markup caching so periodic HUD refreshes never cancel mobile taps.

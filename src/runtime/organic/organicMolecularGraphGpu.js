@@ -11,7 +11,9 @@
 //     all emerge strictly from atomic Z, valence, electronegativity, hardness, and graph topology!
 
 import { solveSymmetricEigenBatchedWebGpu } from '../gpuMath/batchedSymmetricEigensolverGpu.js';
-import { symbolForZ, electronConfiguration } from '../electronicStructure/periodicTable.js';
+import { ATOMIC_MASS_U, symbolForZ, electronConfiguration } from '../electronicStructure/periodicTable.js';
+import { resolveElementPbrOptics } from '../material/materialPbrOpticsBridge.js';
+import elementsBank from '../../../data/material-properties/elements.json' with { type: 'json' };
 import {
   LAW_ADAPTER_MODES,
   LAW_FALLBACK_POLICIES,
@@ -67,31 +69,40 @@ export const ORGANIC_ELEMENT_PHYSICS = Object.freeze({
   35: Object.freeze({ Z: 35, sym: 'Br', massU: 79.904, valence: 1, chiEv: 7.790, etaEv: 8.850,  rCovA: 1.14, rVdwA: 1.85, huckelAlpha: -1.4, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.68, 0.20, 0.16] })
 });
 
+const ELEMENTS_BANK_BY_Z = new Map();
+for (const rec of (elementsBank?.records || [])) {
+  const z = Math.trunc(Number(rec?.atomicNumber));
+  if (z >= 1 && z <= 118) ELEMENTS_BANK_BY_Z.set(z, rec);
+}
+
 const DERIVED_ELEMENT_PHYSICS_CACHE = new Map();
 
 export function getOrganicElementPhysics(Z) {
   const z = Math.max(1, Math.min(118, Math.trunc(Number(Z)) || 6));
   if (ORGANIC_ELEMENT_PHYSICS[z]) return ORGANIC_ELEMENT_PHYSICS[z];
   if (DERIVED_ELEMENT_PHYSICS_CACHE.has(z)) return DERIVED_ELEMENT_PHYSICS_CACHE.get(z);
-  // General first-principles periodic-table derivation across ALL Z = 1..118 (zero Carbon collapse!):
+  // General first-principles periodic-table & ULG material-layer derivation across ALL Z = 1..118!
   const sym = symbolForZ(z);
   const cfg = electronConfiguration(z);
-  const shells = cfg?.subshells || [];
+  const shells = Array.isArray(cfg) ? cfg : (cfg?.subshells || []);
   let maxN = 1;
   let valenceElec = 0;
   for (const sh of shells) {
     if (sh.n > maxN) maxN = sh.n;
   }
   for (const sh of shells) {
-    if (sh.n === maxN || (sh.n === maxN - 1 && sh.l === 2 && sh.electrons < 10)) {
-      valenceElec += sh.electrons;
+    const occ = Number(sh.occupancy ?? sh.electrons ?? 0);
+    if (sh.n === maxN || (sh.n === maxN - 1 && sh.l === 2 && occ < 10)) {
+      valenceElec += occ;
     }
   }
   const isNoble = z === 2 || z === 10 || z === 18 || z === 36 || z === 54 || z === 86 || z === 118;
   const isHalogen = z === 9 || z === 17 || z === 35 || z === 53 || z === 85 || z === 117;
   const valence = isNoble ? 0 : (isHalogen ? 1 : Math.max(1, Math.min(6, valenceElec <= 4 ? valenceElec : (8 - Math.min(8, valenceElec)) || 2)));
-  // Smooth valley-of-stability atomic mass A(Z)
-  const massU = z <= 20 ? z * 2.0 : z * (2.0 + 0.0068 * Math.pow(z, 0.94));
+  // Canonical periodic-table atomic weight & Gate-1 derived ULG optical/material bank!
+  const elemRec = ELEMENTS_BANK_BY_Z.get(z) || null;
+  const massU = Number(elemRec?.atomicMassU) || Number(ATOMIC_MASS_U[z - 1]) || (z * 2.0);
+  const pbrOpt = resolveElementPbrOptics(z, { surfaceFinish: 'crystal' });
   // Slater-shielded covalent radius (Angstrom) & vdW radius
   const rCovA = Number(Math.max(0.32, Math.min(2.45, 0.44 + 0.25 * maxN - 0.045 * Math.min(8, valenceElec))).toFixed(2));
   const rVdwA = Number(Math.max(1.20, Math.min(2.90, rCovA + 0.78)).toFixed(2));
@@ -99,12 +110,11 @@ export function getOrganicElementPhysics(Z) {
   const chiEv = Number(Math.max(2.1, Math.min(10.8, 2.8 + 0.52 * Math.min(8, valenceElec) - 0.14 * (maxN - 2))).toFixed(3));
   const etaEv = Number(Math.max(4.2, Math.min(14.5, 11.4 / Math.max(0.85, rCovA * 1.15))).toFixed(3));
   const huckelAlpha = Number(Math.max(-2.0, Math.min(1.5, (5.343 - chiEv) * 0.35)).toFixed(2));
-  // Deterministic non-gray periodic tint from shell/valence
-  const hue = ((z * 37) % 360) / 360;
+  // Consume ULG's Gate-1 electromagnetic opticalSrgb directly (zero synthetic cos(hue) rainbow!)
   const rgb = [
-    Number((0.38 + 0.42 * Math.cos(hue * 6.28318)).toFixed(2)),
-    Number((0.46 + 0.36 * Math.cos((hue + 0.33) * 6.28318)).toFixed(2)),
-    Number((0.52 + 0.36 * Math.cos((hue + 0.67) * 6.28318)).toFixed(2))
+    Number(pbrOpt.albedoSrgb[0].toFixed(3)),
+    Number(pbrOpt.albedoSrgb[1].toFixed(3)),
+    Number(pbrOpt.albedoSrgb[2].toFixed(3))
   ];
   const entry = Object.freeze({
     Z: z,

@@ -20,6 +20,7 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
+import { resolvePlanetarySurfacePbrOptics } from '../material/materialPbrOpticsBridge.js';
 
 export const ULG_SOLAR_SYSTEM_NBODY_SCHEMA = 'ulg.astrophysics.solar-system-nbody-webgpu.v1';
 
@@ -42,7 +43,7 @@ export const SOLAR_BODY_STRIDE_BYTES = 64;
 
 // True Astronomical Solar System Catalog (exact radii in km -> AU, masses in M_sun, real J2000-like elements)
 // Parent indices reference the array index (-1 = barycenter/Sun primary).
-export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
+const RAW_SOLAR_SYSTEM_CATALOG = [
   {
     id: 'sun', name: 'Sun (G2V)', subtitle: 'Main-Sequence Hydrogen Fusion Star',
     parent: -1, kind: 0, massSolar: 1.0, radiusKm: 695700,
@@ -253,7 +254,30 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     centralP: 3.1e8, coreZ: 14, mantleZ: 8, surfZ: 8,
     composition: 'H₂O/NH₃ Cryo-Ice Crust · Mordor Macula Tholin Polar Cap'
   }
-]);
+];
+
+export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze(RAW_SOLAR_SYSTEM_CATALOG.map((body) => {
+  if (body.kind === 0) return Object.freeze(body);
+  const isMetal = Boolean(body.isMetallicAsteroid) || body.id === 'psyche';
+  const isMercury = body.id === 'mercury';
+  const isTitan = body.id === 'titan';
+  const isEarth = body.id === 'earth';
+  const isVenus = body.id === 'venus';
+  const isIcy = body.kind === 3 || Boolean(body.isCryoMoon) || Boolean(body.isComet);
+  const solvent = isTitan ? 'CH4' : (isVenus ? 'H2SO4' : 'H2O');
+  const pbrOptics = resolvePlanetarySurfacePbrOptics({
+    surfZ: body.surfZ ?? 14,
+    feFrac: isMetal ? 0.85 : (isMercury ? 0.58 : (body.surfZ === 26 ? 0.34 : (isIcy ? 0.06 : 0.20))),
+    silicateFrac: isMetal ? 0.10 : (isIcy ? 0.28 : 0.64),
+    carbonFrac: body.surfZ === 6 ? 0.32 : 0.06,
+    volatileFrac: Number.isFinite(body.volatileMassFrac) ? body.volatileMassFrac : (isIcy ? 0.62 : (isEarth ? 0.14 : 0.02)),
+    isMetallicAsteroid: isMetal,
+    isOceanic: isEarth || isTitan,
+    isIcy,
+    solvent
+  });
+  return Object.freeze({ ...body, pbrOptics });
+}));
 
 function splitDoubleFloat(x) {
   const hi = Math.fround(x);

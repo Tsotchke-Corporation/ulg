@@ -13,6 +13,7 @@
 
 import { configureCompatibleWebGpuCanvas } from '../runtime/shared/webgpuCompat.js';
 import { ULG_MATERIAL_PBR_WGSL } from '../visualization/ulgMaterialPbrWgsl.js';
+import { buildElementPbrLutFloats } from '../runtime/material/materialPbrOpticsBridge.js';
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,
@@ -130,6 +131,7 @@ struct OrgAtom {
 
 @group(0) @binding(0) var<uniform> u: RenderUniforms;
 @group(0) @binding(1) var<storage, read> atoms: array<OrgAtom>;
+@group(0) @binding(2) var<storage, read> element_pbr_lut: array<vec4<f32>>;
 
 struct VsOut {
   @builtin(position) pos: vec4<f32>,
@@ -193,14 +195,15 @@ fn fs_org_atom(in: VsOut) -> FsOut {
   let l1 = normalize(vec3<f32>(0.55, 0.72, 0.58));
   let l2 = normalize(vec3<f32>(-0.65, -0.35, 0.55));
 
-  // Derive metallic cofactor vs organic covalent dielectric PBR directly from atomic number Z!
-  let z = u32(round(max(1.0, in.atomic_z)));
-  let is_metal_ion = (z == 11u || z == 12u || z == 13u || (z >= 19u && z <= 31u) || (z >= 37u && z <= 50u) || (z >= 55u && z <= 83u));
-  let metallic = select(0.0, 0.88, is_metal_ion && u.cam_right_esp.w < 0.5);
-  let roughness = select(0.26, 0.18, metallic > 0.5);
+  // Consume canonical ULG Gate-1 material-physics PBR LUT (f0_rgb, metallic, roughness) for Z = 1..118!
+  let z = clamp(u32(round(max(1.0, in.atomic_z))), 1u, 118u);
+  let pbr0 = element_pbr_lut[z * 2u];
+  let pbr1 = element_pbr_lut[z * 2u + 1u];
+  let esp_w = clamp(u.cam_right_esp.w, 0.0, 1.0);
+  let metallic = clamp(pbr0.w, 0.0, 0.98) * (1.0 - esp_w);
+  let roughness = mix(clamp(pbr1.w, 0.06, 0.90), 0.28, esp_w);
   let albedo_lin = ulg_srgb_to_linear(in.color);
-  let ior_d = select(1.48, 1.62, z == 16u || z == 15u || z == 17u);
-  let f0_rgb = mix(vec3<f32>(ulg_dielectric_f0(ior_d)), clamp(albedo_lin * 1.08, vec3<f32>(0.08), vec3<f32>(0.98)), metallic);
+  let f0_rgb = mix(clamp(pbr0.rgb, vec3<f32>(0.02), vec3<f32>(0.99)), vec3<f32>(0.045), esp_w);
   let direct = ulg_pbr_direct(n_view, v_view, l1, albedo_lin, f0_rgb, metallic, roughness, vec3<f32>(2.40, 2.38, 2.32))
     + ulg_pbr_direct(n_view, v_view, l2, albedo_lin, f0_rgb, metallic, roughness, vec3<f32>(0.72, 0.86, 1.08));
   let env = ulg_pbr_env_hemi(
@@ -542,7 +545,11 @@ fn fs_bio_link(in: VsOut) -> @location(0) vec4<f32> {
   let n_c = normalize(vec3<f32>(0.0, y, cy));
   let v_c = vec3<f32>(0.0, 0.0, 1.0);
   let l_c = normalize(vec3<f32>(0.42, 0.68, 0.60));
-  let alb_l = ulg_srgb_to_linear(in.color);
+  let org_mix = clamp(u.org_tint_a.w, 0.0, 1.0);
+  let luma_l = dot(in.color, vec3<f32>(0.299, 0.587, 0.114));
+  let role_l = smoothstep(-0.2, 0.9, in.color.b - in.color.r);
+  let org_c_l = mix(u.org_tint_b.rgb, u.org_tint_a.rgb, role_l) * (0.62 + 0.58 * luma_l);
+  let alb_l = ulg_srgb_to_linear(mix(in.color, org_c_l, org_mix));
   let f0_l = vec3<f32>(ulg_dielectric_f0(1.42));
   let col = ulg_pbr_direct(n_c, v_c, l_c, alb_l, f0_l, 0.0, 0.34, vec3<f32>(2.25, 2.22, 2.18))
     + ulg_pbr_env_hemi(n_c, v_c, alb_l, f0_l, 0.0, 0.34, vec3<f32>(0.22, 0.34, 0.44), vec3<f32>(0.12, 0.18, 0.24), vec3<f32>(0.04, 0.06, 0.09));
@@ -711,14 +718,15 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
   let n = normalize(vec3<f32>(-dhx * 16.0, 1.0, -dhy * 16.0));
   let l = normalize(vec3<f32>(0.45, 0.85, 0.35));
   let v = normalize(u.cam_pos_mode.xyz - in.world_pos);
+  let col_lin = ulg_srgb_to_linear(col);
   let f0_fld = vec3<f32>(ulg_dielectric_f0(1.38));
-  let lit_fld = ulg_pbr_direct(n, v, l, col, f0_fld, 0.0, 0.32, vec3<f32>(1.85, 1.85, 1.85))
-    + ulg_pbr_env_hemi(n, v, col, f0_fld, 0.0, 0.32, vec3<f32>(0.48, 0.56, 0.68), vec3<f32>(0.34, 0.40, 0.48), vec3<f32>(0.18, 0.22, 0.28));
+  let lit_fld = ulg_pbr_direct(n, v, l, col_lin, f0_fld, 0.0, 0.32, vec3<f32>(2.25, 2.25, 2.25))
+    + ulg_pbr_env_hemi(n, v, col_lin, f0_fld, 0.0, 0.32, vec3<f32>(0.42, 0.50, 0.62), vec3<f32>(0.28, 0.34, 0.42), vec3<f32>(0.14, 0.18, 0.24));
 
   // Subtle physical coordinate border frame
   let edge_d = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
   let rim = (1.0 - smoothstep(0.0, 0.012, edge_d)) * 0.25;
-  return vec4<f32>(lit_fld + vec3<f32>(0.35, 0.72, 1.0) * rim, 1.0);
+  return vec4<f32>(lit_fld + ulg_srgb_to_linear(vec3<f32>(0.35, 0.72, 1.0)) * rim, 1.0);
 }
 `;
 
@@ -779,7 +787,7 @@ fn fs_spec_mesh(in: VsOut) -> @location(0) vec4<f32> {
   let caust = 0.5 + 0.5 * sin(in.world_pos.x * 4.2 + u.cam_up_time.w * 2.1) * cos(in.world_pos.z * 4.5 - u.cam_up_time.w * 1.7);
   let caustic_tint = vec3<f32>(0.08, 0.30, 0.36) * caust * (0.10 + 0.16 * max(0.0, n.y));
   let sss_wrap = select(max(0.0, (dot(n, l1) + 0.45) / 1.45) * base_lin * 0.18, vec3<f32>(0.0), is_floor);
-  let col = direct + env + sss_wrap + caustic_tint + in.col_emiss.rgb * emiss * 1.25;
+  let col = direct + env + sss_wrap + caustic_tint + base_lin * emiss * 1.45;
   return vec4<f32>(col, 1.0);
 }
 
@@ -788,18 +796,23 @@ fn fs_spec_glass(in: VsOut) -> @location(0) vec4<f32> {
   let n = normalize(in.norm);
   let v = normalize(u.cam_pos_mode.xyz - in.world_pos);
   let ndv = abs(dot(n, v));
-  let fres = pow(max(0.0, 1.0 - ndv), 2.4);
+  let f0_g = vec3<f32>(ulg_dielectric_f0(1.52));
+  let fres = ulg_fresnel_schlick(ndv, f0_g).x;
+  let base_g = ulg_srgb_to_linear(in.col_emiss.rgb);
   if (in.zone > 5.5) {
-    // Glowing active lab tool beam (Thermal Laser, Cryo-Jet, Probe, Neuro-Stim, Biopsy!)
-    let beam = in.col_emiss.rgb * (1.25 + 0.65 * ndv);
+    // Glowing active lab tool beam (straight RGB for src-alpha blend — zero alpha^2 dimming!)
+    let beam = base_g * (1.45 + 0.85 * ndv);
     let a = clamp(in.col_emiss.w * 0.55, 0.25, 0.95);
-    return vec4<f32>(beam * a, a);
+    return vec4<f32>(beam, a);
   }
-  // Translucent refractive glass aquarium walls + top solvent meniscus shimmer!
+  // Translucent refractive glass aquarium walls + top solvent meniscus shimmer (straight RGB for src-alpha blend!)
+  let l1 = normalize(vec3<f32>(0.42, 0.86, 0.48));
+  let half_g = normalize(l1 + v);
+  let ggx_g = ulg_d_ggx(max(0.0, abs(dot(n, half_g))), 0.10) * 0.14 * fres;
   let ripple = 0.85 + 0.15 * sin(in.world_pos.x * 5.0 + u.cam_up_time.w * 2.4) * cos(in.world_pos.z * 5.0 - u.cam_up_time.w * 1.9);
-  let alpha = clamp(in.col_emiss.w * (0.45 + 1.35 * fres) * ripple, 0.05, 0.62);
-  let col = in.col_emiss.rgb * (0.85 + 1.25 * fres) + vec3<f32>(0.62, 0.94, 1.0) * fres * 0.45;
-  return vec4<f32>(col * alpha, alpha);
+  let alpha = clamp(in.col_emiss.w * (0.35 + 1.45 * fres) * ripple, 0.05, 0.65);
+  let col = base_g * (0.75 + 1.35 * fres) + vec3<f32>(0.52, 0.88, 1.0) * (fres * 0.55 + ggx_g);
+  return vec4<f32>(col, alpha);
 }
 `;
 
@@ -893,6 +906,13 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   });
   const uniformF32 = new Float32Array(44);
+  const elementPbrLutData = buildElementPbrLutFloats();
+  const elementPbrLutBuf = device.createBuffer({
+    label: 'ulg-chembio-element-pbr-lut',
+    size: elementPbrLutData.byteLength,
+    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
+  });
+  device.queue.writeBuffer(elementPbrLutBuf, 0, elementPbrLutData);
 
   const depthState = { depthWriteEnabled: true, depthCompare: 'less', format: 'depth24plus' };
   const depthReadOnly = { depthWriteEnabled: false, depthCompare: 'less', format: 'depth24plus' };
@@ -1186,7 +1206,8 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
       }
       const abg = getCachedBg(atomBgCache, orgAtomPipe, scene.orgAtomsBuffer, [
         { binding: 0, resource: { buffer: uniformBuf } },
-        { binding: 1, resource: { buffer: scene.orgAtomsBuffer } }
+        { binding: 1, resource: { buffer: scene.orgAtomsBuffer } },
+        { binding: 2, resource: { buffer: elementPbrLutBuf } }
       ]);
       pass.setPipeline(orgAtomPipe);
       pass.setBindGroup(0, abg);
@@ -1280,6 +1301,7 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
     if (disposed) return;
     disposed = true;
     try { uniformBuf.destroy(); } catch {}
+    try { elementPbrLutBuf.destroy(); } catch {}
     try { bloomExtractBuf.destroy(); } catch {}
     try { bloomBlurBuf.destroy(); } catch {}
     if (hdrTex) try { hdrTex.destroy(); } catch {}

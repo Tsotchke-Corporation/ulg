@@ -608,7 +608,9 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
     2.0
   );
   let dielectric_f0 = select(vec3<f32>(0.04), vec3<f32>(dielectric_f0_scalar), refractive_authority);
-  let f0 = mix(dielectric_f0, base_color, metalness);
+  let spec_nk = spectral_complex_index_rgb(optical.spectral_offset, optical.spectral_count);
+  let conductor_f0 = select(base_color, complex_normal_fresnel_rgb(spec_nk.n_rgb, spec_nk.k_rgb), spec_nk.valid > 0.5);
+  let f0 = mix(dielectric_f0, conductor_f0, metalness);
   let ndotv = clamp(dot(normal, view_dir), 0.0, 1.0);
   // Sphere-lane PBR parity: the particle bridge renders through Three's
   // MeshPhysicalMaterial (GGX microfacet BRDF, energy-conserving Lambert)

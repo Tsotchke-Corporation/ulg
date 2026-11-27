@@ -8,10 +8,16 @@ import {
 } from '../src/runtime/astrophysics/causalNebularSystemGenerator.js';
 import { extractCoalescedBodiesFromAnnuli } from '../src/runtime/astrophysics/nebularSystemCoalescenceGpu.js';
 import {
+  buildElementPbrLutFloats,
   derivePbrOpticsFromMaterialBundle,
+  resolveCompoundPbrOptics,
   resolveElementPbrOptics,
-  resolvePlanetarySurfacePbrOptics
+  resolvePlanetarySurfacePbrOptics,
+  resolveSolventIor
 } from '../src/runtime/material/materialPbrOpticsBridge.js';
+import { getOrganicElementPhysics } from '../src/runtime/organic/organicMolecularGraphGpu.js';
+import { REAL_SOLAR_SYSTEM_CATALOG } from '../src/runtime/astrophysics/solarSystemNBodyGpu.js';
+import { ATOMIC_MASS_U } from '../src/runtime/electronicStructure/periodicTable.js';
 
 test('Star-system planet diversity: retires cryo-dwarf/ice-giant monotony across 60 random stars', () => {
   const gEnv = deriveGalaxyEnvironmentFromCosmicContext({ seed: 20261125 });
@@ -128,4 +134,63 @@ test('All four ULG WebGPU renderer engines use Cook-Torrance GGX + Fresnel PBR',
     assert.match(src, /ULG_MATERIAL_PBR_WGSL/, `${file} must import and embed ULG_MATERIAL_PBR_WGSL`);
     assert.match(src, /ulg_pbr_direct|ulg_d_ggx/, `${file} must evaluate Cook-Torrance GGX PBR`);
   }
+});
+
+test('Wave D1 dogfooding invariants: non-noble metals F0, solvent IOR, 118-element organic graph, and real SphereInstance PBR upload', () => {
+  // 1. Non-noble transition/alkali/post-transition metals get true Gate-1 metallic F0 > 0.50 (not crushed to 0.35!)
+  for (const z of [26, 22, 13, 28, 74, 78, 11, 55]) {
+    const opt = resolveElementPbrOptics(z, { surfaceFinish: 'crystal' });
+    assert.ok(opt.metallic >= 0.85, `Z=${z} must be metallic: ${JSON.stringify(opt)}`);
+    const peakF0 = Math.max(opt.f0Rgb[0], opt.f0Rgb[1], opt.f0Rgb[2]);
+    assert.ok(peakF0 > 0.50, `Z=${z} must have true Gate-1 metallic peak F0 > 0.50, got ${JSON.stringify(opt.f0Rgb)} (${opt.source})`);
+  }
+  // Specifically verify Iron (26) green reflectance & golden Cesium (55) red>blue plasmonic dispersion
+  const feOpt = resolveElementPbrOptics(26, { surfaceFinish: 'crystal' });
+  const csOpt = resolveElementPbrOptics(55, { surfaceFinish: 'crystal' });
+  assert.ok(feOpt.f0Rgb[1] > 0.75, `Fe(26) green F0 should exceed 0.75, got ${feOpt.f0Rgb[1]}`);
+  assert.ok(csOpt.f0Rgb[0] > csOpt.f0Rgb[2], `Cs(55) should show warm red>blue plasmonic F0, got ${JSON.stringify(csOpt.f0Rgb)}`);
+
+  // 2. Compound PBR & solvent IOR derivation
+  const h2o = resolveCompoundPbrOptics('H2O', { phase: 'liquid', surfaceFinish: 'liquid' });
+  const sio2 = resolveCompoundPbrOptics('SiO2', { phase: 'solid', surfaceFinish: 'crystal' });
+  assert.equal(h2o.metallic, 0, 'H2O compound must be dielectric');
+  assert.equal(sio2.metallic, 0, 'SiO2 compound must be dielectric');
+  assert.equal(resolveSolventIor('H2O'), 1.333);
+  assert.equal(resolveSolventIor('CH4'), 1.29);
+  assert.equal(resolveSolventIor('NH3'), 1.325);
+  assert.equal(resolveSolventIor('H2SO4'), 1.43);
+
+  // 3. Shared 120-element GPU PBR LUT
+  const lut = buildElementPbrLutFloats();
+  assert.equal(lut.length, 120 * 8);
+  assert.ok(lut[26 * 8 + 3] >= 0.85 && lut[26 * 8 + 1] > 0.50, 'LUT Fe(26) must carry metallic F0 > 0.50');
+  assert.equal(lut[8 * 8 + 3], 0, 'LUT O(8) must be dielectric');
+
+  // 4. All 118 elements in getOrganicElementPhysics (zero 105-element collapse!)
+  const distinctRadii = new Set();
+  for (let z = 1; z <= 118; z += 1) {
+    const p = getOrganicElementPhysics(z);
+    assert.ok(Number.isFinite(p.massU) && Math.abs(p.massU - ATOMIC_MASS_U[z - 1]) < 0.2, `Z=${z} massU ${p.massU} vs canonical ${ATOMIC_MASS_U[z - 1]}`);
+    distinctRadii.add(p.rCovA);
+  }
+  assert.ok(distinctRadii.size >= 25, `Expected >= 25 distinct covalent radii across Z=1..118, got ${distinctRadii.size}`);
+  assert.equal(getOrganicElementPhysics(54).valence, 0, 'Xe (Z=54) must be noble valence 0');
+  assert.ok(getOrganicElementPhysics(22).valence >= 2, 'Ti (Z=22) must derive transition valence >= 2');
+  assert.ok(getOrganicElementPhysics(79).rCovA > getOrganicElementPhysics(6).rCovA + 0.5, 'Au (Z=79) must be larger than C (Z=6)');
+
+  // 5. Real Solar System catalog pbrOptics & SphereInstance shader consumption (zero c_sat hack!)
+  const psyche = REAL_SOLAR_SYSTEM_CATALOG.find((b) => b.id === 'psyche');
+  const titan = REAL_SOLAR_SYSTEM_CATALOG.find((b) => b.id === 'titan');
+  assert.ok(psyche?.pbrOptics && psyche.pbrOptics.metallic > 0.65, '16 Psyche must carry metallic pbrOptics');
+  assert.ok(titan?.pbrOptics && Math.abs(titan.pbrOptics.oceanIor - 1.29) < 1e-3, 'Titan must carry methane oceanIor=1.29');
+
+  const uvRendererSrc = fs.readFileSync('src/demos/ulgUniversesRenderer.js', 'utf8');
+  assert.ok(!uvRendererSrc.includes('let c_sat ='), 'LIT_SPHERE_WGSL must not guess metallicity from RGB saturation');
+  assert.match(uvRendererSrc, /pbr0:\s*vec4<f32>/, 'SphereInstance must include pbr0');
+  assert.match(uvRendererSrc, /surf_pbr:\s*vec4<f32>/, 'CameraUniforms must include surf_pbr');
+  assert.match(uvRendererSrc, /pow\(max\(col,\s*vec3<f32>\(0\.0\)\),\s*vec3<f32>\(1\.0 \/ 2\.2\)\)/, 'POST_WGSL must apply sRGB gamma encode after ACES');
+
+  const studioWgsl = fs.readFileSync('src/visualization/nativeSurfaceMaterialWgsl.js', 'utf8');
+  assert.match(studioWgsl, /let spec_nk = spectral_complex_index_rgb/, 'Studio nativeSurfaceMaterialWgsl must invoke spectral_complex_index_rgb');
+  assert.match(studioWgsl, /complex_normal_fresnel_rgb\(spec_nk\.n_rgb/, 'Studio nativeSurfaceMaterialWgsl must wire complex_normal_fresnel_rgb into conductor F0');
 });

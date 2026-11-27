@@ -665,6 +665,7 @@ export function buildLiveSurfaceCelestialSky({
         tempK: Number(sp.tempK) || 220,
         civTechK: Number(sp.civTechK) || 0,
         dysonCoverage: 0,
+        pbrOptics: sp.pbrOptics || null,
         seed: i * 2.17 + 1.3
       });
     }

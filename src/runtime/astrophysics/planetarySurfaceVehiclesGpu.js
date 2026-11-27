@@ -33,6 +33,10 @@ import {
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 import { deriveFluidElectrodynamicsState } from './planetaryAtmosphereElectricGpu.js';
 import {
+  resolvePlanetarySurfacePbrOptics,
+  resolveSolventIor
+} from '../material/materialPbrOpticsBridge.js';
+import {
   createPlanetaryAtmo3dCfdSessionWebGpu,
   evaluateAtmosphericChemistryAtAltitude
 } from './planetaryAtmosphere3dCfdGpu.js';
@@ -291,6 +295,22 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     ? Math.max(460.0, Math.min(1450.0, 460.0 + (radiusM / 500e3) * 990.0))
     : 2800.0;
 
+  // Derive continuous surface crust & liquid-ocean PBR optical parameters from ULG's material layer!
+  const solventKey = xenobiology?.solvent?.id || xenobiology?.solvent?.formula || (hasExoticOcean ? 'CH4' : 'H2O');
+  const oceanIor = resolveSolventIor(solventKey);
+  const comp = bodySpec.coalescedComposition || null;
+  const surfacePbrOptics = bodySpec.pbrOptics || resolvePlanetarySurfacePbrOptics({
+    surfZ: Number(bodySpec.surfZ) || 14,
+    feFrac: Number(comp?.feFrac) || (isMetallicAsteroid ? 0.82 : (Number(bodySpec.surfZ) === 26 ? 0.42 : 0.18)),
+    silicateFrac: Number(comp?.silicateFrac) || (isMetallicAsteroid ? 0.12 : 0.62),
+    carbonFrac: Number(comp?.carbonFrac) || (Number(bodySpec.surfZ) === 6 ? 0.30 : 0.06),
+    volatileFrac: Number(comp?.volatileFrac) || (isCryoMoon || isComet ? 0.65 : (hasLiquidOcean ? 0.18 : 0.02)),
+    isMetallicAsteroid,
+    isOceanic: hasLiquidOcean,
+    isIcy: isCryoMoon || isComet || bodySpec.kind === 3,
+    solvent: solventKey
+  });
+
   return Object.freeze({
     schema: ULG_PLANETARY_SURFACE_SCHEMA,
     gravityMS2: effectiveGravityMS2,
@@ -308,6 +328,8 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     hasLiquidOcean,
     hasExoticOcean,
     oceanRgb: Object.freeze([oceanRgb[0], oceanRgb[1], oceanRgb[2]]),
+    oceanIor,
+    pbrOptics: surfacePbrOptics,
     solvent: xenobiology.solvent,
     solventMeltTempK,
     xenobiology,

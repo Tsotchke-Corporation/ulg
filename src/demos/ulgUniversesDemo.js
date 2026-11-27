@@ -7126,6 +7126,7 @@ export async function mountUlgUniversesDemo() {
                 civTechK: Number(spec.civTechK) || 0,
                 dysonCoverage: 0,
                 flags: bodyShapeFlags,
+                pbrOptics: spec.pbrOptics || null,
                 seed: i * 2.17 + 1.3
               });
             }

@@ -1198,7 +1198,8 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       volatileFrac: coalescedComp.volatileFrac,
       isMetallicAsteroid: false,
       isOceanic: spec.planetClass === 'earth-like' || spec.planetClass === 'ocean-world' || spec.planetClass === 'titan-world',
-      isIcy: spec.kind === 3 || spec.planetClass === 'cryo-ocean-world' || spec.planetClass === 'icy-dwarf'
+      isIcy: spec.kind === 3 || spec.planetClass === 'cryo-ocean-world' || spec.planetClass === 'icy-dwarf',
+      solvent: spec.planetClass === 'titan-world' ? 'CH4' : (spec.planetClass === 'super-venus' ? 'H2SO4' : 'H2O')
     });
     catalog.push({
       id: `planet-${p}`,
@@ -1324,6 +1325,14 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     tempK: astTeq,
     centralP: 1.4e7,
     coreZ: 26, mantleZ: 28, surfZ: 26,
+    pbrOptics: resolvePlanetarySurfacePbrOptics({
+      surfZ: 26,
+      feFrac: astZone?.feFrac ?? 0.42,
+      silicateFrac: astZone?.silicateFrac ?? 0.48,
+      carbonFrac: astZone?.carbonFrac ?? 0.08,
+      volatileFrac: astZone?.volatileFrac ?? 0.02,
+      isMetallicAsteroid: true
+    }),
     composition: astZone
       ? `GPU-Coalesced Fe-Ni ${Math.round(astZone.feFrac * 100)}% · Silicate ${Math.round(astZone.silicateFrac * 100)}% · C ${Math.round(astZone.carbonFrac * 100)}%`
       : 'Fe-Ni Metallic Ore · Olivine/Pyroxene Chondrite'
@@ -1374,6 +1383,15 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     tempK: Math.max(55, Math.min(220, comZone?.tEqK ? comZone.tEqK + 95 : 175)),
     centralP: 1e5,
     coreZ: 8, mantleZ: 6, surfZ: 8,
+    pbrOptics: resolvePlanetarySurfacePbrOptics({
+      surfZ: 8,
+      feFrac: comZone?.feFrac ?? 0.05,
+      silicateFrac: comZone?.silicateFrac ?? 0.16,
+      carbonFrac: comZone?.carbonFrac ?? 0.06,
+      volatileFrac: comVol,
+      isIcy: true,
+      solvent: 'H2O'
+    }),
     composition: comZone
       ? `GPU-Coalesced H₂O Ice ${Math.round((comZone.h2oIceFrac || 0.48) * 100)}% · CO/CH₄ ${Math.round((comZone.superVolFrac || 0.25) * 100)}% · Silicate Dust`
       : 'H₂O Ice 75% · CO/CO₂/CH₄ Volatiles · Silicate Dust'

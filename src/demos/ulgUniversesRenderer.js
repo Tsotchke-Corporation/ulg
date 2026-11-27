@@ -37,6 +37,7 @@ struct CameraUniforms {
   em_aux: vec4<f32>,     // x = ambientTempK, y = sunFluxOrEclipse, z = skyOptDepth, w = flags (bit0=skipSurfaceFog, bit1=reversedLogDepth)
   star_light: vec4<f32>, // rgb = linear host-star light spectrum, w = perceptual inverse-square irradiance gain [0.14..1.85]
   sph_geo: vec4<f32>,    // x = sphGeoW (0=inactive), y = sphGeoH, z = sphGeoSphereIdx, w = seaLevelNorm
+  surf_pbr: vec4<f32>,   // x = terrainMetallic, y = terrainRoughness, z = oceanIor, w = crustIor (derived by ULG material layer!)
 };
 
 // Unified Reversed Logarithmic Depth Buffer [0.1 m .. 10^14 m (~668 AU)]!
@@ -216,6 +217,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let em_bg = em_sensor_map_rgb(col, mix(cmb_aniso, 6500.0, clamp(star_lum, 0.0, 1.0)), star_lum * 0.5, star_lum * 0.18, hi_plane, 0.0);
     col = em_bg * mix(0.22, 0.95, clamp(star_lum * 2.5, 0.0, 1.0));
   }
+  col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(2.2));
   return vec4<f32>(col, 1.0);
 }
 `;
@@ -405,6 +407,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   col = em_sensor_map_rgb(col, mix(2.725, max(50.0, cam.em_aux.x * 0.82), opt_depth * 0.65), sunset_w * 0.3 + sun_halo * 0.4 + aur_uv_sig * 1.2, aur_uv_sig * 0.25, star_vis * 0.12 + aur_uv_sig * 0.35, 0.0);
+  col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(2.2));
   return vec4<f32>(col, 1.0);
 }
 `;
@@ -530,32 +533,35 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let twi_d = (sun_dir.y - 0.03) / 0.14;
   let sunset_w = select(exp(-(twi_d * twi_d)) * opt_depth * eclipse_f, 0.0, skip_fog);
 
-  // Hemispheric sky-bounce ambient (genuinely dark starlit night on planet/comet dark side!)
+  // Hemispheric sky-bounce ambient in linear light space (genuinely dark starlit night on planet/comet dark side!)
+  let base_lin = ulg_srgb_to_linear(base_col);
+  let sky_zen_lin = ulg_srgb_to_linear(sky_zen);
+  let sky_hor_lin = ulg_srgb_to_linear(sky_hor);
   let star_rgb = cam.star_light.rgb;
   let star_flux = clamp(cam.star_light.w, 0.14, 1.85);
   let surf_star_l = select(star_rgb * star_flux, mix(vec3<f32>(1.0), star_rgb, 0.45) * clamp(0.45 + 0.55 * star_flux, 0.45, 1.35), skip_fog);
   let sky_gain = select(clamp(0.26 + 0.74 * star_flux, 0.22, 1.40), 1.0, skip_fog);
   let hemi_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-  let amb_sky_day = mix(sky_hor * 0.42 + vec3<f32>(0.04, 0.05, 0.07), sky_zen * 0.55 + vec3<f32>(0.05, 0.06, 0.09), hemi_up) * mix(vec3<f32>(1.0), star_rgb, 0.55) * sky_gain;
-  let amb_sky_night = mix(vec3<f32>(0.007, 0.010, 0.018), vec3<f32>(0.020, 0.030, 0.054), opt_depth);
-  let amb_sky = select(mix(amb_sky_night, amb_sky_day, sun_day), vec3<f32>(0.24, 0.28, 0.34), skip_fog);
-  let amb_gain = select(mix(0.20, 0.55, opt_depth * sun_day + 0.15), 0.42, skip_fog);
+  let amb_sky_day = mix(sky_hor_lin * 0.48 + vec3<f32>(0.010, 0.012, 0.018), sky_zen_lin * 0.62 + vec3<f32>(0.012, 0.016, 0.024), hemi_up) * mix(vec3<f32>(1.0), star_rgb, 0.55) * sky_gain;
+  let amb_sky_night = mix(vec3<f32>(0.0010, 0.0016, 0.0036), vec3<f32>(0.0032, 0.0052, 0.0110), opt_depth);
+  let amb_sky = select(mix(amb_sky_night, amb_sky_day, sun_day), vec3<f32>(0.08, 0.10, 0.14), skip_fog);
+  let amb_gain = select(mix(0.22, 0.58, opt_depth * sun_day + 0.15), 0.45, skip_fog);
   let sun_tint = mix(
-    mix(vec3<f32>(1.05, 1.02, 0.96), vec3<f32>(1.12, 0.95, 0.78), opt_depth * 0.35),
-    vec3<f32>(1.25, 0.56, 0.24),
+    mix(vec3<f32>(1.05, 1.02, 0.96), vec3<f32>(1.12, 0.90, 0.64), opt_depth * 0.35),
+    vec3<f32>(1.35, 0.34, 0.06),
     sunset_w * 0.68
   ) * surf_star_l;
 
   // Subtle emerald-cyan UFO ventral landing pool on pitch-black night sides so terrain stays navigable in true darkness!
-  let night_pool = select(exp(-dist * dist / (110.0 * 110.0)) * (1.0 - sun_day) * 0.24, 0.0, skip_fog || tag > 3.5);
-  let sun_rad = sun_tint * (2.85 * sun_day);
-  let env_zen = select(mix(vec3<f32>(0.008, 0.012, 0.022), sky_zen * 0.65 * sky_gain, sun_day), vec3<f32>(0.24, 0.32, 0.44), skip_fog);
-  let env_hor = select(mix(vec3<f32>(0.014, 0.020, 0.034), sky_hor * 0.58 * sky_gain, sun_day), vec3<f32>(0.16, 0.20, 0.28), skip_fog);
+  let night_pool = select(exp(-dist * dist / (110.0 * 110.0)) * (1.0 - sun_day) * 0.14, 0.0, skip_fog || tag > 3.5);
+  let sun_rad = sun_tint * (3.15 * sun_day);
+  let env_zen = select(mix(vec3<f32>(0.0012, 0.0020, 0.0042), sky_zen_lin * 0.72 * sky_gain, sun_day), vec3<f32>(0.09, 0.14, 0.22), skip_fog);
+  let env_hor = select(mix(vec3<f32>(0.0024, 0.0038, 0.0072), sky_hor_lin * 0.64 * sky_gain, sun_day), vec3<f32>(0.05, 0.07, 0.11), skip_fog);
   let env_gnd = amb_sky * (amb_gain * 0.55);
   var lit = vec3<f32>(0.0);
 
   if (tag > 1.5 && tag < 2.5) {
-    // Liquid ocean/sea surface: Cook-Torrance GGX + dielectric Fresnel (H2O n=1.333 / CH4 n=1.29) + live GPU waves!
+    // Liquid ocean/sea surface: Cook-Torrance GGX + solvent-derived dielectric Fresnel (H2O 1.333, CH4 1.29, NH3 1.325, H2SO4 1.43)!
     let t = cam.cam_pos.w;
     let p_w = in.world_pos.xz;
     let ph1 = dot(p_w, vec2<f32>(0.86, 0.51)) * 0.72 + t * 1.9;
@@ -565,45 +571,48 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let wx = sin(ph1) * 0.024 + cos(ph2) * 0.018 + sin(ph3) * 0.012 + wn;
     let wz = cos(ph1) * 0.020 - sin(ph2) * 0.022 + cos(ph3) * 0.012 - wn;
     let nw = normalize(n + vec3<f32>(wx, 0.0, wz));
-    let f0_w = vec3<f32>(ulg_dielectric_f0(1.333));
-    let water_pbr = ulg_pbr_direct(nw, v, sun_dir, base_col, f0_w, 0.0, 0.09, sun_rad)
-      + ulg_pbr_env_hemi(nw, v, base_col, f0_w, 0.0, 0.09, env_zen * 1.25, env_hor * 1.15 + base_col * 0.35 * sun_day, env_gnd);
+    let ocean_ior = select(1.333, cam.surf_pbr.z, cam.surf_pbr.z > 1.01);
+    let f0_w = vec3<f32>(ulg_dielectric_f0(ocean_ior));
+    let water_pbr = ulg_pbr_direct(nw, v, sun_dir, base_lin, f0_w, 0.0, 0.09, sun_rad)
+      + ulg_pbr_env_hemi(nw, v, base_lin, f0_w, 0.0, 0.09, env_zen * 1.35, env_hor * 1.20 + base_lin * 0.35 * sun_day, env_gnd);
     let foam_n = surf_noise(p_w * 1.35 + vec2<f32>(t * 0.4, t * 0.25));
     let foam_wave = clamp(emissive, 0.0, 1.0);
     let foam = clamp(smoothstep(0.68, 0.92, foam_n + sin(ph1) * 0.14) * 0.16 + foam_wave * 0.55, 0.0, 0.85);
-    let foam_col = mix(in.albedo * 1.65, vec3<f32>(0.90, 0.96, 1.0), 0.72);
-    lit = water_pbr + foam_col * foam * (0.25 + 0.85 * ndl * sun_day) + base_col * vec3<f32>(0.34, 0.92, 0.72) * night_pool;
+    let foam_col = ulg_srgb_to_linear(mix(in.albedo * 1.65, vec3<f32>(0.90, 0.96, 1.0), 0.72));
+    lit = water_pbr + foam_col * foam * (0.20 + 0.90 * ndl * sun_day) + base_lin * vec3<f32>(0.12, 0.84, 0.52) * night_pool;
   } else if (tag > 3.5) {
     // Metallic Rover, Drone, & UFO hardware: Cook-Torrance GGX + ULG Ti/Fe conductor Fresnel PBR!
-    let f0_alloy = clamp(mix(vec3<f32>(0.58, 0.56, 0.54), base_col * 1.05, 0.65), vec3<f32>(0.24), vec3<f32>(0.96));
-    let sun_hw = sun_tint * (2.65 * (0.30 + 0.70 * sun_day));
-    lit = ulg_pbr_direct(n, v, sun_dir, base_col, f0_alloy, 0.86, 0.24, sun_hw)
-      + ulg_pbr_env_hemi(n, v, base_col, f0_alloy, 0.86, 0.24, env_zen * 1.35, env_hor * 1.20, env_gnd * 0.85);
+    let f0_alloy = clamp(mix(vec3<f32>(0.58, 0.56, 0.54), base_lin * 1.15, 0.65), vec3<f32>(0.24), vec3<f32>(0.96));
+    let sun_hw = sun_tint * (2.85 * (0.30 + 0.70 * sun_day));
+    lit = ulg_pbr_direct(n, v, sun_dir, base_lin, f0_alloy, 0.86, 0.24, sun_hw)
+      + ulg_pbr_env_hemi(n, v, base_lin, f0_alloy, 0.86, 0.24, env_zen * 1.45, env_hor * 1.25, env_gnd * 0.85);
   } else {
-    // Mineral rock/basalt & crystalline snow/ice slopes: Cook-Torrance GGX dielectric PBR + snow micro-glint!
+    // Mineral rock/basalt, exposed Fe-Ni metallic asteroid cores & crystalline snow/ice slopes: ULG Material-Physics GGX PBR!
     let is_ice_snow = tag > 0.5 && tag < 1.5;
-    let rough_t = select(0.78, 0.34, is_ice_snow);
-    let ior_t = select(1.52, 1.31, is_ice_snow);
-    let f0_t = vec3<f32>(ulg_dielectric_f0(ior_t));
+    let has_spbr = cam.surf_pbr.y > 0.01;
+    let met_t = select(0.0, clamp(cam.surf_pbr.x, 0.0, 0.94), has_spbr && !is_ice_snow);
+    let rough_t = select(select(0.78, clamp(cam.surf_pbr.y, 0.16, 0.94), has_spbr), 0.34, is_ice_snow);
+    let ior_t = select(select(1.52, cam.surf_pbr.w, has_spbr && cam.surf_pbr.w > 1.01), 1.31, is_ice_snow);
+    let f0_t = mix(vec3<f32>(ulg_dielectric_f0(ior_t)), clamp(base_lin * 1.15, vec3<f32>(0.22), vec3<f32>(0.96)), met_t);
     let snow_sparkle = select(0.0, smoothstep(0.88, 0.98, surf_noise(in.world_pos.xz * 7.5 + v.xz * 1.4)) * 0.42 * sun_day, is_ice_snow);
-    lit = ulg_pbr_direct(n, v, sun_dir, base_col, f0_t, 0.0, rough_t, sun_rad)
-      + ulg_pbr_env_hemi(n, v, base_col, f0_t, 0.0, rough_t, env_zen, env_hor, env_gnd)
-      + base_col * (amb_sky * amb_gain * 0.38 + vec3<f32>(0.34, 0.92, 0.72) * night_pool)
+    lit = ulg_pbr_direct(n, v, sun_dir, base_lin, f0_t, met_t, rough_t, sun_rad)
+      + ulg_pbr_env_hemi(n, v, base_lin, f0_t, met_t, rough_t, env_zen, env_hor, env_gnd)
+      + base_lin * (amb_sky * amb_gain * 0.35 + vec3<f32>(0.12, 0.84, 0.52) * night_pool)
       + sun_tint * snow_sparkle;
   }
 
   // Per-pixel volcanic basalt-fissure glow enhancement on Magma Ocean worlds (zero blocky vertex borders!)
   var emiss_eff = select(emissive, 0.0, tag > 1.5 && tag < 2.5);
-  var emiss_col = in.albedo;
+  var emiss_col = ulg_srgb_to_linear(in.albedo);
   if (!skip_fog && cam.extra2.w > 0.5 && tag < 3.5) {
     let f1 = surf_noise(in.world_pos.xz * 0.38 + vec2<f32>(3.1, -5.2));
     let f2 = surf_noise(in.world_pos.xz * 1.15 - vec2<f32>(7.4, 2.8));
     let vein = 1.0 - smoothstep(0.03, 0.16, abs((f1 * 0.7 + f2 * 0.3) - 0.5));
     let molten = clamp(emissive * (0.65 + 0.55 * f2) + vein * 1.15, 0.0, 2.2);
     emiss_eff = molten;
-    emiss_col = mix(vec3<f32>(1.0, 0.24, 0.03), vec3<f32>(1.0, 0.86, 0.32), clamp(molten * 0.62, 0.0, 1.0));
+    emiss_col = ulg_srgb_to_linear(mix(vec3<f32>(1.0, 0.24, 0.03), vec3<f32>(1.0, 0.86, 0.32), clamp(molten * 0.62, 0.0, 1.0)));
   }
-  lit = lit + emiss_col * emiss_eff * 1.20;
+  lit = lit + emiss_col * emiss_eff * 1.35;
 
   var final_col = lit;
   if (!skip_fog) {
@@ -613,7 +622,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog_amt = clamp(1.0 - exp(-dist * fog_density), 0.0, 0.82);
     let patch_edge = smoothstep(4200.0, 5850.0, horiz_dist);
     let total_fog = clamp(max(fog_amt, patch_edge), 0.0, 1.0);
-    let fog_hor = mix(vec3<f32>(0.014, 0.022, 0.044), sky_hor, sun_day) + vec3<f32>(0.96, 0.40, 0.14) * sunset_w * 0.75;
+    let fog_hor = mix(vec3<f32>(0.0016, 0.0032, 0.0085), sky_hor_lin, sun_day) + vec3<f32>(0.92, 0.16, 0.02) * sunset_w * 0.65;
     // Low-sun aerial-perspective Mie forward-scattering golden god-rays!
     let mie_ray = pow(max(0.0, dot(-v, sun_dir)), 7.0) * opt_depth * sun_day * clamp(total_fog * 1.4, 0.0, 0.65);
     final_col = mix(lit, fog_hor, total_fog) + sun_tint * mie_ray * 0.32;
@@ -756,24 +765,27 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let star_rgb_f = cam.star_light.rgb;
   let star_flux_f = clamp(cam.star_light.w, 0.14, 1.85);
   let v_f = normalize(cam.cam_pos.xyz - in.world_pos);
-  let amb_day = mix(sky_hor * 0.36 + vec3<f32>(0.05), sky_zen * 0.48 + vec3<f32>(0.06), clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * mix(vec3<f32>(1.0), star_rgb_f, 0.55) * clamp(0.26 + 0.74 * star_flux_f, 0.22, 1.40);
-  let amb = mix(vec3<f32>(0.025, 0.036, 0.062), amb_day, sun_day);
-  let sun_tint = mix(vec3<f32>(1.06, 1.02, 0.94), vec3<f32>(1.24, 0.56, 0.24), sunset_w * 0.65) * star_rgb_f * star_flux_f;
-  // Cook-Torrance GGX PBR: organic cuticle/foliage (IOR=1.42) + subsurface wrap vs metallic settlements (kind>5.5)!
+  let base_lin_f = ulg_srgb_to_linear(base_col);
+  let sky_zen_fl = ulg_srgb_to_linear(sky_zen);
+  let sky_hor_fl = ulg_srgb_to_linear(sky_hor);
+  let amb_day = mix(sky_hor_fl * 0.42 + vec3<f32>(0.012), sky_zen_fl * 0.54 + vec3<f32>(0.016), clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * mix(vec3<f32>(1.0), star_rgb_f, 0.55) * clamp(0.26 + 0.74 * star_flux_f, 0.22, 1.40);
+  let amb = mix(vec3<f32>(0.003, 0.005, 0.012), amb_day, sun_day);
+  let sun_tint = mix(vec3<f32>(1.06, 1.02, 0.94), vec3<f32>(1.30, 0.34, 0.06), sunset_w * 0.65) * star_rgb_f * star_flux_f;
+  // Cook-Torrance GGX PBR in linear light space: organic cuticle/foliage (IOR=1.42) + subsurface wrap vs metallic settlements (kind>5.5)!
   let is_settle = kind_id > 5.5;
   let met_f = select(0.0, 0.62, is_settle);
   let rgh_f = select(select(0.46, 0.80, part_id < 0.5), 0.28, is_settle);
-  let f0_f = mix(vec3<f32>(ulg_dielectric_f0(1.42)), clamp(base_col * 1.05, vec3<f32>(0.18), vec3<f32>(0.94)), met_f);
-  let sss_f = select(max(0.0, (dot(n, sun_dir) + 0.35) / 1.35) * base_col * sun_tint * (0.24 * sun_day), vec3<f32>(0.0), is_settle || part_id < 0.5);
-  var col = ulg_pbr_direct(n, v_f, sun_dir, base_col, f0_f, met_f, rgh_f, sun_tint * (2.75 * sun_day))
-    + ulg_pbr_env_hemi(n, v_f, base_col, f0_f, met_f, rgh_f, amb * 0.85, amb * 0.65, amb * 0.30)
-    + sss_f + base_col * emiss;
+  let f0_f = mix(vec3<f32>(ulg_dielectric_f0(1.42)), clamp(base_lin_f * 1.15, vec3<f32>(0.18), vec3<f32>(0.94)), met_f);
+  let sss_f = select(max(0.0, (dot(n, sun_dir) + 0.35) / 1.35) * base_lin_f * sun_tint * (0.28 * sun_day), vec3<f32>(0.0), is_settle || part_id < 0.5);
+  var col = ulg_pbr_direct(n, v_f, sun_dir, base_lin_f, f0_f, met_f, rgh_f, sun_tint * (3.05 * sun_day))
+    + ulg_pbr_env_hemi(n, v_f, base_lin_f, f0_f, met_f, rgh_f, amb * 0.95, amb * 0.70, amb * 0.32)
+    + sss_f + base_lin_f * emiss;
 
   let dist = length(cam.cam_pos.xyz - in.world_pos);
   let horiz_dist = length(in.world_pos.xz - cam.cam_pos.xz);
   let fog_amt = clamp(1.0 - exp(-dist * mix(0.000045, 0.00028, opt_depth)), 0.0, 0.82);
   let patch_edge = smoothstep(4200.0, 5850.0, horiz_dist);
-  let fog_hor = mix(vec3<f32>(0.014, 0.022, 0.044), sky_hor, sun_day) + vec3<f32>(0.96, 0.40, 0.14) * sunset_w * 0.75;
+  let fog_hor = mix(vec3<f32>(0.0016, 0.0032, 0.0085), sky_hor_fl, sun_day) + vec3<f32>(0.92, 0.16, 0.02) * sunset_w * 0.65;
   col = mix(col, fog_hor, clamp(max(fog_amt, patch_edge), 0.0, 1.0));
 
   if (cam.em_sensor.z > 0.5) {
@@ -790,6 +802,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 //   tag 6.0 = Glowing Yellow Conical Tractor Beam / 360° Rim EM Laser / Antimatter Annihilation Beam!
 const TRANSLUCENT_FX_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 @group(0) @binding(0) var<uniform> cam: CameraUniforms;
 
@@ -822,22 +835,25 @@ fn vs_main(in: VsIn) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let n = normalize(in.norm);
   let v = normalize(cam.cam_pos.xyz - in.world_pos);
-  let ndv = abs(dot(n, v));
-  let fres = pow(max(0.0, 1.0 - ndv), 2.4);
+  let ndv = max(1e-4, abs(dot(n, v)));
   let sun_dir = normalize(vec3<f32>(0.55, 0.72, 0.42));
   let half_v = normalize(sun_dir + v);
-  let spec = pow(max(0.0, abs(dot(n, half_v))), 64.0);
+  let ndh = max(0.0, abs(dot(n, half_v)));
+  let col_lin = ulg_srgb_to_linear(in.col_alpha.rgb);
 
   if (in.tag < 5.5) {
-    // Glowing emerald-green translucent glass dome bubble (bright glossy rim + transparent center!)
-    let glass_col = in.col_alpha.rgb * (0.72 + 1.35 * fres) + vec3<f32>(0.78, 1.0, 0.88) * spec * 1.15;
-    let alpha = clamp(in.col_alpha.a * (0.45 + 0.85 * fres + 0.45 * spec), 0.14, 0.92);
+    // Glowing translucent silicate-glass dome bubble: Cook-Torrance GGX + IOR 1.52 Schlick Fresnel!
+    let f0_g = vec3<f32>(ulg_dielectric_f0(1.52));
+    let fres = ulg_fresnel_schlick(ndv, f0_g).x;
+    let spec = clamp(ulg_d_ggx(ndh, 0.12) * ulg_v_smith_ggx(ndv, max(1e-4, abs(dot(n, sun_dir))), 0.12) * fres, 0.0, 3.0);
+    let glass_col = col_lin * (0.65 + 1.45 * fres) + vec3<f32>(0.62, 1.0, 0.78) * spec * 1.45;
+    let alpha = clamp(in.col_alpha.a * (0.38 + 1.05 * fres + 0.35 * min(1.0, spec)), 0.12, 0.92);
     return vec4<f32>(glass_col * alpha, alpha);
   }
-  // Yellow conical tractor beam & 360° rim EM Laser / Antimatter beams (luminous soft edge falloff!)
-  let beam_edge = 0.42 + 0.78 * pow(max(0.0, ndv), 0.75);
+  // Yellow conical tractor beam & 360° rim EM Laser / Antimatter beams (linear HDR luminous edge falloff!)
+  let beam_edge = 0.42 + 0.78 * pow(ndv, 0.75);
   let alpha = clamp(in.col_alpha.a * beam_edge, 0.04, 0.96);
-  let glow = in.col_alpha.rgb * (1.28 + 0.55 * ndv);
+  let glow = col_lin * (1.55 + 0.75 * ndv);
   return vec4<f32>(glow * alpha, alpha);
 }
 `;
@@ -1803,7 +1819,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     w = core + halo;
   }
   rgb = em_sensor_map_rgb(rgb, in.em_sig.x, in.em_sig.y, in.em_sig.z, in.em_sig.w, in.em_gam);
-  return vec4<f32>(rgb * w * in.color.a, in.color.a * w);
+  let rgb_lin = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.0));
+  return vec4<f32>(rgb_lin * w * in.color.a, in.color.a * w);
 }
 `;
 
@@ -1817,18 +1834,22 @@ ${CAMERA_WGSL}
 ${EM_SENSOR_WGSL}
 ${ULG_MATERIAL_PBR_WGSL}
 
-// 5 vec4s (80 bytes) per sphere instance:
-//   pos_r:  vec4(x, y, z, true_radius)
-//   color0: vec4(r, g, b, kind)   kind: 0=star, 1=terrestrial/ocean/rocky, 2=gas-giant/haze, 3=ice/moon, 4=cutaway-planet, 5=black-hole/nucleus, 6=nucleon, 7=magma
-//   color1: vec4(r2, g2, b2, atm_strength)
-//   params: vec4(r_core_norm, r_mantle_norm, cutaway_active, seed)
+// 7 vec4s (112 bytes) per sphere instance:
+//   pos_r:   vec4(x, y, z, true_radius)
+//   color0:  vec4(r, g, b, kind)   kind: 0=star, 1=terrestrial/ocean/rocky, 2=gas-giant/haze, 3=ice/moon, 4=cutaway-planet, 5=black-hole/nucleus, 6=nucleon, 7=magma
+//   color1:  vec4(r2, g2, b2, atm_strength)
+//   params:  vec4(r_core_norm, r_mantle_norm, cutaway_active, seed)
 //   sp_info: vec4(tempK, civTechK, dysonCoverage, flags)
+//   pbr0:    vec4(f0_r, f0_g, f0_b, metallic) from ULG material-physics layer (resolvePlanetarySurfacePbrOptics / Gate 1-2)
+//   pbr1:    vec4(roughness, ocean_ior, crust_ior, has_pbr)
 struct SphereInstance {
   pos_r: vec4<f32>,
   color0: vec4<f32>,
   color1: vec4<f32>,
   params: vec4<f32>,
   sp_info: vec4<f32>,
+  pbr0: vec4<f32>,
+  pbr1: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> cam: CameraUniforms;
@@ -2150,7 +2171,7 @@ fn fs_main(in: VsOut) -> FsOut {
         if (cam.em_sensor.z > 0.5) {
           g_rgb = em_sensor_map_rgb(g_rgb, max(100.0, in.sp_info.x), select(0.0, 0.6, kind == 0u), select(0.0, 0.25, kind == 0u), in.sp_info.y * 0.4, 0.0);
         }
-        out_g.color = vec4<f32>(g_rgb, alpha);
+        out_g.color = vec4<f32>(pow(max(g_rgb, vec3<f32>(0.0)), vec3<f32>(2.2)), alpha);
         let clip_g = cam.view_proj * vec4<f32>(in.center, 1.0);
         out_g.depth = eval_frag_depth(clip_g, cam.em_aux.w);
         return out_g;
@@ -2176,7 +2197,8 @@ fn fs_main(in: VsOut) -> FsOut {
         // Hot 1.5 MK solar corona blazes brightly in EUV / Soft X-Ray!
         c_rgb = em_sensor_map_rgb(c_rgb, 1.5e6, corona * 1.4, corona * 1.8, corona * 0.3, 0.0);
       }
-      out_c.color = vec4<f32>(c_rgb, clamp(corona, 0.0, 1.0));
+      let c_a = clamp(corona, 0.0, 1.0);
+      out_c.color = vec4<f32>(pow(max(c_rgb, vec3<f32>(0.0)), vec3<f32>(2.2)) * c_a, c_a);
       // Reversed-Z far depth on translucent corona so background nebulae/disks never get clipped by a square box!
       out_c.depth = 0.0;
       return out_c;
@@ -2195,7 +2217,8 @@ fn fs_main(in: VsOut) -> FsOut {
         bh_rgb = em_sensor_map_rgb(bh_rgb, 1.5e7, bh_glow * 0.8, bh_glow * 1.9, bh_glow * 2.6, bh_glow * 0.7);
       }
       var out_bh: FsOut;
-      out_bh.color = vec4<f32>(bh_rgb, clamp(bh_glow * 0.75, 0.0, 1.0));
+      let bh_a = clamp(bh_glow * 0.75, 0.0, 1.0);
+      out_bh.color = vec4<f32>(pow(max(bh_rgb, vec3<f32>(0.0)), vec3<f32>(2.2)) * bh_a, bh_a);
       out_bh.depth = 0.0;
       return out_bh;
     }
@@ -2204,7 +2227,8 @@ fn fs_main(in: VsOut) -> FsOut {
       if (h_atmo < 0.012) { discard; }
       let lit_side = clamp(dot(normalize(ro_n + rd * closest_n), light_dir) * 0.8 + 0.35, 0.0, 1.0);
       var out_a: FsOut;
-      out_a.color = vec4<f32>(vec3<f32>(0.34, 0.68, 1.0) * h_atmo * lit_side, h_atmo * lit_side);
+      let a_atmo = clamp(h_atmo * lit_side, 0.0, 1.0);
+      out_a.color = vec4<f32>(ulg_srgb_to_linear(vec3<f32>(0.34, 0.68, 1.0)) * a_atmo, a_atmo);
       out_a.depth = 0.0;
       return out_a;
     }
@@ -2313,8 +2337,13 @@ fn fs_main(in: VsOut) -> FsOut {
   let half_v = normalize(light_dir + view_dir);
   let ndh = max(0.0, dot(n_hit, half_v));
   let vdh = max(0.0, dot(view_dir, half_v));
-  // Physical Cook-Torrance GGX specular lobe (H2O ocean IOR=1.333, ice IOR=1.31, metallic Fe-Ni cores/asteroids!)
-  let spec_f0_water = vec3<f32>(ulg_dielectric_f0(1.333));
+  // Consume per-body ULG material-physics PBR parameters directly from SphereInstance storage buffer!
+  let sp_pbr0 = spheres[in.inst_id].pbr0; // (f0_r, f0_g, f0_b, metallic)
+  let sp_pbr1 = spheres[in.inst_id].pbr1; // (roughness, ocean_ior, crust_ior, has_pbr)
+  let has_sp_pbr = sp_pbr1.w > 0.5;
+  let ocean_ior = select(1.333, sp_pbr1.y, has_sp_pbr && sp_pbr1.y > 1.01);
+  // Physical Cook-Torrance GGX ocean/solvent specular lobe driven by solvent refractive index!
+  let spec_f0_water = vec3<f32>(ulg_dielectric_f0(ocean_ior));
   let spec_ggx_water = ulg_d_ggx(ndh, 0.16) * ulg_v_smith_ggx(max(1e-4, ndv), max(1e-4, ndl), 0.16) * ulg_fresnel_schlick(vdh, spec_f0_water).x;
   let spec = clamp(spec_ggx_water * 1.15, 0.0, 2.2);
   let fresnel = pow(max(0.0, 1.0 - ndv), 3.6);
@@ -2350,6 +2379,7 @@ fn fs_main(in: VsOut) -> FsOut {
       em_temp_k = mix(em_temp_k, 420.0, occ);
       em_rad = dyson_tau * 0.9;
     }
+    col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(2.2));
     em_uv = smoothstep(4500.0, 12000.0, em_temp_k) * 1.1;
     em_xr = smoothstep(8000.0, 30000.0, em_temp_k) * 0.9 + (1.0 - limb) * 0.35;
   } else if (is_interior) {
@@ -2375,7 +2405,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let edge_mantle = smoothstep(0.007, 0.016, abs(r_norm - r_mantle));
     shell_col = shell_col * (0.55 + 0.45 * edge_core * edge_mantle);
     let shade = 0.52 + 0.48 * max(0.25, dot(n_hit, normalize(vec3<f32>(0.55, 0.72, 0.45))));
-    col = shell_col * shade;
+    col = ulg_srgb_to_linear(shell_col) * shade;
     em_temp_k = mix(5400.0, em_temp_k, clamp(r_norm, 0.0, 1.0));
   } else if (kind == 2u) {
     // Banded Gas / Dense-Cloud World with LIVE GPU Flow-Map Advected Spherical CFD Jets, Cyclonic Vorticity Eddies, Lightning & Smooth 3D Filamentary Aurorae!
@@ -2451,7 +2481,9 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     let atm = vec3<f32>(0.58, 0.76, 1.0) * fresnel * in.color1.w;
     let sunset = vec3<f32>(0.95, 0.44, 0.16) * term_sunset * 0.14 * star_dir_l;
-    col = base * (vec3<f32>(0.03) + star_dir_l * (0.04 + 0.98 * ndl) * soft_term) + sunset + atm * (vec3<f32>(0.03) + star_dir_l * (0.14 + 0.86 * ndl)) + em_fx;
+    col = ulg_srgb_to_linear(base) * (vec3<f32>(0.014) + star_dir_l * (0.02 + 1.12 * ndl) * soft_term)
+      + ulg_srgb_to_linear(sunset) + ulg_srgb_to_linear(atm) * (vec3<f32>(0.016) + star_dir_l * (0.14 + 0.92 * ndl))
+      + ulg_srgb_to_linear(em_fx);
   } else if (kind == 1u || kind == 4u) {
     // Terrestrial / Ocean / Mars / Mercury / Carbon World:
     // Driven zero-copy by ULG's 3D GPU SPH Planetary Genesis spherical geology map when active
@@ -2637,6 +2669,7 @@ fn fs_main(in: VsOut) -> FsOut {
 
     // Crisp 1-texel central-difference topographic relief normal + 4-step horizon self-shadowing (ZERO blurry bumps!)
     var ndl_relief = ndl;
+    var n_relief_out = n_hit;
     if (bump_strength > 0.01) {
       let up_ref = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n_hit.y) > 0.92);
       let t1 = normalize(cross(up_ref, n_hit));
@@ -2651,6 +2684,7 @@ fn fs_main(in: VsOut) -> FsOut {
         let e2m = sample_sph_geology(normalize(n_hit - t2 * eps_g), gw, gh).x;
         let relief_gain = bump_strength * select(2.45, 3.6, disp_amp > 0.10);
         let n_relief = normalize(n_hit + (t1 * (e1m - e1p) + t2 * (e2m - e2p)) * relief_gain);
+        n_relief_out = n_relief;
         ndl_relief = max(0.0, dot(n_relief, light_dir));
         // Real 4-step topographic self-shadowing across mountain cordilleras, canyons & crater rims!
         if (disp_amp > 0.005 && raw_ndl > -0.04 && raw_ndl < 0.65) {
@@ -2677,6 +2711,7 @@ fn fs_main(in: VsOut) -> FsOut {
         let e2 = fbm5(normalize(n_hit + t2 * eps_b) * 3.4 + seed_v) + 0.24 * fbm5(normalize(n_hit + t2 * eps_b) * 14.0 + seed_v * 1.7);
         let e0 = elev_center + 0.24 * detail;
         let n_relief = normalize(n_hit + (t1 * (e0 - e1) + t2 * (e0 - e2)) * (bump_strength * 5.2));
+        n_relief_out = n_relief;
         ndl_relief = max(0.0, dot(n_relief, light_dir));
       }
     }
@@ -2748,21 +2783,28 @@ fn fs_main(in: VsOut) -> FsOut {
     }
 
     let ndl_eff = mix(ndl_relief, ndl, cloud_cover * 0.85);
+    let n_pbr_1 = normalize(mix(n_relief_out, n_hit, cloud_cover * 0.85));
+    let ndh_1 = max(0.0, dot(n_pbr_1, half_v));
+    let ndv_1 = max(1e-4, dot(n_pbr_1, view_dir));
     let cool_atm_h = select(0.0, clamp(cam.extra0.z, 0.0, 1.0), live_sph_geo);
     let rayleigh_base = mix(vec3<f32>(0.78, 0.50, 0.30), vec3<f32>(0.30, 0.68, 1.0), select(0.25, 1.0, has_ocean));
     let rayleigh = mix(rayleigh_base, vec3<f32>(1.0, 0.44, 0.14), cool_atm_h * 0.82);
     let atm = rayleigh * fresnel * max(in.color1.w, cool_atm_h * 0.68) * 0.98;
     let sunset = mix(vec3<f32>(0.98, 0.44, 0.14), vec3<f32>(1.0, 0.52, 0.18), select(0.0, 1.0, has_ocean)) * term_sunset * (0.16 + 0.24 * cloud_cover + 0.25 * fresnel) * star_dir_l;
-    // Derive Fe-Ni metallic glint on airless iron cores & metallic asteroids vs dielectric silicate/basalt GGX!
-    let c_sat = max(in.color0.r, max(in.color0.g, in.color0.b)) - min(in.color0.r, min(in.color0.g, in.color0.b));
-    let is_metal_body = !has_ocean && in.color1.w < 0.02 && c_sat < 0.12 && in.color0.r > 0.46;
-    let crust_met = select(0.0, 0.68, is_metal_body);
-    let crust_rgh = select(0.74, 0.34, is_metal_body);
-    let crust_f0 = mix(vec3<f32>(ulg_dielectric_f0(1.54)), clamp(surf * 1.10, vec3<f32>(0.24), vec3<f32>(0.92)), crust_met);
-    let crust_ggx = ulg_d_ggx(ndh, crust_rgh) * ulg_v_smith_ggx(max(1e-4, ndv), max(1e-4, ndl_eff), crust_rgh) * ulg_fresnel_schlick(vdh, crust_f0) * (1.0 - cloud_cover) * ndl_eff * soft_term;
-    col = surf * (vec3<f32>(0.028) + star_dir_l * (0.03 + 0.98 * ndl_eff) * soft_term * (1.0 - crust_met * 0.42))
-      + star_dir_l * (crust_ggx * select(0.45, 1.45, is_metal_body) + vec3<f32>(water_spec * ndl))
-      + sunset + atm * (vec3<f32>(0.03) + star_dir_l * (0.14 + 0.86 * ndl)) + em_lightning + em_aurora + em_cities + em_volc;
+    // Consume uploaded ULG material-physics PBR parameters directly from SphereInstance (zero RGB saturation heuristic!)
+    let is_water_px = water_spec > 0.001;
+    let crust_met = select(0.0, clamp(sp_pbr0.w, 0.0, 0.94), has_sp_pbr && !is_water_px);
+    let crust_rgh = select(0.74, clamp(sp_pbr1.x, 0.12, 0.94), has_sp_pbr);
+    let crust_ior = select(1.54, sp_pbr1.z, has_sp_pbr && sp_pbr1.z > 1.01);
+    let crust_f0 = select(vec3<f32>(ulg_dielectric_f0(crust_ior)), clamp(sp_pbr0.rgb, vec3<f32>(0.02), vec3<f32>(0.96)), has_sp_pbr);
+    let crust_ggx = ulg_d_ggx(ndh_1, crust_rgh) * ulg_v_smith_ggx(ndv_1, max(1e-4, ndl_eff), crust_rgh) * ulg_fresnel_schlick(vdh, crust_f0) * (1.0 - cloud_cover) * ndl_eff * soft_term;
+    let surf_lin = ulg_srgb_to_linear(surf);
+    let diff_k = (vec3<f32>(1.0) - crust_f0 * 0.35) * (1.0 - crust_met * 0.68);
+    let spec_boost = mix(0.65, 1.85, crust_met);
+    col = surf_lin * diff_k * (vec3<f32>(0.014) + star_dir_l * (0.02 + 1.15 * ndl_eff) * soft_term)
+      + star_dir_l * (crust_ggx * spec_boost + vec3<f32>(water_spec * ndl * 1.15))
+      + ulg_srgb_to_linear(sunset) + ulg_srgb_to_linear(atm) * (vec3<f32>(0.016) + star_dir_l * (0.14 + 0.95 * ndl))
+      + ulg_srgb_to_linear(em_lightning + em_aurora + em_cities + em_volc);
   } else if (kind == 3u) {
     // Cratered Moon / Icy World / Atmospheric Ice Giant (Uranus & Neptune):
     // Gate rocky crater relief strictly on airless moons (atm < 0.28) so Ice Giants have silky atmospheric methane bands!
@@ -2772,6 +2814,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let t1_3 = normalize(cross(up_r3, n_hit));
     let t2_3 = cross(n_hit, t1_3);
     var ndl_c = ndl;
+    var n_crater_out = n_hit;
     var base = in.color0.rgb;
     if (live_sph3) {
       let gw3 = u32(round(cam.sph_geo.x));
@@ -2784,6 +2827,7 @@ fn fs_main(in: VsOut) -> FsOut {
       let g3ym = sample_sph_geology(normalize(n_hit - t2_3 * eps3), gw3, gh3).x;
       let relief3 = select(2.8 * max(0.35, crater_w), 3.4, disp_amp > 0.10);
       let n_crater = normalize(n_hit + (t1_3 * (g3xm - g3xp) + t2_3 * (g3ym - g3yp)) * relief3);
+      n_crater_out = n_crater;
       ndl_c = max(0.0, dot(n_crater, light_dir));
       if (disp_amp > 0.005 && raw_ndl > -0.04 && raw_ndl < 0.72) {
         let l_tang3 = light_dir - n_hit * raw_ndl;
@@ -2816,6 +2860,7 @@ fn fs_main(in: VsOut) -> FsOut {
       let c_x = fbm5(normalize(n_hit + t1_3 * 0.012) * 18.0 - seed_v);
       let c_y = fbm5(normalize(n_hit + t2_3 * 0.012) * 18.0 - seed_v);
       let n_crater = normalize(n_hit + (t1_3 * (n2 - c_x) + t2_3 * (n2 - c_y)) * (2.4 * crater_w));
+      n_crater_out = n_crater;
       ndl_c = max(0.0, dot(n_crater, light_dir));
       let ig_band = 0.5 + 0.32 * sin(n_hit.y * 14.0 + n1 * 1.4) + 0.18 * fbm5(n_hit * vec3<f32>(3.0, 11.0, 3.0) + seed_v);
       let rocky_mix = clamp(0.2 + 0.7 * n1 + 0.25 * n2, 0.0, 1.0);
@@ -2854,23 +2899,32 @@ fn fs_main(in: VsOut) -> FsOut {
       em_rad = bolt * 1.1 + aur3 * 0.6;
     }
     let atm = vec3<f32>(0.42, 0.76, 1.0) * fresnel * in.color1.w;
-    let ice_f0 = vec3<f32>(ulg_dielectric_f0(1.31));
-    let ice_rgh = mix(0.28, 0.62, crater_w * 0.5);
-    let ice_ggx = ulg_d_ggx(ndh, ice_rgh) * ulg_v_smith_ggx(max(1e-4, ndv), max(1e-4, ndl_c), ice_rgh) * ulg_fresnel_schlick(vdh, ice_f0) * ndl_c * soft_term;
-    col = base * (vec3<f32>(0.03) + star_dir_l * (0.04 + 0.96 * ndl_c) * soft_term) + star_dir_l * ice_ggx * 0.95 + atm * (vec3<f32>(0.03) + star_dir_l * (0.15 + 0.85 * ndl)) + em_ice;
+    let ndh_c = max(0.0, dot(n_crater_out, half_v));
+    let ndv_c = max(1e-4, dot(n_crater_out, view_dir));
+    let ice_f0 = select(vec3<f32>(ulg_dielectric_f0(1.31)), clamp(sp_pbr0.rgb, vec3<f32>(0.018), vec3<f32>(0.96)), has_sp_pbr);
+    let ice_met = select(0.0, clamp(sp_pbr0.w, 0.0, 0.92), has_sp_pbr);
+    let ice_rgh = select(mix(0.28, 0.62, crater_w * 0.5), clamp(sp_pbr1.x, 0.14, 0.92), has_sp_pbr);
+    let ice_ggx = ulg_d_ggx(ndh_c, ice_rgh) * ulg_v_smith_ggx(ndv_c, max(1e-4, ndl_c), ice_rgh) * ulg_fresnel_schlick(vdh, ice_f0) * ndl_c * soft_term;
+    let base_lin_3 = ulg_srgb_to_linear(base);
+    col = base_lin_3 * (1.0 - ice_met * 0.55) * (vec3<f32>(0.014) + star_dir_l * (0.02 + 1.12 * ndl_c) * soft_term)
+      + star_dir_l * ice_ggx * mix(0.95, 1.85, ice_met)
+      + ulg_srgb_to_linear(atm) * (vec3<f32>(0.016) + star_dir_l * (0.15 + 0.92 * ndl))
+      + ulg_srgb_to_linear(em_ice);
   } else if (kind == 5u) {
-    // Event horizon shadow OR glowing atomic nucleus pin
+    // Event horizon shadow OR glowing atomic nucleus pin (Cook-Torrance GGX PBR!)
     let is_black_hole = dot(in.color0.rgb, in.color0.rgb) < 0.001;
     if (is_black_hole) {
       let photon_rim = pow(max(0.0, 1.0 - ndv), 4.8);
-      col = vec3<f32>(1.0, 0.88, 0.64) * photon_rim * 1.4;
+      col = ulg_srgb_to_linear(vec3<f32>(1.0, 0.88, 0.64)) * photon_rim * 1.9;
       em_xr = photon_rim * 1.8;
     } else {
-      let base = mix(in.color0.rgb, in.color1.rgb, 0.25 + 0.45 * fresnel);
-      col = base * (0.3 + 0.75 * ndl) + vec3<f32>(1.0) * spec * 0.65;
+      let base_lin_5 = ulg_srgb_to_linear(mix(in.color0.rgb, in.color1.rgb, 0.25 + 0.45 * fresnel));
+      let f0_5 = vec3<f32>(ulg_dielectric_f0(1.58));
+      col = ulg_pbr_direct(n_hit, view_dir, light_dir, base_lin_5, f0_5, 0.22, 0.22, vec3<f32>(2.4, 2.36, 2.28))
+        + ulg_pbr_env_hemi(n_hit, view_dir, base_lin_5, f0_5, 0.22, 0.22, vec3<f32>(0.24, 0.34, 0.48), vec3<f32>(0.12, 0.16, 0.24), vec3<f32>(0.04, 0.05, 0.08));
     }
   } else if (kind == 7u) {
-    // Kind 7: Incandescent Hadean Magma Ocean World driven by live SPH mantle convection plumes & thin basalt rafts!
+    // Kind 7: Incandescent Hadean Magma Ocean World driven by live SPH mantle convection plumes & basalt GGX PBR!
     let live_sph7 = cam.sph_geo.x > 1.5 && in.inst_id == u32(round(cam.sph_geo.z));
     var rift = 0.5;
     var basalt = vec3<f32>(0.14, 0.10, 0.10);
@@ -2884,14 +2938,20 @@ fn fs_main(in: VsOut) -> FsOut {
       rift = smoothstep(0.46, 0.64, abs(crust - 0.50) * -2.0 + 0.72 + (cracks - 0.5) * 0.35);
       basalt = mix(vec3<f32>(0.10, 0.08, 0.09), vec3<f32>(0.24, 0.16, 0.14), cracks);
     }
-    let lava = mix(vec3<f32>(0.96, 0.22, 0.04), vec3<f32>(1.0, 0.86, 0.32), smoothstep(0.35, 0.92, rift));
-    let atm = vec3<f32>(1.0, 0.48, 0.18) * fresnel * in.color1.w * 0.9;
-    col = basalt * (vec3<f32>(0.04) + star_dir_l * (0.06 + 0.85 * ndl) * soft_term) + lava * rift * 1.65 + atm * (vec3<f32>(0.08) + star_dir_l * (0.30 + 0.65 * ndl));
+    let lava_lin = ulg_srgb_to_linear(mix(vec3<f32>(0.96, 0.22, 0.04), vec3<f32>(1.0, 0.86, 0.32), smoothstep(0.35, 0.92, rift)));
+    let basalt_lin = ulg_srgb_to_linear(basalt);
+    let f0_bas = vec3<f32>(ulg_dielectric_f0(1.62));
+    let basalt_pbr = ulg_pbr_direct(n_hit, view_dir, light_dir, basalt_lin, f0_bas, 0.08, 0.52, star_dir_l * (2.6 * soft_term))
+      + basalt_lin * vec3<f32>(0.018);
+    let atm_lin = ulg_srgb_to_linear(vec3<f32>(1.0, 0.48, 0.18) * fresnel * in.color1.w * 0.9);
+    col = basalt_pbr + lava_lin * rift * 2.25 + atm_lin * (vec3<f32>(0.06) + star_dir_l * (0.30 + 0.65 * ndl));
     em_temp_k = mix(850.0, 2200.0, rift);
   } else {
-    // Kind 6: Quantized L7 Nuclear Protons (warm ruby-amber) & Neutrons (cool sapphire-silver)
-    let base = mix(in.color0.rgb, in.color1.rgb, 0.22 + 0.55 * fresnel);
-    col = base * (0.28 + 0.76 * ndl) + vec3<f32>(1.0, 0.96, 0.92) * spec * 0.72 + in.color0.rgb * fresnel * 0.35;
+    // Kind 6: Quantized L7 Nuclear Protons (warm ruby-amber) & Neutrons (cool sapphire-silver) with Cook-Torrance GGX PBR!
+    let base_lin_6 = ulg_srgb_to_linear(mix(in.color0.rgb, in.color1.rgb, 0.22 + 0.55 * fresnel));
+    let f0_6 = vec3<f32>(ulg_dielectric_f0(1.56));
+    col = ulg_pbr_direct(n_hit, view_dir, light_dir, base_lin_6, f0_6, 0.18, 0.24, vec3<f32>(2.45, 2.40, 2.32))
+      + ulg_pbr_env_hemi(n_hit, view_dir, base_lin_6, f0_6, 0.18, 0.24, vec3<f32>(0.26, 0.36, 0.52), vec3<f32>(0.14, 0.18, 0.28), vec3<f32>(0.05, 0.06, 0.10));
   }
 
   col = em_sensor_map_rgb(col, em_temp_k, em_uv, em_xr, em_rad, 0.0);
@@ -3107,7 +3167,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
       let disk_t = mix(1.2e7, 4500.0, smoothstep(0.0, 0.85, u));
       out_c = em_sensor_map_rgb(out_c, disk_t, (1.0 - u) * 1.1, (1.0 - u) * 2.2 * beam, 0.55 * beam, 0.0);
     }
-    return vec4<f32>(out_c * alpha, alpha);
+    return vec4<f32>(pow(max(out_c, vec3<f32>(0.0)), vec3<f32>(2.2)) * alpha, alpha);
   } else {
     // Planetary ring system with live moon-derived Lindblad resonance divisions (shadow_info.zw)!
     let u = clamp((r - in.r_in) / max(1e-4, in.r_out - in.r_in), 0.0, 1.0);
@@ -3149,7 +3209,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let phase_gain = clamp((0.62 + 0.38 * hg_phase * opp_surge) * sun_obliq, 0.25, 1.65);
     let alpha = clamp(fade * cassini * encke * ringlets * 0.76, 0.0, 0.88);
     let ring_star_l = cam.star_light.rgb * clamp(cam.star_light.w, 0.16, 1.85);
-    var ring_c = in.color_kind.rgb * (0.85 + 0.25 * ringlets) * ring_shadow * phase_gain * ring_star_l;
+    var ring_c = pow(max(in.color_kind.rgb, vec3<f32>(0.0)), vec3<f32>(2.2)) * (0.85 + 0.25 * ringlets) * ring_shadow * phase_gain * ring_star_l;
     ring_c = em_sensor_map_rgb(ring_c, 85.0, 0.0, 0.0, 0.08, 0.0);
     return vec4<f32>(ring_c * alpha, alpha);
   }
@@ -3181,7 +3241,7 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-  return in.color;
+  return vec4<f32>(pow(max(in.color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2)), in.color.a);
 }
 `;
 
@@ -3290,7 +3350,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   }
   let alpha = clamp((1.0 - trans) * alpha_mul, 0.0, 0.82);
   if (alpha < 0.004) { discard; }
-  return vec4<f32>(accum * alpha_mul, alpha);
+  return vec4<f32>(pow(max(accum, vec3<f32>(0.0)), vec3<f32>(2.2)) * alpha_mul, alpha);
 }
 `;
 
@@ -3300,6 +3360,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 const ASTRO_VOL_WGSL = /* wgsl */ `
 ${CAMERA_WGSL}
 ${EM_SENSOR_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 @group(0) @binding(0) var<uniform> cam: CameraUniforms;
 @group(0) @binding(1) var<storage, read> vol_grid: array<vec4<f32>>;
@@ -3576,7 +3637,7 @@ fn fs_main(in: VsOut) -> AstroVolOut {
     let hit_w0 = center_w + (ro + rd * t_hit) * box_r;
     let clip0 = cam.view_proj * vec4<f32>(hit_w0, 1.0);
     var out0: AstroVolOut;
-    out0.color = vec4<f32>(accum * alpha_mul, alpha);
+    out0.color = vec4<f32>(pow(max(accum, vec3<f32>(0.0)), vec3<f32>(2.2)) * alpha_mul, alpha);
     out0.depth = eval_frag_depth(clip0, cam.em_aux.w);
     return out0;
   } else {
@@ -3649,28 +3710,30 @@ fn fs_main(in: VsOut) -> AstroVolOut {
         let bump_n = vec3<f32>(n_a - 0.5, n_b - 0.5, n_c - 0.5) * 0.36;
         let n_iso = normalize(mix(n_rad, n_fd, 0.70) + bump_n);
         let ndl = max(0.0, dot(n_iso, l_dir));
-        let ndv = max(0.0, dot(n_iso, -rd));
-        let half_v = normalize(l_dir - rd);
-        let spec_pow = select(36.0, 76.0, is_water > 0.35 || slag_plate < 0.35 || is_magma);
-        let spec = pow(max(0.0, dot(n_iso, half_v)), spec_pow) * (0.34 + 0.58 * max(is_water, 1.0 - slag_plate));
+        let ndv = max(1e-4, dot(n_iso, -rd));
         let fres = pow(max(0.0, 1.0 - ndv), 3.2);
 
-        let core_c = mix(vec3<f32>(1.0, 0.62, 0.12), vec3<f32>(1.0, 0.94, 0.72), 0.45 + 0.55 * tex) * 1.85;
+        let core_c = ulg_srgb_to_linear(mix(vec3<f32>(1.0, 0.62, 0.12), vec3<f32>(1.0, 0.94, 0.72), 0.45 + 0.55 * tex)) * 2.25;
         // Deep volcanic crimson-ember magma ocean + bright glowing lava fissures contrasting against dark obsidian slag!
-        let magma_c = mix(vec3<f32>(0.10, 0.012, 0.008), vec3<f32>(0.96, 0.26, 0.025), pow(clamp(crack * 0.68 + temp_n * 0.28 + (1.0 - slag_plate) * 0.28, 0.0, 1.0), 1.55))
-          * (0.48 + 0.85 * crack) + vec3<f32>(1.0, 0.56, 0.14) * pow(crack, 3.0) * 0.72;
-        // Cooled obsidian / basaltic tectonic plates with realistic directional lighting & specular sheen!
-        let rock_albedo = mix(vec3<f32>(0.042, 0.038, 0.048), vec3<f32>(0.24, 0.34, 0.20), select(0.06, 0.68, has_ocean) * age_f);
-        let water_albedo = vec3<f32>(0.05, 0.30, 0.68);
+        let magma_c = ulg_srgb_to_linear(mix(vec3<f32>(0.10, 0.012, 0.008), vec3<f32>(0.96, 0.26, 0.025), pow(clamp(crack * 0.68 + temp_n * 0.28 + (1.0 - slag_plate) * 0.28, 0.0, 1.0), 1.55)))
+          * (0.55 + 1.05 * crack) + ulg_srgb_to_linear(vec3<f32>(1.0, 0.56, 0.14)) * pow(crack, 3.0) * 0.95;
+        // Cooled obsidian / basaltic tectonic plates & liquid proto-ocean with Cook-Torrance GGX PBR!
+        let rock_albedo = ulg_srgb_to_linear(mix(vec3<f32>(0.042, 0.038, 0.048), vec3<f32>(0.24, 0.34, 0.20), select(0.06, 0.68, has_ocean) * age_f));
+        let water_albedo = ulg_srgb_to_linear(vec3<f32>(0.05, 0.30, 0.68));
         let base_albedo = mix(rock_albedo, water_albedo, is_water * age_f * 0.78);
-        let lit_crust = base_albedo * (0.10 + 0.96 * ndl) + vec3<f32>(1.0, 0.88, 0.74) * spec * (0.30 + 0.65 * ndl);
-        let rift_glow = vec3<f32>(0.98, 0.30, 0.03) * pow(crack, 1.65) * (0.95 + 1.05 * temp_n) * select(1.0, 1.75, is_magma) * (1.12 - 0.52 * age_f);
+        let iso_rgh = select(0.58, 0.16, is_water > 0.35 || slag_plate < 0.35 || is_magma);
+        let iso_ior = select(1.60, 1.333, is_water > 0.35);
+        let iso_f0 = mix(vec3<f32>(ulg_dielectric_f0(iso_ior)), vec3<f32>(0.68, 0.64, 0.60), is_core * 0.85);
+        let lit_crust = ulg_pbr_direct(n_iso, -rd, l_dir, base_albedo, iso_f0, is_core * 0.85, iso_rgh, vec3<f32>(2.65, 2.58, 2.46))
+          + ulg_pbr_env_hemi(n_iso, -rd, base_albedo, iso_f0, is_core * 0.85, iso_rgh, vec3<f32>(0.10, 0.14, 0.22), vec3<f32>(0.06, 0.08, 0.12), vec3<f32>(0.02, 0.02, 0.03));
+        let magma_spec = ulg_pbr_direct(n_iso, -rd, l_dir, vec3<f32>(0.02), vec3<f32>(ulg_dielectric_f0(1.62)), 0.0, 0.22, vec3<f32>(1.65, 0.88, 0.42));
+        let rift_glow = ulg_srgb_to_linear(vec3<f32>(0.98, 0.30, 0.03)) * pow(crack, 1.65) * (1.15 + 1.25 * temp_n) * select(1.0, 1.75, is_magma) * (1.12 - 0.52 * age_f);
         let crust_blend = clamp(slag_plate * (0.64 + 0.36 * age_f) * select(1.0, 0.45, is_magma), 0.0, 1.0);
-        var iso_c = mix(magma_c + vec3<f32>(1.0, 0.52, 0.22) * spec * 0.36, lit_crust + rift_glow, crust_blend);
+        var iso_c = mix(magma_c + magma_spec, lit_crust + rift_glow, crust_blend);
         iso_c = mix(iso_c, core_c, is_core);
         // Glowing atmospheric volcanic vapor / steam Fresnel rim!
-        let rim_c = select(vec3<f32>(1.0, 0.38, 0.10), vec3<f32>(0.34, 0.68, 1.0), has_ocean && age_f > 0.45);
-        iso_c = iso_c + rim_c * fres * (0.48 + 0.34 * ndl) + vec3<f32>(1.0, 0.86, 0.50) * shock * 0.95;
+        let rim_c = ulg_srgb_to_linear(select(vec3<f32>(1.0, 0.38, 0.10), vec3<f32>(0.34, 0.68, 1.0), has_ocean && age_f > 0.45));
+        iso_c = iso_c + rim_c * fres * (0.55 + 0.42 * ndl) + ulg_srgb_to_linear(vec3<f32>(1.0, 0.86, 0.50)) * shock * 1.15;
 
         accum = accum + trans * iso_c;
         trans = 0.0;
@@ -3864,6 +3927,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   col = aces_tonemap(col * 1.12);
+  col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
 
   if (u.crt_enabled > 0.5) {
     let scan = 0.82 + 0.18 * sin(in.uv.y * u.resolution.y * 1.65);
@@ -3895,25 +3959,25 @@ export function createUlgUniversesRenderer(device, canvas) {
   let bloomTexB = null;
   let bloomViewB = null;
 
-  // Dedicated 240-byte CameraUniforms buffers (incl. EM Sensor, Host Starlight Spectrum, SPH Geology & Space-Mesh!)
-  const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  // Dedicated 256-byte CameraUniforms buffers (incl. EM Sensor, Host Starlight Spectrum, SPH Geology, Surface PBR & Space-Mesh!)
+  const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 256, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const MAX_CLOUD_SLOTS = 8;
   const cloudCamBufs = Array.from({ length: MAX_CLOUD_SLOTS }, (_, idx) => device.createBuffer({
     label: `uv-cam-cloud-${idx}`,
-    size: 240,
+    size: 256,
     usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST
   }));
-  const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const astroVolCamBuf = device.createBuffer({ label: 'uv-cam-astro-vol', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const floraCamBuf = device.createBuffer({ label: 'uv-cam-flora', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const spaceMeshCamBuf = device.createBuffer({ label: 'uv-cam-space-mesh', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const auxCamBuf = device.createBuffer({ label: 'uv-cam-aux', size: 256, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const astroVolCamBuf = device.createBuffer({ label: 'uv-cam-astro-vol', size: 256, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const floraCamBuf = device.createBuffer({ label: 'uv-cam-flora', size: 256, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const spaceMeshCamBuf = device.createBuffer({ label: 'uv-cam-space-mesh', size: 256, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const postUniformBuf = device.createBuffer({ label: 'uv-post-uniform', size: 64, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bloomExtractUniformBuf = device.createBuffer({ label: 'uv-bloom-extract-u', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const bloomBlurUniformBuf = device.createBuffer({ label: 'uv-bloom-blur-u', size: 16, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 
-  const MAX_SPHERES = 320; // Supports up to U-238 (238 nucleons) + planets/moons/stars! (80 B/sphere)
-  const sphereBuf = device.createBuffer({ label: 'uv-spheres', size: MAX_SPHERES * 80, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
+  const MAX_SPHERES = 320; // Supports up to U-238 (238 nucleons) + planets/moons/stars! (112 B/sphere incl. ULG PBR optics)
+  const sphereBuf = device.createBuffer({ label: 'uv-spheres', size: MAX_SPHERES * 112, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const MAX_DISKS = 16;
   const diskBuf = device.createBuffer({ label: 'uv-disks', size: MAX_DISKS * 64, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const MAX_LINE_VERTS = 24576;
@@ -4115,7 +4179,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       targets: [{
         format: sceneFormat,
         blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
           alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
         }
       }]
@@ -4443,13 +4507,13 @@ export function createUlgUniversesRenderer(device, canvas) {
     device.queue.writeBuffer(nuclearVolBuf, 0, volumeData);
   }
 
-  const camData = new Float32Array(60);
+  const camData = new Float32Array(64);
   const postData = new Float32Array(16);
-  const sphereStaging = new Float32Array(MAX_SPHERES * 20);
+  const sphereStaging = new Float32Array(MAX_SPHERES * 28);
   const diskStaging = new Float32Array(MAX_DISKS * 16);
   const lineStaging = new Float32Array(MAX_LINE_VERTS * 7);
 
-  function writeCam(targetBuf, camera, extra0, extra1, extra2, emSensorVec = null, emAuxVec = null, starLightVec = null, sphGeoVec = null) {
+  function writeCam(targetBuf, camera, extra0, extra1, extra2, emSensorVec = null, emAuxVec = null, starLightVec = null, sphGeoVec = null, surfPbrVec = null) {
     camData.set(camera.viewProj, 0);
     camData.set([camera.pos[0], camera.pos[1], camera.pos[2], camera.timeSec || 0], 16);
     camData.set([camera.right[0], camera.right[1], camera.right[2], camera.aspect], 20);
@@ -4462,6 +4526,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     camData.set(emAuxVec || [288.0, 1.0, 0.0, 0.0], 48);
     camData.set(starLightVec || [1.0, 0.97, 0.92, 1.0], 52);
     camData.set(sphGeoVec || [0, 0, -1, -1.5], 56);
+    camData.set(surfPbrVec || [0.0, 0.0, 1.333, 1.52], 60);
     device.queue.writeBuffer(targetBuf, 0, camData);
   }
 
@@ -4518,7 +4583,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       sphereCount = Math.min(MAX_SPHERES, spheres.length);
       for (let i = 0; i < sphereCount; i += 1) {
         const s = spheres[i];
-        const o = i * 20;
+        const o = i * 28;
         sphereStaging[o + 0] = s.pos[0];
         sphereStaging[o + 1] = s.pos[1];
         sphereStaging[o + 2] = s.pos[2];
@@ -4539,8 +4604,28 @@ export function createUlgUniversesRenderer(device, canvas) {
         sphereStaging[o + 17] = Number(s.civTechK) || 0.0;
         sphereStaging[o + 18] = Number(s.dysonCoverage) || 0.0;
         sphereStaging[o + 19] = Number(s.flags) || 0.0;
+        const pbr = s.pbrOptics || null;
+        if (pbr && Array.isArray(pbr.f0Rgb)) {
+          sphereStaging[o + 20] = Number(pbr.f0Rgb[0]) || 0.04;
+          sphereStaging[o + 21] = Number(pbr.f0Rgb[1]) || 0.04;
+          sphereStaging[o + 22] = Number(pbr.f0Rgb[2]) || 0.04;
+          sphereStaging[o + 23] = Number(pbr.metallic) || 0.0;
+          sphereStaging[o + 24] = Number(pbr.roughness) || 0.72;
+          sphereStaging[o + 25] = Number(pbr.oceanIor) || 1.333;
+          sphereStaging[o + 26] = Number(pbr.crustIor ?? pbr.ior) || 1.52;
+          sphereStaging[o + 27] = 1.0;
+        } else {
+          sphereStaging[o + 20] = 0.04;
+          sphereStaging[o + 21] = 0.04;
+          sphereStaging[o + 22] = 0.04;
+          sphereStaging[o + 23] = 0.0;
+          sphereStaging[o + 24] = 0.72;
+          sphereStaging[o + 25] = 1.333;
+          sphereStaging[o + 26] = 1.52;
+          sphereStaging[o + 27] = 0.0;
+        }
       }
-      device.queue.writeBuffer(sphereBuf, 0, sphereStaging.subarray(0, sphereCount * 20));
+      device.queue.writeBuffer(sphereBuf, 0, sphereStaging.subarray(0, sphereCount * 28));
     }
 
     let diskCount = 0;
@@ -4653,6 +4738,12 @@ export function createUlgUniversesRenderer(device, canvas) {
         Number(surfaceScene.dynamoMicroT) || 0.0,
         0.0
       ];
+      const surfPbrVec = [
+        Number(env.pbrOptics?.metallic) || 0.0,
+        Number(env.pbrOptics?.roughness) || 0.78,
+        Number(env.oceanIor ?? env.pbrOptics?.oceanIor) || 1.333,
+        Number(env.pbrOptics?.crustIor ?? env.pbrOptics?.ior) || 1.52
+      ];
       writeCam(
         auxCamBuf,
         camera,
@@ -4662,7 +4753,8 @@ export function createUlgUniversesRenderer(device, canvas) {
         emSensorVec,
         baseEmAux,
         starLightVec,
-        surfAuroraVec
+        surfAuroraVec,
+        surfPbrVec
       );
       const fp = surfaceScene.focusPos || camera.pos;
       writeCam(
@@ -4741,7 +4833,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       const pass = enc.beginRenderPass({
         colorAttachments: [{
           view: sceneView,
-          clearValue: { r: 0.005, g: 0.009, b: 0.02, a: 1.0 },
+          clearValue: { r: 0.0004, g: 0.0008, b: 0.0022, a: 1.0 },
           loadOp: 'clear',
           storeOp: 'store'
         }],

@@ -17,6 +17,11 @@ fn ulg_linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
   return pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
 }
 
+fn ulg_aces_filmic(x: vec3<f32>) -> vec3<f32> {
+  let c = max(x, vec3<f32>(0.0));
+  return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn ulg_complex_f0(n_rgb: vec3<f32>, k_rgb: vec3<f32>) -> vec3<f32> {
   let num = (n_rgb - vec3<f32>(1.0)) * (n_rgb - vec3<f32>(1.0)) + k_rgb * k_rgb;
   let den = (n_rgb + vec3<f32>(1.0)) * (n_rgb + vec3<f32>(1.0)) + k_rgb * k_rgb;

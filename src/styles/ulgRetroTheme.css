@@ -15,6 +15,7 @@
   --ulg-retro-surface: rgba(8, 15, 22, 0.94);
   --ulg-retro-surface-strong: rgba(12, 22, 31, 0.97);
   --ulg-retro-accent: #56f0b8;
+  --ulg-retro-on-accent: #04100d;
   --ulg-retro-accent-dim: rgba(86, 240, 184, 0.15);
   --ulg-retro-cyan: #67d8ff;
   --ulg-retro-amber: #ffbe4f;
@@ -28,8 +29,8 @@
   --ulg-retro-glow: 0 0 14px rgba(86, 240, 184, 0.16);
 }
 
-/* Optional lightweight CRT phosphor scanline mask (zero pointer interference, zero canvas blur) */
-html[data-ulg-crt="1"]::after {
+/* Optional lightweight CRT phosphor scanline mask (single layer only — embedded iframes defer to parent ExoWebTUI overlay!) */
+html[data-ulg-crt="1"]:not([data-ulg-embedded="exowebtui"])::after {
   content: "";
   position: fixed;
   inset: 0;
@@ -79,7 +80,7 @@ html[data-ulg-retro="1"] .ulg-empty-topbar {
   margin: -22px -24px 18px;
   padding: 7px 14px;
   background: var(--ulg-retro-accent);
-  color: #04100d;
+  color: var(--ulg-retro-on-accent, #04100d);
   font-family: var(--ulg-retro-font-mono);
   font-size: 11px;
   font-weight: 800;
@@ -114,7 +115,7 @@ html[data-ulg-retro="1"] .ulg-empty-copy {
 
 .ulg-exowebtui-prompt-box {
   border: 1px solid var(--ulg-retro-accent);
-  background: linear-gradient(180deg, rgba(86, 240, 184, 0.10), rgba(8, 18, 26, 0.78));
+  background: linear-gradient(180deg, var(--ulg-retro-accent-dim), var(--ulg-retro-surface-strong));
   padding: 14px 15px;
   margin-bottom: 16px;
   box-shadow: var(--ulg-retro-bevel), var(--ulg-retro-glow);
@@ -259,7 +260,7 @@ html[data-ulg-retro="1"] .ulg-mini-hud {
 
 html[data-ulg-retro="1"] .ulg-btn-primary {
   background: var(--ulg-retro-accent);
-  color: #04100d;
+  color: var(--ulg-retro-on-accent, #04100d);
   border-color: var(--ulg-retro-accent);
   font-weight: 800;
   text-transform: uppercase;
@@ -320,7 +321,7 @@ html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-brand-title {
   -webkit-background-clip: initial;
   background-clip: initial;
   color: var(--ulg-retro-accent);
-  text-shadow: 0 0 10px rgba(86, 240, 184, 0.35);
+  text-shadow: var(--ulg-retro-glow);
 }
 
 html[data-ulg-retro="1"][data-ulg-lab="universes"] .uv-btn,
@@ -362,7 +363,7 @@ html[data-ulg-retro="1"][data-ulg-lab="life"] header h1 {
   font-family: var(--ulg-retro-font-mono);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  text-shadow: 0 0 8px rgba(86, 240, 184, 0.25);
+  text-shadow: var(--ulg-retro-glow);
 }
 
 html[data-ulg-retro="1"][data-ulg-lab="elements"] .hdr-btn,
@@ -416,4 +417,62 @@ html[data-ulg-retro="1"] input[type="range"] {
 /* Embedded ExoWebTUI compact tweak: hide redundant desktop switcher links when already inside desktop */
 html[data-ulg-embedded="exowebtui"] .ulg-hide-when-embedded {
   display: none !important;
+}
+
+/* ===== HIGH-CONTRAST LIGHT MODE (ExoWebTUI Paper Theme) ACROSS ALL 6 APPS ===== */
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] body {
+  background: var(--ulg-retro-bg);
+  color: var(--ulg-retro-text);
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] header,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .panel,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .card,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .acc-group,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .help-popover,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .modal-panel,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-glass,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-deck,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-card,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-modal-card,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-pop-menu,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-card,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-modal {
+  background: var(--ulg-retro-surface) !important;
+  color: var(--ulg-retro-text) !important;
+  border-color: var(--ulg-retro-border) !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] button,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] select,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] input,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .hdr-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .tab-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .mode-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ctrl-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .specimen-pill,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .hud-chip,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-chip,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-tab,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-hud-btn,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-btn {
+  background-color: var(--ulg-retro-surface-strong);
+  color: var(--ulg-retro-text);
+  border-color: var(--ulg-retro-border);
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .active,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .primary,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .ulg-btn-primary {
+  background-color: var(--ulg-retro-accent) !important;
+  color: var(--ulg-retro-on-accent, #ffffff) !important;
+  border-color: var(--ulg-retro-accent) !important;
+}
+
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] .uv-brand-title,
+html[data-ulg-retro="1"][data-ulg-theme-mode="light"] header h1 {
+  text-shadow: none !important;
+  color: var(--ulg-retro-accent) !important;
 }

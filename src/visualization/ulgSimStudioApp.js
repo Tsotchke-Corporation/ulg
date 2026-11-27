@@ -203,10 +203,14 @@ export function mountUlgSimStudioApp({
   const urlParams = typeof window !== 'undefined'
     ? new URLSearchParams(window.location.search)
     : new URLSearchParams();
+  const isEmbeddedExo = Boolean(
+    urlParams.get('embedded') === 'exowebtui'
+    || (typeof window !== 'undefined' && window.parent && window.parent !== window)
+  );
   const isDirectStudioEntry = Boolean(
     (typeof document !== 'undefined' && document.body?.dataset?.ulgDirectStudio === '1')
     || urlParams.get('studio') === '1'
-    || urlParams.get('embedded') === 'exowebtui'
+    || isEmbeddedExo
   );
   initUlgExoWebTuiBridge({ labId: 'studio', title: 'ULG Continuum Studio' });
 
@@ -414,8 +418,13 @@ export function mountUlgSimStudioApp({
   function clearBrowserUrlParams() {
     if (typeof window === 'undefined' || !window.history?.replaceState) return;
     try {
-      if (window.location.search) {
-        window.history.replaceState(null, '', window.location.pathname);
+      const keep = new URLSearchParams();
+      if (isEmbeddedExo) keep.set('embedded', 'exowebtui');
+      if (isDirectStudioEntry) keep.set('studio', '1');
+      const keepQs = keep.toString();
+      const targetUrl = `${window.location.pathname}${keepQs ? `?${keepQs}` : ''}`;
+      if (window.location.pathname + window.location.search !== targetUrl) {
+        window.history.replaceState(null, '', targetUrl);
       }
     } catch {
       // History replacement may be restricted in sandboxed contexts.
@@ -428,6 +437,8 @@ export function mountUlgSimStudioApp({
       const params = serializeStagedConfigToUrlSearchParams(stagedConfig, {
         autoPlayWhenReady
       });
+      if (isEmbeddedExo) params.set('embedded', 'exowebtui');
+      if (isDirectStudioEntry) params.set('studio', '1');
       const qs = params.toString();
       const nextUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
       if (window.location.pathname + window.location.search !== nextUrl) {

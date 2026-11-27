@@ -2296,6 +2296,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       abducted: false
     })));
   }
+  let disposed = false;
   const bakedFaunaMeshMap = new Map();
   let gpuCladogenesisVerified = false;
   if (isSolidSurfaceBio && Array.isArray(xeno?.species) && xeno.species.some((s) => s.developmentalGenome)) {
@@ -2416,7 +2417,6 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   let stepIndex = 0;
   let simTimeS = 0;
   let mapInFlight = false;
-  let disposed = false;
   let lastCfdTelemetry = cfdSession ? cfdSession.getTelemetry() : null;
 
   let lastTelemetry = Object.freeze({

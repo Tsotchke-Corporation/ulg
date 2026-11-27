@@ -32,6 +32,22 @@ function rgbTupleToRgba(rgb, alpha, fallback) {
   return `rgba(${Math.round(rgb[0])}, ${Math.round(rgb[1])}, ${Math.round(rgb[2])}, ${alpha})`;
 }
 
+function rgbLuminance(rgb) {
+  if (!Array.isArray(rgb) || rgb.length < 3) return 0;
+  return 0.299 * Number(rgb[0]) + 0.587 * Number(rgb[1]) + 0.114 * Number(rgb[2]);
+}
+
+function dispatchCrtSyncEvent(enabled) {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+  try {
+    window.dispatchEvent(new CustomEvent('ulg-exowebtui-crt-change', {
+      detail: { enabled: Boolean(enabled) }
+    }));
+  } catch {
+    // Ignore CustomEvent issues in constrained environments.
+  }
+}
+
 export function applyRetroThemeTokens(theme) {
   if (typeof document === 'undefined' || !theme) return;
   if (!document.documentElement.dataset.ulgRetroCssLoaded) {
@@ -39,17 +55,28 @@ export function applyRetroThemeTokens(theme) {
     import('../styles/ulgRetroTheme.css').catch(() => {});
   }
   const root = document.documentElement;
+  const isLight = typeof theme.isLight === 'boolean'
+    ? theme.isLight
+    : (Array.isArray(theme.background) ? rgbLuminance(theme.background) > 140 : false);
   if (theme.id) root.dataset.ulgTheme = String(theme.id);
+  root.dataset.ulgThemeMode = isLight ? 'light' : 'dark';
   if (theme.crt !== undefined) {
-    root.dataset.ulgCrt = theme.crt ? '1' : '0';
+    const crtOn = Boolean(theme.crt);
+    root.dataset.ulgCrt = crtOn ? '1' : '0';
+    dispatchCrtSyncEvent(crtOn);
   }
   const bg = rgbTupleToCss(theme.background, null);
   const surface = rgbTupleToRgba(theme.surface, 0.94, null);
   const surfaceStrong = rgbTupleToRgba(theme.surfaceStrong, 0.97, null);
   const accent = rgbTupleToCss(theme.accent, null);
-  const accentDim = rgbTupleToRgba(theme.accent, 0.16, null);
-  const border = rgbTupleToRgba(theme.accent, 0.36, null);
-  const borderStrong = rgbTupleToRgba(theme.accent, 0.72, null);
+  const onAccentRgb = Array.isArray(theme.onAccent)
+    ? theme.onAccent
+    : (Array.isArray(theme.accent) ? (rgbLuminance(theme.accent) > 148 ? [8, 16, 14] : [250, 252, 255]) : null);
+  const onAccent = rgbTupleToCss(onAccentRgb, null);
+  const accentDim = rgbTupleToRgba(theme.accent, isLight ? 0.14 : 0.16, null);
+  const border = rgbTupleToRgba(theme.accent, isLight ? 0.48 : 0.36, null);
+  const borderStrong = rgbTupleToRgba(theme.accent, isLight ? 0.85 : 0.72, null);
+  const glow = rgbTupleToRgba(theme.accent, isLight ? 0.12 : 0.18, null);
   const text = rgbTupleToCss(theme.text, null);
   const muted = rgbTupleToCss(theme.muted, null);
   const danger = rgbTupleToCss(theme.danger, null);
@@ -60,9 +87,17 @@ export function applyRetroThemeTokens(theme) {
   if (surface) root.style.setProperty('--ulg-retro-surface', surface);
   if (surfaceStrong) root.style.setProperty('--ulg-retro-surface-strong', surfaceStrong);
   if (accent) root.style.setProperty('--ulg-retro-accent', accent);
+  if (onAccent) root.style.setProperty('--ulg-retro-on-accent', onAccent);
   if (accentDim) root.style.setProperty('--ulg-retro-accent-dim', accentDim);
   if (border) root.style.setProperty('--ulg-retro-border', border);
   if (borderStrong) root.style.setProperty('--ulg-retro-border-hi', borderStrong);
+  if (glow) root.style.setProperty('--ulg-retro-glow', `0 0 14px ${glow}`);
+  root.style.setProperty(
+    '--ulg-retro-bevel',
+    isLight
+      ? 'inset 1px 1px 0 rgba(255, 255, 255, 0.82), inset -1px -1px 0 rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.08)'
+      : 'inset 1px 1px 0 rgba(255, 255, 255, 0.08), inset -1px -1px 0 rgba(0, 0, 0, 0.68), 0 0 0 1px rgba(0, 0, 0, 0.55)'
+  );
   if (text) root.style.setProperty('--ulg-retro-text', text);
   if (muted) root.style.setProperty('--ulg-retro-muted', muted);
   if (danger) root.style.setProperty('--ulg-retro-danger', danger);
@@ -144,7 +179,9 @@ export function initUlgExoWebTuiBridge({ labId = 'unknown', title = '' } = {}) {
       if (data.type === 'ulg-exowebtui-theme' && data.theme) {
         applyRetroThemeTokens(data.theme);
       } else if (data.type === 'ulg-exowebtui-crt') {
-        root.dataset.ulgCrt = data.enabled ? '1' : '0';
+        const crtOn = Boolean(data.enabled);
+        root.dataset.ulgCrt = crtOn ? '1' : '0';
+        dispatchCrtSyncEvent(crtOn);
       }
     });
 

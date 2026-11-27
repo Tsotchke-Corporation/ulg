@@ -7,7 +7,7 @@
 // double-float symplectic N-body gravity.
 
 import { initUlgExoWebTuiBridge } from './ulgExoWebTuiBridge.js';
-initUlgExoWebTuiBridge({ labId: 'universes', title: 'ULG Universes (40-OOM)' });
+const exoBridge = initUlgExoWebTuiBridge({ labId: 'universes', title: 'ULG Universes (40-OOM)' });
 import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
   normalizeWheelDeltaY,
@@ -1123,7 +1123,7 @@ export async function mountUlgUniversesDemo() {
   let showOrbits = true;
   let showTravelPath = true;
   let cameraAutoSpin = urlParams.get('cameraAutoSpin') === '1';
-  let retroCrt = urlParams.get('crt') === '1';
+  let retroCrt = urlParams.get('crt') === '1' || document.documentElement.dataset.ulgCrt === '1';
   let pixelSize = 3;
   const bootAutopilotRequested = urlParams.get('autopilot') === '1';
   let autopilot = false;
@@ -4052,6 +4052,10 @@ export async function mountUlgUniversesDemo() {
   travelToggle?.addEventListener('change', (e) => { showTravelPath = e.target.checked; });
   autoSpinToggle?.addEventListener('change', (e) => { cameraAutoSpin = e.target.checked; });
   crtToggle?.addEventListener('change', (e) => { retroCrt = e.target.checked; });
+  window.addEventListener('ulg-exowebtui-crt-change', (ev) => {
+    retroCrt = Boolean(ev?.detail?.enabled);
+    if (crtToggle) crtToggle.checked = retroCrt;
+  });
   pixelSlider?.addEventListener('input', (e) => {
     pixelSize = Number(e.target.value) || 3;
     if (pixelVal) pixelVal.textContent = `${pixelSize}×`;
@@ -5971,7 +5975,11 @@ export async function mountUlgUniversesDemo() {
         actions.push({ id: 'open-bio', label: '🫧 Bio Aquarium ↗', href: bioHref, cls: 'bio-cta' });
         actions.push({ id: 'open-cargo', label: '🎒 Cargo Bay', cls: '', onClick: () => setCommandDeckTab('cargo') });
         primaryLabel = '🫧 Aquarium';
-        primaryAction = () => { window.open(bioHref, '_blank', 'noopener'); };
+        primaryAction = () => {
+          if (!exoBridge.openSiblingLab(bioHref)) {
+            window.open(bioHref, '_blank', 'noopener');
+          }
+        };
       } else {
         actions.push({ id: 'abduct-org', label: '🛸 Abduct to Cargo', cls: 'primary', onClick: () => abductPickedSurfaceOrganism(org.id) });
         actions.push({ id: 'open-bio', label: '🫧 Bio Aquarium ↗', href: bioHref, cls: 'bio-cta' });

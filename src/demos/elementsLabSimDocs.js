@@ -11,7 +11,13 @@ export const ULG_LINKS = Object.freeze({
   githubMoonlab: 'https://github.com/tsotchke/moonlab',
   demos: Object.freeze([
     {
-      href: './index.html',
+      href: './desktop.html',
+      title: 'ExoWebTUI Desktop',
+      scale: 'MULTI-WINDOW',
+      desc: 'Run all 5 ULG WebGPU labs side-by-side inside one tiled retro workstation desktop.'
+    },
+    {
+      href: './index.html?studio=1',
       title: 'Studio Continuum',
       scale: '10⁻³ → 10⁺² m',
       desc: 'Interactive macroscopic 3D WebGPU MLS-MPM fluid, phase transitions, volumetric optics, and reactive continuum studio.'
@@ -21,6 +27,18 @@ export const ULG_LINKS = Object.freeze({
       title: 'ULG Universes ↗',
       scale: '10⁺²⁵ → 10⁻¹⁵ m',
       desc: 'Interactive 40-order-of-magnitude WebGPU explorer spanning FLRW Cosmic Web, Galaxies with SMBH lensing, Star Systems, Stellar Cores, Planetary Cutaways, MD, Dirac–KS Atoms, and Atomic Nuclei.'
+    },
+    {
+      href: './organic-lab.html',
+      title: 'Organic Chemistry Lab',
+      scale: '10⁻¹⁰ → 10⁻⁶ m',
+      desc: 'GPU Hückel π-MO orbitals, R↔S chirality, QEq reactive bond-order MD, and autocatalytic chemical networks.'
+    },
+    {
+      href: './life-lab.html',
+      title: 'Biophysics & Life Lab',
+      scale: '10⁻⁹ → 10⁻² m',
+      desc: 'Emergent alien ecosystems, 3D SDF morphogenesis, amphiphile protocells, biopolymer folding, and Eigen evolution.'
     }
   ])
 });

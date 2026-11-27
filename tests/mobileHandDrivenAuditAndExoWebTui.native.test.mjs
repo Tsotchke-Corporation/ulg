@@ -181,20 +181,68 @@ test('U17–U19: ExoWebTUI Multi-Window Desktop, Retro UI & Mobile Hand-Driving 
       await page.waitForTimeout(600);
       const themeSync = await page.evaluate(() => {
         const ifr = document.querySelector('.exo-win[data-win-id="elements"] iframe');
+        const uvIfr = document.querySelector('.exo-win[data-win-id="universes"] iframe');
         const childTheme = ifr?.contentDocument?.documentElement?.dataset?.ulgTheme || null;
         const childCrt = ifr?.contentDocument?.documentElement?.dataset?.ulgCrt || null;
+        const childEmbedded = ifr?.contentDocument?.documentElement?.dataset?.ulgEmbedded || null;
+        const childAfterContent = ifr?.contentWindow?.getComputedStyle?.(ifr.contentDocument.documentElement, '::after')?.content || 'none';
+        const uvRetroCrt = Boolean(uvIfr?.contentWindow?.__ulgUniversesDemo?.getState?.()?.retroCrt);
         return {
           parentTheme: window.__ulgExoWebTui.getState().themeId,
           parentCrt: window.__ulgExoWebTui.getState().crtEnabled,
           childTheme,
-          childCrt
+          childCrt,
+          childEmbedded,
+          childAfterContent,
+          uvRetroCrt
         };
       });
       assert.equal(themeSync.parentTheme, 'amber', 'ExoWebTUI theme must update to Amber Glass');
       assert.equal(themeSync.parentCrt, true, 'CRT toggle must activate');
       assert.equal(themeSync.childTheme, 'amber', 'Embedded lab iframe must receive live ExoWebTUI theme');
       assert.equal(themeSync.childCrt, '1', 'Embedded lab iframe must receive live CRT toggle');
+      assert.equal(themeSync.childEmbedded, 'exowebtui', 'Embedded iframe must retain data-ulg-embedded=exowebtui');
+      assert.equal(themeSync.childAfterContent, 'none', 'Embedded iframe must NOT double-stack CSS CRT ::after overlay');
+      assert.equal(themeSync.uvRetroCrt, true, 'Universes WebGPU POST_WGSL retroCrt must sync with ExoWebTUI CRT toggle');
       await maybeShot(page, '05_desktop_exowebtui_amber_crt.png');
+
+      // Wave D4: Paper Light Theme contrast + query-aware openLab non-reload check!
+      await page.click('[data-exo-theme="paper"]');
+      await page.waitForTimeout(350);
+      const paperCheck = await page.evaluate(() => {
+        const parseRgb = (s) => {
+          const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(String(s || ''));
+          return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
+        };
+        const lum = ([r, g, b]) => 0.299 * r + 0.587 * g + 0.114 * b;
+        const icon = document.querySelector('.exo-desktop-icon');
+        const iconSt = icon ? window.getComputedStyle(icon) : null;
+        const iconBgLum = iconSt ? lum(parseRgb(iconSt.backgroundColor)) : 0;
+        const iconFgLum = iconSt ? lum(parseRgb(iconSt.color)) : 0;
+        const ifr = document.querySelector('.exo-win[data-win-id="elements"] iframe');
+        const childMode = ifr?.contentDocument?.documentElement?.dataset?.ulgThemeMode || null;
+        const childSearch = ifr?.contentWindow?.location?.search || '';
+        // Mark iframe window to prove focusing without explicit query does NOT reload the running sim!
+        if (ifr?.contentWindow) ifr.contentWindow.__waveD4NoReloadToken = 'alive';
+        window.__ulgExoWebTui.openLab('elements', './elements-lab.html');
+        const survived = ifr?.contentWindow?.__waveD4NoReloadToken === 'alive';
+        window.__ulgExoWebTui.focusLab('console');
+        return {
+          parentMode: document.documentElement.dataset.ulgThemeMode,
+          childMode,
+          iconBgLum,
+          iconFgLum,
+          contrastDelta: Math.abs(iconBgLum - iconFgLum),
+          childSearch,
+          survived
+        };
+      });
+      assert.equal(paperCheck.parentMode, 'light', 'Paper theme must activate light mode on desktop');
+      assert.equal(paperCheck.childMode, 'light', 'Paper theme must propagate light mode into embedded iframe');
+      assert.ok(paperCheck.iconBgLum > 160 && paperCheck.iconFgLum < 100 && paperCheck.contrastDelta > 90,
+        `Paper theme .exo-desktop-icon must be dark text on light bg (bgLum=${paperCheck.iconBgLum.toFixed(0)}, fgLum=${paperCheck.iconFgLum.toFixed(0)})`);
+      assert.equal(paperCheck.survived, true, 'openLab without explicit query params must preserve live running iframe simulation');
+      assert.match(paperCheck.childSearch, /embedded=exowebtui/, 'Elements Lab replaceState must preserve embedded=exowebtui');
 
       // Reset theme to section9 and CRT off for clean mobile testing
       await page.click('[data-exo-theme="section9"]');

@@ -200,7 +200,14 @@ export function mountUlgExoWebTuiDesktop() {
     };
   }
 
+  function isLightRgb(rgb) {
+    if (!Array.isArray(rgb) || rgb.length < 3) return false;
+    return (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) > 140;
+  }
+
   function themePayload() {
+    const onAccent = shellActiveTitlebarForeground(activeThemeSpec);
+    const isLight = isLightRgb(activeThemeSpec.background);
     return {
       id: activeThemeSpec.id,
       label: activeThemeSpec.label,
@@ -211,6 +218,8 @@ export function mountUlgExoWebTuiDesktop() {
       text: activeThemeSpec.text,
       muted: activeThemeSpec.muted,
       accent: activeThemeSpec.accent,
+      onAccent,
+      isLight,
       success: activeThemeSpec.success,
       warning: activeThemeSpec.warning,
       danger: activeThemeSpec.danger,
@@ -233,12 +242,18 @@ export function mountUlgExoWebTuiDesktop() {
 
   function applyTheme(themeId) {
     activeThemeSpec = shellThemeById(themeId);
-    const onAccent = shellActiveTitlebarForeground(activeThemeSpec);
+    const payload = themePayload();
+    const onAccent = payload.onAccent;
+    const isLight = payload.isLight;
+    document.documentElement.dataset.ulgTheme = activeThemeSpec.id;
+    document.documentElement.dataset.ulgThemeMode = isLight ? 'light' : 'dark';
     const r = document.documentElement.style;
     r.setProperty('--exo-bg', rgbCss(activeThemeSpec.background));
     r.setProperty('--exo-surface', rgbCss(activeThemeSpec.surface));
     r.setProperty('--exo-surface-strong', rgbCss(activeThemeSpec.surfaceStrong));
-    r.setProperty('--exo-border', rgbaCss(activeThemeSpec.accent, 0.42));
+    r.setProperty('--exo-surface-tint', isLight ? 'rgba(0, 0, 0, 0.06)' : 'rgba(0, 0, 0, 0.24)');
+    r.setProperty('--exo-icon-bg', rgbaCss(activeThemeSpec.surface, isLight ? 0.94 : 0.88));
+    r.setProperty('--exo-border', rgbaCss(activeThemeSpec.accent, isLight ? 0.55 : 0.42));
     r.setProperty('--exo-accent', rgbCss(activeThemeSpec.accent));
     r.setProperty('--exo-on-accent', rgbCss(onAccent));
     r.setProperty('--exo-text', rgbCss(activeThemeSpec.text));
@@ -248,13 +263,22 @@ export function mountUlgExoWebTuiDesktop() {
     r.setProperty('--ulg-retro-surface', rgbaCss(activeThemeSpec.surface, 0.94));
     r.setProperty('--ulg-retro-surface-strong', rgbaCss(activeThemeSpec.surfaceStrong, 0.97));
     r.setProperty('--ulg-retro-accent', rgbCss(activeThemeSpec.accent));
+    r.setProperty('--ulg-retro-accent-dim', rgbaCss(activeThemeSpec.accent, isLight ? 0.14 : 0.16));
+    r.setProperty('--ulg-retro-on-accent', rgbCss(onAccent));
     r.setProperty('--ulg-retro-text', rgbCss(activeThemeSpec.text));
     r.setProperty('--ulg-retro-muted', rgbCss(activeThemeSpec.muted));
-    r.setProperty('--ulg-retro-border', rgbaCss(activeThemeSpec.accent, 0.38));
-    r.setProperty('--ulg-retro-border-hi', rgbaCss(activeThemeSpec.accent, 0.80));
+    r.setProperty('--ulg-retro-border', rgbaCss(activeThemeSpec.accent, isLight ? 0.48 : 0.38));
+    r.setProperty('--ulg-retro-border-hi', rgbaCss(activeThemeSpec.accent, isLight ? 0.85 : 0.80));
+    r.setProperty('--ulg-retro-glow', `0 0 14px ${rgbaCss(activeThemeSpec.accent, isLight ? 0.12 : 0.18)}`);
+    r.setProperty(
+      '--ulg-retro-bevel',
+      isLight
+        ? 'inset 1px 1px 0 rgba(255, 255, 255, 0.82), inset -1px -1px 0 rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.08)'
+        : 'inset 1px 1px 0 rgba(255, 255, 255, 0.08), inset -1px -1px 0 rgba(0, 0, 0, 0.68), 0 0 0 1px rgba(0, 0, 0, 0.55)'
+    );
     try {
       window.localStorage?.setItem('ulg-exowebtui-theme-id', activeThemeSpec.id);
-      window.localStorage?.setItem('ulg-exowebtui-theme-json', JSON.stringify(themePayload()));
+      window.localStorage?.setItem('ulg-exowebtui-theme-json', JSON.stringify(payload));
     } catch {
       // Ignore storage error.
     }
@@ -269,6 +293,7 @@ export function mountUlgExoWebTuiDesktop() {
     crtBtn.classList.toggle('active', crtEnabled);
     try {
       window.localStorage?.setItem('ulg-exowebtui-crt', crtEnabled ? '1' : '0');
+      window.localStorage?.setItem('ulg-exowebtui-theme-json', JSON.stringify(themePayload()));
     } catch {
       // Ignore storage error.
     }
@@ -907,13 +932,28 @@ export function mountUlgExoWebTuiDesktop() {
     renderConsoleWindow();
   }
 
+  function hasExplicitStateQuery(href) {
+    try {
+      const u = new URL(href, window.location.href);
+      for (const key of u.searchParams.keys()) {
+        if (key !== 'embedded' && key !== 'studio') return true;
+      }
+      return Boolean(u.hash && u.hash.length > 1);
+    } catch {
+      return false;
+    }
+  }
+
   function openLab(id, customHref = null) {
     const st = winStates.get(id);
     const app = APP_BY_ID.get(id);
     if (!st || !app) return false;
     if (customHref && app.src) {
       const nextSrc = withEmbeddedParam(customHref);
-      if (st.currentSrc !== nextSrc) {
+      const wantsStateNav = hasExplicitStateQuery(customHref);
+      // Preserve live running simulations when simply focusing an open sibling lab without explicit query params;
+      // navigate when a cross-lab handoff supplies explicit state parameters (e.g. ?world=... or ?z=...)!
+      if (!st.open || !st.iframe || (wantsStateNav && st.currentSrc !== nextSrc)) {
         st.currentSrc = nextSrc;
         if (st.iframe) st.iframe.src = nextSrc;
       }

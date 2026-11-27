@@ -3653,7 +3653,14 @@ function getShareableUrl({ includeCamera = true } = {}) {
 function syncBrowserUrl({ force = false } = {}) {
   if (urlSyncSuppressed || typeof window === 'undefined' || !window.history?.replaceState) return;
   const desc = buildCurrentUrlDescriptor();
-  const nextQuery = serializeElementsLabUrlState(desc, { includeCamera: false });
+  let nextQuery = serializeElementsLabUrlState(desc, { includeCamera: false });
+  const curParams = new URLSearchParams(window.location.search);
+  const keepEmbedded = curParams.get('embedded') === 'exowebtui' || (window.parent && window.parent !== window);
+  if (keepEmbedded) {
+    const p = new URLSearchParams(nextQuery.startsWith('?') ? nextQuery.slice(1) : nextQuery);
+    p.set('embedded', 'exowebtui');
+    nextQuery = `?${p.toString()}`;
+  }
   if (!force && nextQuery === lastSyncedQuery) return;
   lastSyncedQuery = nextQuery;
   try {

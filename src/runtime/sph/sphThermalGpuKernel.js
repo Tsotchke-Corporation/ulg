@@ -1,4 +1,10 @@
 import { prepareSphExactThermalQuantities, appendSphExactThermalQuantityWgsl } from './sphExactThermalQuantityGpu.js';
+import {
+  SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD,
+  computeMaterialTableFourierEnvelope,
+  encodeSphImplicitThermalFromSphStep,
+  normalizeSphImplicitThermalOptions
+} from './sphImplicitThermalGpu.js';
 import { appendSphExactThermalEnergyWgsl, sphExactThermalEnergyRecordWords, SPH_EXACT_THERMAL_ENERGY_WORDS }
   from './sphExactThermalEnergyWgsl.js';
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
@@ -3896,7 +3902,8 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   // Shared per-substep neighbor bins refilled after in-place separation.
   // Classic execution uses them only to enumerate the common v2 pair law;
   // overflow or unsupported support radii fall back inside the proposal pass.
-  neighborBins = null
+  neighborBins = null,
+  implicitThermal = null
 } = {}, exactCapture = null, exactQuantities = null) {
   if (!exactCapture) assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Thermal continuation');
   assertPackedSphParticleState(sphParticleState, exactCapture);
@@ -4211,14 +4218,31 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     && a3RadiativeFluxBinding.radiativeFluxBuffer.destroyed !== true
     && (maxThermalStorageSlots === 0 || maxThermalStorageSlots >= baseThermalStorageSlots + 1)
   );
+  // Live GPU IMEX Thermal PCG dispatch whenever explicitly requested OR Fourier number
+  // Fo = alpha * dt / dx^2 exceeds explicit stability threshold (0.45) on float32 thermal steps.
+  const imexGridSpacingM = Math.max(1e-4, finiteNumber(smoothingLengthM, layer || 0.01));
+  const imexFourierEnv = computeMaterialTableFourierEnvelope(thermalMaterialTable, {
+    gridSpacingM: imexGridSpacingM,
+    dtS: finiteNumber(dtS, 0),
+    thresholdFo: SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD
+  });
+  const requestedImexOpts = normalizeSphImplicitThermalOptions(implicitThermal ?? null);
+  const liveImexThermalOpts = !exactQuantities
+    && !exactEnergyLedger
+    && typeof device?.createComputePipeline === 'function'
+    && (maxThermalStorageSlots === 0 || maxThermalStorageSlots >= 8)
+    && sphParticleState.particleCount > 0
+    && (requestedImexOpts || imexFourierEnv.exceedsExplicitStability)
+    ? (requestedImexOpts ?? normalizeSphImplicitThermalOptions({ maxFourierNumber: imexFourierEnv.maxFourierNumber }))
+    : null;
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     materialCount: resolvedPhaseResponseTable.materialCount,
     segmentCount: resolvedPhaseResponseTable.responseCount,
     dtS: finiteNumber(dtS, 0),
     smoothingLengthM: finiteNumber(smoothingLengthM, 0),
-    conductionRate,
-    wallRate: effectiveWallRate,
+    conductionRate: liveImexThermalOpts ? 0 : conductionRate,
+    wallRate: liveImexThermalOpts ? 0 : effectiveWallRate,
     wallLayerM: layer,
     boxDimsM: dims,
     wallTemperaturesK: resolvedWallTemperaturesK,
@@ -4226,8 +4250,8 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     neighborBins,
     maxPairSupportM: resolveThermalMaxPairSupportM(sphParticleState, resolvedPhaseResponseTable),
     ambientTemperatureK: resolvedAmbientTemperatureK,
-    ambientRadiationExchangeEnabled,
-    a3ThermalRadiationEnabled: a3RadiativeFluxEnabled,
+    ambientRadiationExchangeEnabled: liveImexThermalOpts ? false : ambientRadiationExchangeEnabled,
+    a3ThermalRadiationEnabled: liveImexThermalOpts ? false : a3RadiativeFluxEnabled,
     canonicalThermalProposal
   }));
   // Integer energy ledger (g2-integer-ledger-proposal.md, Phase 1): a ledger
@@ -4684,6 +4708,27 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
       pass.end();
+      if (liveImexThermalOpts) {
+        const refMat = Array.isArray(thermalMaterialTable?.materials) ? thermalMaterialTable.materials[0] : null;
+        const refK = Number(refMat?.solid?.thermalConductivityWPerMK ?? refMat?.liquid?.thermalConductivityWPerMK ?? 50);
+        const refCp = Number(refMat?.solid?.specificHeatJPerKgK ?? refMat?.liquid?.specificHeatJPerKgK ?? 1000);
+        encodeSphImplicitThermalFromSphStep(device, encoder, {
+          outStateBuffer,
+          outThermoBuffer,
+          particleCount: sphParticleState.particleCount,
+          dtS: finiteNumber(dtS, 0),
+          gridSpacingM: imexGridSpacingM,
+          boxDimsM: dims,
+          wallRate: effectiveWallRate,
+          wallTemperaturesK: resolvedWallTemperaturesK,
+          ambientTemperatureK: resolvedAmbientTemperatureK,
+          ambientRadiationExchangeEnabled,
+          materialConductivityWPerMK: Number.isFinite(refK) && refK > 0 ? refK : 50,
+          materialSpecificHeatJPerKgK: Number.isFinite(refCp) && refCp > 0 ? refCp : 1000,
+          maxFourierNumber: imexFourierEnv.maxFourierNumber,
+          options: liveImexThermalOpts
+        });
+      }
       if (exactFiniteWall) exactFiniteWall.encodeAfter(encoder);
       else finiteWallState?.encodeUpdate(encoder);
       if (exactQuantities) {

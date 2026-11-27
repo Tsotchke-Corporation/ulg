@@ -615,7 +615,8 @@ export function mountUlgSimStudioApp({
         }
         const dagEpoch = globalThis.__ulgLawDagEpochStatus;
         if (dagEpoch) {
-          archLines.push(`Law-DAG Epoch: valid=${Boolean(dagEpoch.valid)} stages=${dagEpoch.stageCount ?? 0} hoisted=${dagEpoch.hoistedViewBuilds ?? 0} reuses=${dagEpoch.hoistedViewReuses ?? 0} lawIr=${Boolean(dagEpoch.compiledLawIr?.valid)}`);
+          const irLive = dagEpoch.compiledLawIr;
+          archLines.push(`Law-DAG Epoch: valid=${Boolean(dagEpoch.valid)} stages=${dagEpoch.stageCount ?? 0} hoisted=${dagEpoch.hoistedViewBuilds ?? 0} reuses=${dagEpoch.hoistedViewReuses ?? 0} lawIr=${Boolean(irLive?.valid)} (gpuDispatches=${irLive?.liveDispatchCount ?? 0})`);
         }
         const lawWatch = globalThis.__ulgLawEnvelopeWatchStatus;
         if (lawWatch) {
@@ -1303,7 +1304,14 @@ export function mountUlgSimStudioApp({
       atmModeSel.appendChild(o);
     }
     atmModeSel.addEventListener('change', () => {
+      const prevMode = stagedConfig.environment.mode;
       stagedConfig.environment.mode = atmModeSel.value;
+      // Switching interactively from vacuum to room air promotes to 3-level First-Class
+      // Schroeder Chain air (`air3`) by default, retiring the single-level implicit stand-in.
+      if (prevMode !== 'air' && atmModeSel.value === 'air' && !(Number(stagedConfig.environment.airHierarchyLevels) >= 2)) {
+        stagedConfig.environment.airHierarchyLevels = 3;
+        stagedConfig.environment.twoLevelAir = false;
+      }
       markStagedCustom();
       renderContainerTab();
       updateChromeAndStatus();

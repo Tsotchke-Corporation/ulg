@@ -425,6 +425,9 @@ import {
   schroederSpatialReactionPlacementInventoryLineageMatches
 } from './schroederSpatialReactionPlacementEpochGpu.js';
 import {
+  encodeCompiledLawIrMechanicsIntoPass
+} from './compiledLawIrLiveRuntime.js';
+import {
   runSchroederSpatialThermalProposalWebGpu
 } from './schroederSpatialThermalProposalsGpu.js';
 import {
@@ -6281,6 +6284,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
       g2pPass.setPipeline(g2pPipeline);
       g2pPass.setBindGroup(0, g2pBindGroup);
       g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+      if (index === count - 1 && !useThermalSidecarFusion) {
+        encodeCompiledLawIrMechanicsIntoPass(device, g2pPass, {
+          mechanicsBuffer: outMechanicsBuffer,
+          particleCount,
+          generation: Math.max(1, index + 1)
+        });
+      }
       g2pPass.end();
       const separation = encodeMlsMpmParticleSeparationPasses(device, encoder, {
         stateBuffer: outStateBuffer,

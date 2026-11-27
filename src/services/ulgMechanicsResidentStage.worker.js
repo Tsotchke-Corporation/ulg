@@ -41,8 +41,12 @@ import {
 import {
   SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD,
   computeMaterialTableFourierEnvelope,
+  getSphImplicitThermalDeviceExecution,
   normalizeSphImplicitThermalOptions
 } from '../runtime/sph/sphImplicitThermalGpu.js';
+import {
+  getCompiledLawIrLiveStatus
+} from '../runtime/sph/compiledLawIrLiveRuntime.js';
 import {
   LAW_FALLBACK_POLICY,
   approximateLaw,
@@ -15933,29 +15937,61 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         thresholdFo: SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD
       });
       const implicitRecommended = Boolean(requestedImplicitThermal || foEnv.exceedsExplicitStability);
-      // Report strictly honest execution telemetry: the resident worker evaluates
-      // the explicit-stability Fourier envelope here and does not dispatch an IMEX
-      // thermal PCG pass unless an explicit GPU IMEX pass executed in this schedule.
-      implicitThermalStatus = Object.freeze({
-        schema: foEnv.schema,
-        active: false,
-        dispatchedOnGpu: false,
-        envelopeExceeded: Boolean(foEnv.exceedsExplicitStability),
-        recommended: implicitRecommended,
-        requested: Boolean(requestedImplicitThermal),
-        mode: 'advisory-envelope-only',
-        reason: requestedImplicitThermal
-          ? 'explicit-request-advisory-only'
-          : (foEnv.exceedsExplicitStability ? 'fourier-envelope-exceeded' : 'explicit-stable'),
-        maxFourierNumber: foEnv.maxFourierNumber,
-        thresholdFo: foEnv.thresholdFo,
-        worstMaterialId: foEnv.worstMaterialId,
-        evaluatedMaterials: foEnv.evaluatedCount,
-        iterations: requestedImplicitThermal?.iterations ?? foEnv.recommendedIterations,
-        theta: requestedImplicitThermal?.theta ?? 1.0,
-        passCount: 0,
-        skewSymmetricFluxConserved: false
-      });
+      const liveImexExec = record.workerDevice
+        ? getSphImplicitThermalDeviceExecution(record.workerDevice)
+        : null;
+      const imexDispatchedOnGpu = Boolean(
+        liveImexExec?.dispatchedOnGpu
+        && Number(liveImexExec.liveDispatchCount) > 0
+      );
+      // Report strictly honest execution telemetry: only report dispatchedOnGpu: true
+      // when the coalesced GPU IMEX thermal PCG pass actually executed on this device;
+      // otherwise remain strictly advisory-only with passCount: 0.
+      implicitThermalStatus = imexDispatchedOnGpu
+        ? Object.freeze({
+          schema: foEnv.schema,
+          active: true,
+          dispatchedOnGpu: true,
+          envelopeExceeded: Boolean(foEnv.exceedsExplicitStability),
+          recommended: implicitRecommended,
+          requested: Boolean(requestedImplicitThermal),
+          mode: liveImexExec.mode || 'gpu-imex-pcg-1pass',
+          reason: requestedImplicitThermal
+            ? 'explicit-request-gpu-dispatched'
+            : 'fourier-envelope-exceeded-gpu-dispatched',
+          maxFourierNumber: Math.max(foEnv.maxFourierNumber, Number(liveImexExec.maxFourierNumber) || 0),
+          thresholdFo: foEnv.thresholdFo,
+          worstMaterialId: foEnv.worstMaterialId,
+          evaluatedMaterials: foEnv.evaluatedCount,
+          iterations: Number(liveImexExec.iterations ?? requestedImplicitThermal?.iterations ?? foEnv.recommendedIterations),
+          theta: Number(liveImexExec.theta ?? requestedImplicitThermal?.theta ?? 1.0),
+          passCount: Number(liveImexExec.passCount ?? 1),
+          liveDispatchCount: Number(liveImexExec.liveDispatchCount ?? 0),
+          nodeCount: Number(liveImexExec.nodeCount ?? 0),
+          edgeCount: Number(liveImexExec.edgeCount ?? 0),
+          skewSymmetricFluxConserved: Boolean(liveImexExec.skewSymmetricFluxConserved)
+        })
+        : Object.freeze({
+          schema: foEnv.schema,
+          active: false,
+          dispatchedOnGpu: false,
+          envelopeExceeded: Boolean(foEnv.exceedsExplicitStability),
+          recommended: implicitRecommended,
+          requested: Boolean(requestedImplicitThermal),
+          mode: 'advisory-envelope-only',
+          reason: requestedImplicitThermal
+            ? 'explicit-request-advisory-only'
+            : (foEnv.exceedsExplicitStability ? 'fourier-envelope-exceeded' : 'explicit-stable'),
+          maxFourierNumber: foEnv.maxFourierNumber,
+          thresholdFo: foEnv.thresholdFo,
+          worstMaterialId: foEnv.worstMaterialId,
+          evaluatedMaterials: foEnv.evaluatedCount,
+          iterations: requestedImplicitThermal?.iterations ?? foEnv.recommendedIterations,
+          theta: requestedImplicitThermal?.theta ?? 1.0,
+          passCount: 0,
+          liveDispatchCount: 0,
+          skewSymmetricFluxConserved: false
+        });
       globalThis.__ulgImplicitThermalStatus = implicitThermalStatus;
     } catch {
       implicitThermalStatus = null;
@@ -16061,6 +16097,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       dagScheduler.releaseHoistedViews();
       const leaseSnapshot = dagScheduler.leaseScope.assertDrained({ requireAllReleased: true });
       const dagSnap = dagScheduler.snapshot();
+      const compiledLawIrLiveStatus = record.workerDevice
+        ? getCompiledLawIrLiveStatus(record.workerDevice)
+        : null;
       lawDagEpochStatus = Object.freeze({
         schema: dagSnap.schema,
         epochId: dagSnap.epochId,
@@ -16071,12 +16110,17 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         hoistedViewBuilds: dagSnap.hoistedViewBuilds,
         hoistedViewReuses: dagSnap.hoistedViewReuses,
         leasedDrained: leaseSnapshot.live === 0,
-        compiledLawIr: record._compiledLawIrModules ?? null
+        compiledLawIr: record._compiledLawIrModules ?? null,
+        compiledLawIrLive: compiledLawIrLiveStatus
       });
       globalThis.__ulgLawDagEpochStatus = lawDagEpochStatus;
     } catch {
       lawDagEpochStatus = null;
     }
+    const compiledLawIrLiveStatus = record.workerDevice
+      ? getCompiledLawIrLiveStatus(record.workerDevice)
+      : null;
+    globalThis.__ulgCompiledLawIrLiveStatus = compiledLawIrLiveStatus;
     const compiledEshkolLaw = record._compiledEshkolEnvelopeLaw;
     const lawEnvelopeWatchStatus = Object.freeze({
       schema: 'peercompute.ulg.eshkol-envelope-watch-status.v1',
@@ -16089,6 +16133,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       compiledLawIrActive: Boolean(record._compiledLawIrModules?.valid),
       compiledLawIrModules: record._compiledLawIrModules?.moduleIds ?? Object.freeze([]),
       compiledLawIrGpuValidated: Boolean(record._compiledLawIrModules?.gpuShaderModuleValidated),
+      compiledLawIrLiveDispatched: Boolean(compiledLawIrLiveStatus?.dispatchedOnGpu),
+      compiledLawIrLiveDispatchCount: Number(compiledLawIrLiveStatus?.liveDispatchCount ?? 0),
+      compiledLawIrLiveLawId: compiledLawIrLiveStatus?.lawId ?? null,
+      compiledLawIrLiveWgslFingerprint: compiledLawIrLiveStatus?.wgslFingerprint ?? null,
       generation: Number(triadStatus?.generation ?? compiledEshkolLaw?.generation ?? 0),
       functionCount: Number(triadStatus?.functionCount ?? globalThis.__ulgA4GasResponseStatus?.functionCount ?? 0),
       fallbackPolicy: compiledEshkolLaw?.fallbackPolicy ?? LAW_FALLBACK_POLICY.ASYNC,
@@ -16169,6 +16217,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         scaleAtlas: scaleAtlasStatus,
         implicitThermal: implicitThermalStatus,
         lawDagEpoch: lawDagEpochStatus,
+        compiledLawIrLive: compiledLawIrLiveStatus,
         lawEnvelopeWatch: lawEnvelopeWatchStatus,
         representativeParticles: representativeParticlesStatus,
         chainDeepening: chainDeepeningStatus,

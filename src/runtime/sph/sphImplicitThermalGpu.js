@@ -23,6 +23,41 @@ export const SPH_IMPLICIT_THERMAL_DEFAULT_RELATIVE_TOLERANCE = 1e-4;
 export const SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD = 0.45;
 export const STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670374419e-8;
 
+const IMEX_EXECUTION_SYM = Symbol.for('ulg.sphImplicitThermalExecutionByDevice.v1');
+const imexExecutionByDevice = (globalThis[IMEX_EXECUTION_SYM] ??= new WeakMap());
+
+export function recordSphImplicitThermalDeviceExecution(device, receipt) {
+  if (!device) return null;
+  const key = unwrapWebGpuCacheDevice(device);
+  const prev = imexExecutionByDevice.get(key);
+  const next = Object.freeze({
+    schema: SPH_IMPLICIT_THERMAL_SCHEMA,
+    dispatchedOnGpu: true,
+    passCount: Number(receipt?.passCount ?? 1),
+    mode: receipt?.mode ?? 'gpu-imex-pcg-1pass',
+    skewSymmetricFluxConserved: receipt?.skewSymmetricFluxConserved !== false,
+    liveDispatchCount: (prev?.liveDispatchCount ?? 0) + 1,
+    nodeCount: Number(receipt?.nodeCount ?? 0),
+    edgeCount: Number(receipt?.edgeCount ?? 0),
+    iterations: Number(receipt?.iterations ?? 8),
+    theta: Number(receipt?.theta ?? 1.0),
+    maxFourierNumber: Number(receipt?.maxFourierNumber ?? 0),
+    scalarsBuffer: receipt?.scalarsBuffer ?? null
+  });
+  imexExecutionByDevice.set(key, next);
+  return next;
+}
+
+export function getSphImplicitThermalDeviceExecution(device) {
+  if (!device) return null;
+  return imexExecutionByDevice.get(unwrapWebGpuCacheDevice(device)) ?? null;
+}
+
+export function clearSphImplicitThermalDeviceExecution(device) {
+  if (!device) return false;
+  return imexExecutionByDevice.delete(unwrapWebGpuCacheDevice(device));
+}
+
 const GPU_BUFFER_USAGE = {
   MAP_READ: 0x0001,
   COPY_SRC: 0x0004,
@@ -271,19 +306,15 @@ struct ThermalParams {
 @group(0) @binding(3) var<storage, read> edge_neighbors: array<u32>;
 @group(0) @binding(4) var<storage, read> edge_conductance: array<f32>;
 
-// PCG vectors & outputs:
-//   vec_x[i] = dT_i, vec_r[i] = residual, vec_z[i] = M^-1 r, vec_p[i] = search dir,
-//   vec_ap[i] = A p, diag_inv[i] = 1 / M_ii
+// PCG vectors packed into one storage buffer (6 * node_count floats) so the
+// shader stays within the baseline WebGPU 8-storage-buffer-per-stage limit:
+//   [0*n..1*n): x (dT_i), [1*n..2*n): r, [2*n..3*n): z,
+//   [3*n..4*n): p, [4*n..5*n): ap, [5*n..6*n): diag_inv
 //   out_energy[i] = vec4<f32>(T_next_K, delta_E_total_J, delta_E_wall_J, delta_E_pair_J)
 //   scalars[0] = rz, [1] = pAp, [2] = rz_new, [3] = r0_norm2, [4] = r_norm2
-@group(0) @binding(5) var<storage, read_write> vec_x: array<f32>;
-@group(0) @binding(6) var<storage, read_write> vec_r: array<f32>;
-@group(0) @binding(7) var<storage, read_write> vec_z: array<f32>;
-@group(0) @binding(8) var<storage, read_write> vec_p: array<f32>;
-@group(0) @binding(9) var<storage, read_write> vec_ap: array<f32>;
-@group(0) @binding(10) var<storage, read_write> diag_inv: array<f32>;
-@group(0) @binding(11) var<storage, read_write> out_energy: array<vec4<f32>>;
-@group(0) @binding(12) var<storage, read_write> scalars: array<f32>;
+@group(0) @binding(5) var<storage, read_write> pcg_vecs: array<f32>;
+@group(0) @binding(6) var<storage, read_write> out_energy: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> scalars: array<f32>;
 
 var<workgroup> wg_sum_a: array<f32, 64>;
 var<workgroup> wg_sum_b: array<f32, 64>;
@@ -291,7 +322,8 @@ var<workgroup> wg_sum_b: array<f32, 64>;
 @compute @workgroup_size(64)
 fn it_cg_init(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
-  if (i >= params.node_count) { return; }
+  let n = params.node_count;
+  if (i >= n) { return; }
   let ns = node_state[i];
   let cap = max(ns.x, 1e-30);
   let ti = ns.y;
@@ -310,24 +342,25 @@ fn it_cg_init(@builtin(global_invocation_id) gid: vec3<u32>) {
   let rhs = params.dt * flux_sum;
   let m_ii = cap + params.theta * params.dt * (gw + g_sum);
   let inv_m = select(0.0, 1.0 / m_ii, m_ii > 0.0);
-  diag_inv[i] = inv_m;
-  vec_x[i] = 0.0;
-  vec_r[i] = rhs;
+  pcg_vecs[5u * n + i] = inv_m;
+  pcg_vecs[0u * n + i] = 0.0;
+  pcg_vecs[1u * n + i] = rhs;
   let z = rhs * inv_m;
-  vec_z[i] = z;
-  vec_p[i] = z;
+  pcg_vecs[2u * n + i] = z;
+  pcg_vecs[3u * n + i] = z;
 }
 
 @compute @workgroup_size(64)
 fn it_reduce_init(@builtin(local_invocation_id) lid: vec3<u32>) {
   let tid = lid.x;
+  let n = params.node_count;
   var s_rz = 0.0;
   var s_rr = 0.0;
   var idx = tid;
   loop {
-    if (idx >= params.node_count) { break; }
-    let r = vec_r[idx];
-    s_rz += r * vec_z[idx];
+    if (idx >= n) { break; }
+    let r = pcg_vecs[1u * n + idx];
+    s_rz += r * pcg_vecs[2u * n + idx];
     s_rr += r * r;
     idx += 64u;
   }
@@ -353,30 +386,32 @@ fn it_reduce_init(@builtin(local_invocation_id) lid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn it_cg_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
-  if (i >= params.node_count) { return; }
+  let n = params.node_count;
+  if (i >= n) { return; }
   let ns = node_state[i];
   let cap = max(ns.x, 1e-30);
   let gw = max(ns.z, 0.0);
-  let pi = vec_p[i];
+  let pi = pcg_vecs[3u * n + i];
   let start = row_offsets[i];
   let end = row_offsets[i + 1u];
   var lap = 0.0;
   for (var e = start; e < end; e++) {
     let j = edge_neighbors[e];
     let gij = max(edge_conductance[e], 0.0);
-    lap += gij * (pi - vec_p[j]);
+    lap += gij * (pi - pcg_vecs[3u * n + j]);
   }
-  vec_ap[i] = (cap + params.theta * params.dt * gw) * pi + params.theta * params.dt * lap;
+  pcg_vecs[4u * n + i] = (cap + params.theta * params.dt * gw) * pi + params.theta * params.dt * lap;
 }
 
 @compute @workgroup_size(64)
 fn it_reduce_pap(@builtin(local_invocation_id) lid: vec3<u32>) {
   let tid = lid.x;
+  let n = params.node_count;
   var s = 0.0;
   var idx = tid;
   loop {
-    if (idx >= params.node_count) { break; }
-    s += vec_p[idx] * vec_ap[idx];
+    if (idx >= n) { break; }
+    s += pcg_vecs[3u * n + idx] * pcg_vecs[4u * n + idx];
     idx += 64u;
   }
   wg_sum_a[tid] = s;
@@ -391,7 +426,8 @@ fn it_reduce_pap(@builtin(local_invocation_id) lid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn it_cg_update_xr(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
-  if (i >= params.node_count) { return; }
+  let n = params.node_count;
+  if (i >= n) { return; }
   let rz = scalars[0];
   let pap = scalars[1];
   let r0 = scalars[3];
@@ -399,22 +435,23 @@ fn it_cg_update_xr(@builtin(global_invocation_id) gid: vec3<u32>) {
   let tol2 = params.rel_tol * params.rel_tol * r0;
   if (pap <= 1e-30 || rz <= 1e-30 || rr <= tol2) { return; }
   let alpha = rz / pap;
-  vec_x[i] = vec_x[i] + alpha * vec_p[i];
-  let r_new = vec_r[i] - alpha * vec_ap[i];
-  vec_r[i] = r_new;
-  vec_z[i] = r_new * diag_inv[i];
+  pcg_vecs[0u * n + i] = pcg_vecs[0u * n + i] + alpha * pcg_vecs[3u * n + i];
+  let r_new = pcg_vecs[1u * n + i] - alpha * pcg_vecs[4u * n + i];
+  pcg_vecs[1u * n + i] = r_new;
+  pcg_vecs[2u * n + i] = r_new * pcg_vecs[5u * n + i];
 }
 
 @compute @workgroup_size(64)
 fn it_reduce_rz_new(@builtin(local_invocation_id) lid: vec3<u32>) {
   let tid = lid.x;
+  let n = params.node_count;
   var s_rz = 0.0;
   var s_rr = 0.0;
   var idx = tid;
   loop {
-    if (idx >= params.node_count) { break; }
-    let r = vec_r[idx];
-    s_rz += r * vec_z[idx];
+    if (idx >= n) { break; }
+    let r = pcg_vecs[1u * n + idx];
+    s_rz += r * pcg_vecs[2u * n + idx];
     s_rr += r * r;
     idx += 64u;
   }
@@ -437,11 +474,12 @@ fn it_reduce_rz_new(@builtin(local_invocation_id) lid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn it_cg_update_p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
-  if (i >= params.node_count) { return; }
+  let n = params.node_count;
+  if (i >= n) { return; }
   let rz_old = scalars[0];
   let rz_new = scalars[2];
   let beta = select(0.0, rz_new / rz_old, rz_old > 1e-30);
-  vec_p[i] = vec_z[i] + beta * vec_p[i];
+  pcg_vecs[3u * n + i] = pcg_vecs[2u * n + i] + beta * pcg_vecs[3u * n + i];
 }
 
 @compute @workgroup_size(1)
@@ -454,11 +492,12 @@ fn it_commit_rz() {
 @compute @workgroup_size(64)
 fn it_project_conservative_flux(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
-  if (i >= params.node_count) { return; }
+  let n = params.node_count;
+  if (i >= n) { return; }
   let ns = node_state[i];
   let cap = max(ns.x, 1e-30);
   let ti0 = ns.y;
-  let ti1 = ti0 + vec_x[i];
+  let ti1 = ti0 + pcg_vecs[0u * n + i];
   let ti_eff = params.theta * ti1 + (1.0 - params.theta) * ti0;
   let gw = max(ns.z, 0.0);
   let tw = ns.w;
@@ -470,7 +509,7 @@ fn it_project_conservative_flux(@builtin(global_invocation_id) gid: vec3<u32>) {
     let j = edge_neighbors[e];
     let gij = max(edge_conductance[e], 0.0);
     let tj0 = node_state[j].y;
-    let tj1 = tj0 + vec_x[j];
+    let tj1 = tj0 + pcg_vecs[0u * n + j];
     let tj_eff = params.theta * tj1 + (1.0 - params.theta) * tj0;
     // Exact skew-symmetry: (tj_eff - ti_eff) == -(ti_eff - tj_eff) in IEEE-754.
     q_pair += params.dt * gij * (tj_eff - ti_eff);
@@ -512,11 +551,9 @@ function implicitThermalPipelines(device) {
       { binding: 2, visibility: stage, buffer: { type: 'read-only-storage' } },
       { binding: 3, visibility: stage, buffer: { type: 'read-only-storage' } },
       { binding: 4, visibility: stage, buffer: { type: 'read-only-storage' } },
-      ...[5, 6, 7, 8, 9, 10, 11, 12].map((binding) => ({
-        binding,
-        visibility: stage,
-        buffer: { type: 'storage' }
-      }))
+      { binding: 5, visibility: stage, buffer: { type: 'storage' } },
+      { binding: 6, visibility: stage, buffer: { type: 'storage' } },
+      { binding: 7, visibility: stage, buffer: { type: 'storage' } }
     ]
   });
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
@@ -559,12 +596,7 @@ export function encodeSphImplicitThermalSolve(device, encoder, {
   const ws = workspace && workspace.nodeCapacity >= n ? workspace : {
     nodeCapacity: n,
     params: makeBuf('ulg-it-params', 32, GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST),
-    x: makeBuf('ulg-it-x', n * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
-    r: makeBuf('ulg-it-r', n * 4, GPU_BUFFER_USAGE.STORAGE),
-    z: makeBuf('ulg-it-z', n * 4, GPU_BUFFER_USAGE.STORAGE),
-    p: makeBuf('ulg-it-p', n * 4, GPU_BUFFER_USAGE.STORAGE),
-    ap: makeBuf('ulg-it-ap', n * 4, GPU_BUFFER_USAGE.STORAGE),
-    diagInv: makeBuf('ulg-it-diag-inv', n * 4, GPU_BUFFER_USAGE.STORAGE),
+    pcgVecs: makeBuf('ulg-it-pcg-vecs', n * 6 * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
     outEnergy: makeBuf('ulg-it-out-energy', n * 16, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
     scalars: makeBuf('ulg-it-scalars', 32, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
     destroy() { for (const b of owned.splice(0)) b.destroy(); }
@@ -589,14 +621,9 @@ export function encodeSphImplicitThermalSolve(device, encoder, {
       { binding: 2, resource: { buffer: rowOffsetsBuffer } },
       { binding: 3, resource: { buffer: edgeNeighborsBuffer } },
       { binding: 4, resource: { buffer: edgeConductanceBuffer } },
-      { binding: 5, resource: { buffer: ws.x } },
-      { binding: 6, resource: { buffer: ws.r } },
-      { binding: 7, resource: { buffer: ws.z } },
-      { binding: 8, resource: { buffer: ws.p } },
-      { binding: 9, resource: { buffer: ws.ap } },
-      { binding: 10, resource: { buffer: ws.diagInv } },
-      { binding: 11, resource: { buffer: ws.outEnergy } },
-      { binding: 12, resource: { buffer: ws.scalars } }
+      { binding: 5, resource: { buffer: ws.pcgVecs } },
+      { binding: 6, resource: { buffer: ws.outEnergy } },
+      { binding: 7, resource: { buffer: ws.scalars } }
     ]
   });
   const wg = Math.max(1, Math.ceil(n / 64));
@@ -804,4 +831,453 @@ export async function runSphImplicitThermalSolveWebGpu(device, {
     readOut.destroy();
     readScalars.destroy();
   }
+}
+
+const SPH_IMPLICIT_THERMAL_BRIDGE_WGSL = /* wgsl */ `
+struct BridgeParams {
+  particle_count: u32,
+  nx: u32,
+  ny: u32,
+  nz: u32,
+  box_x: f32,
+  box_y: f32,
+  box_z: f32,
+  k_eff: f32,
+  cp_eff: f32,
+  wall_rate: f32,
+  ambient_temp_k: f32,
+  rad_enabled: u32,
+  wall_t_xmin: f32,
+  wall_t_xmax: f32,
+  wall_t_ymin: f32,
+  wall_t_ymax: f32,
+  wall_t_zmin: f32,
+  wall_t_zmax: f32,
+  pad0: f32,
+  pad1: f32
+};
+
+@group(0) @binding(0) var<uniform> bparams: BridgeParams;
+@group(0) @binding(1) var<storage, read_write> p_state: array<f32>;
+@group(0) @binding(2) var<storage, read_write> p_thermo: array<f32>;
+@group(0) @binding(3) var<storage, read_write> cell_accum_bits: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> node_state: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> row_offsets: array<u32>;
+@group(0) @binding(6) var<storage, read> edge_neighbors: array<u32>;
+@group(0) @binding(7) var<storage, read_write> edge_conductance: array<f32>;
+@group(0) @binding(8) var<storage, read> solved_energy: array<vec4<f32>>;
+
+fn bridge_atomic_add_f32(slot_idx: u32, delta: f32) {
+  if (delta == 0.0 || !(delta == delta)) { return; }
+  loop {
+    let old_bits = atomicLoad(&cell_accum_bits[slot_idx]);
+    let next_val = bitcast<f32>(old_bits) + delta;
+    let next_bits = bitcast<u32>(next_val);
+    let res = atomicCompareExchangeWeak(&cell_accum_bits[slot_idx], old_bits, next_bits);
+    if (res.exchanged) { break; }
+  }
+}
+
+fn bridge_particle_cell(px: f32, py: f32, pz: f32) -> u32 {
+  let fx = clamp(px / max(bparams.box_x, 1e-9), 0.0, 0.999999);
+  let fy = clamp(py / max(bparams.box_y, 1e-9), 0.0, 0.999999);
+  let fz = clamp(pz / max(bparams.box_z, 1e-9), 0.0, 0.999999);
+  let ix = min(bparams.nx - 1u, u32(floor(fx * f32(bparams.nx))));
+  let iy = min(bparams.ny - 1u, u32(floor(fy * f32(bparams.ny))));
+  let iz = min(bparams.nz - 1u, u32(floor(fz * f32(bparams.nz))));
+  return ix + bparams.nx * (iy + bparams.ny * iz);
+}
+
+@compute @workgroup_size(64)
+fn it_bridge_clear(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let c = gid.x;
+  let cell_count = bparams.nx * bparams.ny * bparams.nz;
+  if (c >= cell_count) { return; }
+  atomicStore(&cell_accum_bits[c * 2u], 0u);
+  atomicStore(&cell_accum_bits[c * 2u + 1u], 0u);
+  node_state[c] = vec4<f32>(1.0, bparams.ambient_temp_k, 0.0, bparams.ambient_temp_k);
+}
+
+@compute @workgroup_size(64)
+fn it_bridge_p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let p = gid.x;
+  if (p >= bparams.particle_count) { return; }
+  let s_base = p * 8u;
+  let t_base = p * 12u;
+  let mass = p_state[s_base + 3u];
+  let status = p_thermo[t_base + 10u];
+  let temp_k = p_thermo[t_base + 2u];
+  if (!(mass > 0.0) || status >= 251.5 || !(temp_k > 0.0)) { return; }
+  let cap_p = max(mass * bparams.cp_eff, 1e-12);
+  let c = bridge_particle_cell(p_state[s_base], p_state[s_base + 1u], p_state[s_base + 2u]);
+  bridge_atomic_add_f32(c * 2u, cap_p);
+  bridge_atomic_add_f32(c * 2u + 1u, cap_p * temp_k);
+}
+
+@compute @workgroup_size(64)
+fn it_bridge_build_nodes(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let c = gid.x;
+  let cell_count = bparams.nx * bparams.ny * bparams.nz;
+  if (c >= cell_count) { return; }
+  let cap_c = bitcast<f32>(atomicLoad(&cell_accum_bits[c * 2u]));
+  if (!(cap_c > 0.0)) {
+    node_state[c] = vec4<f32>(1.0, bparams.ambient_temp_k, 0.0, bparams.ambient_temp_k);
+    return;
+  }
+  let ene_c = bitcast<f32>(atomicLoad(&cell_accum_bits[c * 2u + 1u]));
+  let temp_c = clamp(ene_c / cap_c, 1.0, 50000.0);
+  let nx = bparams.nx;
+  let ny = bparams.ny;
+  let nz = bparams.nz;
+  let ix = c % nx;
+  let iy = (c / nx) % ny;
+  let iz = c / (nx * ny);
+  let dx = bparams.box_x / f32(nx);
+  let dy = bparams.box_y / f32(ny);
+  let dz = bparams.box_z / f32(nz);
+
+  var g_wall = 0.0;
+  var gt_wall = 0.0;
+  let wr = max(bparams.wall_rate, 0.0);
+  if (wr > 0.0) {
+    if (ix == 0u && bparams.wall_t_xmin > 0.0) {
+      let g = wr * cap_c;
+      g_wall += g;
+      gt_wall += g * bparams.wall_t_xmin;
+    }
+    if (ix + 1u == nx && bparams.wall_t_xmax > 0.0) {
+      let g = wr * cap_c;
+      g_wall += g;
+      gt_wall += g * bparams.wall_t_xmax;
+    }
+    if (iy == 0u && bparams.wall_t_ymin > 0.0) {
+      let g = wr * cap_c;
+      g_wall += g;
+      gt_wall += g * bparams.wall_t_ymin;
+    }
+    if (iy + 1u == ny && bparams.wall_t_ymax > 0.0) {
+      let g = wr * cap_c;
+      g_wall += g;
+      gt_wall += g * bparams.wall_t_ymax;
+    }
+    if (iz == 0u && bparams.wall_t_zmin > 0.0) {
+      let g = wr * cap_c;
+      g_wall += g;
+      gt_wall += g * bparams.wall_t_zmin;
+    }
+    if (iz + 1u == nz && bparams.wall_t_zmax > 0.0) {
+      let g = wr * cap_c;
+      g_wall += g;
+      gt_wall += g * bparams.wall_t_zmax;
+    }
+  }
+  if (bparams.rad_enabled != 0u && bparams.ambient_temp_k > 0.0) {
+    let area_cell = 2.0 * (dx * dy + dy * dz + dz * dx) / 6.0;
+    let t_ref = max(temp_c, bparams.ambient_temp_k);
+    let g_rad = 4.0 * 0.9 * 5.6703744e-8 * t_ref * t_ref * t_ref * area_cell;
+    g_wall += g_rad;
+    gt_wall += g_rad * bparams.ambient_temp_k;
+  }
+  let t_wall = select(bparams.ambient_temp_k, gt_wall / max(g_wall, 1e-30), g_wall > 0.0);
+  node_state[c] = vec4<f32>(cap_c, temp_c, g_wall, t_wall);
+}
+
+@compute @workgroup_size(64)
+fn it_bridge_build_edges(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let c = gid.x;
+  let cell_count = bparams.nx * bparams.ny * bparams.nz;
+  if (c >= cell_count) { return; }
+  let cap_i = bitcast<f32>(atomicLoad(&cell_accum_bits[c * 2u]));
+  let nx = bparams.nx;
+  let ny = bparams.ny;
+  let nz = bparams.nz;
+  let dx = bparams.box_x / f32(nx);
+  let dy = bparams.box_y / f32(ny);
+  let dz = bparams.box_z / f32(nz);
+  let e0 = row_offsets[c];
+  let e1 = row_offsets[c + 1u];
+  for (var e = e0; e < e1; e = e + 1u) {
+    let nb = edge_neighbors[e];
+    let cap_j = bitcast<f32>(atomicLoad(&cell_accum_bits[nb * 2u]));
+    if (!(cap_i > 0.0) || !(cap_j > 0.0)) {
+      edge_conductance[e] = 0.0;
+      continue;
+    }
+    let diff = select(c - nb, nb - c, nb > c);
+    var g_face = 0.0;
+    if (diff == 1u) {
+      g_face = bparams.k_eff * (dy * dz) / max(dx, 1e-9);
+    } else if (diff == nx) {
+      g_face = bparams.k_eff * (dx * dz) / max(dy, 1e-9);
+    } else {
+      g_face = bparams.k_eff * (dx * dy) / max(dz, 1e-9);
+    }
+    edge_conductance[e] = g_face;
+  }
+}
+
+@compute @workgroup_size(64)
+fn it_bridge_g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let p = gid.x;
+  if (p >= bparams.particle_count) { return; }
+  let s_base = p * 8u;
+  let t_base = p * 12u;
+  let mass = p_state[s_base + 3u];
+  let status = p_thermo[t_base + 10u];
+  let temp_old = p_thermo[t_base + 2u];
+  if (!(mass > 0.0) || status >= 251.5 || !(temp_old > 0.0)) { return; }
+  let c = bridge_particle_cell(p_state[s_base], p_state[s_base + 1u], p_state[s_base + 2u]);
+  let cap_c = bitcast<f32>(atomicLoad(&cell_accum_bits[c * 2u]));
+  if (!(cap_c > 0.0)) { return; }
+  let q_total = solved_energy[c].y;
+  let dT_raw = q_total / cap_c;
+  let temp_new = clamp(temp_old + dT_raw, 1.0, 50000.0);
+  let dT_eff = temp_new - temp_old;
+  let u_old = p_state[s_base + 7u];
+  let u_new = max(0.0, u_old + bparams.cp_eff * dT_eff);
+  p_thermo[t_base + 2u] = temp_new;
+  p_state[s_base + 7u] = u_new;
+}
+`;
+
+const imexBridgeByDevice = new WeakMap();
+
+function buildRegularGridCsrTopology(nx, ny, nz) {
+  const n = nx * ny * nz;
+  const rowOffsets = new Uint32Array(n + 1);
+  const neighbors = [];
+  for (let iz = 0; iz < nz; iz += 1) {
+    for (let iy = 0; iy < ny; iy += 1) {
+      for (let ix = 0; ix < nx; ix += 1) {
+        const c = ix + nx * (iy + ny * iz);
+        rowOffsets[c] = neighbors.length;
+        if (ix > 0) neighbors.push(c - 1);
+        if (ix + 1 < nx) neighbors.push(c + 1);
+        if (iy > 0) neighbors.push(c - nx);
+        if (iy + 1 < ny) neighbors.push(c + nx);
+        if (iz > 0) neighbors.push(c - nx * ny);
+        if (iz + 1 < nz) neighbors.push(c + nx * ny);
+      }
+    }
+  }
+  rowOffsets[n] = neighbors.length;
+  return {
+    nodeCount: n,
+    edgeCount: Math.max(1, neighbors.length),
+    rowOffsets,
+    edgeNeighbors: new Uint32Array(neighbors.length ? neighbors : [0])
+  };
+}
+
+function getOrCreateImexBridgeState(device, nx, ny, nz) {
+  const key = unwrapWebGpuCacheDevice(device);
+  let devCache = imexBridgeByDevice.get(key);
+  if (!devCache) {
+    const module = device.createShaderModule({
+      label: 'ulg-sph-implicit-thermal-bridge',
+      code: SPH_IMPLICIT_THERMAL_BRIDGE_WGSL
+    });
+    const stage = globalThis.GPUShaderStage?.COMPUTE ?? 4;
+    const layout = device.createBindGroupLayout({
+      label: 'ulg-sph-implicit-thermal-bridge-bgl',
+      entries: [
+        { binding: 0, visibility: stage, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: stage, buffer: { type: 'storage' } },
+        { binding: 2, visibility: stage, buffer: { type: 'storage' } },
+        { binding: 3, visibility: stage, buffer: { type: 'storage' } },
+        { binding: 4, visibility: stage, buffer: { type: 'storage' } },
+        { binding: 5, visibility: stage, buffer: { type: 'read-only-storage' } },
+        { binding: 6, visibility: stage, buffer: { type: 'read-only-storage' } },
+        { binding: 7, visibility: stage, buffer: { type: 'storage' } },
+        { binding: 8, visibility: stage, buffer: { type: 'read-only-storage' } }
+      ]
+    });
+    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    const mk = (entryPoint) => device.createComputePipeline({
+      label: `ulg-it-bridge-${entryPoint}`,
+      layout: pipelineLayout,
+      compute: { module, entryPoint }
+    });
+    devCache = {
+      layout,
+      pipelines: {
+        it_bridge_clear: mk('it_bridge_clear'),
+        it_bridge_p2g: mk('it_bridge_p2g'),
+        it_bridge_build_nodes: mk('it_bridge_build_nodes'),
+        it_bridge_build_edges: mk('it_bridge_build_edges'),
+        it_bridge_g2p: mk('it_bridge_g2p')
+      },
+      grids: new Map()
+    };
+    imexBridgeByDevice.set(key, devCache);
+  }
+  const gridKey = `${nx}x${ny}x${nz}`;
+  let grid = devCache.grids.get(gridKey);
+  if (!grid) {
+    const csr = buildRegularGridCsrTopology(nx, ny, nz);
+    const n = csr.nodeCount;
+    const e = csr.edgeCount;
+    const mkBuf = (label, size, usage) => device.createBuffer({ label, size: Math.max(16, size), usage });
+    const rowOffsetsBuffer = mkBuf('ulg-it-bridge-row-offsets', csr.rowOffsets.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
+    const edgeNeighborsBuffer = mkBuf('ulg-it-bridge-edge-neighbors', csr.edgeNeighbors.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
+    device.queue.writeBuffer(rowOffsetsBuffer, 0, csr.rowOffsets);
+    device.queue.writeBuffer(edgeNeighborsBuffer, 0, csr.edgeNeighbors);
+    grid = {
+      nx, ny, nz,
+      nodeCount: n,
+      edgeCount: e,
+      paramsBuffer: mkBuf('ulg-it-bridge-params', 80, GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST),
+      cellAccumBits: mkBuf('ulg-it-bridge-accum-bits', n * 2 * 4, GPU_BUFFER_USAGE.STORAGE),
+      nodeStateBuffer: mkBuf('ulg-it-bridge-node-state', n * 16, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
+      rowOffsetsBuffer,
+      edgeNeighborsBuffer,
+      edgeConductanceBuffer: mkBuf('ulg-it-bridge-edge-g', e * 4, GPU_BUFFER_USAGE.STORAGE),
+      pcgWorkspace: {
+        nodeCapacity: n,
+        params: mkBuf('ulg-it-ws-params', 32, GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST),
+        pcgVecs: mkBuf('ulg-it-ws-pcg-vecs', n * 6 * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
+        outEnergy: mkBuf('ulg-it-ws-out-energy', n * 16, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
+        scalars: mkBuf('ulg-it-ws-scalars', 32, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC),
+        destroy() {}
+      },
+      bindGroups: new WeakMap()
+    };
+    devCache.grids.set(gridKey, grid);
+  }
+  return { layout: devCache.layout, pipelines: devCache.pipelines, grid };
+}
+
+/**
+ * Live GPU IMEX thermal PCG bridge encoded directly into an open SPH thermal
+ * command encoder (+0 extra queue.submit calls, zero steady-state buffer churn).
+ * Constructs a symmetric 3D cell thermal conductance graph from particle state,
+ * runs Jacobi-PCG + exact skew-symmetric pairwise flux projection, and scatters
+ * conservative energy deltas back onto particles.
+ */
+export function encodeSphImplicitThermalFromSphStep(device, encoder, {
+  outStateBuffer,
+  outThermoBuffer,
+  particleCount,
+  dtS,
+  gridSpacingM,
+  boxDimsM = [1, 1, 1],
+  wallRate = 0,
+  wallTemperaturesK = null,
+  ambientTemperatureK = 300,
+  ambientRadiationExchangeEnabled = false,
+  materialConductivityWPerMK = 50,
+  materialSpecificHeatJPerKgK = 1000,
+  maxFourierNumber = 0,
+  options = {}
+} = {}) {
+  const count = Math.trunc(Number(particleCount) || 0);
+  const dt = Number(dtS);
+  if (!device || !encoder || !outStateBuffer || !outThermoBuffer || count <= 0 || !(dt > 0)) {
+    return null;
+  }
+  const bx = Math.max(1e-4, Number(boxDimsM?.[0] ?? 1));
+  const by = Math.max(1e-4, Number(boxDimsM?.[1] ?? 1));
+  const bz = Math.max(1e-4, Number(boxDimsM?.[2] ?? 1));
+  const dx = Math.max(1e-4, Number(gridSpacingM) || Math.min(bx, by, bz) / 8);
+  const nx = Math.max(2, Math.min(16, Math.round(bx / dx)));
+  const ny = Math.max(2, Math.min(16, Math.round(by / dx)));
+  const nz = Math.max(2, Math.min(16, Math.round(bz / dx)));
+
+  const { layout, pipelines, grid } = getOrCreateImexBridgeState(device, nx, ny, nz);
+  const raw = new ArrayBuffer(80);
+  const u32 = new Uint32Array(raw);
+  const f32 = new Float32Array(raw);
+  u32[0] = count >>> 0;
+  u32[1] = nx >>> 0;
+  u32[2] = ny >>> 0;
+  u32[3] = nz >>> 0;
+  f32[4] = bx;
+  f32[5] = by;
+  f32[6] = bz;
+  f32[7] = Math.max(1e-4, Number(materialConductivityWPerMK) || 50);
+  f32[8] = Math.max(10, Number(materialSpecificHeatJPerKgK) || 1000);
+  f32[9] = Math.max(0, Number(wallRate) || 0);
+  f32[10] = Math.max(1, Number(ambientTemperatureK) || 300);
+  u32[11] = ambientRadiationExchangeEnabled ? 1 : 0;
+  f32[12] = Number(wallTemperaturesK?.xMin ?? wallTemperaturesK?.[0] ?? 0) || 0;
+  f32[13] = Number(wallTemperaturesK?.xMax ?? wallTemperaturesK?.[1] ?? 0) || 0;
+  f32[14] = Number(wallTemperaturesK?.yMin ?? wallTemperaturesK?.[2] ?? 0) || 0;
+  f32[15] = Number(wallTemperaturesK?.yMax ?? wallTemperaturesK?.[3] ?? 0) || 0;
+  f32[16] = Number(wallTemperaturesK?.zMin ?? wallTemperaturesK?.[4] ?? 0) || 0;
+  f32[17] = Number(wallTemperaturesK?.zMax ?? wallTemperaturesK?.[5] ?? 0) || 0;
+  device.queue.writeBuffer(grid.paramsBuffer, 0, raw);
+
+  let byThermo = grid.bindGroups.get(outStateBuffer);
+  if (!byThermo) {
+    byThermo = new WeakMap();
+    grid.bindGroups.set(outStateBuffer, byThermo);
+  }
+  let bg = byThermo.get(outThermoBuffer);
+  if (!bg) {
+    bg = device.createBindGroup({
+      label: 'ulg-sph-implicit-thermal-bridge-bg',
+      layout,
+      entries: [
+        { binding: 0, resource: { buffer: grid.paramsBuffer } },
+        { binding: 1, resource: { buffer: outStateBuffer } },
+        { binding: 2, resource: { buffer: outThermoBuffer } },
+        { binding: 3, resource: { buffer: grid.cellAccumBits } },
+        { binding: 4, resource: { buffer: grid.nodeStateBuffer } },
+        { binding: 5, resource: { buffer: grid.rowOffsetsBuffer } },
+        { binding: 6, resource: { buffer: grid.edgeNeighborsBuffer } },
+        { binding: 7, resource: { buffer: grid.edgeConductanceBuffer } },
+        { binding: 8, resource: { buffer: grid.pcgWorkspace.outEnergy } }
+      ]
+    });
+    byThermo.set(outThermoBuffer, bg);
+  }
+
+  const wgCells = Math.max(1, Math.ceil(grid.nodeCount / 64));
+  const wgParticles = Math.max(1, Math.ceil(count / 64));
+  const prepPass = encoder.beginComputePass({ label: 'ulg-sph-implicit-thermal-bridge-p2g' });
+  prepPass.setBindGroup(0, bg);
+  prepPass.setPipeline(pipelines.it_bridge_clear);
+  prepPass.dispatchWorkgroups(wgCells);
+  prepPass.setPipeline(pipelines.it_bridge_p2g);
+  prepPass.dispatchWorkgroups(wgParticles);
+  prepPass.setPipeline(pipelines.it_bridge_build_nodes);
+  prepPass.dispatchWorkgroups(wgCells);
+  prepPass.setPipeline(pipelines.it_bridge_build_edges);
+  prepPass.dispatchWorkgroups(wgCells);
+  prepPass.end();
+
+  const solved = encodeSphImplicitThermalSolve(device, encoder, {
+    nodeCount: grid.nodeCount,
+    edgeCount: grid.edgeCount,
+    dt,
+    options,
+    nodeStateBuffer: grid.nodeStateBuffer,
+    rowOffsetsBuffer: grid.rowOffsetsBuffer,
+    edgeNeighborsBuffer: grid.edgeNeighborsBuffer,
+    edgeConductanceBuffer: grid.edgeConductanceBuffer,
+    workspace: grid.pcgWorkspace
+  });
+
+  const applyPass = encoder.beginComputePass({ label: 'ulg-sph-implicit-thermal-bridge-g2p' });
+  applyPass.setBindGroup(0, bg);
+  applyPass.setPipeline(pipelines.it_bridge_g2p);
+  applyPass.dispatchWorkgroups(wgParticles);
+  applyPass.end();
+
+  const receipt = recordSphImplicitThermalDeviceExecution(device, {
+    passCount: 1,
+    mode: 'gpu-imex-pcg-1pass',
+    skewSymmetricFluxConserved: true,
+    nodeCount: grid.nodeCount,
+    edgeCount: grid.edgeCount,
+    iterations: solved.options.iterations,
+    theta: solved.options.theta,
+    maxFourierNumber: maxFourierNumber > 0 ? maxFourierNumber : solved.options.maxFourierNumber,
+    scalarsBuffer: solved.scalarsBuffer
+  });
+  return {
+    ...solved,
+    receipt,
+    gridDims: [nx, ny, nz]
+  };
 }

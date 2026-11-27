@@ -19,6 +19,10 @@ import {
   ULG_POLYTOPE_RECEIPT_BYTES,
   ULG_POLYTOPE_RECEIPT_WORDS
 } from '../material/foundationPolytopeAtlasGpuBridge.js';
+import {
+  encodeCompiledLawIrMechanicsIntoPass,
+  encodeCompiledLawIrReceiptCopy
+} from './compiledLawIrLiveRuntime.js';
 import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
@@ -1307,7 +1311,18 @@ fn eval_tier1_polytope_refresh(
       commitPass.dispatchWorkgroups(
         Math.ceil(sphParticleState.particleCount / 64)
       );
+      if (!exact) {
+        encodeCompiledLawIrMechanicsIntoPass(device, commitPass, {
+          mechanicsBuffer: outMechanicsBuffer,
+          particleCount: sphParticleState.particleCount,
+          generation: Math.max(1, Number(polytopeBinding?.generation ?? 1))
+        });
+      }
       commitPass.end();
+      if (!exact && (args.captureLawIrReceipt === true || globalThis.__ulgCaptureLawIrReceiptThisStep === true)) {
+        globalThis.__ulgCaptureLawIrReceiptThisStep = false;
+        encodeCompiledLawIrReceiptCopy(device, encoder);
+      }
       if (
         usePolytopeAtlas
         && polytopeBinding.missReadbackBuffer

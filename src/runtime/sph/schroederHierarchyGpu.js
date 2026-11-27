@@ -4296,6 +4296,173 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     let chainCapturedOpticsHook = null;
     let chainOpticsProducerStep = null;
     let chainOpticsSourceFamilyTransition = null;
+    let chainPhaseSlotRefinement = null;
+    const chainPhaseSlotTempArtifacts = [];
+    const chainCanPreparePhaseSlotRefinement = Boolean(
+      enablePhaseSlotRefinement === true
+      && !chainOpticsDeclared
+      && readbackMode === SCHROEDER_NO_FULL_READBACK_MODE
+      && spatialEpochGeneration?.ready === true
+      && levelAssignment
+      && chainThermalMaterialTable
+      && chainMechanicsMaterialTable
+      && phaseVolumeSplitMergeAdmission
+      && particleStorageAllocatorAdmission
+      && particleStorageSlotAssignmentAdmission
+      && particleStorageMaterializationAdmission
+      && (!sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload)
+        || sphGpuParticleUploadExactEnergyRows(sphParticleUpload))
+    );
+    if (chainCanPreparePhaseSlotRefinement) {
+      const chainExactMassRead = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload)
+        ? (residentStepOptions?.exactMassSourceRead ?? null)
+        : null;
+      const chainTargetAgg = await phaseVolumeTargetAggregateRunner({
+        device,
+        levelAssignment,
+        physicalGasGrouping: true,
+        physicalLiquidGrouping: Boolean(enableLiquidPhaseSlotRefinement),
+        sphParticleState,
+        sphParticleUpload,
+        baseGridSpacingM: plan.baseGridSpacingM,
+        minLevel: chainMinLevel,
+        maxLevel: chainMaxLevel,
+        targetSupportCells,
+        supportRadiusScale,
+        phaseVolumeExpandThreshold,
+        gasPhaseId,
+        aggregateEpoch: mergeEpoch,
+        stateFamilyId: 1,
+        retainAggregateBuffer: true,
+        readbackMode
+      });
+      if (chainTargetAgg) chainPhaseSlotTempArtifacts.push(chainTargetAgg);
+      const chainTargetAggNode = chainTargetAgg
+        ? await phaseVolumeTargetAggregateNodeReductionRunner({
+          device,
+          hierarchyAggregate: chainTargetAgg,
+          retainAggregateNodeBuffer: true,
+          readbackMode
+        })
+        : null;
+      if (chainTargetAggNode) chainPhaseSlotTempArtifacts.push(chainTargetAggNode);
+      const chainMigration = chainTargetAggNode
+        ? await phaseVolumeMigrationRunner({
+          device,
+          levelAssignment,
+          hierarchyAggregateNode: chainTargetAggNode,
+          sphParticleState,
+          sphParticleUpload,
+          interfaceRefinementFieldView: spatialEpochGeneration.mechanicsFieldView ?? null,
+          physicalLiquidGrouping: Boolean(enableLiquidPhaseSlotRefinement),
+          baseGridSpacingM: plan.baseGridSpacingM,
+          minLevel: chainMinLevel,
+          maxLevel: chainMaxLevel,
+          targetSupportCells,
+          supportRadiusScale,
+          phaseVolumeExpandThreshold,
+          coarsenLevelDeltaThreshold,
+          gasPhaseId,
+          migrationEpoch: mergeEpoch,
+          aggregateResidualTolerance,
+          retainMigrationBuffer: true,
+          readbackMode
+        })
+        : null;
+      if (chainMigration) chainPhaseSlotTempArtifacts.push(chainMigration);
+      const chainProposal = chainMigration
+        ? await phaseVolumeSplitMergeProposalRunner({
+          device,
+          hierarchyAggregateNode: chainTargetAggNode,
+          phaseVolumeMigration: chainMigration,
+          proposalEpoch: mergeEpoch,
+          stateFamilyId: 1,
+          retainProposalBuffer: true,
+          readbackMode
+        })
+        : null;
+      if (chainProposal) chainPhaseSlotTempArtifacts.push(chainProposal);
+      const chainApply = chainProposal
+        ? await phaseVolumeSplitMergeApplyRunner({
+          device,
+          phaseVolumeSplitMergeProposal: chainProposal,
+          phaseVolumeSplitMergeAdmission,
+          applyEpoch: mergeEpoch,
+          stateFamilyId: 1,
+          residualTolerance: aggregateResidualTolerance,
+          retainApplyBuffer: true,
+          readbackMode
+        })
+        : null;
+      if (chainApply) chainPhaseSlotTempArtifacts.push(chainApply);
+      const chainSpareScan = chainApply
+        ? runSchroederSplitSpareLineageScanWebGpu({
+          device,
+          sphParticleState,
+          mlsMpmParticleState,
+          sphParticleUpload,
+          mlsMpmParticleUpload,
+          epoch: mergeEpoch,
+          exactMassSourceRead: chainExactMassRead
+        })
+        : null;
+      if (chainSpareScan) chainPhaseSlotTempArtifacts.push(chainSpareScan);
+      const chainFreeList = chainSpareScan
+        ? createSchroederParticleStorageFreeListPlan({
+          freeListBuffer: chainSpareScan.freeListBuffer,
+          slotCapacity: chainSpareScan.spareCount,
+          availableSlotCount: chainSpareScan.spareCount,
+          maxSlotsPerRow: 8,
+          committedEpoch: mergeEpoch
+        })
+        : null;
+      const chainAlloc = chainApply && chainFreeList
+        ? await particleStorageAllocationRunner({
+          device,
+          phaseVolumeSplitMergeApply: chainApply,
+          particleStorageAllocatorAdmission,
+          preservePhaseSlots: true,
+          allocatorEpoch: mergeEpoch,
+          stateFamilyId: 1,
+          currentParticleCapacity: sphParticleState?.particleCount ?? chainApply.proposalRowCount,
+          requiredParticleCapacity:
+            particleStorageAllocatorAdmission?.requiredParticleCapacity
+            ?? particleStorageAllocatorAdmission?.particleCapacity
+            ?? sphParticleState?.particleCount
+            ?? chainApply.proposalRowCount,
+          targetStateFamilyMask: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK,
+          retainAllocationBuffer: true,
+          readbackMode
+        })
+        : null;
+      if (chainAlloc) chainPhaseSlotTempArtifacts.push(chainAlloc);
+      const chainSlotAssign = chainAlloc && chainFreeList
+        ? await particleStorageSlotAssignmentRunner({
+          device,
+          particleStorageAllocation: chainAlloc,
+          particleStorageFreeList: chainFreeList,
+          particleStorageSlotAssignmentAdmission,
+          assignmentEpoch: mergeEpoch,
+          stateFamilyId: 1,
+          targetStateFamilyMask: SCHROEDER_PARTICLE_STORAGE_TARGET_FAMILY_MASK,
+          retainSlotAssignmentBuffer: true,
+          readbackMode
+        })
+        : null;
+      if (chainSlotAssign) chainPhaseSlotTempArtifacts.push(chainSlotAssign);
+      if (
+        chainSpareScan
+        && chainSlotAssign?.particleStorageSlotAssignmentAdmissionApproved === true
+      ) {
+        chainPhaseSlotRefinement = {
+          sourceSphParticleUpload: sphParticleUpload,
+          sourceMlsMpmParticleUpload: mlsMpmParticleUpload,
+          particleStorageSlotAssignment: chainSlotAssign,
+          particleStorageMaterializationAdmission,
+          spareLineagesBuffer: chainSpareScan.spareLineagesBuffer
+        };
+      }
+    }
     const chainClosureOptions = {
       spatialReactionDiscoveryProposalRunner:
         residentStepOptions?.spatialReactionDiscoveryProposalRunner
@@ -4303,6 +4470,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       schroederLawQueue: null,
       schroederLawNeighborCandidates: null,
       reactionLawInputsQuarantined: true,
+      ...(chainPhaseSlotRefinement ? { phaseSlotRefinement: chainPhaseSlotRefinement } : {}),
       ...(residentStepOptions?.thermalStepOptions
         ? { thermalStepOptions: { ...residentStepOptions.thermalStepOptions } }
         : {}),
@@ -4339,48 +4507,67 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       1,
       Math.round(Number(chainBatchStepCount) || 1)
     );
-    const chainBatch = await runSchroederSpatialChainResidentBatchWebGpu({
-      stepCount: resolvedChainBatchStepCount,
-      device,
-      preferWebGpu: true,
-      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
-      schroederSpatialChain: {
-        mechanicsLevels: chainMechanicsLevels,
-        classificationPolicy: chainClassificationPolicy
-      },
-      forceInputs: chainForceInputs,
-      sphParticleState,
-      mlsMpmParticleState,
-      sphParticleUpload,
-      mlsMpmParticleUpload,
-      mechanicsMaterialTable: chainMechanicsMaterialTable,
-      thermalMaterialTable: chainThermalMaterialTable,
-      thermalResponseGraphUpload: chainThermalResponseGraphUpload,
-      mechanicsMaterialPhaseUpload: chainMechanicsMaterialPhaseUpload,
-      gasPressureMechanicsBoundaryEnabled: chainGasPressureEnabled,
-      ambientPressurePa: chainAmbientPressurePa,
-      gasPressureMechanicsScale: chainGasPressureScale,
-      mechanicsOptions: {
+    let chainBatch;
+    try {
+      chainBatch = await runSchroederSpatialChainResidentBatchWebGpu({
+        stepCount: resolvedChainBatchStepCount,
+        device,
+        preferWebGpu: true,
+        readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+        schroederSpatialChain: {
+          mechanicsLevels: chainMechanicsLevels,
+          classificationPolicy: chainClassificationPolicy
+        },
+        forceInputs: chainForceInputs,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        mechanicsMaterialTable: chainMechanicsMaterialTable,
+        thermalMaterialTable: chainThermalMaterialTable,
+        thermalResponseGraphUpload: chainThermalResponseGraphUpload,
+        mechanicsMaterialPhaseUpload: chainMechanicsMaterialPhaseUpload,
+        gasPressureMechanicsBoundaryEnabled: chainGasPressureEnabled,
         ambientPressurePa: chainAmbientPressurePa,
-        cleanupPassBudget: chainCleanupPassBudget,
-        jacobiIterations: chainJacobiIterations,
-        contactInnerRounds: chainContactInnerRounds,
-        contactCleanupPassBudget: chainCleanupPassBudget,
-        contactJacobiIterations: chainJacobiIterations,
-        contactSolverEnabled: residentStepOptions?.contactSolverEnabled !== false
-      },
-      phaseVolumeInterfaceTransportRequired: chainInterfaceTransportRequired,
-      sourceFamilyConsumerLease: levelAssignmentSourceFamilyLease ?? null,
-      prebuiltInitialSpatialEpoch:
-        spatialEpochGeneration?.ready === true && levelAssignment
-          ? { generation: spatialEpochGeneration, assignment: levelAssignment }
-          : null,
-      allowAdaptiveDtRefinement: true,
-      onAdaptiveRetryAttempt: () => {
-        chainCapturedOpticsHook = null;
-      },
-      closureOptions: chainClosureOptions
-    });
+        gasPressureMechanicsScale: chainGasPressureScale,
+        mechanicsOptions: {
+          ambientPressurePa: chainAmbientPressurePa,
+          cleanupPassBudget: chainCleanupPassBudget,
+          jacobiIterations: chainJacobiIterations,
+          contactInnerRounds: chainContactInnerRounds,
+          contactCleanupPassBudget: chainCleanupPassBudget,
+          contactJacobiIterations: chainJacobiIterations,
+          contactSolverEnabled: residentStepOptions?.contactSolverEnabled !== false
+        },
+        phaseVolumeInterfaceTransportRequired: chainInterfaceTransportRequired,
+        sourceFamilyConsumerLease: levelAssignmentSourceFamilyLease ?? null,
+        prebuiltInitialSpatialEpoch:
+          spatialEpochGeneration?.ready === true && levelAssignment
+            ? { generation: spatialEpochGeneration, assignment: levelAssignment }
+            : null,
+        allowAdaptiveDtRefinement: true,
+        onAdaptiveRetryAttempt: () => {
+          chainCapturedOpticsHook = null;
+        },
+        closureOptions: chainClosureOptions
+      });
+    } finally {
+      if (chainPhaseSlotTempArtifacts.length > 0) {
+        const done = typeof device?.queue?.onSubmittedWorkDone === 'function'
+          ? device.queue.onSubmittedWorkDone().catch(() => {})
+          : Promise.resolve();
+        done.finally(() => {
+          for (const art of chainPhaseSlotTempArtifacts) {
+            for (const fn of ['destroy', 'dispose', 'release']) {
+              if (typeof art?.[fn] === 'function') {
+                try { art[fn](); } catch { /* ignore */ }
+                break;
+              }
+            }
+          }
+        });
+      }
+    }
     const chainStep = chainBatch.finalStep;
     chainStep.nextSphParticleState = chainBatch.nextSphParticleState;
     chainStep.nextMlsMpmParticleState = chainBatch.nextMlsMpmParticleState;

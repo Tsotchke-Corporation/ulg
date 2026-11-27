@@ -850,3 +850,91 @@ export function createRepresentedVolumePhaseRetargetLawIr() {
     ])
   });
 }
+
+/**
+ * Multi-material / multi-phase continuum-safe declarative Law-IR kernel for live
+ * hot-loop execution: reads per-particle `eosModelId`, `solidFlag`, `effectiveBulkModulusPa`,
+ * and paired `(V0, J)` directly from `mls-mpm-mechanics`, evaluates Tait EOS + compile-time
+ * symbolic AD + zero-gauge cavitation floor strictly on live liquid rows while preserving
+ * solids, gases, and dormant spare lineages bit-identically.
+ */
+export function createPerParticleTaitEosCavitationLawIr() {
+  return Object.freeze({
+    schema: ULG_LAW_IR_SCHEMA,
+    id: 'per-particle-tait-eos-cavitation-ad',
+    entryPoint: 'eval_per_particle_tait_eos_cavitation',
+    params: Object.freeze(['gamma']),
+    uniformBinding: 0,
+    resourceBindingTable: Object.freeze({
+      'mls-mpm-mechanics': 1
+    }),
+    receiptBinding: 2,
+    descriptor: Object.freeze({
+      id: 'per-particle-tait-eos-cavitation-ad',
+      adapterMode: 'cell-local',
+      spatialAuthority: 'canonical-ss-epoch',
+      reads: Object.freeze(['mls-mpm-mechanics']),
+      writes: Object.freeze(['mls-mpm-mechanics']),
+      accumulates: Object.freeze([]),
+      pairedVolumeState: Object.freeze({ v0Lane: 'mls-mpm-mechanics.restVolumeM3', jLane: 'mls-mpm-mechanics.volumeRatioJ' }),
+      conservedQuantities: Object.freeze(['linear-momentum']),
+      validityDomain: Object.freeze({ jMin: 0.25, jMax: 4.0, cavitationFloorGaugePa: 0.0 }),
+      fallbackPolicy: 'strict'
+    }),
+    body: Object.freeze([
+      { op: 'letRepresentedVolume', name: 'vol', mode: 'fromMechanics' },
+      { op: 'let', name: 'j_raw', expr: { op: 'representedVolumeField', varName: 'vol', prop: 'j' } },
+      { op: 'let', name: 'eos_model', expr: { op: 'laneRead', resource: 'mls-mpm-mechanics', field: 'eosModelId' } },
+      { op: 'let', name: 'solid_flag', expr: { op: 'laneRead', resource: 'mls-mpm-mechanics', field: 'solidFlag' } },
+      { op: 'let', name: 'k0', expr: { op: 'laneRead', resource: 'mls-mpm-mechanics', field: 'effectiveBulkModulusPa' } },
+      { op: 'let', name: 'p_old', expr: { op: 'laneRead', resource: 'mls-mpm-mechanics', field: 'resolvedAbsolutePressurePa' } },
+      {
+        op: 'let',
+        name: 'is_tait_liquid',
+        expr: Object.freeze({
+          op: 'select',
+          cond: irBin(
+            'and',
+            irBin('and', irBin('gt', irVar('eos_model'), irConst(0.5)), irBin('lt', irVar('eos_model'), irConst(1.5))),
+            irBin('and', irBin('lt', irVar('solid_flag'), irConst(0.5)), irBin('gt', irVar('k0'), irConst(0)))
+          ),
+          whenTrue: irConst(1),
+          whenFalse: irConst(0)
+        })
+      },
+      {
+        op: 'let',
+        name: 'j_checked',
+        expr: Object.freeze({
+          op: 'select',
+          cond: irBin('gt', irVar('is_tait_liquid'), irConst(0.5)),
+          whenTrue: irVar('j_raw'),
+          whenFalse: irConst(1)
+        })
+      },
+      { op: 'envelopeCheck', expr: irVar('j_checked'), min: 0.25, max: 4.0, policy: 'strict' },
+      {
+        op: 'let',
+        name: 'p_raw',
+        expr: irBin(
+          'mul',
+          irBin('div', irVar('k0'), irParam('gamma')),
+          irBin('sub', irBin('pow', irBin('div', irConst(1), irVar('j_checked')), irParam('gamma')), irConst(1))
+        )
+      },
+      { op: 'letDerivative', name: 'dp_dj', ofVar: 'p_raw', wrtVar: 'j_checked' },
+      { op: 'let', name: 'p_gauge', expr: irBin('max', irConst(0), irVar('p_raw')) },
+      {
+        op: 'let',
+        name: 'p_out',
+        expr: Object.freeze({
+          op: 'select',
+          cond: irBin('gt', irVar('is_tait_liquid'), irConst(0.5)),
+          whenTrue: irVar('p_gauge'),
+          whenFalse: irVar('p_old')
+        })
+      },
+      { op: 'laneWrite', resource: 'mls-mpm-mechanics', field: 'resolvedAbsolutePressurePa', expr: irVar('p_out') }
+    ])
+  });
+}

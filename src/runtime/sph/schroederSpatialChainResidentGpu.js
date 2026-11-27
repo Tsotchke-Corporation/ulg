@@ -210,7 +210,11 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
           spatialEpochLaneId,
           spatialEpochDirectArenaCount,
           allowClockSegmentReset: index === 0 && allowAdaptiveDtRefinement,
-          device, closureOptions, retainForPublication: index === effectiveStepCount - 1
+          device,
+          closureOptions: isFirstAttempt && index === 0
+            ? closureOptions
+            : (closureOptions.phaseSlotRefinement ? { ...closureOptions, phaseSlotRefinement: null } : closureOptions),
+          retainForPublication: index === effectiveStepCount - 1
         });
         privateSteps.push(next);
         current = next;

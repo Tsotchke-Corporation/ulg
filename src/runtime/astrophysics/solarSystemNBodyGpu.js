@@ -76,7 +76,7 @@ export const REAL_SOLAR_SYSTEM_CATALOG = Object.freeze([
     aAu: 1.000001, e: 0.01671, incDeg: 0.000, omDeg: 0.0, wDeg: 102.94, m0Deg: 357.5,
     axialObliquityDeg: 23.44, spinAxisLonDeg: 90.0, rotationPeriodHr: 23.934, tidallyLocked: false, civTechK: 0.73,
     color0: [0.24, 0.48, 0.24], color1: [0.06, 0.26, 0.58], atm: 0.72, surfacePressurePa: 101325, tempK: 288,
-    centralP: 364e9, coreZ: 26, mantleZ: 14, surfZ: 29,
+    centralP: 364e9, coreZ: 26, mantleZ: 14, surfZ: 14,
     composition: 'Fe 32.1% · O 30.1% · Si 15.1% · Mg 13.9%'
   },
   {

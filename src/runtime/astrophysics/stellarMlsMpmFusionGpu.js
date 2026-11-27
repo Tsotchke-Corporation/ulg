@@ -652,8 +652,14 @@ export function buildStellarMlsMpmInitialParcels({
   const tSurf = Number.isFinite(Number(surfaceTempK)) ? Number(surfaceTempK) : prof.surfaceTempK;
   const xHInit = Number.isFinite(Number(xH0)) ? Number(xH0) : prof.xH0;
   const xHeInit = Number.isFinite(Number(xHe0)) ? Number(xHe0) : prof.xHe0;
-  const xCnoInit = Number.isFinite(Number(prof.xCno0)) ? Number(prof.xCno0) : ((Number(xZ0) || prof.xZ0) * 0.65);
-  const xAlphaFeInit = Number.isFinite(Number(prof.xAlphaFe0)) ? Number(prof.xAlphaFe0) : ((Number(xZ0) || prof.xZ0) * 0.35);
+  const hasCallerZ = Number.isFinite(Number(xZ0));
+  const effZInit = hasCallerZ ? Math.max(0.0, Number(xZ0)) : Number(prof.xZ0 ?? 0.014);
+  const xCnoInit = hasCallerZ
+    ? effZInit * 0.65
+    : (Number.isFinite(Number(prof.xCno0)) ? Number(prof.xCno0) : effZInit * 0.65);
+  const xAlphaFeInit = hasCallerZ
+    ? effZInit * 0.35
+    : (Number.isFinite(Number(prof.xAlphaFe0)) ? Number(prof.xAlphaFe0) : effZInit * 0.35);
   const cAmp = Number.isFinite(Number(convSeedAmp)) ? Number(convSeedAmp) : prof.convSeedAmp;
   const rand = mulberry32(seed);
   const data = new Float32Array(count * 16);

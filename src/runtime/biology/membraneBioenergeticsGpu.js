@@ -86,8 +86,10 @@ export function evaluateChemiosmoticBioenergetics({
   const R = 8.31446;
   const F = 96485.33;
   const leak = Math.max(0, Math.min(1, Number(uncouplerLeak) || 0));
-  const effPsi = Math.abs(Number(deltaPsiMv) || 0) * (1.0 - leak);
-  const effDph = Math.abs(Number(deltaPh) || 0) * (1.0 - leak);
+  // Signed Mitchell chemiosmotic proton-motive force: aiding gradients sum, opposing gradients cancel,
+  // and reversed gradients go negative (zero forward ATP synthesis!)
+  const effPsi = (Number(deltaPsiMv) || 0) * (1.0 - leak);
+  const effDph = (Number(deltaPh) || 0) * (1.0 - leak);
   const nernstFactorMv = (2.303 * R * T / F) * 1000.0; // ~18.6 mV at 94 K Titan, ~61.5 mV at 310 K Earth!
   const protonMotiveForceMv = effPsi + nernstFactorMv * effDph;
   const protonDriveKjMol = protonsPerAtp * (F * protonMotiveForceMv * 1e-6);

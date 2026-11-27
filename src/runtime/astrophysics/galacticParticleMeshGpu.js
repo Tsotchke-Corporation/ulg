@@ -70,6 +70,20 @@ struct GalParams {
 @group(0) @binding(1) var<storage, read_write> bodies: array<Body>;
 // Canonical Schroeder Scale-Atlas (SS) 3D hierarchical multipole self-gravity acceleration per body!
 @group(0) @binding(2) var<storage, read> ss_acc_phi: array<vec4<f32>>;
+// Race-free read-only snapshot of central SMBH / merger core states taken right before kick_and_drift!
+@group(0) @binding(3) var<storage, read_write> core_snap: array<Body>;
+
+@compute @workgroup_size(64)
+fn pm_snapshot_cores(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x == 0u) {
+    core_snap[0u] = bodies[0u];
+    if (params.smbh_idx_b > 0u && params.smbh_idx_b < params.count) {
+      core_snap[1u] = bodies[params.smbh_idx_b];
+    } else {
+      core_snap[1u] = Body(vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+  }
+}
 
 // First-principles Navarro-Frenk-White (NFW) cosmological Dark Matter Halo gravitational acceleration!
 // Produces genuine flat Rubin rotation curves V_c(r) ~ const so outer spiral disks stay tightly bound.
@@ -96,7 +110,7 @@ fn compute_total_gal_acc(i: u32, pos: vec3<f32>) -> vec3<f32> {
     // INCLUDING the central SMBH (i == 0u) so the SMBH remains naturally nested at the halo minimum!
     acc = acc + eval_nfw_dark_matter_acc(pos, params.dm_halo_mass, params.dm_scale_r, params.dm_conc, params.dm_soft2, params.gravity_g);
     if (i != 0u) {
-      let bh0 = bodies[0u].pos_mass;
+      let bh0 = core_snap[0u].pos_mass;
       if (bh0.w > 0.0) {
         let rel0 = pos - bh0.xyz;
         let d2 = dot(rel0, rel0);
@@ -107,17 +121,18 @@ fn compute_total_gal_acc(i: u32, pos: vec3<f32>) -> vec3<f32> {
       }
     }
   } else {
-    // BINARY MERGER: Two co-moving NFW Dark Matter Halos anchored at bh0 & bh1 with EXACT reciprocal
-    // halo-halo mutual gravity + mild Chandrasekhar dynamical friction between the two merging cores!
-    let bh0 = bodies[0u].pos_mass;
-    let bh1 = bodies[params.smbh_idx_b].pos_mass;
+    // BINARY MERGER: Two co-moving NFW Dark Matter Halos anchored at race-free snapshots bh0 & bh1
+    // with EXACT reciprocal halo-halo mutual gravity (shared r_s_mutual so F_01 = -F_10!) + momentum-conserving DF!
+    let bh0 = core_snap[0u].pos_mass;
+    let bh1 = core_snap[1u].pos_mass;
+    let rs_mutual = params.dm_scale_r * 0.95;
     if (i == 0u) {
       // Halo 0 core feels Halo 1 NFW attraction + mild dynamical friction when halos overlap
       let rel01 = pos - bh1.xyz;
-      acc = acc + eval_nfw_dark_matter_acc(rel01, params.dm_halo_mass_b, params.dm_scale_r * 0.90, params.dm_conc, params.dm_soft2 * 2.2, params.gravity_g);
+      acc = acc + eval_nfw_dark_matter_acc(rel01, params.dm_halo_mass_b, rs_mutual, params.dm_conc, params.dm_soft2 * 2.2, params.gravity_g);
       let d01 = length(rel01);
       if (d01 < 14.0) {
-        let v_rel = bodies[0u].vel_pop.xyz - bodies[params.smbh_idx_b].vel_pop.xyz;
+        let v_rel = core_snap[0u].vel_pop.xyz - core_snap[1u].vel_pop.xyz;
         let m_tot_h = max(1.0, params.dm_halo_mass + params.dm_halo_mass_b);
         let df_k = 0.065 * (1.0 - smoothstep(2.0, 14.0, d01)) * (params.dm_halo_mass_b / m_tot_h) * 2.0;
         acc = acc - v_rel * df_k;
@@ -125,10 +140,10 @@ fn compute_total_gal_acc(i: u32, pos: vec3<f32>) -> vec3<f32> {
     } else if (i == params.smbh_idx_b) {
       // Halo 1 core feels reciprocal Halo 0 NFW attraction + momentum-conserving dynamical friction
       let rel10 = pos - bh0.xyz;
-      acc = acc + eval_nfw_dark_matter_acc(rel10, params.dm_halo_mass, params.dm_scale_r, params.dm_conc, params.dm_soft2 * 2.2, params.gravity_g);
+      acc = acc + eval_nfw_dark_matter_acc(rel10, params.dm_halo_mass, rs_mutual, params.dm_conc, params.dm_soft2 * 2.2, params.gravity_g);
       let d10 = length(rel10);
       if (d10 < 14.0) {
-        let v_rel = bodies[params.smbh_idx_b].vel_pop.xyz - bodies[0u].vel_pop.xyz;
+        let v_rel = core_snap[1u].vel_pop.xyz - core_snap[0u].vel_pop.xyz;
         let m_tot_h = max(1.0, params.dm_halo_mass + params.dm_halo_mass_b);
         let df_k = 0.065 * (1.0 - smoothstep(2.0, 14.0, d10)) * (params.dm_halo_mass / m_tot_h) * 2.0;
         acc = acc - v_rel * df_k;
@@ -425,18 +440,26 @@ export function createGalacticParticleMeshEngineWebGpu({
     label: `${label}-ss-grav`
   });
 
+  const coreSnapBuf = device.createBuffer({
+    label: `${label}-core-snap`,
+    size: 64,
+    usage: GPU_BUF.STORAGE
+  });
+
   const bindings = [
     computeBufferBinding(0, 'uniform'),
     computeBufferBinding(1, 'storage'),
-    computeBufferBinding(2, 'read-only-storage')
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'storage')
   ];
   const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-galactic-ss-nfw-${entryPoint}.v3`,
+    cacheKey: `ulg-galactic-ss-nfw-${entryPoint}.v4`,
     label: `${label}-${entryPoint}`,
     code: galacticSsNfwWgsl,
     entryPoint,
     bindings
   });
+  const snapPipe = mkPipe('pm_snapshot_cores');
   const driftPipe = mkPipe('pm_drift_half');
   const kickPipe = mkPipe('pm_kick_and_drift');
   const calPipe = mkPipe('pm_calibrate_equilibrium');
@@ -448,7 +471,8 @@ export function createGalacticParticleMeshEngineWebGpu({
     entries: [
       { binding: 0, resource: { buffer: paramsBuf } },
       { binding: 1, resource: { buffer: bodiesBuf } },
-      { binding: 2, resource: { buffer: ssGravity.accPhiBuffer } }
+      { binding: 2, resource: { buffer: ssGravity.accPhiBuffer } },
+      { binding: 3, resource: { buffer: coreSnapBuf } }
     ]
   });
 
@@ -536,6 +560,8 @@ export function createGalacticParticleMeshEngineWebGpu({
     const pass = enc.beginComputePass({ label: `${label}-cal-pass` });
     ssGravity.encodeIntoPass(pass, { srcBuffer: bodiesBuf, count });
     pass.setBindGroup(0, bg);
+    pass.setPipeline(snapPipe.pipeline);
+    pass.dispatchWorkgroups(1);
     pass.setPipeline(calPipe.pipeline);
     pass.dispatchWorkgroups(wgBodies);
     // Re-reduce exact GPU V_com after calibration and subtract residual bulk momentum so COM never drifts!
@@ -567,9 +593,11 @@ export function createGalacticParticleMeshEngineWebGpu({
       pass.setBindGroup(0, bg);
       pass.setPipeline(driftPipe.pipeline);
       pass.dispatchWorkgroups(wgBodies);
-      // Refresh canonical 3D SS multipole self-gravity on EVERY symplectic substep!
+      // Refresh canonical 3D SS multipole self-gravity + race-free SMBH snapshot on EVERY symplectic substep!
       ssGravity.encodeIntoPass(pass, { srcBuffer: bodiesBuf, count });
       pass.setBindGroup(0, bg);
+      pass.setPipeline(snapPipe.pipeline);
+      pass.dispatchWorkgroups(1);
       pass.setPipeline(kickPipe.pipeline);
       pass.dispatchWorkgroups(wgBodies);
       stepIndex += 1;
@@ -628,7 +656,7 @@ export function createGalacticParticleMeshEngineWebGpu({
     if (disposed) return;
     disposed = true;
     try { ssGravity.destroy(); } catch {}
-    for (const b of [bodiesBuf, paramsBuf, stagingBuf, comReadBuf]) {
+    for (const b of [bodiesBuf, paramsBuf, stagingBuf, comReadBuf, coreSnapBuf]) {
       try { b.destroy(); } catch {}
     }
   }

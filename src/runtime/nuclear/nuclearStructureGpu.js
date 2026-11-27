@@ -280,6 +280,8 @@ export function computeAlphaWkbTunneling(Z, A, qAlphaMeV, { sampleCount = 64 } =
   if (!(qEff > 0.05)) {
     return Object.freeze({
       tunnelingAllowed: false,
+      rTouchFm,
+      muMeV,
       barrierHeightMeV,
       turningPointFm: Infinity,
       gamowExponent: Infinity,
@@ -306,6 +308,8 @@ export function computeAlphaWkbTunneling(Z, A, qAlphaMeV, { sampleCount = 64 } =
   const log10HalfLifeS = (gamow / Math.LN10) - Math.log10(Math.max(1e10, assaultHz)) + Math.log10(Math.LN2);
   return Object.freeze({
     tunnelingAllowed: true,
+    rTouchFm,
+    muMeV,
     barrierHeightMeV,
     turningPointFm: rTurnFm,
     gamowExponent: gamow,

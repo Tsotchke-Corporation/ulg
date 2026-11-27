@@ -2529,7 +2529,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       // as pressureless dust (J > 1 -> P_gauge = 0) while preserving exact cavitation cutoff!
       let cell_vol = params.grid_spacing_m * params.grid_spacing_m * params.grid_spacing_m;
       let rho_grid = sampled_grid_mass / max(cell_vol, 1.0e-12);
-      let rho0 = pos_mass.w / max(row4.y, 1.0e-12);
+      let rho0 = pos_mass.w / max(row4.w, 1.0e-12);
       if (rho_grid >= 0.85 * rho0 && rho0 > 1.0e-6) {
         let j_grid = g2p_clamp(rho0 / max(rho_grid, 1.0e-6), 0.95, 1.05);
         target_j = mix(target_j, j_grid, 0.06);

@@ -665,18 +665,31 @@ fn vs_main(in: VsIn, @builtin(instance_index) iid: u32) -> VsOut {
     culled.flora_info = vec3<f32>(0.0);
     return culled;
   }
-  let cy = cos(inst.rot_kind.x);
-  let sy = sin(inst.rot_kind.x);
-  let r_sc = inst.rot_kind.y * scale_h;
-  let lx = in.pos_part.x * r_sc;
-  let ly = in.pos_part.y * scale_h;
-  let lz = in.pos_part.z * r_sc;
-  let rx = lx * cy - lz * sy;
-  let rz = lx * sy + lz * cy;
   // Exact live per-frame TinyPlanet spherical curvature matching generate_surface_terrain_mesh to 0.000 m!
   // cam.extra1.w = 1/(2R), cam.extra2.w = focusX, cam.em_aux.z = focusZ
   let dx_c = inst.pos_scale.x - cam.extra2.w;
   let dz_c = inst.pos_scale.z - cam.em_aux.z;
+  // Smooth radial LOD scale-fade across [310 m .. 412 m] so flora/trees never pop instantaneously at the +-416 m grid edge!
+  let flora_dist = length(vec2<f32>(dx_c, dz_c));
+  let flora_lod_fade = 1.0 - smoothstep(310.0, 412.0, flora_dist);
+  if (flora_lod_fade <= 0.01) {
+    var culled_d: VsOut;
+    culled_d.pos = vec4<f32>(2.0, 2.0, -1.0, 1.0);
+    culled_d.world_pos = vec3<f32>(0.0);
+    culled_d.norm = vec3<f32>(0.0, 1.0, 0.0);
+    culled_d.col_emiss = vec4<f32>(0.0);
+    culled_d.flora_info = vec3<f32>(0.0);
+    return culled_d;
+  }
+  let eff_scale_h = scale_h * flora_lod_fade;
+  let cy = cos(inst.rot_kind.x);
+  let sy = sin(inst.rot_kind.x);
+  let r_sc = inst.rot_kind.y * eff_scale_h;
+  let lx = in.pos_part.x * r_sc;
+  let ly = in.pos_part.y * eff_scale_h;
+  let lz = in.pos_part.z * r_sc;
+  let rx = lx * cy - lz * sy;
+  let rz = lx * sy + lz * cy;
   let curv_drop = (dx_c * dx_c + dz_c * dz_c) * cam.extra1.w;
   let base_curved = vec3<f32>(inst.pos_scale.x, inst.pos_scale.y - curv_drop, inst.pos_scale.z);
   let wp = base_curved + vec3<f32>(rx, ly, rz);
@@ -720,6 +733,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   } else if (kind_id < 5.5 && in.col_emiss.w > 0.05) {
     // Subtle nocturnal bioluminescence on exotic cryo-solvent / coral / buoyant kelp flora!
     emiss = in.col_emiss.w * (0.35 + 0.95 * (1.0 - sun_day));
+  }
+  // Upward-facing seasonal winter snow caps on conifer boughs & deciduous canopies from live GPU snowWeight!
+  if (part_id >= 0.5 && part_id <= 1.5 && kind_id < 5.5 && in.flora_info.z > 0.02) {
+    let snow_top = clamp(in.flora_info.z * smoothstep(0.10, 0.72, n.y), 0.0, 1.0);
+    base_col = mix(base_col, vec3<f32>(0.92, 0.96, 1.00), snow_top * 0.78);
   }
 
   let star_rgb_f = cam.star_light.rgb;
@@ -874,6 +892,7 @@ fn vs_main(
   var shape = 0.0;
   var streak_axis = vec3<f32>(0.0);
   var streak_len = 0.0;
+  var cosmo_p_idx = iid;
 
   if (mode == 0u) {
     // L0: Full 93-Gly (28,500 Mpc, R_H = 46.5 Gly) Observable-Universe Lightcone Cosmic Web!
@@ -910,6 +929,7 @@ fn vs_main(
       tile_rot_id = select(c_raw, 0u, r2_t == 0);
       outer_tile_att = select(select(0.95, 0.86, r2_t >= 2), 0.72, r2_t >= 4);
     }
+    cosmo_p_idx = p_idx;
 
     let o = p_idx * 16u;
     var raw_p = vec3<f32>(raw_f32[o], raw_f32[o + 1u], raw_f32[o + 2u]);
@@ -1041,7 +1061,9 @@ fn vs_main(
       let ir_pierce = select(0.0, smoothstep(-6.05, -5.05, mid_log_lam), cam.em_sensor.z > 0.5);
       let r_gal = length(raw_p.xz);
       let arm_phi = atan2(raw_p.z, raw_p.x);
-      let dust_lane = smoothstep(0.58, 0.95, sin(arm_phi * 2.0 - log(max(0.4, r_gal)) * 4.4)) * smoothstep(1.1, 4.4, r_gal) * (1.0 - smoothstep(7.5, 11.8, r_gal)) * (1.0 - ir_pierce * 0.85);
+      // Gate thin-disk dust lane strictly on planar disk scale height so 3D spheroids/ellipticals/globulars never get fake spiral stripes!
+      let disk_flat = exp(-pow(raw_p.y / 1.35, 2.0));
+      let dust_lane = disk_flat * smoothstep(0.58, 0.95, sin(arm_phi * 2.0 - log(max(0.4, r_gal)) * 4.4)) * smoothstep(1.1, 4.4, r_gal) * (1.0 - smoothstep(7.5, 11.8, r_gal)) * (1.0 - ir_pierce * 0.85);
       col = mix(vec3<f32>(0.86, 0.91, 1.0), ob_blue, f) * (1.0 - dust_lane * 0.56);
       pt_size = pt_size_base * (0.44 + 0.74 * f);
       alpha = alpha_gain * (0.28 + 0.56 * f) * (1.0 - dust_lane * 0.36);
@@ -1633,7 +1655,7 @@ fn vs_main(
   var em_rad = 0.0;
   var em_gam = 0.0;
   if (mode == 0u) {
-    let o0 = iid * 16u;
+    let o0 = cosmo_p_idx * 16u;
     let is_bar = raw_f32[o0 + 12u] > 0.5;
     let rho0 = clamp(raw_f32[o0 + 7u], 0.04, 1.0);
     em_t = select(2.725, 4.0e6 * (0.2 + rho0), is_bar);
@@ -2435,6 +2457,9 @@ fn fs_main(in: VsOut) -> FsOut {
       let sea_lvl_base = select(-1.5, cam.sph_geo.w, has_ocean);
       let sea_lvl = select(-1.5, sea_lvl_base - (1.0 - rainout_f) * 0.62, has_ocean);
       elev_center = elev_sph;
+      // Live Milankovitch orbital subsolar declination sin(delta) in space mode -> asymmetric winter/summer hemisphere seasons!
+      let sin_decl = select(0.0, clamp(cam.em_aux.z, -0.98, 0.98), (u32(round(max(0.0, cam.em_aux.w))) & 2u) == 0u);
+      let lat_winter = -n_hit.y * sin_decl;
       // Subtle micro-grain (< 3%) ONLY for sub-texel rock crispness (never alters continents!)
       let micro_g = vnoise3(n_hit * 36.0 + seed_v) * 0.06;
       // Sharp tectonic crust-cooling magma fissures (high exponent = crisp thin lava veins between dark obsidian plates!)
@@ -2458,10 +2483,18 @@ fn fs_main(in: VsOut) -> FsOut {
           let lush_forest = mix(vec3<f32>(0.09, 0.34, 0.13), in.color0.rgb * 1.15, 0.38);
           let mtn_rock = mix(vec3<f32>(0.36, 0.33, 0.30), vec3<f32>(0.54, 0.51, 0.47), crust_comp);
           let raw_basalt = mix(vec3<f32>(0.10, 0.09, 0.10), vec3<f32>(0.24, 0.20, 0.18), crust_comp);
-          // Rich multi-biome vegetation driven directly by GPU Hadley-cell & watershed moisture (NASA Blue Marble palette!)
+          // Rich multi-biome vegetation driven directly by GPU Hadley-cell & watershed moisture + live orbital seasonal phenology!
           let humid_w = clamp(moist_r * 1.10 - h_land * 0.24 + micro_g * 0.7, 0.0, 1.0);
+          let mid_lat_s = smoothstep(0.18, 0.46, abs(n_hit.y)) * (1.0 - smoothstep(0.76, 0.94, abs(n_hit.y)));
+          let autumn_w = smoothstep(0.02, 0.22, lat_winter) * mid_lat_s;
+          let winter_dorm = smoothstep(0.18, 0.36, lat_winter) * mid_lat_s;
+          let lush_seasonal = mix(
+            mix(lush_forest, vec3<f32>(0.68, 0.42, 0.14), autumn_w * 0.62),
+            vec3<f32>(0.46, 0.42, 0.34),
+            winter_dorm * 0.55
+          );
           var bio_col = mix(desert, savanna, smoothstep(0.18, 0.42, humid_w));
-          bio_col = mix(bio_col, lush_forest, smoothstep(0.38, 0.68, humid_w));
+          bio_col = mix(bio_col, lush_seasonal, smoothstep(0.38, 0.68, humid_w));
           bio_col = mix(raw_basalt, bio_col, bio_cool_f);
           // Thin sandy coastline rim right above sea level
           surf = mix(mix(raw_basalt, sand_coast, rainout_f), bio_col, smoothstep(0.0, 0.045, h_land));
@@ -2469,7 +2502,9 @@ fn fs_main(in: VsOut) -> FsOut {
           let river_v = smoothstep(0.91, 0.96, moist_r) * (1.0 - smoothstep(0.14, 0.40, h_land)) * rainout_f;
           surf = mix(surf, vec3<f32>(0.04, 0.24, 0.48), river_v * 0.62);
           surf = mix(surf, mix(raw_basalt, mtn_rock, bio_cool_f), smoothstep(0.42, 0.74, h_land + crust_comp * 0.14));
-          surf = mix(surf, vec3<f32>(0.94, 0.97, 1.00), smoothstep(0.68, 0.88, h_land) * bio_cool_f);
+          let mtn_snow_lo = clamp(0.68 - lat_winter * 0.42, 0.28, 0.86);
+          let mtn_snow_hi = clamp(mtn_snow_lo + 0.18, 0.46, 0.99);
+          surf = mix(surf, vec3<f32>(0.94, 0.97, 1.00), smoothstep(mtn_snow_lo, mtn_snow_hi, h_land) * bio_cool_f);
           bump_strength = 0.42 + 0.68 * h_land;
           is_land_hab = (1.0 - smoothstep(0.30, 0.72, h_land)) * (1.0 - smoothstep(0.58, 0.84, abs(n_hit.y))) * bio_cool_f;
           // Active subduction/rift volcanic glow + continuous cooling crust magma fissures during late planetary genesis!
@@ -2481,8 +2516,11 @@ fn fs_main(in: VsOut) -> FsOut {
             em_temp_k = mix(em_temp_k, 1450.0, v_glow);
           }
         }
-        let polar = smoothstep(0.77, 0.91, abs(n_hit.y) + elev_sph * 0.08 + micro_g) * bio_cool_f;
-        surf = mix(surf, vec3<f32>(0.92, 0.96, 1.00), polar);
+        // Asymmetric hemisphere-opposite seasonal snow & sea-ice advance/retreat driven by live obliquity & orbital phase!
+        let polar = smoothstep(0.75, 0.89, abs(n_hit.y) + lat_winter * 0.68 + elev_sph * 0.09 + micro_g) * bio_cool_f;
+        let ice_col = select(vec3<f32>(0.93, 0.96, 1.00), vec3<f32>(0.82, 0.92, 0.98), elev_sph < sea_lvl);
+        surf = mix(surf, ice_col, polar);
+        water_spec = water_spec * (1.0 - polar * 0.85);
         bump_strength = bump_strength * (1.0 - polar * 0.72);
         is_land_hab = is_land_hab * (1.0 - polar);
       } else {
@@ -2494,8 +2532,9 @@ fn fs_main(in: VsOut) -> FsOut {
         surf = mix(surf, vec3<f32>(0.10, 0.08, 0.09), cool_heat * 0.65);
         let ejecta_bright = smoothstep(0.30, 0.44, crust_comp) * (1.0 - smoothstep(0.46, 0.62, crust_comp));
         surf = mix(surf, min(vec3<f32>(1.0), in.color0.rgb * 1.24), ejecta_bright * 0.32 * bio_cool_f);
-        let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + micro_g) * bio_cool_f;
-        surf = mix(surf, vec3<f32>(0.88, 0.91, 0.95), polar * select(0.0, 0.85, in.color1.w > 0.12));
+        // Dynamic CO2 / water-ice seasonal polar cap expansion & sublimation on atmosphere-bearing dry worlds (e.g. Mars!)
+        let polar = smoothstep(0.79, 0.91, abs(n_hit.y) + lat_winter * 0.62 + micro_g) * bio_cool_f;
+        surf = mix(surf, vec3<f32>(0.90, 0.92, 0.96), polar * select(0.0, 0.88, in.color1.w > 0.12));
         let is_sulfur_volc = (in.color0.r > 0.85 && in.color0.g > 0.72 && in.color0.b < 0.45 && in.color1.w < 0.05);
         let dry_cool_rift = cool_heat * clamp(cool_crack * 1.15 + max(0.0, thermal_v - 0.58) * 0.45, 0.0, 1.0);
         if (is_sulfur_volc) {
@@ -2518,6 +2557,8 @@ fn fs_main(in: VsOut) -> FsOut {
       let elev = fbm5(n_hit * 3.4 + seed_v);
       detail = fbm5(n_hit * 14.0 + seed_v * 1.7);
       elev_center = elev;
+      let sin_decl_fb = select(0.0, clamp(cam.em_aux.z, -0.98, 0.98), (u32(round(max(0.0, cam.em_aux.w))) & 2u) == 0u);
+      let lat_win_fb = -n_hit.y * sin_decl_fb;
       if (has_ocean) {
         let sea_lvl = 0.51;
         if (elev < sea_lvl) {
@@ -2536,14 +2577,14 @@ fn fs_main(in: VsOut) -> FsOut {
           bump_strength = 0.32 + 0.58 * h_land;
           is_land_hab = (1.0 - smoothstep(0.28, 0.68, h_land)) * (1.0 - smoothstep(0.55, 0.82, abs(n_hit.y)));
         }
-        let polar = smoothstep(0.76, 0.90, abs(n_hit.y) + (detail - 0.5) * 0.14);
+        let polar = smoothstep(0.75, 0.89, abs(n_hit.y) + lat_win_fb * 0.64 + (detail - 0.5) * 0.14);
         surf = mix(surf, vec3<f32>(0.90, 0.94, 0.98), polar);
         bump_strength = bump_strength * (1.0 - polar * 0.75);
         is_land_hab = is_land_hab * (1.0 - polar);
       } else {
         let crater = smoothstep(0.32, 0.68, detail);
         surf = mix(in.color1.rgb, in.color0.rgb, clamp(elev * 1.15 - 0.1 + 0.25 * crater, 0.0, 1.0));
-        let polar = smoothstep(0.84, 0.94, abs(n_hit.y) + (detail - 0.5) * 0.08);
+        let polar = smoothstep(0.80, 0.92, abs(n_hit.y) + lat_win_fb * 0.58 + (detail - 0.5) * 0.08);
         surf = mix(surf, vec3<f32>(0.88, 0.90, 0.94), polar * select(0.0, 0.85, in.color1.w > 0.12));
         let is_sulfur_volc = (in.color0.r > 0.85 && in.color0.g > 0.72 && in.color0.b < 0.45 && in.color1.w < 0.05);
         if (is_sulfur_volc) {
@@ -2860,8 +2901,9 @@ fn vs_main(
 
   let center = (p_raw.xyz - half_box) * world_scale;
   let raw_coord = p_raw.w;
-  // On frame 0 before first neighbor build raw_coord can be 0; treat 0 as crystal base color!
-  let coord_frac = select(clamp(raw_coord / ideal_coord, 0.0, 1.2), 1.0, raw_coord < 0.01);
+  // molecularDynamicsWebGpu.js ALREADY writes normalized coord_i / ideal_coord into pos.w (avoid double-division!);
+  // on frame 0 before first neighbor build raw_coord can be 0; treat 0 as crystal base color!
+  let coord_frac = select(clamp(raw_coord, 0.0, 1.2), 1.0, raw_coord < 0.01);
   let speed = length(v_raw.xyz);
   let heat = clamp(speed * 1.4, 0.0, 1.0);
 
@@ -3268,8 +3310,13 @@ fn sample_grid_trilin(p_unit: vec3<f32>, dim: u32, stride: u32, slot: u32) -> ve
   );
 }
 
+struct AstroVolOut {
+  @location(0) color: vec4<f32>,
+  @builtin(frag_depth) depth: f32,
+};
+
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> AstroVolOut {
   let dim = u32(round(cam.extra0.x));
   let box_r = max(0.05, cam.extra0.y);
   let mode = u32(round(cam.extra0.z));
@@ -3303,6 +3350,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
   let time_s = cam.extra2.z;
   var accum = vec3<f32>(0.0);
   var trans = 1.0;
+  var t_hit = 0.5 * (t_enter + t_exit);
 
   if (mode == 0u) {
     // MODE 0: LIVE 3D MLS-MPM STELLAR ENGINE — 100% PHYSICALLY OPAQUE OPTICAL PHOTOSPHERE +
@@ -3400,21 +3448,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
           surf_c = surf_c + vec3<f32>(0.45, 0.85, 1.0) * (sunspot * 1.45 + gran_hi * 0.45) * euv_band;
           surf_c = mix(surf_c, mix(vec3<f32>(0.65, 0.12, 0.02), vec3<f32>(1.0, 0.65, 0.20), gran_hi) * limb_dark, ir_band * 0.65);
           if (is_cut_face && r_norm < 0.88) {
-            // Concentric stellar interior: boiling outer convective zone -> warm radiative zone -> blazing nuclear core!
-            let rad_col = mix(phot_base * 1.35, vec3<f32>(1.0, 0.92, 0.72), 0.42) * (0.72 + 0.35 * n2);
+            // Live GPU-field-driven stellar interior: convective vigor from live |v_rad|, nuclear burning directly from live eps_tot!
+            // (Retires hardcoded r=0.68 tachocline & r=0.36 core rings that contradicted brown dwarfs & massive convective-core stars!)
+            let conv_activity = smoothstep(0.06, 0.42, abs(v_rad) + length(g0.xyz) * 0.14);
+            let burn_activity = smoothstep(0.04, 2.8, eps_tot + g2.z * 0.65);
+            let rad_col = mix(phot_base * 1.28, vec3<f32>(1.0, 0.92, 0.72), 0.38) * (0.72 + 0.35 * n2);
             let conv_col = mix(lane_col * 1.1, crest_col * 1.15, gran_hi);
-            var interior_c = mix(rad_col, conv_col, smoothstep(0.62, 0.76, r_norm));
-            interior_c = mix(interior_c, core_emit * 1.35, 1.0 - smoothstep(0.24, 0.44, r_norm));
-            // Crisp radial zone-boundary lines at core & tachocline!
-            let dtacho = (r_norm - 0.68) / 0.018;
-            let tacho = exp(-(dtacho * dtacho)) * 0.45;
-            let dcore = (r_norm - 0.36) / 0.018;
-            let core_ring = exp(-(dcore * dcore)) * 0.55;
-            surf_c = interior_c + vec3<f32>(1.0, 0.95, 0.85) * (tacho + core_ring);
+            var interior_c = mix(rad_col, conv_col, clamp(conv_activity * 0.85 + smoothstep(0.74, 0.88, r_norm) * 0.4, 0.0, 1.0));
+            let core_blend = clamp(max(burn_activity, (1.0 - smoothstep(0.16, 0.38, r_norm)) * (0.35 + 0.65 * burn_activity)), 0.0, 1.0);
+            surf_c = mix(interior_c, core_emit * 1.35, core_blend);
           }
           accum = accum + trans * surf_c;
           trans = 0.0;
           hit_opaque = true;
+          t_hit = t;
           break;
         } else {
           // X-RAY / GAMMA-RAY HIGH-ENERGY TRANSPARENCY: outer photosphere becomes ghostly optically thin
@@ -3468,7 +3515,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let alpha = select(clamp((1.0 - trans) * alpha_mul, 0.0, 0.98), alpha_mul, hit_opaque);
     if (alpha < 0.004) { discard; }
-    return vec4<f32>(accum * alpha_mul, alpha);
+    let hit_w0 = center_w + (ro + rd * t_hit) * box_r;
+    let clip0 = cam.view_proj * vec4<f32>(hit_w0, 1.0);
+    var out0: AstroVolOut;
+    out0.color = vec4<f32>(accum * alpha_mul, alpha);
+    out0.depth = eval_frag_depth(clip0, cam.em_aux.w);
+    return out0;
   } else {
     // MODE 1: MLS-MPM-GRADE HYBRID 3D DENSITY-ISOSURFACE + ∇ρ NORMALS + MOLTEN RIFT PROTOPLANET!
     // Solidifies cooling obsidian/silicate crust plates with crisp 3D finite-difference ∇ρ surface-normal lighting
@@ -3565,6 +3617,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         accum = accum + trans * iso_c;
         trans = 0.0;
         hit_solid = true;
+        t_hit = t;
         break;
       }
 
@@ -3584,7 +3637,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let alpha = select(clamp((1.0 - trans) * alpha_mul, 0.0, 0.98), alpha_mul, hit_solid);
     if (alpha < 0.004) { discard; }
-    return vec4<f32>(accum * alpha_mul, alpha);
+    // Pull depth gently forward by 0.045 unit-box radii so Mode 1 blends cleanly over its own
+    // LIT_SPHERE_WGSL crossfade while STILL being cleanly occluded by foreground rings, moons, or spacecraft!
+    let t_depth1 = max(0.0, t_hit - 0.045);
+    let hit_w1 = center_w + (ro + rd * t_depth1) * box_r;
+    let clip1 = cam.view_proj * vec4<f32>(hit_w1, 1.0);
+    var out1: AstroVolOut;
+    out1.color = vec4<f32>(accum * alpha_mul, alpha);
+    out1.depth = eval_frag_depth(clip1, cam.em_aux.w);
+    return out1;
   }
 }
 `;
@@ -3778,7 +3839,7 @@ export function createUlgUniversesRenderer(device, canvas) {
 
   // Dedicated 240-byte CameraUniforms buffers (incl. EM Sensor, Host Starlight Spectrum, SPH Geology & Space-Mesh!)
   const camBuf = device.createBuffer({ label: 'uv-cam-base', size: 240, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
-  const MAX_CLOUD_SLOTS = 4;
+  const MAX_CLOUD_SLOTS = 8;
   const cloudCamBufs = Array.from({ length: MAX_CLOUD_SLOTS }, (_, idx) => device.createBuffer({
     label: `uv-cam-cloud-${idx}`,
     size: 240,
@@ -4156,7 +4217,7 @@ export function createUlgUniversesRenderer(device, canvas) {
       }]
     },
     primitive: { topology: 'triangle-list' },
-    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'always' }
+    depthStencil: { format: depthFormat, depthWriteEnabled: false, depthCompare: 'greater-equal' }
   });
   const astroVolBgCache = new WeakMap();
   function getAstroVolBindGroup(gridBuf) {
@@ -4357,6 +4418,7 @@ export function createUlgUniversesRenderer(device, canvas) {
     lightDir = [0.6, 0.75, 0.55],
     lightIsPoint = false, // True in L2 multi-planet view -> `lightDir` holds live host-star world pos for radial per-body illumination!
     coolingHeat = 0.0,    // Continuous post-SPH planetary cooling ramp [0..1] for focused SPH globe
+    orbitalSeasonDecl = 0.0, // Live subsolar declination sin(delta) in [-1..+1] driving asymmetric L4/L2 orbital seasons!
     ringShadow = null,    // Optional `{ normal, rInRatio, rOutRatio, sphereIndex }` casting ring shadows onto focused ringed planet!
     starLight = [1.0, 0.97, 0.92, 1.0], // Physical linear host-star RGB + perceptual inverse-square irradiance gain!
     mdCloud = null,
@@ -4381,8 +4443,12 @@ export function createUlgUniversesRenderer(device, canvas) {
       : [-6.42, -6.12, 0.0, 1.0];
     const baseAmbientTempK = Number(surfaceScene?.ambientTempK ?? surfaceScene?.env?.tempK ?? mdCloud?.tempK ?? 288.0);
     // Enable unified Reversed Logarithmic Depth Buffer (0.1 m -> 10^14 m) on ALL surface passes (bit 1 = 2.0)!
-    const logDepthFlag = (surfaceScene && surfaceScene.env) ? 2.0 : 0.0;
-    const baseEmAux = [baseAmbientTempK, Number(surfaceScene?.eclipseFactor ?? 1.0), Number(surfaceScene?.env?.skyOpticalDepth ?? 0.0), logDepthFlag];
+    const isSurfaceMode = Boolean(surfaceScene && surfaceScene.env);
+    const logDepthFlag = isSurfaceMode ? 2.0 : 0.0;
+    const emAuxZ = isSurfaceMode
+      ? Number(surfaceScene?.env?.skyOpticalDepth ?? 0.0)
+      : Math.max(-0.985, Math.min(0.985, Number(orbitalSeasonDecl) || 0.0));
+    const baseEmAux = [baseAmbientTempK, Number(surfaceScene?.eclipseFactor ?? 1.0), emAuxZ, logDepthFlag];
 
     let sphereCount = 0;
     if (Array.isArray(spheres) && spheres.length > 0) {

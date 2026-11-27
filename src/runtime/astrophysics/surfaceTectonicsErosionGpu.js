@@ -59,7 +59,7 @@ export function registerSurfaceTectonicsModule(registry) {
     method: { model: 'surface-tectonics-erosion', version: 1 },
     kernel: {
       sourceModule: 'src/runtime/astrophysics/surfaceTectonicsErosionGpu.js',
-      entryPoint: 'erode_tectonic_step',
+      entryPoint: 'erode_tectonic_pass',
       workgroupSize: 64
     },
     parameterSchema: {
@@ -78,7 +78,7 @@ export function registerSurfaceTectonicsModule(registry) {
     lawAdapter: SURFACE_TECTONICS_LAW_ADAPTER,
     async stepCapsule(capsule, { createSimulationArtifact, device }) {
       const p = capsule.input?.parameters || {};
-      const session = createSurfaceTectonicsErosionSessionWebGpu(device, {
+      const session = createSurfaceTectonicsErosionGpu(device, {
         erosionPasses: Number(p.erosionPasses ?? 8)
       });
       try {

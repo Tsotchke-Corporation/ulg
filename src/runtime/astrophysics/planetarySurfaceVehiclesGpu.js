@@ -190,8 +190,12 @@ export function deriveSurfaceEnvironmentState(bodySpec = {}, {
     : 273.16;
   const hasLiquidWaterOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !isRogue
     && pressurePa >= 611 && tempK >= 255 && tempK <= tBoilWaterK && volatileFrac >= 0.012;
+  // Surface exotic oceans ONLY when the solvent is actually liquid at surface (T, P) — NEVER spawn a surface ocean from elevated 50 km cloud-deck aerosols (e.g. 737 K Venus H2SO4)!
   const hasExoticOcean = hasSolidCrust && !isMagmaOcean && !isCryoMoon && !hasLiquidWaterOcean
-    && (xenobiology.solvent === 'CH4' || xenobiology.solvent === 'NH3' || xenobiology.solvent === 'H2SO4');
+    && !xenobiology.isCloudDeckHabitat
+    && ((xenobiology.solvent === 'CH4' && tempK >= 82 && tempK <= 125)
+      || (xenobiology.solvent === 'NH3' && tempK >= 190 && tempK <= 265)
+      || (xenobiology.solvent === 'H2SO4' && tempK >= 283 && tempK <= 605));
   const hasLiquidOcean = hasLiquidWaterOcean || hasExoticOcean;
   const oceanRgb = xenobiology.oceanRgb || [0.04, 0.24, 0.46];
   const solventMeltTempK = xenobiology.solvent === 'CH4'
@@ -896,10 +900,13 @@ export function sampleLocalPlanetaryMaterial(env, vehiclePos = [0, 0, 0], {
   if (env.hasLiquidOcean) {
     const xeno = env.xenobiology;
     const isAlien = Boolean(xeno && (xeno.solvent !== 'H2O' || xeno.biosphereViability >= 0.25));
+    const domFlora = xeno?.species?.find((s) => s.kingdom === 'flora')?.speciesName || xeno?.floraMorphology || `${xeno?.solvent || 'H₂O'} Photosynthetic Flora`;
+    const memLabel = xeno?.membraneType || xeno?.membraneClass || 'Organic Biopolymer / Amphiphile';
+    const metabLabel = xeno?.redoxSummary || xeno?.metabolism || xeno?.biosignatureGas || 'Chemo-Phototrophic Metabolism';
     return mkSample({
       id: isAlien ? 'alien-biosphere-flora' : 'verdant-organic-loam',
       name: xeno?.biosphereViability >= 0.25
-        ? `${xeno.floraMorphology} (${xeno.solventLabel} Biosphere)`
+        ? `${domFlora} (${xeno.solventLabel || xeno.solvent} Biosphere)`
         : 'Organic Humus & Silicate Loam (CH₄ · SiO₂ · H₂O)',
       shortLabel: xeno?.biosphereViability >= 0.25 ? `${xeno.solvent} Flora` : 'Organic Loam',
       phasePreset: 'solid',
@@ -910,13 +917,13 @@ export function sampleLocalPlanetaryMaterial(env, vehiclePos = [0, 0, 0], {
       xenoProfile: xeno,
       xenoUrl: xeno ? buildLifeLabXenobiologyUrl(xeno) : null,
       compounds: [
-        { id: 'CH4', formula: xeno?.solvent === 'CH4' ? 'C₂H₃N (Azotosome)' : 'C₆H₁₀O₅', name: xeno?.membraneClass || 'Organic Biopolymer / Cellulose', moleFrac: 0.42, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1, 8] },
+        { id: 'CH4', formula: xeno?.solvent === 'CH4' ? 'C₂H₃N (Azotosome)' : 'C₆H₁₀O₅', name: memLabel, moleFrac: 0.42, primaryZ: 6, moleculeKey: 'CH4', elements: [6, 1, 8] },
         { id: 'SiO2', formula: 'SiO₂', name: 'Clay & Quartz Soil', moleFrac: 0.36, primaryZ: 14, moleculeKey: 'SiO2', elements: [14, 8] },
-        { id: 'H2O', formula: xeno?.solventLabel || 'H₂O', name: 'Solvent Pore Fluid', moleFrac: 0.14, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
+        { id: 'H2O', formula: xeno?.solventLabel || xeno?.solvent || 'H₂O', name: 'Solvent Pore Fluid', moleFrac: 0.14, primaryZ: 8, moleculeKey: 'H2O', elements: [8, 1] },
         { id: 'NH3', formula: 'NO₃⁻/NH₃', name: 'Fixed Nitrogen', moleFrac: 0.08, primaryZ: 7, moleculeKey: 'NH3', elements: [7, 1, 8] }
       ],
       summary: xeno
-        ? `${xeno.floraMorphology} · ${xeno.metabolism} · ${xeno.civStage} sampled at ${locStr}`
+        ? `${domFlora} · ${metabLabel} · ${xeno.civStage || 'Pre-Technological'} sampled at ${locStr}`
         : `Temperate organic-bearing lowland soil sampled at ${locStr}`
     });
   }
@@ -1135,8 +1142,12 @@ fn sample_deform_field(x: f32, z: f32) -> vec4<f32> {
 
 fn sample_tectonic_field(x: f32, z: f32) -> vec4<f32> {
   let span = max(1000.0, params.climate_aux.z);
-  let u = clamp((x / span) + 0.5, 0.0, 0.9999);
-  let v = clamp((z / span) + 0.5, 0.0, 0.9999);
+  let u_raw = (x / span) + 0.5;
+  let v_raw = (z / span) + 0.5;
+  // Seamless C^0 mirror-reflected continuation beyond the +-1.4 km core SPH patch so 94.7% of the
+  // +-6 km horizon renders natural rolling coastlines & mountains instead of hard-clamped cardinal ramp walls!
+  let u = clamp(1.0 - abs(fract(u_raw * 0.5) * 2.0 - 1.0), 0.0, 0.9999);
+  let v = clamp(1.0 - abs(fract(v_raw * 0.5) * 2.0 - 1.0), 0.0, 0.9999);
   let gf = vec2<f32>(u * 255.0, v * 255.0);
   let i0 = vec2<u32>(u32(floor(gf.x)), u32(floor(gf.y)));
   let i1 = vec2<u32>(min(255u, i0.x + 1u), min(255u, i0.y + 1u));
@@ -1238,20 +1249,24 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
   var n_vec = normalize(vec3<f32>(hL - hR, 2.0 * eps, hD - hU));
 
   var wave_foam = 0.0;
+  let inner_half_m = f32(n - 1u) * 0.5 * params.cell_size;
   if (is_ocean && ice_cover < 0.96) {
     let ow = sample_ocean_field(wx, wz);
-    let wave_fade = 1.0 - smoothstep(420.0, 1800.0, length(vec2<f32>(wx - params.col0_pad.w, wz - params.col1_pad.w)));
+    // Fade vertex ocean wave displacement cleanly before inner clipmap border (eliminates 95 m outer-ring Nyquist aliasing!)
+    let wave_fade = 1.0 - smoothstep(inner_half_m * 0.52, inner_half_m * 0.92, length(vec2<f32>(wx - params.col0_pad.w, wz - params.col1_pad.w)));
     let wave_amp = (1.0 - ice_cover) * wave_fade;
     h = h + ow.x * wave_amp * 0.85;
     n_vec = normalize(vec3<f32>(-ow.y * wave_amp * 2.2, 1.0, -ow.z * wave_amp * 2.2));
     wave_foam = ow.w * wave_amp;
   }
 
-  // Subtle seam drop on outer clipmap overlap collar so inner high-detail ring always wins cleanly!
+  // Parametric clipmap overlap collar derived directly from actual inner_half_m (eliminates +-380 m mobile sky trench crack!)
   let dx = wx - params.col0_pad.w;
   let dz = wz - params.col1_pad.w;
   let r2 = dx * dx + dz * dz;
-  let collar_drop = select(0.0, select(0.0, 1.8, max(abs(wx - params.center_x), abs(wz - params.center_z)) < 580.0), is_outer);
+  let max_inner_d = max(abs(wx - params.center_x), abs(wz - params.center_z));
+  let collar_lim = max(80.0, inner_half_m - params.cell_size * 2.5);
+  let collar_drop = select(0.0, 1.4 * (1.0 - smoothstep(collar_lim - params.cell_size * 3.0, collar_lim, max_inner_d)), is_outer);
   let y_curved = h - r2 * params.curv_inv_2r - collar_drop;
 
   let tect = sample_tectonic_field(wx, wz);
@@ -1285,6 +1300,12 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
       let rift = smoothstep(0.72, 0.96, tect.z);
       col = mix(col, vec3<f32>(0.96, 0.36, 0.10), rift * 0.48);
       emiss = max(emiss, rift * 0.55);
+    }
+    // Seasonal CO2 / water-ice frost deposition on cold ridges & winter craters of atmosphere-bearing dry worlds (e.g. Mars!)
+    if (params.rho_atm > 0.002) {
+      let dry_frost = smoothstep(params.climate_aux.x - 4.0, params.climate_aux.x + 12.0, h) * (1.0 - smoothstep(0.35, 0.75, slope));
+      col = mix(col, vec3<f32>(0.90, 0.93, 0.97), dry_frost * 0.78);
+      if (dry_frost > 0.45) { tag = 1.0; }
     }
   }
 
@@ -1324,8 +1345,9 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
     let coast = 1.0 - smoothstep(params.sea_level + 0.05, params.sea_level + 1.4, h);
     let snow = smoothstep(params.climate_aux.x - 4.0, params.climate_aux.x + 12.0, h);
     let moisture = tect.z;
-    // Rivers appear ONLY in concentrated valley drainage channels (above background rainfall equilibrium ~1.2!)
-    let river = smoothstep(1.48, 2.18, tect.y) * (1.0 - smoothstep(0.05, 0.15, slope)) * (1.0 - snow * 0.85);
+    // Rivers appear ONLY in concentrated valley drainage channels (SPH channels live in [0..1], Voronoi in [1.48..2.18]!)
+    let riv_raw = select(smoothstep(1.48, 2.18, tect.y), smoothstep(0.66, 0.90, tect.y), has_sph);
+    let river = riv_raw * (1.0 - smoothstep(0.05, 0.22, slope)) * (1.0 - snow * 0.85);
     let autumn = clamp(params.clip_aux.w, 0.0, 1.0);
     let dry_col = vec3<f32>(0.62, 0.52, 0.34);
     let lush_col = mix(vec3<f32>(0.14, 0.44, 0.18), vec3<f32>(0.50, 0.36, 0.15), autumn * 0.55);
@@ -1360,7 +1382,8 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
   let ring_off = gid.z * n * n;
   let idx = ring_off + gid.y * n + gid.x;
   var v: TerrainVert;
-  v.pos_curv = vec4<f32>(wx, y_curved, wz, h);
+  // Pass height above active sea level (on dry/airless worlds sea_level = -999 -> h - sea_level >> 100, gating wet_shore cleanly to 0!)
+  v.pos_curv = vec4<f32>(wx, y_curved, wz, h - params.sea_level);
   v.norm_tag = vec4<f32>(n_vec, tag);
   v.col_emiss = vec4<f32>(col, emiss);
   terrain_verts[idx] = v;
@@ -1458,17 +1481,26 @@ fn step_surface_plume_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
           p.col_life = vec4<f32>(mix(params.col0_pad.rgb, vec3<f32>(0.85, 0.92, 1.0), 0.35), 0.65 + 0.35 * r_rand);
           p.meta0 = vec4<f32>(0.32 + 0.22 * r_rand, 0.15, seed, 1.0);
           live = 1.0;
-        } else if ((i & 3u) == 0u) {
-          // Sparse fine wind-blown atmospheric dust wisps
-          let rx = (fract(seed * 13.7 + f32(params.step_index) * 0.01) - 0.5) * 64.0;
-          let rz = (fract(seed * 29.3 + f32(params.step_index) * 0.017) - 0.5) * 64.0;
-          let ry = 0.8 + r_rand * 12.0;
+        } else if ((i & 3u) == 0u || params.climate_aux.x < 12.0) {
+          // Winter snowfall flurries when snowline drops below local terrain (< 12 m), otherwise sparse wind-blown dust wisps!
+          let is_snowfall = params.climate_aux.x < 12.0 && params.rho_atm > 0.05;
+          let rx = (fract(seed * 13.7 + f32(params.step_index) * 0.01) - 0.5) * select(64.0, 96.0, is_snowfall);
+          let rz = (fract(seed * 29.3 + f32(params.step_index) * 0.017) - 0.5) * select(64.0, 96.0, is_snowfall);
+          let ry = select(0.8 + r_rand * 12.0, 4.0 + r_rand * 28.0, is_snowfall);
           let bx = params.col0_pad.w + rx;
           let bz = params.col1_pad.w + rz;
           pos = vec3<f32>(bx, eval_height(bx, bz) + ry, bz);
-          vel = vec3<f32>(params.wind_x, (r_rand - 0.5) * 0.4, params.wind_z);
-          p.col_life = vec4<f32>(mix(params.col0_pad.rgb, vec3<f32>(0.92, 0.88, 0.82), 0.45), 1.8 + 1.0 * r_rand);
-          p.meta0 = vec4<f32>(0.11 + 0.09 * r_rand, 0.1, seed, 1.0);
+          vel = select(
+            vec3<f32>(params.wind_x, (r_rand - 0.5) * 0.4, params.wind_z),
+            vec3<f32>(params.wind_x * 0.45 + (r_rand - 0.5) * 1.4, -1.6 - r_rand * 1.6, params.wind_z * 0.45 + (cos(ang) - 0.5) * 1.4),
+            is_snowfall
+          );
+          p.col_life = select(
+            vec4<f32>(mix(params.col0_pad.rgb, vec3<f32>(0.92, 0.88, 0.82), 0.45), 1.8 + 1.0 * r_rand),
+            vec4<f32>(0.94, 0.97, 1.00, 2.8 + 1.8 * r_rand),
+            is_snowfall
+          );
+          p.meta0 = vec4<f32>(select(0.11 + 0.09 * r_rand, 0.16 + 0.14 * r_rand, is_snowfall), 0.1, seed, 1.0);
           live = 1.0;
         } else {
           live = 0.0;
@@ -3278,7 +3310,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       windX,
       windZ,
       iceCoverFrac: liveSeaIceFrac,
-      latRad: Number(climate?.latitudeRad) || 0.55
+      latRad: Number.isFinite(Number(climate?.latitudeRad)) ? Number(climate.latitudeRad) : 0.55
     });
     floraGpu.encodePlacementIfNeeded(enc, {
       centerX: snapX,

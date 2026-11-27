@@ -54,6 +54,7 @@ import { createUlgUniversesRenderer } from './ulgUniversesRenderer.js';
 import {
   buildLiveSurfaceCelestialSky,
   buildOrbitalCfdStreamlines,
+  computeOrbitalSeasonalState,
   sampleOrbitalBodySurfaceAtNormal
 } from '../runtime/astrophysics/surfaceCelestialSkyAndSeasons.js';
 import {
@@ -740,8 +741,9 @@ export async function mountUlgUniversesDemo() {
   }
   syncEmSensorUi();
 
-  const SURFACE_TIMEWARP_STEPS = [1, 1e3, 1e5, 1e6];
+  const SURFACE_TIMEWARP_STEPS = [1, 1e3, 1e5, 1e6, 1e7];
   function formatSurfaceTimeWarp(w) {
+    if (w >= 1e7) return '10⁷× SEASONS';
     if (w >= 1e6) return '10⁶× SKY';
     if (w >= 1e5) return '10⁵× SKY';
     if (w >= 1e3) return '10³× SKY';
@@ -6065,7 +6067,13 @@ export async function mountUlgUniversesDemo() {
       }
     } else if (currentLevel === 2 || currentLevel === 4) {
       ctxType = 'planet';
-      const isGiant = Boolean(focusedSpec && (focusedSpec.kind === 2 || focusedSpec.isGasGiant || (Number(focusedSpec.radiusKm) || 0) >= 16000));
+      const isGiant = Boolean(focusedSpec && (
+        focusedSpec.isGasGiant
+        || focusedSpec.planetClass === 'gas-giant'
+        || focusedSpec.planetClass === 'hot-jupiter'
+        || focusedSpec.planetClass === 'ice-giant'
+        || (Number(focusedSpec.radiusKm) || 0) >= 16000
+      ));
       const rs = lastOrbitalRemoteSensing;
       badge = rs?.biosignatureBadge || (isGiant ? '🌀 GAS GIANT WORLD' : '🌍 PLANETARY WORLD');
       headline = focusedSpec?.name || target?.name || 'Planet';
@@ -6385,6 +6393,7 @@ export async function mountUlgUniversesDemo() {
     let lightDir = [0.62, 0.55, 0.55];
     let atmoEm = null;
     let sphGeology = null;
+    let orbitalSeasonDecl = 0.0;
     let mdCloud = null;
     let nuclearVol = null;
     let astroVol = null;
@@ -6918,21 +6927,35 @@ export async function mountUlgUniversesDemo() {
           isRogue: false,
           stellarModeHint: physics.stellarMode
         });
+        let orbitalSeasonState = null;
         if (!isFocusStar) {
           const dxS = sunSt.posAu[0] - focusSt.posAu[0];
           const dyS = sunSt.posAu[1] - focusSt.posAu[1];
           const dzS = sunSt.posAu[2] - focusSt.posAu[2];
           const distToStar0Au = Math.max(0.012, Math.hypot(dxS, dyS, dzS));
+          const toStarUnit = vec3Norm([dxS, dyS, dzS]);
           if (currentLevel === 4 && physics.planetaryMode === 'eyeball-locked') {
             lightDir = [1.0, 0.0, 0.0];
+            orbitalSeasonState = computeOrbitalSeasonalState({ bodySpec: { ...focusSpec, tidallyLocked: true }, toStarUnit });
           } else if (currentLevel === 4 && physics.planetaryMode === 'rogue') {
             lightDir = [0.15, 0.96, 0.22];
+            orbitalSeasonState = { obliquityDeg: 0, sinDecl: 0, declDeg: 0, seasonLabel: 'Rogue', tiltedLightDir: lightDir };
           } else {
-            lightDir = vec3Norm([dxS, dyS, dzS]);
+            orbitalSeasonState = computeOrbitalSeasonalState({ bodySpec: focusSpec, toStarUnit });
+            // Smoothly tilt orbital sunlight into the focused planet's spin-axis frame at L4 so axial obliquity
+            // physically tilts the day/night terminator (midnight sun at summer pole, polar night at winter pole!)
+            const oblBlend = smoothstep(10.2, 8.8, span);
+            lightDir = vec3Norm([
+              toStarUnit[0] * (1 - oblBlend) + orbitalSeasonState.tiltedLightDir[0] * oblBlend,
+              toStarUnit[1] * (1 - oblBlend) + orbitalSeasonState.tiltedLightDir[1] * oblBlend,
+              toStarUnit[2] * (1 - oblBlend) + orbitalSeasonState.tiltedLightDir[2] * oblBlend
+            ]);
           }
-          // At system overview scale (`L2`), use mild mid-system flux so all planets stay legible while
-          // still reflecting the real host star's spectrum; at L4 planetary orbit use EXACT inverse-square flux at this planet's AU!
-          const effDistAu = span < 9.2 ? distToStar0Au : Math.max(0.45, Math.min(2.8, distToStar0Au));
+          orbitalSeasonDecl = Number(orbitalSeasonState?.sinDecl) || 0.0;
+          // Smooth irradiance ramp from mild L2 system overview -> exact 1/r^2 L4 planetary flux (ZERO 10x-100x snap at span=9.2!)
+          const l4IrradBlend = smoothstep(10.2, 8.8, span);
+          const l2ClampedDistAu = Math.max(0.45, Math.min(2.8, distToStar0Au));
+          const effDistAu = l2ClampedDistAu * (1 - l4IrradBlend) + distToStar0Au * l4IrradBlend;
           activeStarLight = computeHostStarIllumination({
             starSpec: star0Spec,
             bodySpec: focusSpec,
@@ -6979,7 +7002,8 @@ export async function mountUlgUniversesDemo() {
           // Hide focused star's opaque photosphere at L3 (`span <= 9.9`) so live 3D MHD / Fusion Plasma shines unobstructed!
           if (i === focusIdx && bodyIsStar && span <= 9.9) continue;
 
-          const isFocusL4 = (!bodyIsStar && span < 9.5 && (i === physics.planetaryBodyIndex || i === focusIdx));
+          const isFocusL4 = (!bodyIsStar && span < 10.4 && (i === physics.planetaryBodyIndex || i === focusIdx));
+          const l4DispBlend = smoothstep(10.4, 9.1, span);
           if (isFocusL4) {
             lastL4GlobeMeta = {
               center: [wx, wy, wz],
@@ -7058,13 +7082,13 @@ export async function mountUlgUniversesDemo() {
                 const gp = sphSess.genesisParams;
                 const rKm = Number(spec.radiusKm) || 6371;
                 if (gp?.isMinorBody || spec.isMinorBody || spec.isComet || rKm < 550) {
-                  bodyShapeFlags = 0.38; // Unmistakable Rosetta 67P / Halley 2:1 bilobed contact-binary 3D comet/asteroid!
+                  bodyShapeFlags = 0.38 * l4DispBlend; // Smoothly morph into Rosetta 67P / Halley 2:1 bilobed contact-binary 3D comet/asteroid!
                 } else if (rKm < 1250) {
-                  bodyShapeFlags = 0.048; // Medium icy/rocky moon with prominent 3D impact basins & ridges!
+                  bodyShapeFlags = 0.048 * l4DispBlend; // Medium icy/rocky moon with prominent 3D impact basins & ridges!
                 } else if (gp?.hasOcean) {
-                  bodyShapeFlags = 0.014; // Hydrostatic ocean planet: smooth geoid sea + realistic 3D mountain chains!
+                  bodyShapeFlags = 0.014 * l4DispBlend; // Hydrostatic ocean planet: smooth geoid sea + realistic 3D mountain chains!
                 } else {
-                  bodyShapeFlags = 0.022; // Hydrostatic rocky planet: realistic 3D crater rims, canyons & cordilleras!
+                  bodyShapeFlags = 0.022 * l4DispBlend; // Hydrostatic rocky planet: realistic 3D crater rims, canyons & cordilleras!
                 }
               } else if ((spec.kind === 2 || spec.kind === 3) && (Number(spec.radiusKm) || 0) >= 16000) {
                 const rotHr = Math.max(5.0, Number(spec.rotationPeriodHr) || 10.5);
@@ -7396,6 +7420,22 @@ export async function mountUlgUniversesDemo() {
       } else if (physics.stellarEngine) {
         const stEng = physics.stellarEngine;
         const teffLog = Math.log10(Math.max(900, Number(stEng.surfaceTempK) || 5778));
+        const rStarNorm = Math.max(0.45, Math.min(0.92, (stEng.rStar || 5.3) / (stEng.boxHalf || 7.5)));
+        const defaultBoxR = (stEng.boxHalf || 7.5) * stScale * 0.95;
+        let astroBoxR = defaultBoxR;
+        if (physics.solarEngine) {
+          const catL3 = physics.getActiveSystemCatalog();
+          const fIdxL3 = Math.max(0, Math.min(catL3.length - 1, physics.focusedSolarBodyIndex || 0));
+          const fStL3 = physics.solarEngine.getMassiveBodyState64(fIdxL3);
+          const scaleAuL3 = WORLD_VIEW_SPAN / Math.max(1e-9, spanMeters / AU_METERS);
+          const trueStarRWorld = (Number(fStL3?.radiusAu) || 0.00465) * scaleAuL3;
+          const exactBoxR = trueStarRWorld / (rStarNorm * 0.935);
+          // Match L2 photosphere radius 1:1 at the span=9.9 handoff (0% jump across all spectral classes),
+          // then smoothly frame even tiny M-dwarfs or giant supergiants as the camera zooms deep into L3!
+          const l3FrameBlend = smoothstep(9.75, 8.65, span);
+          astroBoxR = exactBoxR * (1 - l3FrameBlend) + Math.max(0.45, Math.min(18.0, defaultBoxR)) * l3FrameBlend;
+        }
+        const stDynamoScale = astroBoxR / (stEng.boxHalf || 7.5);
         if (stEng.solver === 'webgpu-3d-mls-mpm-nuclear-fusion' && typeof stEng.getResidentGridBuffer === 'function') {
           // True Zero-Copy 3D Volumetric Radiative-Transfer Star (`ASTRO_VOL_WGSL` Mode 0) directly reading
           // the live 32^3 MLS-MPM stellar density/temperature/velocity/4-channel nuclear burn grid!
@@ -7404,19 +7444,19 @@ export async function mountUlgUniversesDemo() {
             mode: 0,
             buffer: stEng.getResidentGridBuffer(),
             dim: stEng.gridN || 24,
-            boxRadius: (stEng.boxHalf || 7.5) * stScale * 0.95,
+            boxRadius: astroBoxR,
             center: [0, 0, 0],
             alphaMul: wStarCore,
             paramA: teffLog,
-            extra2: [(stEng.rStar || 5.3) / (stEng.boxHalf || 7.5), physics.stellarCutaway ? 1.0 : 0.0, nowSec, stEng.generation ?? 3]
+            extra2: [rStarNorm, physics.stellarCutaway ? 1.0 : 0.0, nowSec, stEng.generation ?? 3]
           };
         } else {
           particleClouds.push({
             buffer: stEng.getResidentBuffer(),
             count: stEng.count,
             mode: 2,
-            worldScale: stScale * 0.95,
-            pointSize: Math.max(0.045, Math.min(0.20, 0.125 * stScale)),
+            worldScale: stDynamoScale,
+            pointSize: Math.max(0.045, Math.min(0.20, 0.125 * stDynamoScale)),
             alphaGain: 0.30 * wStarCore,
             extra1: [0, 0, 0, teffLog]
           });
@@ -7425,7 +7465,7 @@ export async function mountUlgUniversesDemo() {
         // (Zero hardcoded analytic dipole loops; B₀ = 0 produces 0 streamlines!)
         if ((showOrbits || emSensorState.active || physics.stellarCutaway) && physics.stellarDynamoStreamlines?.length >= 14) {
           const rawS = physics.stellarDynamoStreamlines;
-          const scS = stScale * 0.95;
+          const scS = stDynamoScale;
           const emBoostS = emSensorState.active ? 1.65 : 1.0;
           for (let i = 0; i < rawS.length; i += 7) {
             lineChunks.push(
@@ -7567,6 +7607,7 @@ export async function mountUlgUniversesDemo() {
       lightDir,
       lightIsPoint: Boolean(typeof solarLightIsPoint !== 'undefined' && solarLightIsPoint),
       coolingHeat: (currentLevel === 4 && physics.planetaryGenesisSphSession) ? (physics.planetaryCoolingHeat || 0.0) : 0.0,
+      orbitalSeasonDecl,
       ringShadow: (typeof activeRingShadow !== 'undefined' && activeRingShadow) ? activeRingShadow : null,
       starLight: lastStarIllumination?.vec4 || [1.0, 0.97, 0.92, 1.0],
       mdCloud,
@@ -7751,7 +7792,7 @@ export async function mountUlgUniversesDemo() {
         navRadiusM: s.env.tinyPlanetCurvatureRadiusM,
         env: s.env,
         surfaceSimSec: physics.surfaceSimSec,
-        observerLatDeg: 32.0,
+        observerLatDeg: 42.0,
         landingSite: physics.surfaceLandingSite,
         altitudeKm: physics.surfaceTelemetry?.ufoAltitudeKm,
         dysonCoverage: Math.min(0.95, Math.max(0, kardashev.state.dysonTau || 0))

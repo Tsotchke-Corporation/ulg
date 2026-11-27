@@ -146,14 +146,21 @@ fn step_ocean_wave_pde(@builtin(global_invocation_id) gid: vec3<u32>) {
   let open_w = max(0.0, 1.0 - params.ice_cover);
 
   // Wind-driven directional gravity-capillary swell forcing aligned with live Ekman current!
+  // Snap wavevectors to exact integer cycles over [0, 1]^2 so periodic wrap has ZERO 1,024 m phase seam!
   let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + 0.5) / f32(n);
   let w_spd = length(vec2<f32>(params.wind_x, params.wind_z));
   let w_dir = select(vec2<f32>(0.82, 0.57), vec2<f32>(params.wind_x, params.wind_z) / max(1e-4, w_spd), w_spd > 0.05);
   let w_perp = vec2<f32>(-w_dir.y, w_dir.x);
   let g_scale = sqrt(max(0.15, params.gravity_g) / 9.81);
-  let ph1 = dot(uv, w_dir) * 37.6991 - params.time_s * (1.85 * g_scale);
-  let ph2 = dot(uv, w_dir * 0.78 + w_perp * 0.62) * 62.8318 - params.time_s * (2.65 * g_scale);
-  let ph3 = dot(uv, w_dir * 0.72 - w_perp * 0.69) * 87.9646 - params.time_s * (3.15 * g_scale);
+  let k1_raw = round(w_dir * 6.0);
+  let k1 = select(k1_raw, vec2<f32>(6.0, 0.0), dot(k1_raw, k1_raw) < 0.5);
+  let k2_raw = round((w_dir * 0.78 + w_perp * 0.62) * 10.0);
+  let k2 = select(k2_raw, vec2<f32>(8.0, 6.0), dot(k2_raw, k2_raw) < 0.5);
+  let k3_raw = round((w_dir * 0.72 - w_perp * 0.69) * 14.0);
+  let k3 = select(k3_raw, vec2<f32>(10.0, -10.0), dot(k3_raw, k3_raw) < 0.5);
+  let ph1 = dot(uv, k1) * 6.2831853 - params.time_s * (1.85 * g_scale);
+  let ph2 = dot(uv, k2) * 6.2831853 - params.time_s * (2.65 * g_scale);
+  let ph3 = dot(uv, k3) * 6.2831853 - params.time_s * (3.15 * g_scale);
   let wind_gain = clamp(0.18 + w_spd * 0.085, 0.14, 1.45) * open_w;
   // Low-gravity worlds have slower, taller wave crests for the same wind stress!
   let grav_amp = clamp(pow(max(0.15, 9.81 / max(0.25, params.gravity_g)), 0.35), 0.75, 2.35);

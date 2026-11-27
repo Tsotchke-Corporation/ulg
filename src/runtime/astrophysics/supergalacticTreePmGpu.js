@@ -1688,7 +1688,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     const maxOverdensity = f32[1];
     const kineticEnergy = f32[4];
     const momentum = [f32[5], f32[6], f32[7]];
-    const redshiftZ = Math.max(0, 1 / aScale - 1);
+    const redshiftZ = 1 / Math.max(1e-4, aScale) - 1;
 
     const kBins = [];
     const pkValues = [];
@@ -1887,7 +1887,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
       chosen.push(next);
     }
 
-    const zNow = Math.max(0, 1 / Math.max(0.02, aScale) - 1);
+    const zNow = 1 / Math.max(0.02, aScale) - 1;
     return chosen.slice(0, maxHalos).map((h, idx) => {
       const ux = ((h.ix + 0.5) / n) - 0.5;
       const uy = ((h.iy + 0.5) / n) - 0.5;

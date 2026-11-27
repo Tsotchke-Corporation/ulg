@@ -888,14 +888,16 @@ fn tdse_step_im(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (i == 0u || i + 1u == n) { psi_im[i] = 0.0; prob_out[i] = 0.0; return; }
   let lap = psi_re[i + 1u] - 2.0 * psi_re[i] + psi_re[i - 1u];
   let h_re = -p.inv_2mu_dx2 * lap + pot_v[i] * psi_re[i];
-  var next_im = psi_im[i] - p.dt_scale * h_re;
+  let prev_im = psi_im[i];
+  var next_im = prev_im - p.dt_scale * h_re;
   let frac = f32(i) / f32(n - 1u);
   if (frac > p.cap_start) {
     let s = (frac - p.cap_start) / max(0.01, 1.0 - p.cap_start);
     next_im = next_im * exp(-p.cap_strength * s * s);
   }
   psi_im[i] = next_im;
-  prob_out[i] = psi_re[i] * psi_re[i] + next_im * next_im;
+  // Exact Visscher (1991) time-centered conserved probability density P(t_n) = Re(t_n)^2 + Im(t_n - dt/2) * Im(t_n + dt/2)!
+  prob_out[i] = max(0.0, psi_re[i] * psi_re[i] + prev_im * next_im);
 }
 `;
 
@@ -927,8 +929,10 @@ export function createNuclearTunnelingTdseWebGpu(device, nuclear) {
   const { bgl, stepRe, stepIm } = getTdsePipelines(device);
 
   const wkb = nuclear?.alphaWkb;
-  const rSrc = Array.isArray(wkb?.rFm) ? wkb.rFm : Array.from({ length: 64 }, (_, i) => (i / 63) * 45);
-  const vSrc = Array.isArray(wkb?.vMeV) ? wkb.vMeV : rSrc.map((r) => (r < 6 ? -20 : 120 / r));
+  const hasRealR = (Array.isArray(wkb?.rFm) || ArrayBuffer.isView(wkb?.rFm)) && wkb.rFm.length >= 8;
+  const hasRealV = (Array.isArray(wkb?.vMeV) || ArrayBuffer.isView(wkb?.vMeV)) && wkb.vMeV.length === wkb?.rFm?.length;
+  const rSrc = hasRealR ? wkb.rFm : Array.from({ length: 64 }, (_, i) => (i / 63) * 45);
+  const vSrc = hasRealV ? wkb.vMeV : rSrc.map((r) => (r < 6 ? -20 : 120 / r));
   const rMaxFm = Math.max(24, Number(rSrc[rSrc.length - 1]) || 45);
   const rTouchFm = Math.max(2.5, Number(wkb?.rTouchFm) || (nuclear?.chargeRadiusFm || 4.0) * 1.35);
   const dxFm = rMaxFm / (TDSE_N - 1);
@@ -947,15 +951,27 @@ export function createNuclearTunnelingTdseWebGpu(device, nuclear) {
     if (v > vPeak) vPeak = v;
   }
 
-  const qEffMeV = Math.max(3.5, Math.min(vPeak * 0.82, Number(nuclear?.qAlphaMeV) > 0.5 ? Number(nuclear.qAlphaMeV) : vPeak * 0.55));
-  const inv2muDx2 = (197.32698 * 197.32698) / (2 * 3727.38 * dxFm * dxFm);
+  const rawQAlpha = Number(nuclear?.qAlphaMeV);
+  const tunnelingAllowed = Number.isFinite(rawQAlpha) ? rawQAlpha > 0.05 : Boolean(wkb?.tunnelingAllowed);
+  const qEffMeV = tunnelingAllowed ? Math.max(0.25, Math.min(vPeak * 0.92, rawQAlpha)) : 0.0;
+  // Exact reduced alpha-daughter mass mu = 4 * A_d / (4 + A_d) * m_u (not bare alpha mass!)
+  const aParent = Math.max(5, Number(nuclear?.A) || 56);
+  const aDaughter = Math.max(1, aParent - 4);
+  const muMeV = Number.isFinite(Number(wkb?.muMeV)) && Number(wkb.muMeV) > 100
+    ? Number(wkb.muMeV)
+    : ((4 * aDaughter) / (4 + aDaughter)) * 931.4941;
+  const inv2muDx2 = (197.32698 * 197.32698) / (2 * muMeV * dxFm * dxFm);
   const maxEig = 4.0 * inv2muDx2 + Math.max(vPeak, 25);
   const dtScale = 0.35 / Math.max(1.0, maxEig);
 
   const rTouchIdx = Math.max(4, Math.min(TDSE_N - 16, Math.round(rTouchFm / dxFm)));
   let rTurnIdx = Math.min(TDSE_N - 12, rTouchIdx + 24);
-  for (let i = rTouchIdx + 1; i < TDSE_N - 4; i += 1) {
-    if (potRawMeV[i] <= qEffMeV) { rTurnIdx = i; break; }
+  if (tunnelingAllowed) {
+    for (let i = rTouchIdx + 1; i < TDSE_N - 4; i += 1) {
+      if (potRawMeV[i] <= qEffMeV) { rTurnIdx = i; break; }
+    }
+  } else {
+    rTurnIdx = TDSE_N - 2;
   }
 
   const paramsBuf = device.createBuffer({ size: 32, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
@@ -983,23 +999,36 @@ export function createNuclearTunnelingTdseWebGpu(device, nuclear) {
   function resetWavepacket() {
     stepCount = 0;
     const re0 = new Float32Array(TDSE_N);
+    const imRaw = new Float32Array(TDSE_N);
     const im0 = new Float32Array(TDSE_N);
     const prob0 = new Float32Array(TDSE_N);
     const r0 = Math.max(1.5, rTouchFm * 0.52);
-    const sigma = Math.max(0.85, rTouchFm * 0.22);
-    const k0 = Math.sqrt(Math.max(0.2, (qEffMeV + 18.0) / Math.max(1e-4, inv2muDx2 * dxFm * dxFm)));
+    const sigma = Math.max(0.75, rTouchFm * 0.20);
+    const wellIdx = Math.max(1, Math.min(TDSE_N - 2, Math.round(r0 / dxFm)));
+    const wellDepthMeV = Math.max(1.0, -potRawMeV[wellIdx]);
+    // Unstable alpha-emitters (qAlphaMeV > 0) carry real incident kinetic energy (Q_alpha - V_well);
+    // stable bound nuclei (e.g. Fe-56) initialize a confined zero-momentum bound wavepacket inside the well!
+    const k0 = tunnelingAllowed
+      ? Math.sqrt(Math.max(0.1, (qEffMeV + wellDepthMeV * 0.45) / Math.max(1e-4, inv2muDx2 * dxFm * dxFm)))
+      : 0.0;
     let norm2 = 0;
     for (let i = 1; i < TDSE_N - 1; i += 1) {
       const r = rGridFm[i];
       const env = Math.exp(-0.5 * Math.pow((r - r0) / sigma, 2));
       re0[i] = env * Math.cos(k0 * (r - r0));
-      im0[i] = env * Math.sin(k0 * (r - r0));
-      norm2 += re0[i] * re0[i] + im0[i] * im0[i];
+      imRaw[i] = env * Math.sin(k0 * (r - r0));
+      norm2 += re0[i] * re0[i] + imRaw[i] * imRaw[i];
     }
     const invN = 1 / Math.sqrt(Math.max(1e-12, norm2));
     for (let i = 0; i < TDSE_N; i += 1) {
-      re0[i] *= invN; im0[i] *= invN;
-      prob0[i] = re0[i] * re0[i] + im0[i] * im0[i];
+      re0[i] *= invN; imRaw[i] *= invN;
+    }
+    // Exact Visscher initial half-step: Im(psi, +dt/2) = Im(psi, 0) - 0.5 * dt * H * Re(psi, 0)
+    for (let i = 1; i < TDSE_N - 1; i += 1) {
+      const lapRe = re0[i + 1] - 2.0 * re0[i] + re0[i - 1];
+      const hRe = -inv2muDx2 * lapRe + potRawMeV[i] * re0[i];
+      im0[i] = imRaw[i] - 0.5 * dtScale * hRe;
+      prob0[i] = re0[i] * re0[i] + imRaw[i] * imRaw[i];
     }
     device.queue.writeBuffer(reBuf, 0, re0);
     device.queue.writeBuffer(imBuf, 0, im0);

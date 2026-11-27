@@ -65,7 +65,7 @@ export function registerEmergentMhdDynamoModule(registry) {
     method: { model: 'emergent-3d-mhd-dynamo', version: 1 },
     kernel: {
       sourceModule: 'src/runtime/astrophysics/emergentMhdDynamoGpu.js',
-      entryPoint: 'step_induction_glm',
+      entryPoint: 'step_dynamo_bfield',
       workgroupSize: 64
     },
     parameterSchema: {

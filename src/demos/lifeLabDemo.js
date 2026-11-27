@@ -570,8 +570,8 @@ export async function mountLifeLabDemo() {
         series: [{ pts: qs.map((q, i) => [i, q]), color: '#56c2ff', width: 2.1 }],
         hZero: true, labelX: 'Atom Index i (Rappé–Goddard QEq)'
       });
-      if (activePiResult && activePiResult.energiesEv?.length >= 2) {
-        const es = Array.from(activePiResult.energiesEv);
+      if (activePiResult && activePiResult.eigenvaluesEv?.length >= 2) {
+        const es = Array.from(activePiResult.eigenvaluesEv);
         el('p3-title').textContent = `GPU Hückel π-MO (${es.length}π)`;
         el('p3-sub').textContent = `Gap ${(activePiResult.homoLumoGapEv || 0).toFixed(2)} eV`;
         drawLinePlot(plot3, {
@@ -974,11 +974,11 @@ export async function mountLifeLabDemo() {
       await activeSession.step({ dt: 0.014, substeps: 6, readTelemetry: true });
       try {
         const piRes = await solvePiMolecularOrbitalsWebGpu(device, mMeta.graph);
-        if (piRes && piRes.piCount >= 2 && myToken === modeSwitchToken && !disposed) {
+        if (piRes && piRes.piAtomCount >= 2 && myToken === modeSwitchToken && !disposed) {
           activePiResult = piRes;
           activePiCloud = buildPiOrbitalCloudBufferWebGpu(device, mMeta.graph, piRes, {
-            orbitalIndex: piRes.homoIndex ?? 0,
-            samplesPerAtom: 140
+            moIndex: piRes.homoIndex ?? 0,
+            pointCount: Math.max(2048, Math.min(8192, piRes.piAtomCount * 400))
           });
         }
       } catch {}
@@ -1120,7 +1120,7 @@ export async function mountLifeLabDemo() {
         orgAtomCount: activeSession.atomCount,
         orgBondsBuffer: activeSession.getResidentBondsBuffer(),
         orgBondCount: activeSession.bondCount,
-        piCloudBuffer: activePiCloud?.buffer || null,
+        piCloudBuffer: activePiCloud?.pointsBuffer || null,
         piCloudCount: activePiCloud?.pointCount || 0,
         showPiMo: Boolean(params.molShowPi),
         espBlend: params.molEspBlend,
@@ -1339,9 +1339,10 @@ export async function mountLifeLabDemo() {
     const spd = Math.hypot(raw[4] || 0, raw[5] || 0, raw[6] || 0);
     pickedEntity.pos = [x, y, z];
     if (currentLayer === 'evo') {
-      const fit = raw[7] || 0;
+      const fit = Number(raw[3]) || 0;
+      const genU32 = new Uint32Array(new Float32Array([raw[7] || 0]).buffer)[0];
       pickedEntity.title = `Replicator #${pickedEntity.index} · Fitness w=${fit.toFixed(3)}`;
-      pickedEntity.details = `r_fit=${Math.hypot(x, z).toFixed(2)} · match=${((raw[3] || 0) * 100).toFixed(1)}% · live GPU genome`;
+      pickedEntity.details = `r_fit=${Math.hypot(x, z).toFixed(2)} · genome=0x${genU32.toString(16).padStart(8, '0')} · live GPU replicator`;
     } else if (currentLayer === 'morph') {
       pickedEntity.details = `Sensed Morphogen v=${(raw[7] || 0).toFixed(3)} · Speed=${spd.toFixed(2)} · θ=${(raw[3] || 0).toFixed(2)} rad`;
     } else {
@@ -1482,9 +1483,10 @@ export async function mountLifeLabDemo() {
       const label = sym === 'H' ? 'Hydrophobic (H)' : (sym === '+' ? 'Cationic (+)' : (sym === '-' ? 'Anionic (−)' : 'Polar (P)'));
       title = `Residue #${hit.index + 1} · ${label}`;
     } else if (currentLayer === 'evo') {
-      const fit = hit.vec1[3];
+      const fit = Number(hit.vec0[3]) || 0;
+      const genU32 = new Uint32Array(new Float32Array([hit.vec1[3] || 0]).buffer)[0];
       title = `Replicator #${hit.index} · Fitness w=${fit.toFixed(3)}`;
-      details = `r_fit=${Math.hypot(hit.vec0[0], hit.vec0[2]).toFixed(2)} · match=${(hit.vec0[3] * 100).toFixed(1)}% · live GPU genome`;
+      details = `r_fit=${Math.hypot(hit.vec0[0], hit.vec0[2]).toFixed(2)} · genome=0x${genU32.toString(16).padStart(8, '0')} · live GPU replicator`;
     } else if (currentLayer === 'morph') {
       title = `Active Swimmer #${hit.index}`;
       details = `Sensed Morphogen v=${hit.vec1[3].toFixed(3)} · Speed=${spd.toFixed(2)} · θ=${hit.vec0[3].toFixed(2)} rad`;

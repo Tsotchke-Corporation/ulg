@@ -429,13 +429,14 @@ fn step_mhd_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     (cyp.u_p_phi.y - cym.u_p_phi.y) * inv2dx,
     (czp.u_p_phi.y - czm.u_p_phi.y) * inv2dx
   );
-  // Phi stored in fluid_dst.u_p_phi.z by store_gravity_phi right before step_mhd_grid!
-  let phi_xp = fluid_dst[cidx(ix + 1, iy, iz, n)].u_p_phi.z;
-  let phi_xm = fluid_dst[cidx(ix - 1, iy, iz, n)].u_p_phi.z;
-  let phi_yp = fluid_dst[cidx(ix, iy + 1, iz, n)].u_p_phi.z;
-  let phi_ym = fluid_dst[cidx(ix, iy - 1, iz, n)].u_p_phi.z;
-  let phi_zp = fluid_dst[cidx(ix, iy, iz + 1, n)].u_p_phi.z;
-  let phi_zm = fluid_dst[cidx(ix, iy, iz - 1, n)].u_p_phi.z;
+  // Read solved 3D FFT gravitational potential Phi directly from read-only grav_fft (ZERO read/write race on fluid_dst!)
+  let phi_c = grav_fft[idx].x;
+  let phi_xp = grav_fft[cidx(ix + 1, iy, iz, n)].x;
+  let phi_xm = grav_fft[cidx(ix - 1, iy, iz, n)].x;
+  let phi_yp = grav_fft[cidx(ix, iy + 1, iz, n)].x;
+  let phi_ym = grav_fft[cidx(ix, iy - 1, iz, n)].x;
+  let phi_zp = grav_fft[cidx(ix, iy, iz + 1, n)].x;
+  let phi_zm = grav_fft[cidx(ix, iy, iz - 1, n)].x;
   let grad_phi = vec3<f32>(
     (phi_xp - phi_xm) * inv2dx,
     (phi_yp - phi_ym) * inv2dx,
@@ -505,7 +506,7 @@ fn step_mhd_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var out_f: FluidCell;
   out_f.rho_v = vec4<f32>(rho_new, v_new);
-  out_f.u_p_phi = vec4<f32>(u_new, p_new, fluid_dst[idx].u_p_phi.z, div_b);
+  out_f.u_p_phi = vec4<f32>(u_new, p_new, phi_c, div_b);
   fluid_dst[idx] = out_f;
   b_dst[idx] = vec4<f32>(b_new, psi_new);
 }
@@ -516,7 +517,7 @@ fn step_nebula_tracers(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= params.tracer_count) { return; }
   var tr = tracers[i];
-  let half = params.box_size * 0.48;
+  let half = params.box_size * 0.5;
   let local_p = tr.pos_m.xyz - params.center_offset.xyz;
 
   // Sample updated fluid & B-field directly from fluid_src / b_src (after swap, latest state!)
@@ -527,10 +528,10 @@ fn step_nebula_tracers(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v_new = mix(tr.vel_bmag.xyz, v_grid, 0.45);
   var next_loc = local_p + v_new * params.dt;
 
-  // Keep domain periodic/contained without origin pinning
-  if (abs(next_loc.x) > half) { next_loc.x = next_loc.x - sign(next_loc.x) * params.box_size * 0.94; }
-  if (abs(next_loc.y) > half) { next_loc.y = next_loc.y - sign(next_loc.y) * params.box_size * 0.94; }
-  if (abs(next_loc.z) > half) { next_loc.z = next_loc.z - sign(next_loc.z) * params.box_size * 0.94; }
+  // Exact periodic domain wrap without 6% seam jump or origin pinning
+  if (abs(next_loc.x) > half) { next_loc.x = next_loc.x - sign(next_loc.x) * params.box_size; }
+  if (abs(next_loc.y) > half) { next_loc.y = next_loc.y - sign(next_loc.y) * params.box_size; }
+  if (abs(next_loc.z) > half) { next_loc.z = next_loc.z - sign(next_loc.z) * params.box_size; }
 
   let b_mag = length(b.xyz);
   // Outflow signature along rotation/magnetic axis: positive when flowing outward from midplane!
@@ -812,11 +813,9 @@ export function createNebularMhdCollapseSessionWebGpu(device, {
         ? (phiBuf === fftWs.bufferA ? bg0A : bg0B)
         : (phiBuf === fftWs.bufferA ? bg1A : bg1B);
 
-      // 3. Store Phi + Step 3D Compressible Resistive MHD + Dedner GLM cleaning
+      // 3. Step 3D Compressible Resistive MHD + Dedner GLM cleaning (reads solved Phi directly from read-only grav_fft — zero race!)
       pass = enc.beginComputePass({ label: `${label}-mhd-step` });
       pass.setBindGroup(0, bgPhi);
-      pass.setPipeline(storePhiPipe.pipeline);
-      pass.dispatchWorkgroups(wgCells);
       pass.setPipeline(stepMhdPipe.pipeline);
       pass.dispatchWorkgroups(wgGrid3d, wgGrid3d, wgGrid3d);
       pass.end();

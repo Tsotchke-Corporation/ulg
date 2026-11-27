@@ -78,7 +78,7 @@ export function registerXenobiologyEcologyModule(registry) {
     method: { model: 'planetary-xenobiology-ecology', version: 1 },
     kernel: {
       sourceModule: 'src/runtime/biology/xenobiologyEcologyEngine.js',
-      entryPoint: 'synthesizePlanetaryEcosystem',
+      entryPoint: 'synthesizeWorldEcosystem',
       workgroupSize: 64
     },
     parameterSchema: {
@@ -183,6 +183,8 @@ export function classifySolventBains2024({
       solvent: 'H2-He-cloud',
       formula: 'H₂/He + H₂O/NH₃ Aerosols',
       label: 'Baroclinic Cloud-Deck Aerosol Biosphere (2–6 bar)',
+      isCloudDeckHabitat: true,
+      habitatAltitudeKm: 45,
       bainsScore: 0.58,
       dielectricEr: 54.0,
       tMeltK: 210.0,
@@ -226,12 +228,45 @@ export function classifySolventBains2024({
     });
   }
 
-  // Concentrated H2SO4 Cloud Aerosols (Bains, Petkowski & Seager 2024: stable organic cores!)
-  if ((P >= 2.5e6 && T >= 295 && T <= 760) || (P >= 5e5 && T > 388 && T <= 760)) {
+  // Liquid Water (Aqueous — checked BEFORE H2SO4 cloud decks using real Clausius-Clapeyron T_boil(P),
+  // while desiccated super-greenhouse worlds with P >= 50 bar & scarce water v <= 0.035 fall through to H2SO4 cloud decks!)
+  const tBoilWaterK = P >= 611
+    ? Math.max(273.16, Math.min(647.1, 373.15 / Math.max(0.55, 1.0 - 0.07632 * Math.log(Math.max(1e-4, P / 101325)))))
+    : 273.16;
+  const isDesiccatedSuperGreenhouse = P >= 5.0e6 && v <= 0.035;
+  if (hasSolidCrust && !isDesiccatedSuperGreenhouse && P >= 611 && T >= 255 && T <= tBoilWaterK && v >= 0.012) {
+    return Object.freeze({
+      solvent: 'H2O',
+      formula: 'H₂O',
+      label: 'Liquid Water (Aqueous)',
+      isCloudDeckHabitat: false,
+      habitatAltitudeKm: 0,
+      bainsScore: 0.96,
+      dielectricEr: 78.4,
+      tMeltK: 273.15,
+      tBoilK: Number(tBoilWaterK.toFixed(2)),
+      tDenatureK: 355.0 + Math.max(0, (T - 295) * 0.65),
+      oceanRgb: [0.04, 0.24, 0.48],
+      membraneType: 'Phospholipid Bilayer',
+      compartmentModel: 'fluid-phospholipid-bilayer',
+      hydrophobicCoupling: 1.85,
+      hBondStrength: 1.45,
+      deltaPh: 1.0,
+      strongPairFraction: 0.52,
+      xnaBackbone: cToO > 0.75 ? 'Threose Nucleic Acid (TNA)' : 'Deoxyribo/Ribo-Nucleic Acid (DNA/RNA)',
+      xnaAlphabetSize: cToO > 0.75 ? 6 : 4,
+      sequence: 'HPPHH+PHHPPHH-PPHHPPH+PPH-PHHPPH'
+    });
+  }
+
+  // Concentrated H2SO4 Cloud Aerosols (Bains, Petkowski & Seager 2024: elevated 50 km cloud deck — NEVER a 737 K surface ocean!)
+  if ((P >= 2.5e6 && T >= 295 && T <= 760) || (P >= 5e5 && T > tBoilWaterK && T <= 760)) {
     return Object.freeze({
       solvent: 'H2SO4',
       formula: 'H₂SO₄',
       label: 'Sulfuric Acid Cloud Aerosols (50 km Deck)',
+      isCloudDeckHabitat: true,
+      habitatAltitudeKm: 50,
       bainsScore: 0.62,
       dielectricEr: 101.0,
       tMeltK: 283.5,
@@ -247,30 +282,6 @@ export function classifySolventBains2024({
       xnaBackbone: 'Sulfonated Aromatic XNA (Acid-Stable)',
       xnaAlphabetSize: 6,
       sequence: 'HHH+PP-HHH+PP-HHHH+PP-HHH+PP-HHH'
-    });
-  }
-
-  // Liquid Water (Aqueous — canonical benchmark)
-  if (hasSolidCrust && P >= 611 && T >= 262 && T <= 388 && v >= 0.012) {
-    return Object.freeze({
-      solvent: 'H2O',
-      formula: 'H₂O',
-      label: 'Liquid Water (Aqueous)',
-      bainsScore: 0.96,
-      dielectricEr: 78.4,
-      tMeltK: 273.15,
-      tBoilK: 373.15,
-      tDenatureK: 355.0 + Math.max(0, (T - 295) * 0.65),
-      oceanRgb: [0.04, 0.24, 0.48],
-      membraneType: 'Phospholipid Bilayer',
-      compartmentModel: 'fluid-phospholipid-bilayer',
-      hydrophobicCoupling: 1.85,
-      hBondStrength: 1.45,
-      deltaPh: 1.0,
-      strongPairFraction: 0.52,
-      xnaBackbone: cToO > 0.75 ? 'Threose Nucleic Acid (TNA)' : 'Deoxyribo/Ribo-Nucleic Acid (DNA/RNA)',
-      xnaAlphabetSize: cToO > 0.75 ? 6 : 4,
-      sequence: 'HPPHH+PHHPPHH-PPHHPPH+PPH-PHHPPH'
     });
   }
 
@@ -414,37 +425,62 @@ export function solvePhotobiologySpectrum({
     samples.push({ lamNm: lam, flux, trans });
   }
 
-  // Optimal Z-scheme photon count (Takizawa / Lehmer / Kiang):
-  // Splitting H2O requires ~1.23 eV thermodynamic + overpotential -> ~1.75 eV per electron.
-  // Cool M-dwarfs have low-energy NIR photons (~1.0-1.2 eV) requiring 3- or 4-photon chained photosystems!
-  let zSchemePhotons = 2;
-  let redEdgeNm = 705;
-  let pigmentClass = 'Chlorophyll-a/b (Oxygenic 2-Photon Z-Scheme)';
-  let primaryRgb = [0.16, 0.54, 0.22];
-  let secondaryRgb = [0.28, 0.64, 0.18];
+  // Compute integrated 23-band photon-weighted spectral moments directly from the transmitted surface spectrum:
+  //   - meanLamNm: continuous photon-flux centroid (immune to 50-nm bin quantization plateaus!)
+  //   - meanPhotonEv: mean incident photon energy <hc / lambda>
+  let sumFlux = 0;
+  let sumLamFlux = 0;
+  let sumEvFlux = 0;
+  for (const s of samples) {
+    sumFlux += s.flux;
+    sumLamFlux += s.lamNm * s.flux;
+    sumEvFlux += (1239.84 / s.lamNm) * s.flux;
+  }
+  const meanLamNm = sumFlux > 1e-12 ? (sumLamFlux / sumFlux) : peakLamNm;
+  const meanPhotonEv = sumFlux > 1e-12 ? (sumEvFlux / sumFlux) : (1239.84 / Math.max(300, peakLamNm));
+
+  // Optimal Z-scheme photon count & red edge driven continuously from the ACTUAL 23-band integrated
+  // surface spectrum (Takizawa 2017 / Lehmer 2018 / Kiang 2007):
+  //   After ~0.63 eV per-photosystem Stokes + charge-separation thermalization loss, n photons must clear
+  //   the ~1.86 eV net electrochemical free-energy barrier of oxygenic water splitting!
+  let zSchemePhotons = clamp(Math.ceil(1.86 / Math.max(0.32, meanPhotonEv - 0.63)), 2, 4);
+  let redEdgeNm = Math.round(clamp(0.55 * peakLamNm + 0.45 * meanLamNm, 560, 1280));
+  let pigmentClass = `${zSchemePhotons}-Photon Photopigment (λ_peak=${peakLamNm} nm)`;
+  // Continuous complementary reflectance from integrated surface spectrum
+  const lamNorm = clamp((meanLamNm - 680) / 420, 0, 1);
+  let primaryRgb = [
+    Number(clamp(0.16 + 0.44 * Math.sin(lamNorm * Math.PI) - 0.24 * Math.max(0, lamNorm - 0.65), 0.08, 0.85).toFixed(3)),
+    Number(clamp(0.60 * Math.exp(-Math.pow((meanLamNm - 815) / 145, 2)) + 0.08, 0.07, 0.72).toFixed(3)),
+    Number(clamp(0.56 * Math.exp(-Math.pow((meanLamNm - 690) / 120, 2)) + 0.12, 0.08, 0.78).toFixed(3))
+  ];
+  let secondaryRgb = [
+    Number(clamp(primaryRgb[0] * 1.18 + 0.08, 0.08, 0.92).toFixed(3)),
+    Number(clamp(primaryRgb[1] * 1.12 + 0.04, 0.08, 0.88).toFixed(3)),
+    Number(clamp(primaryRgb[2] * 0.92 + 0.04, 0.08, 0.86).toFixed(3))
+  ];
 
   if (solvent === 'CH4') {
-    zSchemePhotons = 2;
-    redEdgeNm = 920;
-    pigmentClass = 'Tholin-Polyacetylene Photopigment (Cryo-Catalytic)';
+    zSchemePhotons = Math.max(2, zSchemePhotons);
+    redEdgeNm = Math.max(880, redEdgeNm);
+    pigmentClass = `Tholin-Polyacetylene Photopigment (λ_peak=${peakLamNm} nm, Cryo-Catalytic)`;
     primaryRgb = [0.58, 0.36, 0.72];
     secondaryRgb = [0.76, 0.48, 0.34];
   } else if (solvent === 'NH3') {
-    zSchemePhotons = 2;
-    redEdgeNm = 780;
-    pigmentClass = 'Ammono-Bacteriochlorophyll Teal Complex';
+    zSchemePhotons = Math.max(2, zSchemePhotons);
+    redEdgeNm = Math.round(clamp(redEdgeNm * 1.06, 720, 1180));
+    pigmentClass = `Ammono-Bacteriochlorophyll Teal Complex (λ_peak=${peakLamNm} nm)`;
     primaryRgb = [0.20, 0.62, 0.58];
     secondaryRgb = [0.14, 0.46, 0.68];
   } else if (solvent === 'H2SO4') {
     zSchemePhotons = 2;
-    redEdgeNm = 660;
-    pigmentClass = 'Sulfur-Carotenoid Acidophile Photopigment';
+    redEdgeNm = Math.round(clamp(redEdgeNm * 0.96, 620, 920));
+    pigmentClass = `Sulfur-Carotenoid Acidophile Photopigment (λ_peak=${peakLamNm} nm)`;
     primaryRgb = [0.78, 0.64, 0.20];
     secondaryRgb = [0.88, 0.46, 0.16];
   } else if (solvent === 'CO2-liq') {
-    zSchemePhotons = 2;
-    redEdgeNm = 740;
-    pigmentClass = 'Carboxy-Porphyrin Bronze-Teal Photopigment';
+    zSchemePhotons = Math.max(2, zSchemePhotons);
+    redEdgeNm = Math.round(clamp(redEdgeNm * 1.03, 680, 1140));
+    pigmentClass = `Carboxy-Porphyrin Bronze-Teal Photopigment (λ_peak=${peakLamNm} nm)`;
     primaryRgb = [0.54, 0.48, 0.26];
     secondaryRgb = [0.28, 0.56, 0.44];
   } else if (solvent === 'H2O-subsurface') {
@@ -454,43 +490,29 @@ export function solvePhotobiologySpectrum({
     primaryRgb = [0.22, 0.74, 0.86];
     secondaryRgb = [0.82, 0.42, 0.22];
   } else if (solvent === 'H2-He-cloud') {
-    zSchemePhotons = 2;
-    redEdgeNm = 760;
-    pigmentClass = 'Baroclinic Cloud-Deck Phycobilin & Carotenoid';
+    zSchemePhotons = Math.max(2, zSchemePhotons);
+    redEdgeNm = Math.round(clamp(redEdgeNm * 1.02, 680, 1120));
+    pigmentClass = `Baroclinic Cloud-Deck Phycobilin & Carotenoid (λ_peak=${peakLamNm} nm)`;
     primaryRgb = [0.84, 0.48, 0.26];
     secondaryRgb = [0.46, 0.68, 0.86];
-  } else if (T < 3100) {
-    zSchemePhotons = 4;
-    redEdgeNm = 1220;
-    pigmentClass = '4-Photon NIR-Absorbing Melanoid-Retinal Complex (Ultra-Cool M-Dwarf)';
-    primaryRgb = [0.24, 0.08, 0.12];
-    secondaryRgb = [0.42, 0.14, 0.18];
-  } else if (T < 3750) {
-    zSchemePhotons = 3;
-    redEdgeNm = 1040;
-    pigmentClass = '3-Photon Far-Red / NIR Bacteriochlorophyll-f (M-Dwarf)';
-    const f = clamp((T - 3100) / 650, 0, 1);
-    primaryRgb = [0.36 + 0.22 * f, 0.09 + 0.09 * f, 0.12 + 0.06 * f];
-    secondaryRgb = [0.52 + 0.16 * f, 0.16 + 0.10 * f, 0.16];
-  } else if (T < 5150) {
-    zSchemePhotons = 2;
-    redEdgeNm = 760 + Math.round((5150 - T) * 0.11);
-    pigmentClass = '2-Photon K-Dwarf Phycobilin / Vermilion-Olive Complex';
-    const f = clamp((T - 3750) / 1400, 0, 1);
-    primaryRgb = [0.58 - 0.36 * f, 0.24 + 0.28 * f, 0.12 + 0.08 * f];
-    secondaryRgb = [0.76 - 0.30 * f, 0.40 + 0.22 * f, 0.14];
-  } else if (T <= 6350) {
-    zSchemePhotons = 2;
-    redEdgeNm = 705;
-    pigmentClass = '2-Photon Chlorophyll-a/b + Carotenoid (G-Star)';
-    const f = clamp((T - 5150) / 1200, 0, 1);
-    primaryRgb = [0.14 + 0.06 * (1 - f), 0.48 + 0.10 * f, 0.18 + 0.12 * f];
+  } else if (meanLamNm >= 960) {
+    pigmentClass = `${zSchemePhotons}-Photon NIR Melanoid / Bacteriochlorophyll-f (λ_peak=${peakLamNm} nm)`;
+    const f = clamp((1080 - meanLamNm) / 140, 0, 1);
+    primaryRgb = [0.24 + 0.22 * f, 0.08 + 0.08 * f, 0.12 + 0.04 * f];
+    secondaryRgb = [0.42 + 0.18 * f, 0.14 + 0.10 * f, 0.16];
+  } else if (meanLamNm >= 865) {
+    pigmentClass = `${zSchemePhotons}-Photon K-Dwarf Phycobilin / Vermilion-Olive (λ_peak=${peakLamNm} nm)`;
+    const f = clamp((960 - meanLamNm) / 95, 0, 1);
+    primaryRgb = [0.58 - 0.34 * f, 0.24 + 0.28 * f, 0.12 + 0.08 * f];
+    secondaryRgb = [0.76 - 0.28 * f, 0.40 + 0.20 * f, 0.14];
+  } else if (meanLamNm >= 765) {
+    pigmentClass = `2-Photon Chlorophyll-a/b + Carotenoid (λ_peak=${peakLamNm} nm)`;
+    const f = clamp((865 - meanLamNm) / 100, 0, 1);
+    primaryRgb = [0.14 + 0.08 * (1 - f), 0.48 + 0.10 * f, 0.18 + 0.12 * f];
     secondaryRgb = [0.24, 0.62, 0.26];
   } else {
-    zSchemePhotons = 2;
-    redEdgeNm = 635;
-    pigmentClass = 'UV-Shielded Violaxanthin / Radiotrophic Melanin-Cyan (F/A-Star)';
-    const f = clamp((T - 6350) / 3000, 0, 1);
+    pigmentClass = `UV-Shielded Violaxanthin / Radiotrophic Melanin-Cyan (λ_peak=${peakLamNm} nm)`;
+    const f = clamp((765 - meanLamNm) / 120, 0, 1);
     primaryRgb = [0.20 + 0.28 * f, 0.44 - 0.12 * f, 0.58 + 0.28 * f];
     secondaryRgb = [0.48 + 0.24 * f, 0.28, 0.78];
   }
@@ -1054,9 +1076,9 @@ export function synthesizeWorldEcosystem({
       * bergmannMassMul * Math.pow(9.81 / g, 0.35) * (0.6 + spRand() * 0.9),
       1.5, 12000
     ).toFixed(1));
-    // Kleiber's Law: BMR = B0 * M^0.75 * Q10^((T - 288)/10)
+    // Kleiber's Law: BMR = B0 * M^0.75 * Q10^((T - 288)/10) (clamped safely for cryo/thermophile bounds)
     const b0 = kingdom === 'fauna' ? 3.4 : (kingdom === 'fungi' ? 0.55 : 0.28);
-    const q10 = Math.pow(2.0, clamp((T - 288) / 35, -2.5, 2.5));
+    const q10 = Math.pow(2.0, clamp((T - 288) / 10.0, -3.2, 2.8));
     const kleiberWatts = Number((b0 * Math.pow(bodyMassKg, 0.75) * q10).toFixed(1));
     const strouhalHz = Number(clamp(
       (0.28 * (2.5 + spRand() * 2.5)) / Math.max(0.35, scaleBase * 0.85),

@@ -265,9 +265,9 @@ fn finalize_annuli(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Runaway H2/He gas envelope capture when coalesced solid core crosses critical mass threshold
   // outside or near the snow line (Mizuno-Pollack core-accretion instability)!
-  let cold_capture = smoothstep(420.0, 145.0, temp_k);
-  let core_excess = smoothstep(38.0, 110.0, m_sol * (0.55 + 0.65 * cold_capture));
-  let gas_env_frac = clamp(core_excess * clamp(m_gas / (cnt_n * 0.25 + 1.0), 0.0, 1.0) * 0.88, 0.0, 0.92);
+  let cold_capture = smoothstep(460.0, 145.0, temp_k);
+  let core_excess = smoothstep(26.0, 96.0, m_sol * (0.55 + 0.65 * cold_capture));
+  let gas_env_frac = clamp(core_excess * clamp(m_gas / (cnt_n * 0.22 + 1.0), 0.0, 1.0) * 0.88, 0.0, 0.92);
 
   let coh = clamp(length(vec2<f32>(c_sum, s_sum)) * inv_s, 0.0, 1.0);
   let mean_c = select(1.0, c_sum / max(1e-5, length(vec2<f32>(c_sum, s_sum))), coh > 0.01);
@@ -510,20 +510,36 @@ export function extractCoalescedBodiesFromAnnuli(summaryF32, {
     return 0.25 * mL + 0.5 * mC + 0.25 * mR;
   });
 
-  // Candidate local maxima sorted by total coalesced mass (solid + gas envelope).
-  // Do NOT normalize by `maxBinM` (which previously erased disk-mass diversity between lean M-dwarf/Pop-II disks
-  // and massive giant-forming disks!) — use ABSOLUTE GPU condensed solid mass directly!
+  // Local radial baseline (9-bin neighborhood) so the ~3x H2O/CO ice condensation jump outside
+  // the snow line NEVER raises a global threshold that silently kills inner terrestrial/HZ clumps!
+  const localBase = bins.map((_, i) => {
+    const lo = Math.max(0, i - 4);
+    const hi = Math.min(nBins - 1, i + 4);
+    let s = 0;
+    for (let j = lo; j <= hi; j += 1) s += smoothM[j];
+    return s / Math.max(1, hi - lo + 1);
+  });
+
+  // Candidate local maxima using LOCAL contrast + physical mass floor (no maxBinM diversity erasure,
+  // and no global meanMass*0.55 cliff that deletes inner rocky/habitable-zone embryos!).
   const candidates = [];
   for (let b = 1; b < nBins - 1; b += 1) {
-    if (smoothM[b] >= smoothM[b - 1] && smoothM[b] >= smoothM[b + 1] && bins[b].solidMass > Math.max(2.2, meanMass * 0.55)) {
-      candidates.push({ ...bins[b], score: bins[b].solidMass * (1.0 + bins[b].gasEnvFrac * 4.5) });
+    const isPeak = smoothM[b] >= smoothM[b - 1] && smoothM[b] >= smoothM[b + 1];
+    const clearsLocal = bins[b].solidMass > Math.max(0.95, localBase[b] * 0.72, meanMass * 0.12);
+    if (isPeak && clearsLocal) {
+      const localContrast = bins[b].solidMass / Math.max(0.8, localBase[b]);
+      const massWeight = Math.pow(Math.max(0.5, bins[b].solidMass), 0.58);
+      candidates.push({
+        ...bins[b],
+        score: localContrast * massWeight * (1.0 + bins[b].gasEnvFrac * 2.4)
+      });
     }
   }
   // Only fall back to top overdensity bin if disk has condensed solids but remained very smooth (allows genuinely sparse 1-2 world systems!)
   if (candidates.length === 0 && metallicitySolar >= 0.015) {
     let bestBin = null;
     for (let b = 1; b < nBins - 1; b += 1) {
-      if (bins[b].solidMass > 1.2 && (!bestBin || bins[b].solidMass > bestBin.solidMass)) bestBin = bins[b];
+      if (bins[b].solidMass > 0.85 && (!bestBin || bins[b].solidMass > bestBin.solidMass)) bestBin = bins[b];
     }
     if (bestBin) candidates.push({ ...bestBin, score: bestBin.solidMass });
   }
@@ -669,8 +685,8 @@ export function createNebularSystemCoalescenceSessionWebGpu(device, {
   }
   const nParcels = Math.max(512, Math.min(131072, Math.trunc(parcelCount)));
   const nBins = Math.max(32, Math.min(128, Math.trunc(Number(radialBins) || NEBULAR_RADIAL_BINS)));
-  const rMin = Math.max(0.04, Number(rMinStableAu) || 0.14);
-  const rMax = Math.max(rMin * 3.5, Math.min(48.0, Number(rMaxStableAu) || 28.0));
+  const rMin = Math.max(0.012, Number(rMinStableAu) || 0.14);
+  const rMax = Math.max(rMin * 4.5, Math.min(48.0, Number(rMaxStableAu) || 28.0));
   const mStar = Math.max(0.08, Number(starMassSolar) || 1.0);
   const lStar = Math.max(1e-4, Number(starLuminositySolar) || 1.0);
   const met = Math.max(0.005, Math.min(3.5, Number(metallicitySolar) || 1.0));

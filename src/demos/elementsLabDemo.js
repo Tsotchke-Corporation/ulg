@@ -26,6 +26,7 @@ import {
   stepIsotopeInventoryLedger
 } from '../runtime/material/nuclearCherenkovClosure.js';
 import { deriveElementBundleWebGpu } from '../runtime/material/periodicTableEngineWebGpu.js';
+import { derivePbrOpticsFromMaterialBundle } from '../runtime/material/materialPbrOpticsBridge.js';
 import { solveAtomFullWebGpu } from '../runtime/electronicStructure/radialKohnShamWebGpu.js';
 import {
   buildMultiSpeciesCrystalLattice,
@@ -3316,13 +3317,16 @@ function renderViewportSync() {
       const multiCry = activeSpecimenKind === 'compound'
         ? currentCompoundRes?.visualData?.multiSpeciesCrystal
         : currentElementCrystal;
+      const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentBundle;
+      const pbrOptics = derivePbrOpticsFromMaterialBundle(activeBundle, { surfaceFinish: 'crystal', fallbackZ: uiState.Z });
       if (multiCry) {
         gpuRenderer.renderMultiSpeciesCrystalScene({
           crystal: multiCry,
           colorMode: uiState.crystalColorMode,
           yaw: camYaw,
           pitch: camPitch,
-          camDist: Math.max(2.0, Math.min(5.2, camDist + 0.35))
+          camDist: Math.max(2.0, Math.min(5.2, camDist + 0.35)),
+          pbrOptics
         });
       } else if (liveMdSession) {
         gpuRenderer.renderLiveMd({
@@ -3333,10 +3337,13 @@ function renderViewportSync() {
           yaw: camYaw,
           pitch: camPitch,
           tint: em?.opticalSrgb || [0.65, 0.82, 0.96],
+          pbrOptics,
           velocityColorScale: 16.0
         });
       }
     } else if (liveMdSession) {
+      const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentBundle;
+      const pbrOptics = derivePbrOpticsFromMaterialBundle(activeBundle, { surfaceFinish: 'crystal', fallbackZ: uiState.Z });
       gpuRenderer.renderLiveMd({
         positionsBuffer: liveMdSession.positionsBuffer,
         velocitiesBuffer: liveMdSession.velocitiesBuffer,
@@ -3345,11 +3352,16 @@ function renderViewportSync() {
         yaw: camYaw,
         pitch: camPitch,
         tint: em?.opticalSrgb || [0.65, 0.82, 0.96],
+        pbrOptics,
         velocityColorScale: 16.0
       });
     }
   } else if (currentTab === 'md' && liveMdSession) {
     const em = getActiveElectromagnetic();
+    const activeBundle = activeSpecimenKind === 'compound' ? currentCompoundRes?.bundle : currentBundle;
+    const tMelt = liveMdConfigMeta?.meltingPointK ?? 600;
+    const mdPhase = (uiState.mdTempK || 300) >= tMelt ? 'liquid' : 'solid';
+    const pbrOptics = derivePbrOpticsFromMaterialBundle(activeBundle, { phase: mdPhase, surfaceFinish: mdPhase === 'liquid' ? 'liquid' : 'crystal', fallbackZ: uiState.Z });
     gpuRenderer.renderLiveMd({
       positionsBuffer: liveMdSession.positionsBuffer,
       velocitiesBuffer: liveMdSession.velocitiesBuffer,
@@ -3358,14 +3370,15 @@ function renderViewportSync() {
       boxLengthsA: liveMdSession.boxLengthsA,
       initBoxLengthsA: liveMdSession.initBoxLengthsA,
       rNearestNeighborA: liveMdConfigMeta?.rNearestNeighborA ?? liveMdSession.rNearestNeighborA,
-      meltingPointK: liveMdConfigMeta?.meltingPointK ?? 600,
+      meltingPointK: tMelt,
       cohesiveEnergyEv: liveMdConfigMeta?.cohesiveEnergyEv ?? 1.5,
       colorMode: uiState.mdColorMode,
       gravityEnabled: uiState.mdGravity,
       yaw: camYaw,
       pitch: camPitch,
       camDist: Math.max(1.85, Math.min(6.2, camDist + 0.35)),
-      tint: em?.opticalSrgb || [0.65, 0.80, 0.96]
+      tint: em?.opticalSrgb || [0.65, 0.80, 0.96],
+      pbrOptics
     });
   } else if (currentTab === 'compound') {
     const cm = uiState.chemViewMode;

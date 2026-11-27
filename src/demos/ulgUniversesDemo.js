@@ -14,6 +14,7 @@ import {
   requestCompatibleWebGpuDevice
 } from '../runtime/shared/webgpuCompat.js';
 import { createWebXrWebGpuBridge } from '../runtime/shared/webxrWebGpuBridge.js';
+import { derivePbrOpticsFromMaterialBundle } from '../runtime/material/materialPbrOpticsBridge.js';
 import {
   appendIconicUfoGeometry,
   appendMissileGeometry,
@@ -7523,7 +7524,8 @@ export async function mountUlgUniversesDemo() {
       const mdZoomFactor = Math.pow(10, Math.max(-1.2, Math.min(1.4, -8.2 - span)));
       const worldScale = baseScale * mdZoomFactor;
       const b = physics.getCachedElementBundle(physics.mdElementZ, true)?.bundle;
-      const rgb = b?.electromagnetic?.opticalSrgb || [0.76, 0.80, 0.86];
+      const pbrOptics = derivePbrOpticsFromMaterialBundle(b, { surfaceFinish: 'crystal', fallbackZ: physics.mdElementZ });
+      const rgb = b?.electromagnetic?.opticalSrgb || pbrOptics.albedoSrgb || [0.76, 0.80, 0.86];
       mdCloud = {
         positionsBuffer: physics.mdSession.positionsBuffer,
         velocitiesBuffer: physics.mdSession.velocitiesBuffer,
@@ -7532,6 +7534,7 @@ export async function mountUlgUniversesDemo() {
         worldScale,
         radius: Math.max(0.045, Math.min(1.3, (physics.mdSession.rNearestNeighborA || 2.5) * 0.285 * worldScale)),
         baseRgb: rgb,
+        pbrOptics,
         alphaFade: wMd,
         idealCoord: physics.mdSession.idealCoordination || 12
       };

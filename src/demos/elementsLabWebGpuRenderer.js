@@ -14,6 +14,7 @@
 //      contours directly from `currentAtlas.packedGpuAtlas.data` on WebGPU!
 
 import { evaluatePolytopeAtlasWgsl } from '../../ulg-gpu-abi/src/materialFoundationAbi.js';
+import { ULG_MATERIAL_PBR_WGSL } from '../visualization/ulgMaterialPbrWgsl.js';
 
 const GPU_BUFFER_USAGE = Object.freeze({
   MAP_READ: 0x0001,
@@ -331,7 +332,10 @@ fn fs_raymarch(in: VsOut) -> @location(0) vec4<f32> {
 `;
 
 // Zero-Copy Instanced 3D Sphere Renderer reading `positionsBuffer`, `velocitiesBuffer`, & `forcesBuffer` DIRECTLY on WebGPU!
+// Shaded with Cook-Torrance GGX + Complex (n_rgb, k_rgb) Fresnel PBR driven by ULG's Gate 1/2 electromagnetic closure!
 const INSTANCED_ATOMS_WGSL = /* wgsl */ `
+${ULG_MATERIAL_PBR_WGSL}
+
 struct AtomRenderUniforms {
   resolution: vec2<f32>,
   yaw: f32,
@@ -339,7 +343,9 @@ struct AtomRenderUniforms {
   box_l: vec4<f32>,        // (Lx, Ly, Lz, atomRadiusWorldA)
   ref_box_cam: vec4<f32>,  // (refLx, refLy, refLz, camDist)
   base_tint: vec4<f32>,    // (r, g, b, meltingTempK)
-  render_cfg: vec4<f32>,   // (colorMode: 0=Temp 1=Phase/Coord 2=E_pot, eCohEv, wireMode: 0=live 1=refGhost, pad)
+  render_cfg: vec4<f32>,   // (colorMode: 0=Temp 1=Phase/Coord 2=E_pot, eCohEv, wireMode: 0=live 1=refGhost, gravFlag)
+  pbr_f0_met: vec4<f32>,   // (f0_r, f0_g, f0_b, metallic) from ULG material-physics electromagnetic closure
+  pbr_rgh_ior: vec4<f32>,  // (roughness, ior, thermal_phase_blend, 0)
 };
 
 @group(0) @binding(0) var<uniform> u: AtomRenderUniforms;
@@ -470,18 +476,35 @@ fn fs_atom(in: VsOut) -> FsOut {
   if (r2 > 1.0) { discard; }
   let nz = sqrt(max(0.0, 1.0 - r2));
   let n = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
+  let v = vec3<f32>(0.0, 0.0, 1.0);
   let key_l = normalize(vec3<f32>(-0.42, 0.64, 0.64));
   let fill_l = normalize(vec3<f32>(0.62, -0.35, 0.55));
-  let diff = max(0.16, dot(n, key_l)) + 0.18 * max(0.0, dot(n, fill_l));
-  let half_v = normalize(key_l + vec3<f32>(0.0, 0.0, 1.0));
-  let spec = pow(max(0.0, dot(n, half_v)), 34.0) * 0.68;
-  let rim = pow(max(0.0, 1.0 - nz), 2.4) * (0.26 + in.glow * 0.65);
-  let ao = 0.84 + 0.16 * nz;
+  let rim_l = normalize(vec3<f32>(0.18, 0.78, -0.58));
+
+  // ULG Material-Physics Cook-Torrance GGX + Complex (n, k) Fresnel PBR!
+  let albedo_lin = ulg_srgb_to_linear(in.color);
+  let metallic = clamp(u.pbr_f0_met.w, 0.0, 1.0);
+  let roughness = clamp(u.pbr_rgh_ior.x * (1.0 - in.glow * 0.35), 0.06, 0.94);
+  let f0_mat = clamp(u.pbr_f0_met.rgb, vec3<f32>(0.02), vec3<f32>(0.99));
+  let f0_eff = mix(f0_mat, max(f0_mat, albedo_lin * 0.85), metallic * 0.35);
+
+  let direct_key = ulg_pbr_direct(n, v, key_l, albedo_lin, f0_eff, metallic, roughness, vec3<f32>(2.45, 2.42, 2.34));
+  let direct_fill = ulg_pbr_direct(n, v, fill_l, albedo_lin, f0_eff, metallic, roughness, vec3<f32>(0.68, 0.82, 1.05));
+  let direct_rim = ulg_pbr_direct(n, v, rim_l, albedo_lin, f0_eff, metallic, roughness, vec3<f32>(0.42, 0.64, 0.92));
+  let env_ibl = ulg_pbr_env_hemi(
+    n, v, albedo_lin, f0_eff, metallic, roughness,
+    vec3<f32>(0.26, 0.34, 0.48),
+    vec3<f32>(0.14, 0.18, 0.25),
+    vec3<f32>(0.05, 0.06, 0.09)
+  );
+  let ao = 0.82 + 0.18 * nz;
   let fog = clamp(1.0 - max(0.0, in.view_z - 3.6) * 0.10, 0.58, 1.0);
-  let lit = (in.color * diff * ao + vec3<f32>(1.0) * spec + mix(vec3<f32>(0.38, 0.78, 1.0), in.color, 0.45) * rim + in.color * in.glow * 0.35) * fog;
+  let hdr = ((direct_key + direct_fill + direct_rim + env_ibl) * ao + albedo_lin * (in.glow * 0.65)) * fog;
+  let mapped = hdr / (hdr + vec3<f32>(0.78));
+  let srgb = ulg_linear_to_srgb(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)));
 
   var out: FsOut;
-  out.color = vec4<f32>(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+  out.color = vec4<f32>(srgb, 1.0);
   out.depth = clamp((in.view_z - nz * in.view_rad - 0.35) / 10.0, 0.001, 0.999);
   return out;
 }
@@ -1758,11 +1781,13 @@ fn fs_tr_dot(in: TrPtOut) -> @location(0) vec4<f32> {
 // Crystal Renderer (`MOLECULE_3D_WGSL`) — Depth-Buffered Phong/Fresnel WebGPU!
 // ============================================================================
 const MOLECULE_3D_WGSL = /* wgsl */ `
+${ULG_MATERIAL_PBR_WGSL}
+
 struct MolSceneUniforms {
   res_yaw_pitch: vec4<f32>, // (w, h, yaw, pitch)
   cam_meta: vec4<f32>,      // (cam_dist, scale_norm, color_mode (0=CPK, 1=MEP), time_s)
   center_off: vec4<f32>,    // (cx, cy, cz, show_box)
-  box_half: vec4<f32>,      // (hx, hy, hz, 0)
+  box_half: vec4<f32>,      // (hx, hy, hz, pbr_metallic)
 };
 
 // atoms_pos_r: vec4(x, y, z, radius_world)
@@ -1850,14 +1875,25 @@ fn fs_mol_atom(in: MolAtomOut) -> @location(0) vec4<f32> {
   if (r2 > 1.0) { discard; }
   let nz = sqrt(max(0.0, 1.0 - r2));
   let n = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
+  let v = vec3<f32>(0.0, 0.0, 1.0);
   let light1 = normalize(vec3<f32>(-0.42, 0.65, 0.63));
   let light2 = normalize(vec3<f32>(0.55, -0.30, 0.78));
-  let diff = max(0.16, dot(n, light1)) * 0.86 + max(0.0, dot(n, light2)) * 0.24;
-  let half_v = normalize(light1 + vec3<f32>(0.0, 0.0, 1.0));
-  let spec = pow(max(0.0, dot(n, half_v)), 34.0) * 0.78;
-  let rim = pow(max(0.0, 1.0 - nz), 2.6) * 0.32;
-  let rgb = in.color * diff + vec3<f32>(1.0) * spec + in.rim_tint * rim;
-  return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+  let albedo_lin = ulg_srgb_to_linear(in.color);
+  let metallic = clamp(u.box_half.w, 0.0, 0.96);
+  let roughness = mix(0.26, 0.18, metallic);
+  let f0_rgb = mix(vec3<f32>(0.045), clamp(albedo_lin * 1.08, vec3<f32>(0.08), vec3<f32>(0.98)), metallic);
+  let d1 = ulg_pbr_direct(n, v, light1, albedo_lin, f0_rgb, metallic, roughness, vec3<f32>(2.40, 2.36, 2.28));
+  let d2 = ulg_pbr_direct(n, v, light2, albedo_lin, f0_rgb, metallic, roughness, vec3<f32>(0.68, 0.80, 1.02));
+  let env = ulg_pbr_env_hemi(
+    n, v, albedo_lin, f0_rgb, metallic, roughness,
+    vec3<f32>(0.24, 0.34, 0.48),
+    vec3<f32>(0.12, 0.16, 0.24),
+    vec3<f32>(0.04, 0.05, 0.08)
+  );
+  let rim = pow(max(0.0, 1.0 - nz), 3.0) * 0.14;
+  let hdr = d1 + d2 + env + ulg_srgb_to_linear(in.rim_tint) * rim;
+  let mapped = hdr / (hdr + vec3<f32>(0.76));
+  return vec4<f32>(ulg_linear_to_srgb(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
 }
 
 @vertex
@@ -1920,11 +1956,18 @@ fn fs_mol_bond(in: MolBondOut) -> @location(0) vec4<f32> {
   }
   let y = clamp(in.uv_along.y, -1.0, 1.0);
   let cyl_z = sqrt(max(0.02, 1.0 - y * y));
-  let shade = 0.32 + 0.68 * max(0.0, y * 0.45 + cyl_z * 0.88);
-  let spec = pow(max(0.0, y * 0.35 + cyl_z * 0.93), 18.0) * 0.45;
+  let n_cyl = normalize(vec3<f32>(0.0, y, cyl_z));
+  let v_cyl = vec3<f32>(0.0, 0.0, 1.0);
+  let l_cyl = normalize(vec3<f32>(-0.35, 0.48, 0.80));
+  let alb_lin = ulg_srgb_to_linear(in.color);
+  let met_b = clamp(u.box_half.w * 0.55, 0.0, 0.75);
+  let f0_b = mix(vec3<f32>(0.045), alb_lin, met_b);
+  let lit_b = ulg_pbr_direct(n_cyl, v_cyl, l_cyl, alb_lin, f0_b, met_b, 0.30, vec3<f32>(2.35, 2.32, 2.26))
+    + ulg_pbr_env_hemi(n_cyl, v_cyl, alb_lin, f0_b, met_b, 0.30, vec3<f32>(0.24, 0.32, 0.44), vec3<f32>(0.12, 0.16, 0.22), vec3<f32>(0.04, 0.05, 0.08));
   let pulse = select(1.0, 0.85 + 0.25 * sin(u.cam_meta.w * 4.5), mode >= 0.5 && mode < 1.5);
-  let rgb = (in.color * shade + vec3<f32>(0.95) * spec) * pulse;
-  return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+  let hdr_b = lit_b * pulse;
+  let rgb = ulg_linear_to_srgb(clamp(hdr_b / (hdr_b + vec3<f32>(0.76)), vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(rgb, 1.0);
 }
 
 @vertex
@@ -2741,8 +2784,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
 
   // Reusable uniforms & dummy placeholder buffers
   const volUniformBuf = device.createBuffer({ size: 48, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const atomUniformBuf = device.createBuffer({ size: 80, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const refWireUniformBuf = device.createBuffer({ size: 80, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const atomUniformBuf = device.createBuffer({ size: 112, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const refWireUniformBuf = device.createBuffer({ size: 112, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const polyUniformBuf = device.createBuffer({ size: 32, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const polyProbeUniformBuf = device.createBuffer({ size: 16, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const polyProbeOutBuf = device.createBuffer({ size: 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
@@ -2963,7 +3006,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     yaw = 0.45,
     pitch = 0.32,
     camDist = 3.25,
-    tint = [0.65, 0.80, 0.96]
+    tint = [0.65, 0.80, 0.96],
+    pbrOptics = null
   }) {
     if (!positionsBuffer || !velocitiesBuffer || !(atomCount > 0)) return;
     const { w, h } = ensureCanvasSize();
@@ -2981,13 +3025,19 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     const safeTm = Math.max(25, Number(meltingPointK) || 600);
     const safeEcoh = Math.max(0.08, Number(cohesiveEnergyEv) || 1.5);
     const gravFlag = gravityEnabled ? 1.0 : 0.0;
+    const f0 = pbrOptics?.f0Rgb || [0.05, 0.05, 0.05];
+    const met = Number.isFinite(Number(pbrOptics?.metallic)) ? Number(pbrOptics.metallic) : 0.18;
+    const rgh = Number.isFinite(Number(pbrOptics?.roughness)) ? Number(pbrOptics.roughness) : 0.28;
+    const ior = Number.isFinite(Number(pbrOptics?.ior)) ? Number(pbrOptics.ior) : 1.5;
 
     const uData = new Float32Array([
       w, h, yaw, pitch,
       lx, ly, lz, atomRadA,
       rlx, rly, rlz, effCamDist,
       tint[0] ?? 0.65, tint[1] ?? 0.80, tint[2] ?? 0.96, safeTm,
-      Number(colorMode) || 0, safeEcoh, 0.0, gravFlag
+      Number(colorMode) || 0, safeEcoh, 0.0, gravFlag,
+      f0[0] ?? 0.05, f0[1] ?? 0.05, f0[2] ?? 0.05, met,
+      rgh, ior, 0.0, 0.0
     ]);
     device.queue.writeBuffer(atomUniformBuf, 0, uData);
 
@@ -3841,7 +3891,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     colorMode = 0,
     yaw = 0.48,
     pitch = 0.30,
-    camDist = 3.25
+    camDist = 3.25,
+    pbrOptics = null
   }) {
     if (!crystal?.positions || !(crystal.atomCount > 0)) return;
     const { w, h } = ensureCanvasSize();
@@ -3877,11 +3928,12 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
       sB.set([crystal.positions[ib * 4], crystal.positions[ib * 4 + 1], crystal.positions[ib * 4 + 2], 0.25], i * 4);
     }
 
+    const pbrMet = Number.isFinite(Number(pbrOptics?.metallic)) ? Number(pbrOptics.metallic) : 0.15;
     device.queue.writeBuffer(molUniformBuf, 0, new Float32Array([
       w, h, yaw, pitch,
       camDist, scaleNorm, colorMode, 0.0,
       cx, cy, cz, 1.0,
-      lx * 0.5, ly * 0.5, lz * 0.5, 0.0
+      lx * 0.5, ly * 0.5, lz * 0.5, pbrMet
     ]));
     device.queue.writeBuffer(molAtomsPosBuf, 0, aPos);
     device.queue.writeBuffer(molAtomsMetaBuf, 0, aMeta);

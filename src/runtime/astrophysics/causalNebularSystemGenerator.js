@@ -178,6 +178,7 @@ export function deriveGalaxyEnvironmentFromCosmicContext({
     redshiftZ: z,
     cosmicAgeGyr: ageCosmicGyr,
     localOverdensity: delta,
+    tidalSpinLambda: spinL ?? Number((0.024 + rand() * 0.056).toFixed(4)),
     regionPosMpc: Object.freeze([regionPosMpc[0] || 0, regionPosMpc[1] || 0, regionPosMpc[2] || 0]),
     morphology,
     morphologyLabel,
@@ -998,6 +999,30 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       };
     }
 
+    // Preserve exact GPU-coalesced mass, physical radius, central pressure, and HUD composition label
+    // (NEVER throw away GPU-coalesced planet sizes & masses for unrelated random rolls!)
+    if (gpuB && spec) {
+      if (Number.isFinite(gpuB.totalMassEarth) && gpuB.totalMassEarth > 0) {
+        const gMe = gpuB.totalMassEarth;
+        spec.massSolar = gMe * EARTH_MASS_SOLAR;
+        if (spec.planetClass === 'gas-giant' || spec.planetClass === 'hot-jupiter') {
+          const gMj = gMe / 317.83;
+          spec.centralP = Math.round((360 + gMj * 180) * 1e9);
+          spec.composition = spec.composition.replace(/\([0-9.]+ M_J\)/, `(${gMj.toFixed(2)} M_J)`);
+        } else {
+          spec.centralP = Math.round((Math.min(450, 40 + gMe * 110)) * 1e9);
+          spec.composition = spec.composition.replace(/\([0-9.]+ M⊕\)/, `(${gMe.toFixed(1)} M⊕)`);
+        }
+      }
+      if (Number.isFinite(gpuB.radiusEarth) && gpuB.radiusEarth > 0) {
+        spec.radiusKm = Math.max(1200, Math.round(gpuB.radiusEarth * 6371.0));
+      }
+      if (spec.ringed) {
+        spec.ringInnerKm = Math.round(spec.radiusKm * 1.32);
+        spec.ringOuterKm = Math.round(spec.radiusKm * 2.34);
+      }
+    }
+
     const bodyIdx = catalog.length;
     // Causal spin obliquity (stochastic giant-impact scatter) & tidal-locking timescale (tau ~ a^6 / M_*^2)!
     const mHost = Math.max(0.08, stars[0]?.massSolar || 1.0);
@@ -1018,15 +1043,21 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     const civTechK = (isHabLike && isMature && civRoll < 0.55)
       ? Number((0.38 + rand() * 0.52).toFixed(2))
       : 0.0;
+    // Preserve exact GPU-coalesced clump azimuth phiRad in right-handed CCW WebGPU ecliptic coordinates
+    // (`pos = (r cos M, 0, -r sin M)` matches disk `(r cos phi, 0, r sin phi)` at `M0 = -phi`!).
+    const hasGpuPhi = Boolean(gpuB && Number.isFinite(gpuB.phiRad));
+    const coalescedM0Deg = hasGpuPhi
+      ? Number((((-gpuB.phiRad * 180.0 / Math.PI) % 360.0 + 360.0) % 360.0).toFixed(2))
+      : Number((rand() * 360).toFixed(1));
     catalog.push({
       id: `planet-${p}`,
       parent: planetParentIdx,
       aAu: Number(aAu.toFixed(4)),
       e: Number((0.008 + rand() * (archetype === 'earth-like' ? 0.045 : 0.095)).toFixed(4)),
-      incDeg: Number(((rand() - 0.5) * 4.2).toFixed(2)),
-      omDeg: Number((rand() * 360).toFixed(1)),
-      wDeg: Number((rand() * 360).toFixed(1)),
-      m0Deg: Number((rand() * 360).toFixed(1)),
+      incDeg: Number(((rand() - 0.5) * (hasGpuPhi ? 2.4 : 4.2)).toFixed(2)),
+      omDeg: hasGpuPhi ? 0.0 : Number((rand() * 360).toFixed(1)),
+      wDeg: hasGpuPhi ? 0.0 : Number((rand() * 360).toFixed(1)),
+      m0Deg: coalescedM0Deg,
       axialObliquityDeg,
       spinAxisLonDeg,
       rotationPeriodHr,

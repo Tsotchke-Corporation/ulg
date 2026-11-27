@@ -854,9 +854,11 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  // Radiogenic core heating + heat conduction + Stefan-Boltzmann radiative surface cooling
+  // Radiogenic core heating + heat conduction + true T^4 Stefan-Boltzmann radiative surface cooling
   let core_heat = select(0.0, params.radiogenic_heat * 0.32, r_new < 0.62);
-  let surf_cool = select(0.0, 0.28 * pow(max(0.05, temp), 3.0), r_new > 0.88 && (params.flags & 2u) == 0u);
+  let t_rad = max(0.05, temp);
+  let t_rad2 = t_rad * t_rad;
+  let surf_cool = select(0.0, 0.34 * t_rad2 * t_rad2, r_new > 0.88 && (params.flags & 2u) == 0u);
   let conduct = (cell_temp - temp) * 1.45;
   temp = clamp(temp + (core_heat + conduct - surf_cool) * dt, 0.06, 1.0);
   shock = max(0.0, shock - dt * (0.25 + params.tectonic_mobility * 0.35));
@@ -1077,7 +1079,7 @@ fn resolve_spherical_geology(@builtin(global_invocation_id) gid: vec3<u32>) {
   let is_magma = (params.flags & 2u) != 0u;
   let is_minor = (params.flags & 16u) != 0u;
   // Realistic Earth-like ~32% cohesive continental plates on ocean worlds (leaves ~68% open deep sapphire oceans!)
-  let cont_step = select(smoothstep(0.24, 0.54, felsic), smoothstep(0.42, 0.68, felsic), has_ocean);
+  let cont_step = select(smoothstep(0.24, 0.54, felsic), smoothstep(0.49, 0.74, felsic), has_ocean);
   // Crisp narrow coastal Andean/Himalayan mountain arc strictly along convergent continental subduction margins!
   let margin_band = smoothstep(0.46, 0.62, felsic) * (1.0 - smoothstep(0.70, 0.90, felsic));
   let mtn_belt = margin_band * (0.28 + max(0.0, conv) * 0.72) * (0.35 + params.tectonic_mobility * 0.65);
@@ -1349,34 +1351,45 @@ fn project_local_patch(@builtin(global_invocation_id) gid: vec3<u32>) {
   let u = (f32(ix) + 0.5) / f32(n) - 0.5;
   let v = (f32(iz) + 0.5) / f32(n) - 0.5;
 
-  // Orthonormal tangent basis (east, north, up) at landing site (lat_rad, lon_rad)!
+  // Right-handed orthonormal tangent basis (east, north, up) at landing site (lat_rad, lon_rad)!
+  // Note: cross(east, up_c) has +Y component (+cos(lat)) pointing strictly Geographic North!
   let cl = cos(params.lat_rad);
   let sl = sin(params.lat_rad);
   let co = cos(params.lon_rad);
   let so = sin(params.lon_rad);
   let up_c = vec3<f32>(cl * co, sl, cl * so);
   let east = normalize(vec3<f32>(-so, 0.0, co));
-  let north = normalize(cross(up_c, east));
+  let north = normalize(cross(east, up_c));
 
   let n_dir = normalize(up_c + east * (u * params.angular_span_rad) + north * (-v * params.angular_span_rad));
   let g = sample_sphere_geo(n_dir);
-  // Sample local orbital SPH gradient (east/north slopes) to drive physical tectonic/hydraulic micro-terracing
-  // ZERO Perlin noise (p_vnoise retired!): all surface relief comes directly from the orbital 3D SPH geology
-  // map + local physical sedimentary/basalt strata benching + 40 passes of GPU hydraulic & thermal-talus erosion!
+  // Sample local orbital SPH gradient & curvature (east/west/north/south slopes) so mountains, crater rims,
+  // rift valleys, and tectonic escarpments seen from orbit rise with matching pronounced 3D relief on the surface!
+  // ZERO Perlin noise: all relief is strictly derived from the orbital 3D SPH geology map + slope-gated strata + hydraulic erosion!
   let step_ang = params.angular_span_rad / f32(n);
   let gE = sample_sphere_geo(normalize(n_dir + east * step_ang));
+  let gW = sample_sphere_geo(normalize(n_dir - east * step_ang));
   let gN = sample_sphere_geo(normalize(n_dir + north * step_ang));
-  let grad_mag = length(vec2<f32>(gE.x - g.x, gN.x - g.x)) / max(1e-4, step_ang);
+  let gS = sample_sphere_geo(normalize(n_dir - north * step_ang));
+  let grad_x = (gE.x - gW.x) / max(2e-4, 2.0 * step_ang);
+  let grad_z = (gN.x - gS.x) / max(2e-4, 2.0 * step_ang);
+  let grad_mag = length(vec2<f32>(grad_x, grad_z));
+  // Local orbital SPH curvature (positive on crests/crater rims, negative in basins/troughs)
+  let curv_lap = (gE.x + gW.x + gN.x + gS.x - 4.0 * g.x);
   let has_ocean = (params.flags & 1u) != 0u;
-  // Physical sedimentary/lava-flow strata ledges emerge strictly on sloping bedrock (zero flat-plain Perlin blobs!)
-  let strata_step = sin(g.x * 42.0 + g.y * 6.0) * 0.012 * clamp(grad_mag * 0.45, 0.0, 1.0);
-  let above_sea = select(1.0, smoothstep(params.sea_level_norm - 0.01, params.sea_level_norm + 0.03, g.x), has_ocean);
+  let above_sea = select(1.0, smoothstep(params.sea_level_norm - 0.008, params.sea_level_norm + 0.025, g.x), has_ocean);
+  // Pronounced alpine/crater-rim contrast & physical stratified escarpment ledges strictly driven by orbital SPH relief!
+  let slope_w = clamp(grad_mag * 0.55, 0.0, 1.0);
+  let highland_boost = max(0.0, g.x - select(-0.15, params.sea_level_norm, has_ocean)) * (0.28 + 0.34 * g.y);
+  let ridge_crisp = clamp(-curv_lap * 14.0, -0.045, 0.065) * (0.55 + 0.85 * slope_w);
+  let strata_step = (sin(g.x * 38.0 + g.y * 5.5) * 0.024 + sin(g.x * 84.0 - g.z * 4.2) * 0.009) * slope_w;
   // Output layout matches planetarySurfaceVehiclesGpu tectonic_field:
   //   x = elevNorm [-1..1], y = riverMask [0..1], z = moistureOrVolc [0..1], w = soilOrCrustComp [0..1]
-  let elev = clamp(g.x + strata_step * above_sea, -1.0, 1.0);
-  // Seed initial watershed headwaters strictly on high moist SPH slopes for D8 hydraulic gully carving!
-  let river = clamp(g.w * smoothstep(params.sea_level_norm + 0.02, params.sea_level_norm + 0.42, elev) * (0.28 + 0.72 * clamp(grad_mag * 0.4, 0.0, 1.0)), 0.0, 1.0);
-  let moist_or_volc = select(g.w, max(g.w, g.z), (params.flags & 2u) != 0u || g.z > 0.45);
+  let elev = clamp(g.x + (highland_boost + ridge_crisp + strata_step) * above_sea, -1.0, 1.0);
+  // Seed initial watershed headwaters strictly on high moist SPH slopes for isotropic hydraulic canyon carving!
+  let river = clamp(g.w * smoothstep(params.sea_level_norm + 0.02, params.sea_level_norm + 0.42, elev) * (0.30 + 0.70 * slope_w), 0.0, 1.0);
+  // Keep hydraulic moisture strictly separated from volcanic rift heat on ocean/biosphere worlds so volcanoes never spawn forests!
+  let moist_or_volc = select(select(g.w, max(g.w, g.z), (params.flags & 2u) != 0u || g.z > 0.45), g.w, has_ocean);
   patch_a[idx] = vec4<f32>(elev, river, moist_or_volc, g.y);
 }
 
@@ -1427,24 +1440,24 @@ fn erode_local_patch(@builtin(global_invocation_id) gid: vec3<u32>) {
   var moist = c.z;
   var comp = c.w;
 
-  // Isotropic thermal talus creep & bedrock cliff benching
-  let talus = mix(0.028, 0.052, comp);
+  // Isotropic thermal talus creep & bedrock cliff benching (preserves steep rocky crags!)
+  let talus = mix(0.038, 0.072, comp);
   if (slope > talus) {
-    elev = elev + clamp(lap, -0.03, 0.03) * 0.35;
+    elev = elev + clamp(lap, -0.026, 0.026) * 0.24;
   }
-  // Isotropic hydraulic stream-power incision & alluvial delta deposition on solvent-bearing land!
+  // Isotropic hydraulic stream-power canyon incision & alluvial delta deposition on solvent-bearing land!
   if (params.hydraulic_erosion > 0.08 && is_land) {
     let avg_riv = (nL.y + nR.y + nU.y + nD.y) * 0.1666667 + (nUL.y + nUR.y + nDL.y + nDR.y) * 0.0833333;
-    let flux = (0.025 + inflow * 3.4 + avg_riv * 0.72) * params.hydraulic_erosion;
-    let erode_d = clamp(flux * slope * 0.60, 0.0, 0.020);
-    let dep_d = clamp(flux * max(0.0, 0.016 - slope) * 0.32, 0.0, 0.010);
+    let flux = (0.030 + inflow * 4.2 + avg_riv * 0.76) * params.hydraulic_erosion;
+    let erode_d = clamp(flux * slope * 0.82, 0.0, 0.032);
+    let dep_d = clamp(flux * max(0.0, 0.018 - slope) * 0.34, 0.0, 0.012);
     elev = elev - erode_d + dep_d;
     if (has_ocean) {
       elev = max(params.sea_level_norm + 0.002, elev);
     }
-    river = clamp(max(river * 0.92, min(1.0, flux * 0.86)), 0.0, 1.0);
+    river = clamp(max(river * 0.92, min(1.0, flux * 0.88)), 0.0, 1.0);
     moist = clamp(max(moist * 0.98, river * 0.95), 0.0, 1.0);
-    comp = clamp(comp + erode_d * 3.2 - dep_d * 2.0, 0.0, 1.0);
+    comp = clamp(comp + erode_d * 3.4 - dep_d * 2.0, 0.0, 1.0);
   }
   patch_b[idx] = vec4<f32>(clamp(elev, -1.0, 1.0), river, moist, comp);
 }

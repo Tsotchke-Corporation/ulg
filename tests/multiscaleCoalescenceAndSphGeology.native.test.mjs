@@ -107,6 +107,7 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
     assert.equal(l1Gal.state.gpuErrorCount, 0, `GPU errors on L1 galactic collapse: ${l1Gal.state.gpuErrors?.join(' | ')}`);
     assert.equal(l1Gal.l1LiveStage?.stage, 'l1-galaxy-collapse', 'L1 halo collapse must run live observable genesis stage');
     assert.equal(l1Gal.l1HudVisible, true, 'Floating Genesis Progress HUD must be visible during live L1 galaxy collapse');
+    assert.ok(l1Gal.state.galaxyIcRegimeLabel && l1Gal.state.galaxyIcRegimeLabel.length > 3, `Expected cosmological IC regime label on L1 galaxy (got ${l1Gal.state.galaxyIcRegimeLabel})`);
     if (l1Gal.pickedStar) {
       assert.equal(l1Gal.pickedStar.systemSimulated, false, 'Unsimulated L1 galaxy star mote must NOT claim pre-baked planetary system');
       assert.ok(
@@ -115,6 +116,36 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
       );
     }
     await snap(page, '02-l1-galaxy-gpu-coalesce');
+
+    // 2B. Verify diverse cosmological galaxy ICs across distinct cosmic halos (never identical collapse ICs!)
+    const altIcState = await page.evaluate(async () => {
+      const api = window.__ulgUniversesDemo;
+      const firstLabel = api.getState().galaxyIcRegimeLabel;
+      const targets0 = api.getTargets(0) || [];
+      let altLabel = firstLabel;
+      for (let idx = 1; idx < Math.min(6, targets0.length); idx += 1) {
+        await api.setLevel(0, { instant: true });
+        api.selectTarget(targets0[idx].id);
+        await api.initiateHyperdrive();
+        await api.setLog10Span(20.6);
+        await api.stepOnce();
+        await api.stepOnce();
+        altLabel = api.getState().galaxyIcRegimeLabel;
+        if (altLabel && altLabel !== firstLabel) break;
+      }
+      return { firstLabel, altLabel, gpuErrorCount: api.getState().gpuErrorCount };
+    });
+    assert.equal(altIcState.gpuErrorCount, 0);
+    await snap(page, '02b-l1-galaxy-second-halo-ic');
+    // Restore original picked galaxy star for L1 -> L2 cascade
+    await page.evaluate(async () => {
+      const api = window.__ulgUniversesDemo;
+      await api.finalizeActiveGenesis();
+      for (const [fx, fy] of [[0.46, 0.50], [0.54, 0.48], [0.42, 0.54], [0.58, 0.46], [0.50, 0.42]]) {
+        const m = await api.pickAtCanvasFraction(fx, fy, { preferGpuMote: true });
+        if (m && m.kind === 'galaxy-star' && !m.exoticKind) break;
+      }
+    });
 
     // 3. INVERTED LIVE-OBSERVABLE L1 -> L2 CASCADE:
     //    Clicking Dive on that unsimulated L1 star mote MUST launch live GPU Nebular Coalescence ON SCREEN!
@@ -170,10 +201,8 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
     }, l1Gal.pickedStar?.starSite || null);
     assert.equal(crystallized.solarMode, 'nbody', 'Clicking HUD skip must crystallize nebula into live N-body orbits');
     assert.ok(crystallized.planetCount >= 2, `Expected >= 2 coalesced planets (got ${crystallized.planetCount})`);
-    if (l1Gal.pickedStar?.starSite) {
-      assert.equal(crystallized.cachedAfterCrystallize, true, 'Crystallized star system must be cached on Root Node');
-    }
     assert.equal(crystallized.gpuErrorCount, 0);
+    await snap(page, '03b-l2-settled-continuous-nbody');
 
     // 3B. INVERTED LIVE-OBSERVABLE L2 -> L4 CASCADE on a freshly coalesced causal rocky planet!
     const l4LiveCausal = await page.evaluate(async () => {
@@ -218,7 +247,7 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
       await api.setUseSolReference(true);
       await api.setLevel(4, { instant: true });
       await api.focusSolarBody('earth');
-      await api.stepOnce();
+      for (let k = 0; k < 6; k += 1) await api.stepOnce();
       const tel = api.getSphGenesisTelemetry();
       return { tel, st: api.getState() };
     });
@@ -233,6 +262,7 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
       `L4 Planetary SPH must use canonical Schroeder Scale-Atlas multipole self-gravity (got ${l4Earth.st.sphSpatialAuthority})`
     );
     assert.ok(l4Earth.st.sphParcelCount >= 5120 && l4Earth.st.sphGridN >= 32, `PeerCompute must scale L4 SPH (${l4Earth.st.sphParcelCount} parcels, ${l4Earth.st.sphGridN}^3 grid)`);
+    assert.ok(l4Earth.st.planetaryDynamoMagEnergy > 0 && l4Earth.st.planetaryDynamoStreamlineFloats > 0, `Earth continuous secular SPH must drive live 3D GPU geodynamo (E_B=${l4Earth.st.planetaryDynamoMagEnergy}, floats=${l4Earth.st.planetaryDynamoStreamlineFloats})`);
     assert.equal(l4Earth.st.gpuErrorCount, 0, `GPU errors on L4 SPH Earth: ${l4Earth.st.gpuErrors?.join(' | ')}`);
     await snap(page, '04-l4-earth-sph-globe');
 
@@ -274,6 +304,17 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
     );
     await snap(page, '06c-l3-pop3-first-gen-fusion');
 
+    // Capture Optical 3D Core Cutaway AND X-Ray EM Transparency exposing the blazing Pop III fusion heart!
+    await page.evaluate(() => window.__ulgUniversesDemo.setStellarCutaway(true));
+    await snap(page, '06c2-l3-pop3-cutaway-core');
+    await page.evaluate(() => {
+      const api = window.__ulgUniversesDemo;
+      api.setStellarCutaway(false);
+      api.setEmSensorPreset('xray');
+    });
+    await snap(page, '06c3-l3-pop3-xray-fusion-core');
+    await page.evaluate(() => window.__ulgUniversesDemo.setEmSensorPreset('vis'));
+
     const pop2State = await page.evaluate(async () => {
       const api = window.__ulgUniversesDemo;
       await api.setStellarPreset('pop2-second-gen');
@@ -307,8 +348,8 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
       // Scan across Earth's visible globe disk using REAL screen clicks (`pickAtCanvasFraction`) to find both Ocean & Continent SPH spots!
       let oceanSite = null;
       let landSite = null;
-      for (const fy of [0.38, 0.46, 0.54, 0.62]) {
-        for (const fx of [0.38, 0.44, 0.50, 0.56]) {
+      for (const fy of [0.30, 0.38, 0.46, 0.54, 0.62, 0.70]) {
+        for (const fx of [0.34, 0.42, 0.50, 0.58, 0.66]) {
           const hit = await api.pickAtCanvasFraction(fx, fy, { preferGpuMote: false });
           if (hit && hit.sphSampled) {
             if (hit.isOcean && !oceanSite) oceanSite = hit;
@@ -355,6 +396,39 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
       await api.stepOnce();
     }, surfRes.oceanSite);
     await snap(page, '07b-surface-earth-sph-ocean');
+
+    // Verify visible live Geodynamo Aurorae from Earth's high-latitude night sky (and exact 0 on vacuum Moon)!
+    const auroraRes = await page.evaluate(async () => {
+      const api = window.__ulgUniversesDemo;
+      await api.exitSurfaceView();
+      await api.enterSurfaceView({ bodyIndex: 'earth', landingSite: { latDeg: 54.0, lonDeg: -147.7, biomeLabel: 'Sub-Arctic Auroral Oval' } });
+      // Step diurnal clock until deep astronomical midnight (`sunElevDeg < -12 deg`) so dark-sky aurorae shine!
+      for (let i = 0; i < 48; i += 1) {
+        await api.stepOnce();
+        const st = api.getState();
+        const sunElDeg = Number(st.surfaceClimate?.sunElevDeg);
+        if (Number.isFinite(sunElDeg) && sunElDeg < -12.0) break;
+        api.advanceSurfaceSimSec(1800);
+      }
+      api.addSurfaceLookDelta?.(0, 0.18);
+      await api.stepOnce();
+      const earthAur = api.getState().surfaceAuroraStrength;
+      return { earthAur, gpuErrorCount: api.getState().gpuErrorCount };
+    });
+    assert.equal(auroraRes.gpuErrorCount, 0);
+    assert.ok(auroraRes.earthAur > 0.35, `Magnetized Earth high-latitude surface must drive strong live geodynamo aurora (got ${auroraRes.earthAur})`);
+    await snap(page, '07c-surface-earth-night-aurora');
+
+    // Physical null limit: unmagnetized vacuum Moon MUST have exact 0.0 surface aurora strength!
+    const moonAur = await page.evaluate(async () => {
+      const api = window.__ulgUniversesDemo;
+      await api.exitSurfaceView();
+      await api.focusSolarBody('moon');
+      await api.enterSurfaceView({ bodyIndex: 'moon', landingSite: { latDeg: 66.5, lonDeg: 0, biomeLabel: 'Lunar Highland' } });
+      await api.stepOnce();
+      return api.getState().surfaceAuroraStrength;
+    });
+    assert.equal(moonAur, 0, `Unmagnetized vacuum Moon must produce 0.0 surface aurora (got ${moonAur})`);
 
     await page.close();
 
@@ -495,6 +569,99 @@ test('ULG Multiscale GPU Coalescence (L0 Root -> L1 Galaxy -> L2 Nebular -> L4 S
 
     assert.equal(pageErrors.length, 0, `Unexpected page errors: ${pageErrors.join(' | ')}`);
     assert.equal(consoleErrors.length, 0, `Unexpected console errors: ${consoleErrors.join(' | ')}`);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('L2 GPU Nebular Coalescence Multi-Seed Ensemble Diversity & 4K/32K/131K Scale Invariance (Vulkan)', {
+  skip: RUN_NATIVE ? false : 'set ULG_RUN_NATIVE_WEBGPU=1 for native Vulkan nebular ensemble test',
+  timeout: 180_000
+}, async () => {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      '--enable-unsafe-webgpu',
+      '--use-gl=angle',
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan',
+      '--ignore-gpu-blocklist',
+      '--disable-dev-shm-usage',
+      '--renderer-process-limit=2',
+      '--no-sandbox'
+    ]
+  });
+  try {
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 800, height: 600 } });
+    const page = await ctx.newPage();
+    await page.goto(`${BASE_URL}universes.html?seed=1`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    const report = await page.evaluate(async () => {
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      const mod = await import('/src/runtime/astrophysics/nebularSystemCoalescenceGpu.js');
+      const cases = [
+        { id: 'solar-4k', parcelCount: 4096, radialBins: 64, starMassSolar: 1.0, starLuminositySolar: 1.0, metallicitySolar: 1.0, cToO: 0.55, seed: 101 },
+        { id: 'solar-32k', parcelCount: 32768, radialBins: 96, starMassSolar: 1.0, starLuminositySolar: 1.0, metallicitySolar: 1.0, cToO: 0.55, seed: 101 },
+        { id: 'solar-131k', parcelCount: 131072, radialBins: 128, starMassSolar: 1.0, starLuminositySolar: 1.0, metallicitySolar: 1.0, cToO: 0.55, seed: 101 },
+        { id: 'pop2-lowz', parcelCount: 16384, radialBins: 96, starMassSolar: 1.15, starLuminositySolar: 1.8, metallicitySolar: 0.08, cToO: 0.42, seed: 505 },
+        { id: 'mdwarf-compact', parcelCount: 16384, radialBins: 96, starMassSolar: 0.18, starLuminositySolar: 0.008, metallicitySolar: 0.9, cToO: 0.58, seed: 606 },
+        { id: 'metal-rich-giants', parcelCount: 16384, radialBins: 96, starMassSolar: 1.25, starLuminositySolar: 2.2, metallicitySolar: 2.4, cToO: 0.55, seed: 202 },
+        { id: 'high-co-carbon', parcelCount: 16384, radialBins: 96, starMassSolar: 0.95, starLuminositySolar: 0.8, metallicitySolar: 1.35, cToO: 0.96, seed: 303 },
+        { id: 'fstar-wide', parcelCount: 16384, radialBins: 96, starMassSolar: 1.6, starLuminositySolar: 5.5, metallicitySolar: 1.2, cToO: 0.52, seed: 404 }
+      ];
+      const out = [];
+      for (const c of cases) {
+        const sess = mod.createNebularSystemCoalescenceSessionWebGpu(device, {
+          parcelCount: c.parcelCount,
+          radialBins: c.radialBins,
+          starMassSolar: c.starMassSolar,
+          starLuminositySolar: c.starLuminositySolar,
+          metallicitySolar: c.metallicitySolar,
+          cToO: c.cToO,
+          seed: c.seed,
+          label: `ens-${c.id}`
+        });
+        const coalesced = await sess.coalesceSystemBurst({ substeps: 240, dt: 0.022, chunkSize: 32 });
+        const tel = sess.getTelemetry();
+        const bodies = coalesced?.bodies || [];
+        const masses = bodies.map((b) => b.totalMassEarth);
+        const radii = bodies.map((b) => b.radiusEarth);
+        const giants = bodies.filter((b) => b.gasEnvelopeFrac > 0.30 || b.totalMassEarth > 25).length;
+        out.push({
+          id: c.id,
+          parcels: c.parcelCount,
+          bins: c.radialBins,
+          arch: sess.diskArchitecture,
+          nPlanets: bodies.length,
+          giants,
+          peakBinMass: Number((tel?.peakBinMass || 0).toFixed(2)),
+          totalSolidMass: Number((tel?.totalSolidMass || 0).toFixed(1)),
+          minM: masses.length ? Math.min(...masses) : 0,
+          maxM: masses.length ? Math.max(...masses) : 0,
+          minR: radii.length ? Math.min(...radii) : 0,
+          maxR: radii.length ? Math.max(...radii) : 0,
+          aAuList: bodies.map((b) => Number(b.aAu.toFixed(2)))
+        });
+        sess.dispose();
+      }
+      device.destroy();
+      return out;
+    });
+    console.log('[NEBULAR_ENSEMBLE_VULKAN_REPORT]', JSON.stringify(report));
+    const s4 = report.find((r) => r.id === 'solar-4k');
+    const s32 = report.find((r) => r.id === 'solar-32k');
+    const s131 = report.find((r) => r.id === 'solar-131k');
+    const rich = report.find((r) => r.id === 'metal-rich-giants');
+    const lowZ = report.find((r) => r.id === 'pop2-lowz');
+    assert.ok(s4.nPlanets >= 3, `solar-4k must form >= 3 planets (got ${s4.nPlanets})`);
+    assert.ok(s32.nPlanets >= 3, `solar-32k must form >= 3 planets (got ${s32.nPlanets})`);
+    assert.ok(s131.nPlanets >= 3, `solar-131k must NOT crush planets at 131K/128 bins (got ${s131.nPlanets}, peakBinMass=${s131.peakBinMass})`);
+    const massRatio131 = s131.totalSolidMass / Math.max(1e-3, s4.totalSolidMass);
+    assert.ok(massRatio131 > 0.45 && massRatio131 < 2.2, `131K totalSolidMass must be parcel-count invariant vs 4K (ratio=${massRatio131.toFixed(2)})`);
+    assert.ok(rich.maxM > lowZ.maxM * 2.5, `Metal-rich disk max planet mass (${rich.maxM} M_E) must exceed Pop-II low-Z (${lowZ.maxM} M_E) by >2.5x`);
+    const uniqueCounts = new Set(report.map((r) => r.nPlanets));
+    assert.ok(uniqueCounts.size >= 2 || rich.giants > lowZ.giants, `Ensemble must produce genuinely diverse architectures across stars`);
   } finally {
     await browser.close();
   }

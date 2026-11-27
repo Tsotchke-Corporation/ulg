@@ -428,7 +428,7 @@ export function evaluatePlanetaryCrustElevation(x, z, env) {
     const sphElev = sampleSphCoarseHeight64Js(x, z, env);
     const sphOrigin = sampleSphCoarseHeight64Js(0, 0, env);
     const refVal = env.hasLiquidOcean ? (Number(env.sphSeaLevelNorm) || 0.0) : sphOrigin;
-    return (sphElev - refVal) * (env.terrainAmpM * 2.15);
+    return (sphElev - refVal) * (env.terrainAmpM * 3.1);
   }
   const apron = Math.min(1.0, Math.max(0.0, (r0 - 18.0) / 52.0));
   const apronSmooth = apron * apron * (3 - 2 * apron);
@@ -1172,7 +1172,7 @@ fn eval_crust_height(x: f32, z: f32) -> f32 {
     let tect0 = sample_tectonic_field(0.0, 0.0);
     let has_ocean = (params.mode_flags & 8u) != 0u;
     let ref_val = select(tect0.x, params.clip_aux.y, has_ocean);
-    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 2.15);
+    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 3.1);
     return sph_h + def.x;
   }
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
@@ -1264,8 +1264,8 @@ fn generate_surface_terrain_mesh(@builtin(global_invocation_id) gid: vec3<u32>) 
     let beach_w = (1.0 - smoothstep(0.0, 1.40, h - params.sea_level)) * (1.0 - smoothstep(0.22, 0.55, slope));
     col = mix(col, vec3<f32>(0.76, 0.68, 0.48), beach_w * 0.72);
     // Narrow hydraulically carved SPH river channels ONLY in concentrated valleys (never flooding whole hillsides!)
-    let riv_w = smoothstep(0.84, 0.97, tect.y) * (1.0 - smoothstep(0.10, 0.28, slope)) * (1.0 - smoothstep(4.0, 14.0, h - params.sea_level));
-    col = mix(col, params.ocean_rgb_ice.rgb * 1.15, riv_w * 0.78);
+    let riv_w = smoothstep(0.68, 0.92, tect.y) * (1.0 - smoothstep(0.10, 0.28, slope)) * (1.0 - smoothstep(4.0, 26.0, h - params.sea_level));
+    col = mix(col, params.ocean_rgb_ice.rgb * 1.18, riv_w * 0.82);
   }
   var emiss = 0.0;
   var tag = 0.0;
@@ -1482,10 +1482,10 @@ fn step_surface_plume_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let gh = eval_height(pos.x, pos.z);
     if (pos.y < gh + 0.08) {
       pos.y = gh + 0.08;
-      // Radial surface impingement splash!
+      // Physical dissipative inelastic surface rebound (never amplifies horizontal kinetic energy!)
       vel.y = abs(vel.y) * 0.22;
-      vel.x = vel.x * 1.15;
-      vel.z = vel.z * 1.15;
+      vel.x = vel.x * 0.78;
+      vel.z = vel.z * 0.78;
     }
   }
 
@@ -1829,7 +1829,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   }
   const baseEnv = deriveSurfaceEnvironmentState(bodySpec, { planetaryResult, planetaryAtmoState, planetaryMode, landingSite, seed });
   const hasSphPatch = Boolean(sphSurfacePatch && sphSurfacePatch.patchBuffer && sphSurfacePatch.coarseHeight64 && baseEnv.hasSolidCrust);
-  const SPH_SURFACE_PATCH_SPAN_M = 4200.0;
+  const SPH_SURFACE_PATCH_SPAN_M = 2800.0;
   const env = hasSphPatch
     ? Object.freeze({
       ...baseEnv,
@@ -3318,6 +3318,9 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         craftPos: focus,
         altKm: liveAltKm,
         groundY: groundYAtFocus,
+        sunElev: Number.isFinite(Number(climate?.sunElevDeg))
+          ? Math.sin((Number(climate.sunElevDeg) * Math.PI) / 180.0)
+          : 0.45,
         readTelemetry: readTelemetry || (stepIndex <= 2)
       });
     }

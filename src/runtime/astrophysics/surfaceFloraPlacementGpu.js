@@ -235,7 +235,7 @@ fn eval_ground_h(x: f32, z: f32) -> f32 {
     let tect0 = sample_tect(0.0, 0.0);
     let has_ocean = (params.flags & 2u) != 0u;
     let ref_val = select(tect0.x, params.arch_cdf1.z, has_ocean);
-    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 2.15);
+    let sph_h = (tect.x - ref_val) * (params.terrain_amp * 3.1);
     return sph_h + def.x;
   }
   let a = clamp((r0 - 18.0) / 52.0, 0.0, 1.0);
@@ -315,7 +315,9 @@ fn place_surface_flora(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let tect = sample_tect(wx, wz);
-  if (has_ocean && tect.y > 1.78 && slope < 0.12) {
+  let has_sph_tect = (params.flags & 16u) != 0u;
+  let river_thresh = select(1.78, 0.72, has_sph_tect);
+  if (has_ocean && tect.y > river_thresh && slope < 0.16) {
     instances[idx] = inst;
     return;
   }

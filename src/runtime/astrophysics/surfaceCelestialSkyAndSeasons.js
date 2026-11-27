@@ -106,7 +106,7 @@ export function sampleOrbitalBodySurfaceAtNormal(nHit, bodySpec = {}, seedFloat 
 
   const c1 = Array.isArray(bodySpec.color1) ? bodySpec.color1 : [0.1, 0.25, 0.55];
   const radiusKm = Number(bodySpec.radiusKm) || 6371;
-  const isGasGiant = radiusKm >= 16000 || bodySpec.kind === 2;
+  const isGasGiant = radiusKm >= 14000;
   const hasSph = !isGasGiant && Boolean(sphGeoSnapshot?.data && sphGeoSnapshot.width > 1 && sphGeoSnapshot.height > 1);
 
   const sunDot = Array.isArray(lightDir) && lightDir.length === 3 ? dot3(n, norm3(lightDir)) : 0.65;

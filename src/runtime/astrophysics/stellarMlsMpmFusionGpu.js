@@ -281,7 +281,9 @@ struct StellarMpmParams {
 
 const Q_M: f32 = 4096.0;
 const Q_P: f32 = 1024.0;
-const Q_E: f32 = 512.0;
+// High-precision thermal accumulator scale (resolves photospheric ~3,000 K without underflow-to-zero
+// across 16K..32K parcels, while staying 50x below signed i32 overflow even at 320 MK Pop III cores!)
+const Q_E: f32 = 32768.0;
 
 fn cell_index(cx: u32, cy: u32, cz: u32) -> u32 {
   let gn = p.grid_n;
@@ -359,7 +361,7 @@ fn p2g_stellar_mpm(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicAdd(&grid_accum[off + 1u], i32(round(wm * vel.x * Q_P)));
         atomicAdd(&grid_accum[off + 2u], i32(round(wm * vel.y * Q_P)));
         atomicAdd(&grid_accum[off + 3u], i32(round(wm * vel.z * Q_P)));
-        atomicAdd(&grid_accum[off + 4u], i32(round(wm * temp_mk * Q_E)));
+        atomicAdd(&grid_accum[off + 4u], i32(round(clamp(wm * temp_mk * Q_E, 0.0, 2.0e7))));
         atomicAdd(&grid_accum[off + 5u], i32(round(wm * x_h * Q_M)));
         atomicAdd(&grid_accum[off + 6u], i32(round(wm * x_he * Q_M)));
         atomicAdd(&grid_accum[off + 7u], i32(round(wm * x_cno * Q_M)));
@@ -619,7 +621,7 @@ fn g2p_advect_burn(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicAdd(&telemetry_u32[6u], 1u);
   }
   if (r_new < p.r_star * 0.35) {
-    atomicAdd(&telemetry_u32[7u], u32(clamp(new_mk * 100.0, 0.0, 1000000.0)));
+    atomicAdd(&telemetry_u32[7u], u32(clamp(new_mk * 1000.0, 0.0, 1000000.0)));
     atomicAdd(&telemetry_u32[8u], 1u);
   }
   atomicAdd(&telemetry_u32[9u], u32(round(x_afe * 100000.0)));
@@ -940,7 +942,7 @@ export function createStellarMlsMpmFusionSessionWebGpu(device, {
           const convectiveRmsVel = u[5] / (n * 1000.0);
           const activeFusionParcels = u[6];
           const coreCnt = Math.max(1, u[8]);
-          const coreTempKLive = u[8] > 0 ? (u[7] / (coreCnt * 100.0)) * 1e6 : peakTempK;
+          const coreTempKLive = u[8] > 0 ? (u[7] / (coreCnt * 1000.0)) * 1e6 : peakTempK;
           const pPp = u[10];
           const pCno = u[11];
           const p3a = u[12];

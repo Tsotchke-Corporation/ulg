@@ -509,6 +509,7 @@ struct Cfd3dParams {
   deck0_col: vec4<f32>,    // upper cloud RGB, upper_y_norm
   deck1_col: vec4<f32>,    // mid cloud RGB, mid_y_norm
   deck2_col: vec4<f32>,    // lower cloud RGB, lower_y_norm
+  ground_sun: vec4<f32>,   // x = groundY, y = sunElev [-1..1], z = pad, w = pad
 };
 
 fn wrap_i(i: i32, n: i32) -> u32 {
@@ -639,10 +640,11 @@ fn cfd3d_advect_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
   let relax_tau = select(0.18, 0.26, is_deep);
   u = u + (u_jet_eq - u) * (relax_tau * dt);
 
-  // 3D Coriolis force (-f * k x v): deflects horizontal flows into spinning cyclones & anticyclonic vortices!
+  // 3D Coriolis force (-f * k x v in right-handed X=East, Y=Up, Z=South):
+  //   -f (0,1,0) x (u,0,w) = (-f*w, 0, +f*u) -> deflects Northern-Hemisphere winds RIGHT!
   let f_eff = coriolis_f * (0.4 + 0.8 * (z_norm - 0.5));
-  let du_cor = f_eff * w;
-  let dw_cor = -f_eff * u;
+  let du_cor = -f_eff * w;
+  let dw_cor = f_eff * u;
   u = u + du_cor * dt;
   w = w + dw_cor * dt;
 
@@ -836,7 +838,8 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cy = p.craft_pos.y;
   let cz = p.craft_pos.z;
   let is_deep = p.flags.y != 0u;
-  let ground_y = p.deck2_col.w;
+  let ground_y = p.ground_sun.x;
+  let sun_elev = p.ground_sun.y;
 
   var px = motes[o + 0u];
   var py = motes[o + 1u];
@@ -898,9 +901,14 @@ fn cfd3d_step_motes(@builtin(global_invocation_id) gid: vec3<u32>) {
   var sz = 1.8;
   var live = 1.0;
   if (role < 3.5) {
-    // 3D Volumetric Cloud Strata Puff: visible where live GPU Clausius-Clapeyron cloud q > 0.14!
+    // 3D Volumetric Cloud Strata Puff: shaded naturally by live solar elevation (dark blue-indigo at midnight, warm gold at dusk, crisp white at noon!)
+    let day_sh = smoothstep(-0.14, 0.28, sun_elev);
+    let dusk_d = (sun_elev - 0.02) / 0.14;
+    let dusk_sh = exp(-(dusk_d * dusk_d));
+    let sky_lit = mix(vec3<f32>(0.08, 0.11, 0.22), vec3<f32>(1.0, 0.99, 0.97), day_sh)
+      + vec3<f32>(0.72, 0.34, 0.12) * dusk_sh * 0.55;
     let flash_boost = c_loc.w * 2.0;
-    col = deck_rgb * (0.76 + 0.36 * yn) + vec3<f32>(0.72, 0.88, 1.0) * flash_boost;
+    col = deck_rgb * sky_lit * (0.76 + 0.36 * yn) + vec3<f32>(0.72, 0.88, 1.0) * flash_boost;
     sz = select(2.8 + c_loc.x * 3.6, 3.0 + c_loc.x * 4.0, is_deep);
     let q_vis = select(c_loc.x * clamp(p.phys1.w * 1.45, 0.12, 1.0), c_loc.x, is_deep);
     live = select(0.0, clamp((q_vis - 0.14) * 1.45, 0.0, 0.85), q_vis > 0.14);
@@ -1087,14 +1095,14 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
     computeBufferBinding(5, 'storage')
   ];
   const mkFluidPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-atmo-3d-cfd-fluid-${entryPoint}.v4`,
+    cacheKey: `ulg-atmo-3d-cfd-fluid-${entryPoint}.v5-coriolis-sun`,
     label: `${label}-${entryPoint}`,
     code: fluidCfd3dWgsl,
     entryPoint,
     bindings: fluidBindings
   });
   const mkPostPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-atmo-3d-cfd-post-${entryPoint}.v4`,
+    cacheKey: `ulg-atmo-3d-cfd-post-${entryPoint}.v5-coriolis-sun`,
     label: `${label}-${entryPoint}`,
     code: postCfd3dWgsl,
     entryPoint,
@@ -1108,7 +1116,7 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
   const motesPipe = mkPostPipe('cfd3d_step_motes');
   const telPipe = mkPostPipe('cfd3d_reduce_telemetry');
 
-  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 128, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 144, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const velA = device.createBuffer({ label: `${label}-velA`, size: initVel.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const velB = device.createBuffer({ label: `${label}-velB`, size: initVel.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
   const cloudA = device.createBuffer({ label: `${label}-cloudA`, size: initCloud.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST });
@@ -1202,6 +1210,7 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
     craftPos = [0, 0, 0],
     altKm = profile.startAltKm,
     groundY = -9999.0,
+    sunElev = 0.45,
     readTelemetry = true
   } = {}) {
     if (disposed) return lastTelemetry;
@@ -1211,19 +1220,21 @@ export function createPlanetaryAtmo3dCfdSessionWebGpu(device, {
     lastChemistry = evaluateAtmosphericChemistryAtAltitude(profile, altKm);
     const coriolisEff = clamp(profile.omegaRadS * 4200.0, 0.0, 2.2);
     const safeGroundY = Number.isFinite(Number(groundY)) ? Number(groundY) : -9999.0;
+    const safeSunElev = Number.isFinite(Number(sunElev)) ? Number(sunElev) : 0.45;
 
-    const ab = new ArrayBuffer(128);
+    const ab = new ArrayBuffer(144);
     new Uint32Array(ab, 0, 8).set([
       NX, NY, NZ, mCount,
       stepIndex, profile.isDeepFluid ? 1 : 0, 0, 0
     ]);
-    new Float32Array(ab, 32, 24).set([
+    new Float32Array(ab, 32, 28).set([
       dtSafe, profile.jetSpeedScaleMS, coriolisEff, profile.convectiveBuoyancyScale,
       boxHalfXZ, boxHalfY, profile.rossbyNumber, Math.max(0.25, lastChemistry.cloudOpticalDensity),
       craftPos[0] || 0, craftPos[1] || 0, craftPos[2] || 0, lastChemistry.altKm,
       deck0Rgb[0], deck0Rgb[1], deck0Rgb[2], 0.78,
       deck1Rgb[0], deck1Rgb[1], deck1Rgb[2], 0.48,
-      deck2Rgb[0], deck2Rgb[1], deck2Rgb[2], safeGroundY
+      deck2Rgb[0], deck2Rgb[1], deck2Rgb[2], 0.22,
+      safeGroundY, safeSunElev, 0, 0
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 

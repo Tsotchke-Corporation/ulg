@@ -182,16 +182,16 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
     workgroupSize: 64
   }, ctx);
 
-  // 3. L2 Whole-Star-System GPU Nebular Coalescence
+  // 3. L2 Whole-Star-System GPU Nebular Coalescence (high-resolution 32K..131K parcels on desktop/workstation/cluster!)
   const nebularParcelsSizing = sizeCountWorkload({
     name: 'l2-nebular-parcels',
-    minCount: 3072,
-    baseCount: 12288,
-    maxCount: 32768,
-    multiple: 1024,
+    minCount: 4096,
+    baseCount: 32768,
+    maxCount: 131072,
+    multiple: 2048,
     strideBytes: 64,
     buffersCount: 2,
-    memoryFraction: 0.18,
+    memoryFraction: 0.20,
     workgroupSize: 64
   }, ctx);
   const nebularRadialBins = nebularParcelsSizing.count >= 16384 ? 128 : (nebularParcelsSizing.count >= 8192 ? 96 : 64);
@@ -250,26 +250,31 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
   }, ctx);
 
   // 5. Watchable Long-Horizon Multi-Substep GPU Coalescence Pacing!
-  //    Each animation frame batches multiple GPU compute substeps inside ONE `queue.submit`
-  //    so L1/L2/L4 genuinely run 400..1,800+ dynamical substeps (25+ orbits, full planetary tectonics &
-  //    hydrologic flow-accumulation erosion!) over ~45-100s on desktop/workstation while [Finish Now]
-  //    fast-forwards via chunked bursts in ~1-2s!
+  //    Each animation frame batches many GPU compute substeps inside ONE `queue.submit`
+  //    (with cadenced canonical SS 3D Multipole updates on L2) so:
+  //      - L1 Galaxy Collapse unfolds over 360..1,800 dynamical steps (real mergers, cold streams, triaxial relaxation!)
+  //      - L2 Solar-System Nebular Coalescence runs 10x longer (2,800..16,800 steps = 250-500+ inner Keplerian orbits!)
+  //        with a fast 10x-deeper discovery burst (640..2,400 substeps) on [Crystallize Into Orbits]!
+  //      - L4 Planetary 3D SPH runs fast through Formation (240..1,560 steps), then NEVER stops — seamlessly
+  //        downshifting into continuous Secular Live Gear (mantle convection + live 3D Fe-core Geodynamo!)
   const perfScale = presetChoice.perfScale;
   const tier = sizingOverrides.tier || normalizedCaps.tier;
-  const l1TargetSteps = tier === 'cluster' ? 960 : (tier === 'workstation' ? 720 : (tier === 'laptop' ? 420 : 180));
-  const l1SubstepsPerFrame = tier === 'cluster' ? 4 : (tier === 'workstation' ? 3 : 2);
-  const l2TargetSteps = tier === 'cluster' ? 1680 : (tier === 'workstation' ? 1280 : (tier === 'laptop' ? 720 : 280));
-  const l2SubstepsPerFrame = tier === 'cluster' ? 6 : (tier === 'workstation' ? 5 : (tier === 'laptop' ? 4 : 2));
+  const l1TargetSteps = tier === 'cluster' ? 1800 : (tier === 'workstation' ? 1400 : (tier === 'laptop' ? 840 : 360));
+  const l1SubstepsPerFrame = tier === 'cluster' ? 6 : (tier === 'workstation' ? 5 : (tier === 'laptop' ? 3 : 2));
+  const l2TargetSteps = tier === 'cluster' ? 16800 : (tier === 'workstation' ? 12800 : (tier === 'laptop' ? 7200 : 2800));
+  const l2SubstepsPerFrame = tier === 'cluster' ? 28 : (tier === 'workstation' ? 24 : (tier === 'laptop' ? 16 : 8));
+  const l2GravityCadence = 4;
   const l4TargetSteps = tier === 'cluster' ? 1560 : (tier === 'workstation' ? 1180 : (tier === 'laptop' ? 640 : 240));
-  const l4SubstepsPerFrame = tier === 'cluster' ? 6 : (tier === 'workstation' ? 5 : (tier === 'laptop' ? 3 : 2));
+  const l4SubstepsPerFrame = tier === 'cluster' ? 8 : (tier === 'workstation' ? 6 : (tier === 'laptop' ? 4 : 2));
+  const l4SecularSubstepsPerFrame = 1;
   const l3SubstepsPerFrame = tier === 'cluster' ? 4 : (tier === 'workstation' ? 3 : 2);
   const sphErosionPasses = tier === 'cluster' ? 40 : (tier === 'workstation' ? 34 : (tier === 'laptop' ? 24 : 16));
   // Re-project spherical geology smoothly every 24-36 substeps during live 3D SPH formation (keeping 60 FPS!)
-  const l4MapUpdateCadence = sphParcelsSizing.count >= 24576 ? 30 : (sphParcelsSizing.count >= 12288 ? 20 : 12);
-  // Chunked burst substeps used when clicking [Finish Now] or pre-computing non-observed worlds
-  // (deep enough for genuine core segregation, tectonic plate drift & cratering without stalling!)
+  const l4MapUpdateCadence = sphParcelsSizing.count >= 24576 ? 32 : (sphParcelsSizing.count >= 12288 ? 24 : 14);
+  // Chunked burst substeps used when clicking [Finish / Crystallize] or pre-computing non-observed worlds:
+  // L2 burst is 10x deeper (640..2,400 substeps across 32K..131K parcels) for real secular planetary core accretion!
   const l4BurstSubsteps = tier === 'cluster' ? 240 : (tier === 'workstation' ? 200 : (tier === 'laptop' ? 150 : 96));
-  const l2BurstSubsteps = tier === 'cluster' ? 260 : (tier === 'workstation' ? 210 : (tier === 'laptop' ? 140 : 84));
+  const l2BurstSubsteps = tier === 'cluster' ? 2400 : (tier === 'workstation' ? 1800 : (tier === 'laptop' ? 1200 : 640));
 
   const gpuInfo = normalizedCaps.webgpu.info || {};
   const gpuLabel = [gpuInfo.vendor, gpuInfo.architecture, gpuInfo.description]
@@ -304,6 +309,7 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
       nebularRadialBins,
       l2TargetSteps,
       l2SubstepsPerFrame,
+      l2GravityCadence,
       l2BurstSubsteps,
       stellarParcels: stellarParcelsSizing.count,
       stellarGridN,
@@ -315,6 +321,7 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
       sphErosionPasses,
       l4TargetSteps,
       l4SubstepsPerFrame,
+      l4SecularSubstepsPerFrame,
       l4MapUpdateCadence,
       l4BurstSubsteps,
       surfaceGridN: tier === 'mobile' ? 81 : (tier === 'laptop' ? 129 : 161),

@@ -34,10 +34,11 @@
 
 ---
 
-## Remaining Standing Architecture Specs & Post-1.0 Operational Stretch (`7` Active Docs)
+## Remaining Standing Architecture Specs & Active Audits (`8` Active Docs)
 
 | File | Category | Live-Code Reality (2026-11-26) & Remaining Scope |
 |---|---|---|
+| [`full-stack-scientific-realism-audit-2026-11-26.md`](full-stack-scientific-realism-audit-2026-11-26.md) | **ACTIVE P0–P2 Master Audit & Plan** | Complete top-to-bottom 4-auditor state-of-the-art scientific & mechanics audit across ALL ULG engines (`L0–L7`, Studio Continuum MLS-MPM/SS, Nuclear/Atomic/DFT/MD/Chemistry/Polytope, and Bio Lab) plus **every explicit request from `big dog`** (Observable Universe 93-Gly lightcone web, COM orbit anchoring, anti-solar comet tails, horizon-to-zenith surface aurorae, and Waves 1–4 P0/P1/P2 remediation roadmap). |
 | [`prompt-audit-and-backlog.md`](prompt-audit-and-backlog.md) | Master Audit Log | Complete chronological audit of user requests reconciled against shipped code (`P1–P5`, Pass 2 LOD, Phase B Procedural Xenobiology & Bio-Lab Vivarium, Phase C Astronomical Catalog & JWST IR Dust Piercing, Phase D Core ULG Scientific Audit & 32-Node Universal Law Graph + live 40-OOM Schroeder SS Atlas). |
 | [`SS/README.md`](SS/README.md) & [`SS/schroeder-tree-and-algorithm-plan.md`](SS/schroeder-tree-and-algorithm-plan.md) | Standing Architecture | Canonical Schroeder Simulation (`SS`) immutable spatial epoch & 6 derived views contract. Zero private 4,096-bucket solid-fluid hashes remain (`Gate 6 Phase C`); `LawDagEpochScheduler`, declarative Law-IR → WGSL compiler (`ulg-gpu-abi`), live 40-OOM `createDynamicSchroederScaleAtlasRuntime` in `universes.html`, and `dynamicHierarchyLod: '1'` are live. Kept as standing SS architectural specification. |
 | [`scale-adaptive-law-activation-plan.md`](scale-adaptive-law-activation-plan.md) | Standing Architecture | Canonical Two Unifications (`SS` + Tier 0–3 Closure Economy) architectural specification. Kept as standing design authority. |

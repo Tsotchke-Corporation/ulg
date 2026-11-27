@@ -69,7 +69,7 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
 
     // ---- 1. L1 SPIRAL GALAXY MULTI-FRAME STABILITY + EMERGENT GPU α-ω DYNAMO ----
     const galSt0 = await page.evaluate(() => window.__ulgUniversesDemo.getState());
-    assert.equal(galSt0.galacticGravityMode, 'webgpu-cic-3dfft-pm+smbh', 'L1 Galaxy must use smooth 32^3 CIC 3D-FFT PM + direct SMBH');
+    assert.equal(galSt0.galacticGravityMode, 'webgpu-schroeder-scale-atlas-multipole', 'L1 Galaxy must use canonical Schroeder Scale-Atlas 3D multipole + NFW Dark Matter Halo + direct SMBH');
     assert.ok(galSt0.galacticDynamoStreamlineFloats > 200, `Expected emergent galactic dynamo streamlines > 200 floats (got ${galSt0.galacticDynamoStreamlineFloats})`);
     assert.ok(galSt0.galacticDynamoMagEnergy > 0, `Expected positive emergent galactic dynamo energy (got ${galSt0.galacticDynamoMagEnergy})`);
     const galDiag0 = await page.evaluate(() => window.__ulgUniversesDemo.readGalaxyDiagnostics());
@@ -101,7 +101,7 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
     const pickedStar = await page.evaluate(() => window.__ulgUniversesDemo.pickAtCanvasFraction(0.56, 0.52, { preferGpuMote: true }));
     assert.ok(pickedStar && pickedStar.kind === 'galaxy-star' && pickedStar.index >= 0, `Expected GPU star pick on L1 (got ${JSON.stringify(pickedStar)})`);
     const galInspName = await page.locator('#uv-target-name').textContent();
-    assert.ok(galInspName.includes(`Star #${pickedStar.index}`), `Inspector must show picked GPU star name (got "${galInspName}")`);
+    assert.ok(galInspName.includes(`#${pickedStar.index}`), `Inspector must show picked GPU star index #${pickedStar.index} (got "${galInspName}")`);
     const galFocused = await page.evaluate(() => window.__ulgUniversesDemo.focusPickedMote({ zoomIn: false }));
     assert.equal(galFocused, true, 'focusPickedMote must lock onto clicked galaxy star');
     await snap(page, '04-galaxy-picked-star');
@@ -118,7 +118,10 @@ test('ULG Universes multi-frame Galaxy/Star stability, emergent GPU 3D MHD B-fie
     };
 
     // ---- 2. L3 HYDROSTATIC MAIN-SEQUENCE STAR STABILITY + EMERGENT GPU STELLAR DYNAMO ----
-    await page.evaluate(() => window.__ulgUniversesDemo.setLevel(3, { instant: true }));
+    await page.evaluate(async () => {
+      await window.__ulgUniversesDemo.setUseSolReference?.(true);
+      await window.__ulgUniversesDemo.setLevel(3, { instant: true });
+    });
     await page.evaluate(() => window.__ulgUniversesDemo.setCameraAngles(0.52, 0.34));
     const st0 = await page.evaluate(() => window.__ulgUniversesDemo.getState());
     assert.equal(st0.stellarPreset, 'main-sequence-star', 'L3 default fusion preset must be hydrostatic main-sequence-star');

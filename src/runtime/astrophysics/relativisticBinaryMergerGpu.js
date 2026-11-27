@@ -438,9 +438,11 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     const rDot = (rx * vx + ry * vy + rz * vz) / r;
     const eta = m1Frac * m2Frac;
 
-    // Exact Newtonian + 1PN conservative periastron precession acceleration
+    // Exact Blanchet (2014) Eq. 203 Newtonian + 1PN conservative periastron precession acceleration:
+    //   a = -(GM/r^2) * [ (1 + (1/c^2)*((1+3*eta)*v^2 - (4+2*eta)*GM/r - 1.5*eta*rDot^2)) * r_hat
+    //                     - (1/c^2)*(4-2*eta)*rDot * v ]
     const gmOverR = gmTot / r;
-    const pn1Rad = invC2 * ((4.0 + 2.0 * eta) * gmOverR - (1.0 + 3.0 * eta) * v2 + 1.5 * eta * rDot * rDot);
+    const pn1Rad = invC2 * ((1.0 + 3.0 * eta) * v2 - (4.0 + 2.0 * eta) * gmOverR - 1.5 * eta * rDot * rDot);
     const pn1Vel = invC2 * (4.0 - 2.0 * eta) * rDot;
 
     // Exact 2.5PN Peters-Mathews gravitational-wave radiation-reaction drag (zero when invC5 == 0!)
@@ -451,9 +453,9 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     const gwB = gwFactor * (v2 + 3.0 * gmOverR);
 
     const invR3 = -gmTot / (r * r * r);
-    const ax = invR3 * ((1.0 + pn1Rad) * rx - pn1Vel * vx) + (gwA * (rDot / r) * rx - gwB * vx);
-    const ay = invR3 * ((1.0 + pn1Rad) * ry - pn1Vel * vy) + (gwA * (rDot / r) * ry - gwB * vy);
-    const az = invR3 * ((1.0 + pn1Rad) * rz - pn1Vel * vz) + (gwA * (rDot / r) * rz - gwB * vz);
+    const ax = invR3 * ((1.0 + pn1Rad) * rx - pn1Vel * r * vx) + (gwA * (rDot / r) * rx - gwB * vx);
+    const ay = invR3 * ((1.0 + pn1Rad) * ry - pn1Vel * r * vy) + (gwA * (rDot / r) * ry - gwB * vy);
+    const az = invR3 * ((1.0 + pn1Rad) * rz - pn1Vel * r * vz) + (gwA * (rDot / r) * rz - gwB * vz);
 
     // Symplectic kick-drift
     vRel[0] += ax * dt; vRel[1] += ay * dt; vRel[2] += az * dt;
@@ -468,11 +470,11 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     }
 
     lastSep = Math.hypot(rRel[0], rRel[1], rRel[2]);
-    // Exact quadrupole gravitational-wave strain h_+ = (2 G / c^4 D) (I_xx'' - I_yy'') ~ eta * (v/c)^2 * cos(2 phi)!
+    // Exact quadrupole gravitational-wave strain h_+ ~ eta * (GM / (r c^2)) * cos(2 phi) (scales cleanly as 1/r!)
     const phi = Math.atan2(rRel[2], rRel[0]);
     const omegaOrb = Math.sqrt(gmTot / Math.max(0.25, lastSep * lastSep * lastSep));
     lastFGw = (omegaOrb / Math.PI); // f_GW = 2 * f_orb!
-    const hAmp = invC2 > 0 ? Math.min(1.6, 4.2 * eta * gmOverR * invC2 * (4.0 / Math.max(0.6, lastSep))) : 0.0;
+    const hAmp = invC2 > 0 ? Math.min(1.6, 4.2 * eta * (gmTot / Math.max(0.45, lastSep)) * invC2) : 0.0;
     lastHPlus = hAmp * Math.cos(2 * phi);
     lastHCross = hAmp * Math.sin(2 * phi);
 
@@ -523,7 +525,10 @@ export function createRelativisticBinaryMergerSessionWebGpu(device, {
     const pass = enc.beginComputePass({ label: `${label}-pass` });
     pass.setBindGroup(0, bg);
     pass.setPipeline(stepPipe.pipeline);
-    pass.dispatchWorkgroups(wg);
+    // Synchronize GPU ejecta/accretion integration with all `nSub` orbital substeps in ONE submit!
+    for (let s = 0; s < nSub; s += 1) {
+      pass.dispatchWorkgroups(wg);
+    }
     pass.setPipeline(telPipe.pipeline);
     pass.dispatchWorkgroups(1);
     pass.end();

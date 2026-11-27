@@ -386,7 +386,7 @@ fn cic_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
   //   (b) uniform -mean_mass_cell peculiar background at EVERY cell center (including empty voids!)
   if (params.short_range_r_s > 0.0) {
     let r_s = params.short_range_r_s;
-    let r_cut = 2.0 * r_s;
+    let r_cut = 3.6 * r_s;
     let r_cut2 = r_cut * r_cut;
     let eps2 = (0.55 * cell_len) * (0.55 * cell_len);
     for (var oz: i32 = -1; oz <= 1; oz = oz + 1) {
@@ -480,9 +480,13 @@ fn cic_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
   let a = max(0.01, params.a_scale);
   let h_a = max(0.05, params.h_a);
   let da = params.da;
-  let kick_fac = da / (a * a * h_a);
+  // Exact canonical FLRW comoving momentum kick dp/da = -grad_x(Phi) / (a * H(a))
+  // (note grav_pref = 1.5 * Omega_m / a already carries the 1/a Poisson scale factor!)
+  let kick_fac = da / (a * h_a);
   let a_mid = a + 0.5 * da;
-  let drift_fac = da / (a_mid * a_mid * a_mid * h_a);
+  let omega_l = max(0.0, 1.0 - params.omega_m);
+  let h_mid = sqrt(max(0.0025, params.omega_m / (a_mid * a_mid * a_mid) + omega_l));
+  let drift_fac = da / (a_mid * a_mid * a_mid * h_mid);
 
   let v_sync = select(pt.vel_rho.xyz, pt.vel_rho.xyz + acc * (0.5 * params.prev_kick_fac), params.step_index > 0u);
   let v_half = v_sync + acc * (0.5 * kick_fac);
@@ -795,7 +799,8 @@ export async function buildZeldovichCosmologyICsWebGpu(device, {
   const hInit = friedmannHOverH0(aInit, { omegaM, omegaLambda });
   const growthRate = Math.pow(omegaM / (aInit ** 3 * hInit * hInit), 0.55);
   const vPref = aInit * aInit * hInit * growthRate;
-  const kEq = (2 * Math.PI / L) * 2.5;
+  const dkBox = (2 * Math.PI) / Math.max(1e-3, L);
+  const kEq = Math.max(dkBox * 1.5, Math.min(0.0103, dkBox * Math.max(2.5, fftGridN * 0.22)));
 
   const ws = createFft3dWorkspaceWebGpu(device, fftGridN);
   const totalFft = ws.total;
@@ -1034,7 +1039,8 @@ export async function build2LptCosmologyICsWebGpu(device, {
   const f2 = 2.0 * Math.pow(Math.max(1e-4, omegaMA), 6 / 11);
   const vPref1 = aInit * aInit * hInit * f1;
   const vPref2 = aInit * aInit * hInit * f2;
-  const kEq = (2 * Math.PI / L) * 2.5;
+  const dkBox = (2 * Math.PI) / Math.max(1e-3, L);
+  const kEq = Math.max(dkBox * 1.5, Math.min(0.0103, dkBox * Math.max(2.5, fftGridN * 0.22)));
 
   const ws = createFft3dWorkspaceWebGpu(device, fftGridN);
   const M = ws.n;
@@ -1322,7 +1328,8 @@ export function buildZeldovichCosmologyICs({
     return (s + 0.5) / 4294967296;
   };
   const modes = [];
-  const kEq = (2 * Math.PI / L) * 2.5;
+  const dkBoxHost = (2 * Math.PI) / Math.max(1e-3, L);
+  const kEq = Math.max(dkBoxHost * 1.5, Math.min(0.0103, dkBoxHost * Math.max(2.5, n * 0.22)));
   for (let kx = -3; kx <= 3; kx += 1) {
     for (let ky = -3; ky <= 3; ky += 1) {
       for (let kz = -3; kz <= 3; kz += 1) {
@@ -1598,7 +1605,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   async function step({ readTelemetry = true } = {}) {
     if (disposed) return lastTelemetry;
     const { hA } = writeUniforms();
-    const curKickFac = da / (Math.max(0.01, aScale) ** 2 * Math.max(0.05, hA));
+    const curKickFac = da / (Math.max(0.01, aScale) * Math.max(0.05, hA));
 
     // ALL TreePM stages fused into ONE single CommandEncoder & ONE queue.submit!
     //   1. Clear -> CIC Deposit -> Prepare Poisson RHS

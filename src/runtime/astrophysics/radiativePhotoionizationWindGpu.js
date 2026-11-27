@@ -120,8 +120,9 @@ struct RadWindParams {
   bipolar_asym: f32,   // Equatorial torus confinement producing hourglass/bipolar planetary nebulae
   box_half: f32,
   pad1: f32,
-  source_dir: vec4<f32>, // xyz = unit direction toward ionizing star / Sun, w = source distance
-  center_offset: vec4<f32>,
+  source_dir: vec4<f32>,    // xyz = unit direction toward ionizing star / Sun, w = source distance
+  center_offset: vec4<f32>, // xyz = world offset, w = pad
+  orb_vel_dir: vec4<f32>,   // xyz = live 3D orbital velocity unit vector of comet/planet, w = heliocentric r_AU
 };
 
 // 16 floats (64 B) matching PARTICLE_CLOUD_WGSL Mode 8 (Photoionized Nebulae + Comet/XUV Outflows!):
@@ -159,6 +160,11 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   if (reg == 3u || reg == 4u) {
     // Active Comet Dual-Tail (reg=3) OR Hot-Jupiter XUV Photoevaporation Tail (reg=4)!
+    // Strictly anti-solar physics:
+    //   - Solar-wind CO+/H2O+ ion tail streams straight away from the Sun (-s_dir) with realistic ~4° aberration
+    //     behind the comet's live 3D orbital motion (-v_orb_perp). Zero periodic sin(t) wiggle hacks!
+    //   - Micron dust syndynes experience reduced effective gravity (1 - beta) * GM / r^2, accelerating anti-solar
+    //     along -s_dir AND lagging smoothly behind the comet's ACTUAL trailing orbital wake (-v_orb_perp)!
     if (params.subl_drive <= 1e-6) {
       p.vel_ion.w = 0.0;
       p.em_spec = vec4<f32>(0.0, 0.0, 0.0, p.em_spec.w);
@@ -169,43 +175,62 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
     p.meta0.w = 1.0;
     let is_ion = p.pos_m.w > 0.5 && p.pos_m.w < 1.5;
     let anti_sun = -s_dir;
-    // Perpendicular orbital-lag tangent curving the radiation-pressure dust tail vs straight ion tail!
-    let orb_tang = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), anti_sun + vec3<f32>(0.0, 0.0, 1e-4)));
+    // Project live 3D orbital velocity orthogonal to the Sun-comet radial line for exact trailing syndyne lag!
+    let raw_v_orb = params.orb_vel_dir.xyz;
+    let v_orb_proj = raw_v_orb - s_dir * dot(raw_v_orb, s_dir);
+    let fallback_perp = cross(vec3<f32>(0.0, 1.0, 0.0), s_dir);
+    let fallback_unit = select(vec3<f32>(0.0, 0.0, 1.0), normalize(fallback_perp), length(fallback_perp) > 1e-4);
+    let orb_fwd = select(fallback_unit, normalize(v_orb_proj), length(v_orb_proj) > 1e-4);
+    let orb_trail = -orb_fwd;
+    let side_orth = normalize(cross(anti_sun, orb_trail));
+    // Inverse-square solar radiation & wind flux scaling with heliocentric distance r_AU
+    let r_au = max(0.18, params.orb_vel_dir.w);
+    let flux_inv2 = clamp(1.0 / (r_au * r_au), 0.35, 3.2);
+    let grain_beta = params.rad_beta * (0.45 + 1.10 * p.meta0.z); // Physical grain-size beta dispersion!
     let age = p.em_spec.w + dt * (0.28 + 0.35 * params.subl_drive);
     if (is_ion) {
-      // Photoionized CO+/H2O+ (or H+ XUV) swept straight antisolar by magnetized solar wind!
-      let a_sw = anti_sun * (params.wind_speed * 2.2) + vec3<f32>(0.0, sin(age * 4.0 + p.meta0.x * 6.28) * 0.12, 0.0);
-      vel = mix(vel, a_sw, clamp(dt * 3.2, 0.0, 1.0));
-      x_hii = clamp(x_hii + params.uv_flux * (1.0 - x_hii) * dt * 2.5, 0.0, 1.0);
+      // Photoionized CO+/H2O+ (or H+ XUV) swept strictly anti-solar by magnetized solar wind (~400 km/s)
+      // with slight physical aberration angle (~4-6°) into the trailing orbital wake + frozen-in MHD Alfvenic filamentation!
+      let mhd_disp = (orb_trail * (0.09 + 0.05 * (p.meta0.x - 0.5)) + side_orth * ((p.meta0.y - 0.5) * 0.09));
+      let v_sw_target = (anti_sun + mhd_disp) * (params.wind_speed * (2.15 + 0.45 * p.meta0.x) * sqrt(flux_inv2));
+      vel = mix(vel, v_sw_target, clamp(dt * 3.8, 0.0, 1.0));
+      x_hii = clamp(x_hii + params.uv_flux * flux_inv2 * (1.0 - x_hii) * dt * 2.5, 0.0, 1.0);
     } else {
-      // Micron dust grains pushed by radiation pressure beta AND curving along orbital lag!
-      let a_rad = anti_sun * (params.rad_beta * 1.45) + orb_tang * (0.55 * params.rad_beta * age);
+      // Micron silicate dust grains: anti-solar radiation pressure beta * F_sun + Keplerian trailing orbital lag!
+      let a_rad = anti_sun * (grain_beta * 1.48 * flux_inv2)
+        + orb_trail * (0.58 * grain_beta * min(2.4, age) * sqrt(flux_inv2))
+        + side_orth * ((p.meta0.y - 0.5) * 0.14 * grain_beta);
       vel = vel + a_rad * dt;
+      // Gentle speed ceiling keeps dust tail smoothly coherent across high time-warp
+      let d_spd = length(vel);
+      let d_max = params.wind_speed * 2.4;
+      if (d_spd > d_max) { vel = vel * (d_max / d_spd); }
       x_hii = 0.0;
     }
     loc = loc + vel * dt;
-    if (length(loc) > params.box_half * 1.1 || age > 3.6) {
-      // Respawn at sunlit hemisphere sublimation/exobase surface!
+    // Detect tail parcels drifting far sunward or past box_half (e.g. after rapid Sun bearing rotation) and respawn cleanly!
+    let sunward_dist = dot(loc, s_dir);
+    if (length(loc) > params.box_half * 1.1 || age > 3.6 || sunward_dist > 1.85) {
+      // Respawn at sunlit hemisphere sublimation/exobase surface (coma fountain turned back by solar wind/rad pressure!)
       let phi = p.meta0.x * 6.2831853;
       let ct = 0.25 + 0.75 * p.meta0.y;
       let st = sqrt(max(0.0, 1.0 - ct * ct));
-      let side = normalize(cross(s_dir, vec3<f32>(0.0, 1.0, 0.0) + vec3<f32>(1e-4, 0.0, 0.0)));
-      let up_s = cross(side, s_dir);
-      let n_emit = normalize(s_dir * ct + (side * cos(phi) + up_s * sin(phi)) * st);
+      let n_emit = normalize(s_dir * ct + (orb_trail * cos(phi) + side_orth * sin(phi)) * st);
       let r_body = select(0.55, 0.95, reg == 4u);
       loc = n_emit * r_body;
-      vel = n_emit * (0.35 + 0.45 * params.subl_drive) + anti_sun * 0.25;
+      let v_outgas = 0.22 + 0.28 * params.subl_drive;
+      vel = n_emit * v_outgas + anti_sun * select(0.55, 1.25, is_ion) + orb_trail * select(0.18, 0.06, is_ion);
       p.em_spec.w = 0.0;
     } else {
       p.em_spec.w = age;
     }
-    let fade = exp(-length(loc) * 0.12);
+    let fade = exp(-length(loc) * 0.072);
     p.pos_m = vec4<f32>(loc + params.center_offset.xyz, p.pos_m.w);
     p.vel_ion = vec4<f32>(vel, x_hii);
     p.em_spec = vec4<f32>(
-      select(0.12, 0.08 * x_hii, is_ion) * fade,
-      select(0.04, 1.38 * x_hii, is_ion) * fade,
-      select(1.05 * params.subl_drive, 0.02, is_ion) * fade,
+      select(0.22, 0.14 * x_hii, is_ion) * fade,
+      select(0.08, 1.85 * x_hii, is_ion) * fade,
+      select(1.45 * params.subl_drive, 0.04, is_ion) * fade,
       p.em_spec.w
     );
     parcels[i] = p;
@@ -298,8 +323,8 @@ fn step_radiative_wind(@builtin(global_invocation_id) gid: vec3<u32>) {
       vel = normalize(loc) * v_shell * 0.6;
     }
   } else if (reg == 2u) {
-    // Supernova Remnant / Crab PWN: Sedov-Taylor blastwave decelerating (R ~ t^(2/5)) + filamentary RT web!
-    let sedov_v = params.wind_speed / pow(0.6 + r * 0.42, 1.15);
+    // Supernova Remnant / Crab PWN: exact Sedov-Taylor blastwave decelerating (R ~ t^(2/5) => v ~ R^(-3/2)) + filamentary RT web!
+    let sedov_v = params.wind_speed / pow(0.6 + r * 0.42, 1.5);
     let rt_swirl = vec3<f32>(sin(loc.y * 2.3 + p.meta0.x * 6.28), cos(loc.z * 2.3), sin(loc.x * 2.3)) * 0.24;
     vel = mix(vel, dir * sedov_v + rt_swirl, clamp(dt * 2.0, 0.0, 1.0));
     loc = loc + vel * dt;
@@ -408,6 +433,8 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
   sublimationDrive = 1.0,
   bipolarAsymmetry = 1.35,
   sourceDir = [0.65, 0.55, 0.52],
+  orbVelDir = null,
+  sunDistAu = 1.0,
   particleCount = 5120,
   seed = 20261125,
   centerOffset = [0, 0, 0],
@@ -431,8 +458,17 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
   const ox = Number(centerOffset?.[0]) || 0;
   const oy = Number(centerOffset?.[1]) || 0;
   const oz = Number(centerOffset?.[2]) || 0;
-  const sLen = Math.hypot(sourceDir[0], sourceDir[1], sourceDir[2]) || 1;
-  const sDir = [sourceDir[0] / sLen, sourceDir[1] / sLen, sourceDir[2] / sLen];
+  const norm3 = (v, fb) => {
+    const x = Number(v?.[0]); const y = Number(v?.[1]); const z = Number(v?.[2]);
+    const l = Math.hypot(x, y, z);
+    return (Number.isFinite(l) && l > 1e-6) ? [x / l, y / l, z / l] : fb;
+  };
+  let curSourceDir = norm3(sourceDir, [0.65, 0.55, 0.52]);
+  const defaultOrb = norm3([-curSourceDir[2], 0, curSourceDir[0]], [0, 0, -1]);
+  let curOrbVelDir = orbVelDir ? norm3(orbVelDir, defaultOrb) : defaultOrb;
+  let curSublDrive = Number(sublimationDrive) || 0;
+  let curSunDistAu = Math.max(0.18, Number(sunDistAu) || 1.0);
+  const sDir = curSourceDir;
 
   const init = new Float32Array(n * 16);
   for (let i = 0; i < n; i += 1) {
@@ -559,18 +595,27 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
       vx = lx * 0.4; vy = ly * 0.4; vz = lz * 0.4;
       sp = isInnerPwn ? 2.0 : 3.0;
     } else {
-      // Comet Dual-Tail (3) or Hot-Jupiter XUV Photoevaporation Tail (4)
+      // Comet Dual-Tail (3) or Hot-Jupiter XUV Photoevaporation Tail (4) — strictly anti-solar + trailing orbital lag!
       const isIon = (i & 1) === 0;
       const tTail = rand() * 6.5;
-      const spread = 0.25 + 0.14 * tTail;
+      const spread = 0.20 + 0.12 * tTail;
       const ang = rand() * Math.PI * 2;
-      const side = [-sDir[2], 0, sDir[0]];
-      const sl = Math.hypot(side[0], side[2]) || 1;
-      side[0] /= sl; side[2] /= sl;
-      const curve = isIon ? 0 : 0.16 * tTail * tTail * radBeta;
-      lx = -sDir[0] * tTail + side[0] * (curve + Math.cos(ang) * spread);
-      ly = -sDir[1] * tTail + Math.sin(ang) * spread;
-      lz = -sDir[2] * tTail + side[2] * (curve + Math.cos(ang) * spread);
+      // Trail opposite to curOrbVelDir projected orthogonal to sDir
+      const dotSV = curOrbVelDir[0] * sDir[0] + curOrbVelDir[1] * sDir[1] + curOrbVelDir[2] * sDir[2];
+      const trail = norm3([
+        -(curOrbVelDir[0] - sDir[0] * dotSV),
+        -(curOrbVelDir[1] - sDir[1] * dotSV),
+        -(curOrbVelDir[2] - sDir[2] * dotSV)
+      ], norm3([sDir[2], 0, -sDir[0]], [0, 0, 1]));
+      const sideOrth = norm3([
+        (-sDir[1]) * trail[2] - (-sDir[2]) * trail[1],
+        (-sDir[2]) * trail[0] - (-sDir[0]) * trail[2],
+        (-sDir[0]) * trail[1] - (-sDir[1]) * trail[0]
+      ], [0, 1, 0]);
+      const curve = isIon ? (0.06 * tTail) : (0.16 * tTail * tTail * radBeta);
+      lx = -sDir[0] * tTail + trail[0] * (curve + Math.cos(ang) * spread) + sideOrth[0] * Math.sin(ang) * spread;
+      ly = -sDir[1] * tTail + trail[1] * (curve + Math.cos(ang) * spread) + sideOrth[1] * Math.sin(ang) * spread;
+      lz = -sDir[2] * tTail + trail[2] * (curve + Math.cos(ang) * spread) + sideOrth[2] * Math.sin(ang) * spread;
       vx = -sDir[0] * (isIon ? windSpeed : radBeta);
       vy = -sDir[1] * (isIon ? windSpeed : radBeta);
       vz = -sDir[2] * (isIon ? windSpeed : radBeta);
@@ -590,21 +635,21 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
     computeBufferBinding(2, 'storage')
   ];
   const stepPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-rad-wind-step.v2-rich',
+    cacheKey: 'ulg-rad-wind-step.v3-antisolar-3d',
     label: `${label}-step`,
     code: radiativeWindWgsl,
     entryPoint: 'step_radiative_wind',
     bindings
   });
   const telPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-rad-wind-tel.v1',
+    cacheKey: 'ulg-rad-wind-tel.v2-antisolar-3d',
     label: `${label}-tel`,
     code: radiativeWindWgsl,
     entryPoint: 'reduce_rad_wind_telemetry',
     bindings
   });
 
-  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 80, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
+  const paramsBuf = device.createBuffer({ label: `${label}-params`, size: 96, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const parcelBuf = device.createBuffer({ label: `${label}-parcels`, size: init.byteLength, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
   const telBuf = device.createBuffer({ label: `${label}-tel`, size: 16, usage: GPU_BUF.STORAGE | GPU_BUF.COPY_SRC });
   const telReadBuf = device.createBuffer({ label: `${label}-tel-rd`, size: 16, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
@@ -636,18 +681,39 @@ export function createRadiativePhotoionizationWindSessionWebGpu(device, {
   });
   const wg = Math.ceil(n / 64);
 
-  async function step({ dt = 0.035, substeps = 2, readTelemetry = true } = {}) {
+  async function step({
+    dt = 0.035,
+    substeps = 2,
+    sourceDir: nextSourceDir = null,
+    orbVelDir: nextOrbVelDir = null,
+    sublimationDrive: nextSublDrive = null,
+    sunDistAu: nextSunDistAu = null,
+    readTelemetry = true
+  } = {}) {
     if (disposed) return lastTelemetry;
     const nSub = Math.max(1, Math.min(16, Math.trunc(substeps)));
     const dtSafe = Math.max(0.004, Math.min(0.1, Number(dt) || 0.035));
+    if (Array.isArray(nextSourceDir) && nextSourceDir.length >= 3) {
+      curSourceDir = norm3(nextSourceDir, curSourceDir);
+    }
+    if (Array.isArray(nextOrbVelDir) && nextOrbVelDir.length >= 3) {
+      curOrbVelDir = norm3(nextOrbVelDir, curOrbVelDir);
+    }
+    if (nextSublDrive != null && Number.isFinite(Number(nextSublDrive))) {
+      curSublDrive = Math.max(0, Number(nextSublDrive));
+    }
+    if (nextSunDistAu != null && Number.isFinite(Number(nextSunDistAu))) {
+      curSunDistAu = Math.max(0.18, Number(nextSunDistAu));
+    }
 
-    const ab = new ArrayBuffer(80);
+    const ab = new ArrayBuffer(96);
     new Uint32Array(ab, 0, 4).set([n, regimeCode, stepIndex, 0]);
-    new Float32Array(ab, 16, 16).set([
+    new Float32Array(ab, 16, 20).set([
       dtSafe, uvFlux, radBeta, windSpeed,
-      sublimationDrive, bipolarAsymmetry, 8.6, 0,
-      sDir[0], sDir[1], sDir[2], 6.0,
-      ox, oy, oz, 0
+      curSublDrive, bipolarAsymmetry, 8.6, 0,
+      curSourceDir[0], curSourceDir[1], curSourceDir[2], 6.0,
+      ox, oy, oz, 0,
+      curOrbVelDir[0], curOrbVelDir[1], curOrbVelDir[2], curSunDistAu
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
 

@@ -78,11 +78,11 @@ export function registerSurfaceOceanWavesModule(registry) {
     lawAdapter: SURFACE_OCEAN_WAVES_LAW_ADAPTER,
     async stepCapsule(capsule, { createSimulationArtifact, device }) {
       const p = capsule.input?.parameters || {};
-      const session = createSurfaceOceanWaveSessionWebGpu(device, {
+      const session = createSurfaceOceanWaveGpu(device, {
         gravityMS2: Number(p.gravityMS2 ?? 9.81)
       });
       try {
-        const summary = { gridN: session.gridN, enabled: session.enabled };
+        const summary = { gridN: OCEAN_GRID_N, enabled: true };
         return createSimulationArtifact?.({ schema: 'ulg.astrophysics.surface-ocean-waves.v1', summary }) ?? summary;
       } finally {
         session.dispose();
@@ -168,10 +168,11 @@ fn step_ocean_wave_pde(@builtin(global_invocation_id) gid: vec3<u32>) {
     imp = params.impulse_xyz_r.z * exp(-r2 / (rad * rad)) * open_w;
   }
 
-  // Exact leapfrog 2D wave PDE with stability-clamped celerity c^2 <= 0.24
-  let c2 = clamp(params.celerity_c2, 0.03, 0.22);
-  let damp = clamp(params.damping + params.ice_cover * 0.18, 0.004, 0.35);
-  var next_h = (2.0 - damp) * c0 - (1.0 - damp) * p0 + c2 * lap + force + imp;
+  // Exact leapfrog 2D shallow-water wave PDE scaled by actual params.dt (CFL-clamped c^2 * dt_ratio^2 <= 0.23)
+  let dt_ratio = clamp(params.dt / 0.02, 0.25, 1.5);
+  let c2 = clamp(params.celerity_c2 * dt_ratio * dt_ratio, 0.015, 0.23);
+  let damp = clamp((params.damping + params.ice_cover * 0.18) * dt_ratio, 0.004, 0.35);
+  var next_h = (2.0 - damp) * c0 - (1.0 - damp) * p0 + c2 * lap + force * dt_ratio + imp;
   next_h = clamp(next_h * (0.25 + 0.75 * open_w), -3.2, 3.2);
   h_next[idx] = next_h;
 
@@ -271,15 +272,15 @@ export function createSurfaceOceanWaveGpu(device, {
     simTimeS += Math.max(0.004, Math.min(0.05, dt));
     stepIndex += 1;
 
-    // Hemispheric Coriolis Ekman spiral (+-45 deg right in N hemisphere, left in S hemisphere)
-    const ekAngle = (latRad >= 0 ? -1 : 1) * (Math.PI * 0.25);
+    // Hemispheric Coriolis Ekman spiral: in (X=East, Z=South), +45 deg deflects RIGHT in N hemisphere, -45 deg LEFT in S hemisphere!
+    const ekAngle = (latRad >= 0 ? 1 : -1) * (Math.PI * 0.25);
     const ce = Math.cos(ekAngle);
     const se = Math.sin(ekAngle);
     const ekWindX = windX * ce - windZ * se;
     const ekWindZ = windX * se + windZ * ce;
 
-    // Shallow-water wave speed squared proportional to surface gravity g
-    const c2 = Math.max(0.04, Math.min(0.20, 0.14 * Math.sqrt(Math.max(0.2, gravityMS2) / 9.81)));
+    // Shallow-water wave celerity squared c^2 = g * H_eff scales linearly with surface gravity g!
+    const c2 = Math.max(0.02, Math.min(0.22, 0.13 * (Math.max(0.15, gravityMS2) / 9.81)));
     u32[0] = N;
     u32[1] = stepIndex;
     u32[2] = pendingImpulse ? 1 : 0;

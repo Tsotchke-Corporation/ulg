@@ -443,8 +443,9 @@ export function buildDivergenceFreeSeedBField({
   const ax = new Float32Array(total);
   const ay = new Float32Array(total);
   const az = new Float32Array(total);
-  const rScale = geometry === 'stellar' ? (boxSize * 0.16) : (boxSize * 0.24);
-  const hScale = geometry === 'stellar' ? rScale : (boxSize * 0.10);
+  const isSpherical = geometry === 'stellar' || geometry === 'planetary';
+  const rScale = isSpherical ? (boxSize * 0.16) : (boxSize * 0.24);
+  const hScale = isSpherical ? rScale : (boxSize * 0.10);
 
   for (let iz = 0; iz < n; iz += 1) {
     for (let iy = 0; iy < n; iy += 1) {
@@ -455,7 +456,7 @@ export function buildDivergenceFreeSeedBField({
         const z = (iz + 0.5) * dx - half;
         const r2 = x * x + z * z;
         const r3d2 = r2 + y * y;
-        if (geometry === 'stellar') {
+        if (isSpherical) {
           // Smooth regularized magnetic dipole vector potential A = (m x r) / (r^2 + r_c^2)^(3/2)
           // Guaranteed strictly div(curl A) = 0 everywhere!
           const denom = Math.pow(r3d2 + rScale * rScale, 1.5);
@@ -775,7 +776,7 @@ export function createEmergent3dDynamoFieldWebGpu(device, {
     new Float32Array(ab, 16, 16).set([
       boxSize, dx, dtSafe, etaRes,
       alphaAmp, cH, 6.5, bSat,
-      velScale, currentB0, geometry === 'stellar' ? 1.0 : 0.0, 0.0,
+      velScale, currentB0, (geometry === 'stellar' || geometry === 'planetary') ? 1.0 : 0.0, 0.0,
       centerOffset[0] || 0, centerOffset[1] || 0, centerOffset[2] || 0, 0
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
@@ -888,13 +889,17 @@ export function createEmergent3dDynamoFieldWebGpu(device, {
   } = {}) {
     if (Math.abs(currentB0) <= 1e-7) return new Float32Array(0);
     const seedPoints = [];
-    if (geometry === 'stellar') {
-      // Seed flux-rope traces on two latitude rings just above the convective tachocline/photosphere!
-      const rSeeds = [2.2, 3.1];
+    if (geometry === 'stellar' || geometry === 'planetary') {
+      // Seed flux-rope traces proportionally to `boxSize` so BOTH 15-unit stars AND 3.3-unit planetary cores
+      // trace clean emergent 3D poloidal/toroidal magnetic loops strictly inside the live GPU B(x,y,z) box!
+      const halfB = boxSize * 0.5;
+      const rSeeds = geometry === 'planetary'
+        ? [halfB * 0.36, halfB * 0.62]
+        : [halfB * 0.30, halfB * 0.44];
       for (const rS of rSeeds) {
         for (let k = 0; k < 8; k += 1) {
           const phi = (k / 8) * Math.PI * 2 + rS * 0.35;
-          const lat = (k & 1) === 0 ? 0.42 : -0.42;
+          const lat = (k & 1) === 0 ? 0.46 : -0.46;
           seedPoints.push([
             rS * Math.cos(lat) * Math.cos(phi),
             rS * Math.sin(lat),
@@ -908,13 +913,13 @@ export function createEmergent3dDynamoFieldWebGpu(device, {
         boxSize,
         seedPoints,
         stepsPerDir: 28,
-        stepLen: 0.24,
+        stepLen: Math.max(0.04, boxSize * 0.018),
         worldScale,
         offset,
         alpha,
         refB: Math.max(0.15, Math.abs(currentB0)),
-        colorPoloidal: [0.24, 0.80, 1.0],
-        colorToroidal: [1.0, 0.62, 0.24]
+        colorPoloidal: geometry === 'planetary' ? [0.16, 0.94, 0.72] : [0.24, 0.80, 1.0],
+        colorToroidal: geometry === 'planetary' ? [0.42, 0.52, 1.0] : [1.0, 0.62, 0.24]
       });
     }
     // Galactic disk dynamo seeds at 2 clean radial rings inside the differentially rotating disk!

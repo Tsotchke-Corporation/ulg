@@ -868,6 +868,8 @@ export function createSphPhaseScene(container, {
   residentAuthorityHost = null,
   a6PeerRelayUrl = '',
   a6PeerRoomId = '',
+  a6PeerIceServers = [],
+  a6PeerIceTransportPolicy = 'all',
   cameraPositionNormalized = null,
   cameraTargetNormalized = null,
   navigatorRef = globalThis.navigator
@@ -40938,6 +40940,8 @@ fn main(
             nodeId: `client-${laneId}`,
             ...(resolvedA6RelayUrl ? { relayUrl: resolvedA6RelayUrl } : {}),
             ...(resolvedA6RoomId ? { roomId: resolvedA6RoomId } : {}),
+            ...(Array.isArray(a6PeerIceServers) && a6PeerIceServers.length > 0 ? { rtcIceServers: a6PeerIceServers } : {}),
+            ...(a6PeerIceTransportPolicy ? { iceTransportPolicy: a6PeerIceTransportPolicy } : {}),
             ...(peerComputeNetMgr ? { networkManager: peerComputeNetMgr } : {})
           });
         }

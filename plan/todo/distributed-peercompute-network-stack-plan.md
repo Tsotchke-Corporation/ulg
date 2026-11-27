@@ -2,15 +2,10 @@
 
 Date: 2026-06-14 AKDT
 
-> **2026-11-23 Live-Code Status (`c09644f8`, Gate 5D / Multi-Host):**
-> **2-Browser-Context WebRTC Proofs PASS (`priority3GpuAndWebRtc.native.test.mjs`
-> + `priority5ScaleAtlasAndWebRtcTreePm.native.test.mjs`):** direct browser-to-browser
-> `RTCPeerConnection` + `RTCDataChannel` with signaling WebSocket closed, G5
-> `ReservationLedger` CAS tile leases (`distributedSpatialPartitioner.js`), real
-> GPU-computed supergalactic TreePM tile multipole summaries, exact global mass
-> conservation, and fail-closed peer-loss tile reassignment. External PeerCompute
-> extension spec completed & archived at `/home/cos/projects/peercompute/plan/todo/done/ulg-scale-ladder-peercompute-extensions.md` (merged in `peercompute` `c5c24a76`).
-> Open: physical 2-machine WAN/STUN/TURN validation.
+> **2026-11-27 Live-Code Status (`feat/post-1-0-all-four-tracks` Track 4 — Self-Contained STUN/TURN/ICE WAN Stack):**
+> - **Implemented & Verified on Single-Host 3-Browser Forced-TURN:** Zero-dependency RFC 5389 STUN + RFC 5766 TURN UDP relay server (`src/services/localStunTurnServer.js`), browser ICE/STUN/TURN config & `RTCPeerConnection.getStats()` path diagnostics (`src/services/peerIceConfig.js`), full ICE/TURN/policy/role (`requester`, `responder`, `observer`, `validator`) plumbing across `clientDerivationPeers.js`, `distributedSpatialPartitioner.js`, Universes (`universes.html`, `ulgUniversesPhysics.js`, `ulgUniversesDemo.js`), and MLS-MPM Studio (`ulgSimStudioModel.js`, `ulgSimStudioApp.js`, `sphPhaseDemoMount.js`, `sphPhaseScene.js`), one-command dev stack CLI (`scripts/peercompute-wan-dev-stack.mjs`), and operator runbook ([`plan/todo/peercompute-wan-runbook.md`](peercompute-wan-runbook.md)).
+> - **Verified Automated Proofs:** `tests/localStunTurnServer.test.mjs` (RFC 5389 STUN + RFC 5766 TURN auth/Send/Data/ChannelData/Refresh) + `tests/distributedPeerComputeWanStack.native.test.mjs` (3 isolated Chromium browser contexts with forced `iceTransportPolicy: 'relay'` proving `turnServer.getStats().relayedBytes > 0` & `pc.getStats().usingTurnRelay === true`, plus all 5 failure modes: forced TURN relay, responder mid-graph disconnect failover, duplicate responder disagreement quorum rejection, stale epoch/cache rejection, and missing GPU fence / invalid lease token commit block).
+> - **Honesty Boundary (Open):** Physical two-computer WAN validation requires launching `scripts/peercompute-wan-dev-stack.mjs` on Host A and opening the printed LAN/WAN URLs from a second physical computer.
 
 ## Purpose
 

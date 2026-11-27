@@ -18,6 +18,10 @@ import {
   SPATIAL_TILE_BOUNDARY_SCHEMA,
   SPATIAL_TILE_LEASE_SCHEMA
 } from '../runtime/peercomputeCore.js';
+import {
+  collectPeerConnectionIceDiagnostics,
+  normalizeIceTransportPolicy
+} from './peerIceConfig.js';
 
 export const ULG_DISTRIBUTED_SPATIAL_PARTITION_SCHEMA =
   'peercompute.ulg.distributed-spatial-partition.v1';
@@ -368,9 +372,11 @@ export async function connectWebRtcTreePmPeer({
   role = 'initiator', // 'initiator' | 'responder'
   channelLabel = 'ulg-treepm-tiles',
   iceServers = [],
+  iceTransportPolicy = 'all',
   timeoutMs = 20_000
 } = {}) {
-  const pc = new RTCPeerConnection({ iceServers });
+  const resolvedPolicy = normalizeIceTransportPolicy(iceTransportPolicy);
+  const pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: resolvedPolicy });
   const ws = new WebSocket(`${relayWsUrl}?room=${encodeURIComponent(room)}&peerId=${encodeURIComponent(peerId)}`);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${peerId} relay WS open timeout`)), timeoutMs);
@@ -478,10 +484,59 @@ export async function connectWebRtcTreePmPeer({
       });
     },
     waitForClose: () => closedPromise,
+    getIceDiagnostics: () => collectPeerConnectionIceDiagnostics(pc),
     close() {
       try { channel.close(); } catch { /* ignore */ }
       try { pc.close(); } catch { /* ignore */ }
       try { ws.close(); } catch { /* ignore */ }
+    }
+  });
+}
+
+/**
+ * High-level PeerCompute WebRTC TreePM Peer Coordinator combining
+ * `createDistributedSpatialPartitioner` (G5 `SpatialTileLeaseBroker`) with
+ * STUN/TURN-capable `connectWebRtcTreePmPeer` direct/relayed DataChannel exchange.
+ */
+export async function createWebRtcTreePmPeerCoordinator({
+  relayWsUrl,
+  room,
+  peerId,
+  role = 'initiator',
+  tileIndex = 0,
+  tileCount = 2,
+  boxLength = 200,
+  iceServers = [],
+  iceTransportPolicy = 'all',
+  timeoutMs = 20_000
+} = {}) {
+  const partitioner = createDistributedSpatialPartitioner({
+    domainId: room || 'ulg-supergalactic-domain',
+    boxLength,
+    tileCount
+  });
+  const peer = await connectWebRtcTreePmPeer({
+    relayWsUrl,
+    room,
+    peerId,
+    role,
+    iceServers,
+    iceTransportPolicy,
+    timeoutMs
+  });
+  const claim = partitioner.claimTile(tileIndex, peerId);
+  return Object.freeze({
+    peerId,
+    role,
+    tileIndex,
+    claim,
+    partitioner,
+    peer,
+    getIceDiagnostics: () => peer.getIceDiagnostics(),
+    isSignalingClosed: () => peer.isSignalingClosed(),
+    close() {
+      peer.close();
+      partitioner.destroy();
     }
   });
 }

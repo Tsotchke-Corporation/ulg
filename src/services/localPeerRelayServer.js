@@ -243,11 +243,13 @@ export async function createLocalPeerRelayServer({
   const httpScheme = tls && tls.key && tls.cert ? 'https' : 'http';
   const url = `${scheme}://${addr.address}:${addr.port}`;
   const healthUrl = `${httpScheme}://${addr.address}:${addr.port}/health`;
+  const iceConfigUrl = `${httpScheme}://${addr.address}:${addr.port}/ice-config`;
 
   return {
     schema: ULG_DISTRIBUTED_PEER_RELAY_SCHEMA,
     url,
     healthUrl,
+    iceConfigUrl,
     port: addr.port,
     host: addr.address,
     iceConfig,

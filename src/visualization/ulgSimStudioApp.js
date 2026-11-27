@@ -1719,17 +1719,30 @@ export function mountUlgSimStudioApp({
     hudBlock.appendChild(hudToggleLabel);
     panel.appendChild(hudBlock);
 
-    // Remote Derivation Peers (A6 cross-machine WebRTC / signaling relay)
-    stagedConfig.network = stagedConfig.network || { peerRelayUrl: '', peerRoomId: '' };
+    // Remote Derivation Peers (A6 cross-machine WebRTC / STUN / TURN / signaling relay)
+    stagedConfig.network = stagedConfig.network || {
+      peerRelayUrl: '', peerRoomId: '', peerStunUrl: '', peerTurnUrl: '', peerTurnUser: '', peerTurnCred: '', icePolicy: 'all'
+    };
     const peerBlock = document.createElement('div');
     peerBlock.className = 'ulg-card-block';
     const peerDetails = document.createElement('details');
     peerDetails.className = 'ulg-details';
-    if (stagedConfig.network.peerRelayUrl || stagedConfig.network.peerRoomId) peerDetails.open = true;
-    peerDetails.innerHTML = '<summary>Remote Derivation Peers (A6 WebRTC / Signaling Relay)</summary><p class="ulg-section-help" style="margin-top:8px;">Optional WebSocket signaling relay for cross-machine PeerCompute 2-of-2 quorum derivation over WebRTC DataChannels. Leave blank to use local warm workers and sibling same-origin tabs.</p>';
+    if (
+      stagedConfig.network.peerRelayUrl
+      || stagedConfig.network.peerRoomId
+      || stagedConfig.network.peerStunUrl
+      || stagedConfig.network.peerTurnUrl
+      || stagedConfig.network.icePolicy === 'relay'
+    ) peerDetails.open = true;
+    peerDetails.innerHTML = '<summary>Remote Derivation Peers (A6 WebRTC / STUN / TURN / Signaling Relay)</summary><p class="ulg-section-help" style="margin-top:8px;">Optional WebSocket signaling relay plus STUN/TURN ICE settings for cross-machine PeerCompute 2-of-2 quorum derivation over WebRTC DataChannels. Leave blank to use local warm workers and sibling same-origin tabs.</p>';
     const peerGrid = document.createElement('div');
     peerGrid.className = 'ulg-grid-2';
     peerGrid.style.marginTop = '8px';
+
+    const syncPeerNet = () => {
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
+      updateChromeAndStatus();
+    };
 
     const relayField = document.createElement('label');
     relayField.className = 'ulg-field';
@@ -1741,8 +1754,7 @@ export function mountUlgSimStudioApp({
     relayInp.value = stagedConfig.network.peerRelayUrl || '';
     relayInp.addEventListener('change', () => {
       stagedConfig.network.peerRelayUrl = relayInp.value.trim();
-      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
-      updateChromeAndStatus();
+      syncPeerNet();
     });
     relayField.appendChild(relayInp);
 
@@ -1756,12 +1768,80 @@ export function mountUlgSimStudioApp({
     roomInp.value = stagedConfig.network.peerRoomId || '';
     roomInp.addEventListener('change', () => {
       stagedConfig.network.peerRoomId = roomInp.value.trim();
-      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
-      updateChromeAndStatus();
+      syncPeerNet();
     });
     roomField.appendChild(roomInp);
 
-    peerGrid.append(relayField, roomField);
+    const stunField = document.createElement('label');
+    stunField.className = 'ulg-field';
+    stunField.innerHTML = '<span class="ulg-field-label"><span>STUN Server URL</span><span class="ulg-field-hint">stun:host:3478</span></span>';
+    const stunInp = document.createElement('input');
+    stunInp.type = 'text';
+    stunInp.className = 'ulg-input';
+    stunInp.placeholder = 'stun:127.0.0.1:3478';
+    stunInp.value = stagedConfig.network.peerStunUrl || '';
+    stunInp.addEventListener('change', () => {
+      stagedConfig.network.peerStunUrl = stunInp.value.trim();
+      syncPeerNet();
+    });
+    stunField.appendChild(stunInp);
+
+    const turnField = document.createElement('label');
+    turnField.className = 'ulg-field';
+    turnField.innerHTML = '<span class="ulg-field-label"><span>TURN Relay URL</span><span class="ulg-field-hint">turn:host:3478</span></span>';
+    const turnInp = document.createElement('input');
+    turnInp.type = 'text';
+    turnInp.className = 'ulg-input';
+    turnInp.placeholder = 'turn:127.0.0.1:3478?transport=udp';
+    turnInp.value = stagedConfig.network.peerTurnUrl || '';
+    turnInp.addEventListener('change', () => {
+      stagedConfig.network.peerTurnUrl = turnInp.value.trim();
+      syncPeerNet();
+    });
+    turnField.appendChild(turnInp);
+
+    const turnUserField = document.createElement('label');
+    turnUserField.className = 'ulg-field';
+    turnUserField.innerHTML = '<span class="ulg-field-label"><span>TURN Username</span><span class="ulg-field-hint">optional</span></span>';
+    const turnUserInp = document.createElement('input');
+    turnUserInp.type = 'text';
+    turnUserInp.className = 'ulg-input';
+    turnUserInp.placeholder = 'ulg-dev';
+    turnUserInp.value = stagedConfig.network.peerTurnUser || '';
+    turnUserInp.addEventListener('change', () => {
+      stagedConfig.network.peerTurnUser = turnUserInp.value.trim();
+      syncPeerNet();
+    });
+    turnUserField.appendChild(turnUserInp);
+
+    const turnCredField = document.createElement('label');
+    turnCredField.className = 'ulg-field';
+    turnCredField.innerHTML = '<span class="ulg-field-label"><span>TURN Credential</span><span class="ulg-field-hint">local-dev</span></span>';
+    const turnCredInp = document.createElement('input');
+    turnCredInp.type = 'password';
+    turnCredInp.className = 'ulg-input';
+    turnCredInp.placeholder = 'local credential';
+    turnCredInp.value = stagedConfig.network.peerTurnCred || '';
+    turnCredInp.addEventListener('change', () => {
+      stagedConfig.network.peerTurnCred = turnCredInp.value.trim();
+      syncPeerNet();
+    });
+    turnCredField.appendChild(turnCredInp);
+
+    const policyField = document.createElement('label');
+    policyField.className = 'ulg-field';
+    policyField.innerHTML = '<span class="ulg-field-label"><span>ICE Transport Policy</span><span class="ulg-field-hint">all | relay</span></span>';
+    const policySel = document.createElement('select');
+    policySel.className = 'ulg-input';
+    policySel.innerHTML = '<option value="all">Auto (Direct + STUN + TURN)</option><option value="relay">Force TURN Relay Only</option>';
+    policySel.value = stagedConfig.network.icePolicy === 'relay' ? 'relay' : 'all';
+    policySel.addEventListener('change', () => {
+      stagedConfig.network.icePolicy = policySel.value === 'relay' ? 'relay' : 'all';
+      syncPeerNet();
+    });
+    policyField.appendChild(policySel);
+
+    peerGrid.append(relayField, roomField, stunField, turnField, turnUserField, turnCredField, policyField);
     peerDetails.appendChild(peerGrid);
     peerBlock.appendChild(peerDetails);
     panel.appendChild(peerBlock);

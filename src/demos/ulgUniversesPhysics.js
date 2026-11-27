@@ -162,6 +162,11 @@ import {
   startLiveClientDerivationPeerMesh
 } from '../services/clientDerivationPeers.js';
 import {
+  buildBrowserIceConfiguration,
+  fetchRelayIceConfig,
+  normalizeIceTransportPolicy
+} from '../services/peerIceConfig.js';
+import {
   buildPeerComputeSimulationProfile
 } from '../runtime/astrophysics/peercomputeSimulationScaler.js';
 import { QUALITY_PRESETS, UNIVERSES_ELEMENT_CHOICES } from './ulgUniversesDocs.js';
@@ -4339,22 +4344,47 @@ export function createUlgUniversesPhysics(device, {
     };
   }
 
-  async function connectPeerMesh({ relayUrl = peerMeshState.relayUrl, roomId = peerMeshState.roomId, role = peerMeshState.role } = {}) {
+  async function connectPeerMesh({
+    relayUrl = peerMeshState.relayUrl,
+    roomId = peerMeshState.roomId,
+    role = peerMeshState.role,
+    rtcIceServers = null,
+    iceTransportPolicy = 'all',
+    enableWebRtc = true
+  } = {}) {
     await disconnectPeerMesh();
     const cleanRelay = String(relayUrl || '').trim();
     const cleanRoom = String(roomId || 'ulg-universes-mesh-v1').trim();
-    const cleanRole = ['requester', 'responder', 'observer'].includes(role) ? role : 'requester';
+    const cleanRole = ['requester', 'responder', 'observer', 'validator'].includes(role) ? role : 'requester';
     if (!cleanRelay) {
       peerMeshState = { ...peerMeshState, connected: false, relayUrl: '', roomId: cleanRoom, role: cleanRole, error: null };
       return peerMeshState;
     }
     try {
+      let resolvedIceServers = Array.isArray(rtcIceServers) && rtcIceServers.length > 0 ? rtcIceServers : [];
+      let resolvedPolicy = normalizeIceTransportPolicy(iceTransportPolicy);
+      if (resolvedIceServers.length === 0) {
+        const fetched = await fetchRelayIceConfig(cleanRelay);
+        if (fetched?.iceServers?.length) {
+          resolvedIceServers = [...fetched.iceServers];
+          if (!iceTransportPolicy || iceTransportPolicy === 'all') {
+            resolvedPolicy = fetched.iceTransportPolicy;
+          }
+        }
+      }
       const peerId = `uv-${cleanRole}-${Math.random().toString(36).slice(2, 8)}`;
       const taskModuleUrl = new URL('../services/cosmicQuantumPeerTask.js', import.meta.url).href;
       let handle = null;
       let transport = null;
       if (cleanRole === 'observer') {
-        transport = createRelaySignalingTransport({ relayUrl: cleanRelay, roomId: cleanRoom, peerId, enableWebRtc: false });
+        transport = createRelaySignalingTransport({
+          relayUrl: cleanRelay,
+          roomId: cleanRoom,
+          peerId,
+          enableWebRtc: enableWebRtc !== false,
+          rtcIceServers: resolvedIceServers,
+          iceTransportPolicy: resolvedPolicy
+        });
         const seenPeers = new Set();
         let witnessedMessages = 0;
         let lastWitnessedType = null;
@@ -4374,9 +4404,13 @@ export function createUlgUniversesPhysics(device, {
             remotePeerCount: seenPeers.size,
             remotePeerIds: [...seenPeers],
             quorumReady: false,
+            iceTransportPolicy: resolvedPolicy,
+            iceServersConfigured: resolvedIceServers.length,
+            webrtcDataChannelPeers: transport.getTransportMeta?.()?.webrtcDataChannelPeers ?? [],
             witnessedMessages,
             lastWitnessedType
           }),
+          getIceDiagnostics: () => transport.getIceDiagnostics?.(),
           async stop() { transport.close(); }
         };
       } else {
@@ -4384,7 +4418,9 @@ export function createUlgUniversesPhysics(device, {
           relayUrl: cleanRelay,
           roomId: cleanRoom,
           peerId,
-          enableWebRtc: false,
+          enableWebRtc: enableWebRtc !== false,
+          rtcIceServers: resolvedIceServers,
+          iceTransportPolicy: resolvedPolicy,
           taskModuleUrl,
           announceIntervalMs: 120,
           staleMs: 12000,
@@ -4395,10 +4431,11 @@ export function createUlgUniversesPhysics(device, {
           mesh,
           getStatus: () => mesh.getStatus(),
           getActiveRequester: () => mesh.getActiveRequester(),
+          getIceDiagnostics: () => mesh.getIceDiagnostics(),
           async stop() { mesh.stop(); }
         };
       }
-      peerMesh = { transport, handle, peerId, role: cleanRole, stop: () => handle?.stop?.() };
+      peerMesh = { transport, handle, peerId, role: cleanRole, iceConfig: buildBrowserIceConfiguration({ iceServers: resolvedIceServers, iceTransportPolicy: resolvedPolicy }), stop: () => handle?.stop?.() };
       const st0 = handle.getStatus() || {};
       peerMeshState = {
         connected: true,
@@ -4409,6 +4446,9 @@ export function createUlgUniversesPhysics(device, {
         remotePeers: st0.remotePeerCount ?? 0,
         remotePeerIds: [...(st0.remotePeerIds || [])],
         quorumReady: Boolean(st0.quorumReady),
+        iceTransportPolicy: resolvedPolicy,
+        iceServersConfigured: resolvedIceServers.length,
+        webrtcDataChannelPeers: [...(st0.webrtcDataChannelPeers || [])],
         witnessedMessages: st0.witnessedMessages ?? 0,
         lastWitnessedType: st0.lastWitnessedType ?? null,
         dispatches: 0,
@@ -4436,8 +4476,23 @@ export function createUlgUniversesPhysics(device, {
       remotePeers: live ? live.remotePeerCount : peerMeshState.remotePeers,
       remotePeerIds: live ? [...(live.remotePeerIds || [])] : (peerMeshState.remotePeerIds || []),
       quorumReady: live ? Boolean(live.quorumReady) : peerMeshState.quorumReady,
+      webrtcDataChannelPeers: live ? [...(live.webrtcDataChannelPeers || [])] : (peerMeshState.webrtcDataChannelPeers || []),
       witnessedMessages: live?.witnessedMessages ?? peerMeshState.witnessedMessages ?? 0,
       lastWitnessedType: live?.lastWitnessedType ?? peerMeshState.lastWitnessedType ?? null
+    };
+  }
+
+  async function getPeerIceDiagnostics() {
+    if (typeof peerMesh?.handle?.getIceDiagnostics === 'function') {
+      return peerMesh.handle.getIceDiagnostics();
+    }
+    return {
+      iceTransportPolicy: peerMeshState.iceTransportPolicy || 'all',
+      iceServersConfigured: peerMeshState.iceServersConfigured || 0,
+      webrtcPeerCount: 0,
+      openDataChannels: [],
+      usingTurnRelay: false,
+      peers: {}
     };
   }
 
@@ -5912,6 +5967,7 @@ export function createUlgUniversesPhysics(device, {
     connectPeerMesh,
     disconnectPeerMesh,
     getPeerMeshState,
+    getPeerIceDiagnostics,
     dispatchPeerDerivation,
     getCosmoSpatialPartitionerState() {
       if (!cosmoSpatialPartitioner) return null;

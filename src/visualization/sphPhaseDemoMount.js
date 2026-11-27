@@ -1,4 +1,5 @@
 import { SPH_ENVIRONMENT_CONTROL_DEFAULTS, sphEnvironmentOptionsFromControls } from '../runtime/sphEnvironmentControls.js';
+import { buildBrowserIceConfiguration } from '../services/peerIceConfig.js';
 import {
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
   SPH_SCENE_LIGHTING_MODE_DARK_LAB,
@@ -2045,6 +2046,15 @@ export async function mountSphPhaseDemoOverlay({
   const initialPeerRoomId = String(
     initialHash.get('peerRoom') ?? initialQuery.get('peerRoom') ?? initialScenarioRuntime.peerRoom ?? ''
   ).trim();
+  const initialPeerIceConfig = buildBrowserIceConfiguration({
+    stunUrls: String(initialHash.get('peerStun') ?? initialQuery.get('peerStun') ?? initialScenarioRuntime.peerStun ?? '').trim(),
+    turnUrls: String(initialHash.get('peerTurn') ?? initialQuery.get('peerTurn') ?? initialScenarioRuntime.peerTurn ?? '').trim(),
+    turnUsername: String(initialHash.get('peerTurnUser') ?? initialQuery.get('peerTurnUser') ?? initialScenarioRuntime.peerTurnUser ?? '').trim(),
+    turnCredential: String(initialHash.get('peerTurnCred') ?? initialQuery.get('peerTurnCred') ?? initialScenarioRuntime.peerTurnCred ?? '').trim(),
+    iceTransportPolicy: String(initialHash.get('icePolicy') ?? initialQuery.get('icePolicy') ?? initialScenarioRuntime.icePolicy ?? 'all').trim()
+  });
+  const initialPeerIceServers = initialPeerIceConfig.iceServers;
+  const initialPeerIceTransportPolicy = initialPeerIceConfig.iceTransportPolicy;
   const initialHydrostaticInitialization = (() => {
     const raw = initialHash.get('hydroInit') ?? initialQuery.get('hydroInit');
     if (raw == null || raw === '') return null;
@@ -5300,6 +5310,8 @@ export async function mountSphPhaseDemoOverlay({
     residentAuthorityHost: currentResidentAuthorityHostForScene(),
     a6PeerRelayUrl: initialPeerRelayUrl,
     a6PeerRoomId: initialPeerRoomId,
+    a6PeerIceServers: initialPeerIceServers,
+    a6PeerIceTransportPolicy: initialPeerIceTransportPolicy,
     cameraPositionNormalized: initialCameraPositionNormalized,
     cameraTargetNormalized: initialCameraTargetNormalized
   });
@@ -10657,6 +10669,8 @@ export async function mountSphPhaseDemoOverlay({
       residentAuthorityHost: currentResidentAuthorityHostForScene(),
       a6PeerRelayUrl: initialPeerRelayUrl,
       a6PeerRoomId: initialPeerRoomId,
+      a6PeerIceServers: initialPeerIceServers,
+      a6PeerIceTransportPolicy: initialPeerIceTransportPolicy,
       cameraPositionNormalized: initialCameraPositionNormalized,
       cameraTargetNormalized: initialCameraTargetNormalized
     });

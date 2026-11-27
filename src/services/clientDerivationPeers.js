@@ -16,6 +16,10 @@ import {
   ComputeManager,
   createRemoteResultQuorumValidator
 } from '../runtime/peercomputeCore.js';
+import {
+  collectPeerConnectionIceDiagnostics,
+  normalizeIceTransportPolicy
+} from './peerIceConfig.js';
 
 export const ULG_LIVE_CLIENT_DERIVATION_PEER_MESH_CHANNEL = 'ulg-a6-derivation-peers-v1';
 
@@ -120,10 +124,12 @@ export function createRelaySignalingTransport({
   peerId,
   enableWebRtc = true,
   rtcIceServers = [],
+  iceTransportPolicy = 'all',
   webSocketFactory = null,
   rtcPeerConnectionFactory = null,
   reconnectDelayMs = 1500
 } = {}) {
+  const resolvedIcePolicy = normalizeIceTransportPolicy(iceTransportPolicy);
   const normalizedUrl = normalizeRelayUrl(relayUrl);
   if (!normalizedUrl) {
     throw new TypeError('createRelaySignalingTransport requires a non-empty relayUrl');
@@ -203,11 +209,14 @@ export function createRelaySignalingTransport({
     if (existing) return existing;
     let pc;
     try {
-      pc = rtcFactory({ iceServers: Array.isArray(rtcIceServers) ? rtcIceServers : [] });
+      pc = rtcFactory({
+        iceServers: Array.isArray(rtcIceServers) ? rtcIceServers : [],
+        iceTransportPolicy: resolvedIcePolicy
+      });
     } catch {
       return null;
     }
-    const entry = { pc, dc: null, ready: false };
+    const entry = { pc, dc: null, ready: false, pendingIce: [] };
     rtcPeers.set(remotePeerId, entry);
     pc.onicecandidate = (event) => {
       if (event?.candidate) {
@@ -215,7 +224,7 @@ export function createRelaySignalingTransport({
           type: 'rtc-ice',
           from: resolvedPeerId,
           to: remotePeerId,
-          candidate: event.candidate
+          candidate: typeof event.candidate.toJSON === 'function' ? event.candidate.toJSON() : event.candidate
         });
       }
     };
@@ -240,6 +249,14 @@ export function createRelaySignalingTransport({
     return entry;
   };
 
+  const flushPendingIce = async (entry) => {
+    if (!entry || !Array.isArray(entry.pendingIce) || !entry.pendingIce.length) return;
+    while (entry.pendingIce.length > 0) {
+      const cand = entry.pendingIce.shift();
+      try { await entry.pc.addIceCandidate(cand); } catch { /* Ignore late ICE. */ }
+    }
+  };
+
   const handleSignalingEnvelope = async (envelope) => {
     if (!envelope || typeof envelope !== 'object') return;
     if (envelope.roomId && envelope.roomId !== resolvedRoomId) return;
@@ -249,9 +266,10 @@ export function createRelaySignalingTransport({
       if (!entry) return;
       try {
         await entry.pc.setRemoteDescription(envelope.sdp);
+        await flushPendingIce(entry);
         const answer = await entry.pc.createAnswer();
         await entry.pc.setLocalDescription(answer);
-        sendViaSocket({ type: 'rtc-answer', from: resolvedPeerId, to: envelope.from, sdp: answer });
+        sendViaSocket({ type: 'rtc-answer', from: resolvedPeerId, to: envelope.from, sdp: entry.pc.localDescription || answer });
       } catch {
         cleanupRtcPeer(envelope.from);
       }
@@ -262,15 +280,20 @@ export function createRelaySignalingTransport({
       if (!entry) return;
       try {
         await entry.pc.setRemoteDescription(envelope.sdp);
+        await flushPendingIce(entry);
       } catch {
         cleanupRtcPeer(envelope.from);
       }
       return;
     }
     if (envelope.type === 'rtc-ice' && envelope.to === resolvedPeerId) {
-      const entry = rtcPeers.get(envelope.from);
+      const entry = rtcPeers.get(envelope.from) || ensureRtcPeer(envelope.from, false);
       if (entry && envelope.candidate) {
-        try { await entry.pc.addIceCandidate(envelope.candidate); } catch { /* Ignore late ICE. */ }
+        if (entry.pc?.remoteDescription) {
+          try { await entry.pc.addIceCandidate(envelope.candidate); } catch { /* Ignore late ICE. */ }
+        } else {
+          entry.pendingIce.push(envelope.candidate);
+        }
       }
       return;
     }
@@ -287,7 +310,7 @@ export function createRelaySignalingTransport({
         try {
           const offer = await entry.pc.createOffer();
           await entry.pc.setLocalDescription(offer);
-          sendViaSocket({ type: 'rtc-offer', from: resolvedPeerId, to: envelope.from, sdp: offer });
+          sendViaSocket({ type: 'rtc-offer', from: resolvedPeerId, to: envelope.from, sdp: entry.pc.localDescription || offer });
         } catch {
           cleanupRtcPeer(envelope.from);
         }
@@ -407,7 +430,26 @@ export function createRelaySignalingTransport({
         roomId: resolvedRoomId,
         relayUrl: normalizedUrl,
         connected: !closed && (socketOpen || openWebRtcPeers().length > 0),
+        iceTransportPolicy: resolvedIcePolicy,
+        iceServersConfigured: Array.isArray(rtcIceServers) ? rtcIceServers.length : 0,
         webrtcDataChannelPeers: Object.freeze(openWebRtcPeers())
+      });
+    },
+    async getIceDiagnostics() {
+      const peers = {};
+      let usingTurnRelay = false;
+      for (const [remotePeerId, entry] of rtcPeers.entries()) {
+        const diag = await collectPeerConnectionIceDiagnostics(entry.pc);
+        peers[remotePeerId] = diag;
+        if (diag.usingTurnRelay) usingTurnRelay = true;
+      }
+      return Object.freeze({
+        iceTransportPolicy: resolvedIcePolicy,
+        iceServersConfigured: Array.isArray(rtcIceServers) ? rtcIceServers.length : 0,
+        webrtcPeerCount: rtcPeers.size,
+        openDataChannels: openWebRtcPeers(),
+        usingTurnRelay,
+        peers
       });
     },
     close() {
@@ -587,7 +629,24 @@ export function createHybridDerivationTransport(transports = []) {
         roomId: relayMeta?.roomId ?? metas[0]?.roomId ?? ULG_LIVE_CLIENT_DERIVATION_PEER_MESH_CHANNEL,
         relayUrl: relayMeta?.relayUrl ?? null,
         connected: !closed && active.some((t) => t.isConnected()),
+        iceTransportPolicy: relayMeta?.iceTransportPolicy ?? 'all',
+        iceServersConfigured: relayMeta?.iceServersConfigured ?? 0,
         webrtcDataChannelPeers: Object.freeze(rtcPeers)
+      });
+    },
+    async getIceDiagnostics() {
+      for (const t of active) {
+        if (typeof t.getIceDiagnostics === 'function') {
+          return t.getIceDiagnostics();
+        }
+      }
+      return Object.freeze({
+        iceTransportPolicy: 'all',
+        iceServersConfigured: 0,
+        webrtcPeerCount: 0,
+        openDataChannels: [],
+        usingTurnRelay: false,
+        peers: {}
       });
     },
     close() {
@@ -613,6 +672,7 @@ export function createDerivationPeerTransport({
   networkManager = null,
   enableWebRtc = true,
   rtcIceServers = [],
+  iceTransportPolicy = 'all',
   webSocketFactory = null,
   rtcPeerConnectionFactory = null,
   reconnectDelayMs = 1500
@@ -655,6 +715,7 @@ export function createDerivationPeerTransport({
         peerId,
         enableWebRtc: enableWebRtc !== false,
         rtcIceServers,
+        iceTransportPolicy,
         webSocketFactory,
         rtcPeerConnectionFactory,
         reconnectDelayMs
@@ -674,6 +735,7 @@ export function createDerivationPeerTransport({
         peerId,
         enableWebRtc: enableWebRtc !== false,
         rtcIceServers,
+        iceTransportPolicy,
         webSocketFactory,
         rtcPeerConnectionFactory,
         reconnectDelayMs
@@ -727,6 +789,7 @@ export function startClientDerivationResponder({
   networkManager = null,
   enableWebRtc = true,
   rtcIceServers = [],
+  iceTransportPolicy = 'all',
   webSocketFactory = null,
   rtcPeerConnectionFactory = null,
   announceIntervalMs = 250,
@@ -745,11 +808,16 @@ export function startClientDerivationResponder({
     networkManager,
     enableWebRtc,
     rtcIceServers,
+    iceTransportPolicy,
     webSocketFactory,
     rtcPeerConnectionFactory
   });
   const kernel = new NodeKernel({
     enableRemoteComputeResponder: true,
+    network: {
+      iceServers: Array.isArray(rtcIceServers) ? rtcIceServers : [],
+      iceTransportPolicy: normalizeIceTransportPolicy(iceTransportPolicy)
+    },
     ...buildRemoteModulePolicyConfig({
       allowedRemoteModules,
       allowedRemoteModuleOrigins,
@@ -800,6 +868,7 @@ export function startClientDerivationRequester({
   networkManager = null,
   enableWebRtc = true,
   rtcIceServers = [],
+  iceTransportPolicy = 'all',
   webSocketFactory = null,
   rtcPeerConnectionFactory = null,
   allowedRemoteModules = null,
@@ -816,10 +885,15 @@ export function startClientDerivationRequester({
     networkManager,
     enableWebRtc,
     rtcIceServers,
+    iceTransportPolicy,
     webSocketFactory,
     rtcPeerConnectionFactory
   });
   const kernel = new NodeKernel({
+    network: {
+      iceServers: Array.isArray(rtcIceServers) ? rtcIceServers : [],
+      iceTransportPolicy: normalizeIceTransportPolicy(iceTransportPolicy)
+    },
     ...buildRemoteModulePolicyConfig({
       allowedRemoteModules,
       allowedRemoteModuleOrigins,
@@ -957,6 +1031,7 @@ export function startLiveClientDerivationPeerMesh({
   networkManager = null,
   enableWebRtc = true,
   rtcIceServers = [],
+  iceTransportPolicy = 'all',
   webSocketFactory = null,
   rtcPeerConnectionFactory = null,
   taskModuleUrl = null,
@@ -993,6 +1068,7 @@ export function startLiveClientDerivationPeerMesh({
         networkManager,
         enableWebRtc,
         rtcIceServers,
+        iceTransportPolicy,
         webSocketFactory,
         rtcPeerConnectionFactory
       })
@@ -1103,7 +1179,23 @@ export function startLiveClientDerivationPeerMesh({
       remotePeerCount: peers.length,
       quorumReady: connected && peers.length >= 2,
       requesterActive: Boolean(activeRequester),
+      iceTransportPolicy: meta.iceTransportPolicy ?? normalizeIceTransportPolicy(iceTransportPolicy),
+      iceServersConfigured: meta.iceServersConfigured ?? (Array.isArray(rtcIceServers) ? rtcIceServers.length : 0),
       webrtcDataChannelPeers: Object.freeze(meta.webrtcDataChannelPeers ?? [])
+    });
+  }
+
+  async function getIceDiagnostics() {
+    if (typeof discoveryTransport.getIceDiagnostics === 'function') {
+      return discoveryTransport.getIceDiagnostics();
+    }
+    return Object.freeze({
+      iceTransportPolicy: normalizeIceTransportPolicy(iceTransportPolicy),
+      iceServersConfigured: Array.isArray(rtcIceServers) ? rtcIceServers.length : 0,
+      webrtcPeerCount: 0,
+      openDataChannels: [],
+      usingTurnRelay: false,
+      peers: {}
     });
   }
 
@@ -1135,6 +1227,7 @@ export function startLiveClientDerivationPeerMesh({
     transport: discoveryTransport,
     getActiveRequester,
     getStatus,
+    getIceDiagnostics,
     stop
   });
 }

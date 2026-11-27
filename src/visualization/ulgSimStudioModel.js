@@ -205,7 +205,12 @@ export function buildStagedConfigFromPreset(presetId) {
     },
     network: {
       peerRelayUrl: '',
-      peerRoomId: ''
+      peerRoomId: '',
+      peerStunUrl: '',
+      peerTurnUrl: '',
+      peerTurnUser: '',
+      peerTurnCred: '',
+      icePolicy: 'all'
     },
     solverProfile: isTier0Water
       ? 'tier0-realtime'
@@ -269,7 +274,12 @@ export function buildBlankCustomConfig() {
     },
     network: {
       peerRelayUrl: '',
-      peerRoomId: ''
+      peerRoomId: '',
+      peerStunUrl: '',
+      peerTurnUrl: '',
+      peerTurnUser: '',
+      peerTurnCred: '',
+      icePolicy: 'all'
     },
     solverProfile: 'canonical-ss',
     presetRuntimeOverlay: { ...DEFAULT_CUSTOM_CAMERA }
@@ -752,6 +762,21 @@ export function buildLaunchParamsFromStagedConfig(config) {
       : {}),
     ...(String(config.network?.peerRoomId || '').trim()
       ? { peerRoom: String(config.network.peerRoomId).trim() }
+      : {}),
+    ...(String(config.network?.peerStunUrl || '').trim()
+      ? { peerStun: String(config.network.peerStunUrl).trim() }
+      : {}),
+    ...(String(config.network?.peerTurnUrl || '').trim()
+      ? { peerTurn: String(config.network.peerTurnUrl).trim() }
+      : {}),
+    ...(String(config.network?.peerTurnUser || '').trim()
+      ? { peerTurnUser: String(config.network.peerTurnUser).trim() }
+      : {}),
+    ...(String(config.network?.peerTurnCred || '').trim()
+      ? { peerTurnCred: String(config.network.peerTurnCred).trim() }
+      : {}),
+    ...(String(config.network?.icePolicy || '').trim().toLowerCase() === 'relay'
+      ? { icePolicy: 'relay' }
       : {})
   };
   delete compiled.surfaceDraw;
@@ -875,8 +900,18 @@ export function serializeStagedConfigToUrlSearchParams(config, {
   const network = config.network || {};
   const peerRelayUrl = String(network.peerRelayUrl || '').trim();
   const peerRoomId = String(network.peerRoomId || '').trim();
+  const peerStunUrl = String(network.peerStunUrl || '').trim();
+  const peerTurnUrl = String(network.peerTurnUrl || '').trim();
+  const peerTurnUser = String(network.peerTurnUser || '').trim();
+  const peerTurnCred = String(network.peerTurnCred || '').trim();
+  const icePolicy = String(network.icePolicy || '').trim().toLowerCase();
   if (peerRelayUrl) params.set('peerRelay', peerRelayUrl);
   if (peerRoomId) params.set('peerRoom', peerRoomId);
+  if (peerStunUrl) params.set('peerStun', peerStunUrl);
+  if (peerTurnUrl) params.set('peerTurn', peerTurnUrl);
+  if (peerTurnUser) params.set('peerTurnUser', peerTurnUser);
+  if (peerTurnCred) params.set('peerTurnCred', peerTurnCred);
+  if (icePolicy === 'relay') params.set('icePolicy', 'relay');
   if (autoPlayWhenReady === true) {
     params.set('autoplay', '1');
   }
@@ -1006,12 +1041,29 @@ export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
     const blob = Number(params.get('blob'));
     if (Number.isFinite(blob) && blob > 0) config.display.blobScale = blob;
   }
-  config.network = config.network || { peerRelayUrl: '', peerRoomId: '' };
+  config.network = config.network || {
+    peerRelayUrl: '', peerRoomId: '', peerStunUrl: '', peerTurnUrl: '', peerTurnUser: '', peerTurnCred: '', icePolicy: 'all'
+  };
   if (params.has('peerRelay')) {
     config.network.peerRelayUrl = String(params.get('peerRelay') || '').trim();
   }
   if (params.has('peerRoom')) {
     config.network.peerRoomId = String(params.get('peerRoom') || '').trim();
+  }
+  if (params.has('peerStun')) {
+    config.network.peerStunUrl = String(params.get('peerStun') || '').trim();
+  }
+  if (params.has('peerTurn')) {
+    config.network.peerTurnUrl = String(params.get('peerTurn') || '').trim();
+  }
+  if (params.has('peerTurnUser')) {
+    config.network.peerTurnUser = String(params.get('peerTurnUser') || '').trim();
+  }
+  if (params.has('peerTurnCred')) {
+    config.network.peerTurnCred = String(params.get('peerTurnCred') || '').trim();
+  }
+  if (params.has('icePolicy')) {
+    config.network.icePolicy = String(params.get('icePolicy') || '').trim().toLowerCase() === 'relay' ? 'relay' : 'all';
   }
 
   const rawAutoplay = params.get('autoplay');

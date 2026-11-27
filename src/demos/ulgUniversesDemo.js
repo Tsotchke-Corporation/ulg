@@ -70,6 +70,7 @@ import {
 } from '../runtime/astrophysics/peercomputeSimulationScaler.js';
 import { createUfoFlightController } from './ufoFlightController.js';
 import { buildLifeLabXenobiologyUrl } from '../runtime/biology/xenobiologySynthesizer.js';
+import { resolvePeerIceConfigFromSearch } from '../services/peerIceConfig.js';
 
 // ---- Pure Linear Algebra for Column-Major WebGPU [0, 1] Perspective Camera ----
 function vec3Sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
@@ -4110,6 +4111,11 @@ export async function mountUlgUniversesDemo() {
     pixelSize = Number(e.target.value) || 3;
     if (pixelVal) pixelVal.textContent = `${pixelSize}×`;
   });
+  const urlPeerIceCfg = resolvePeerIceConfigFromSearch(window.location.search);
+  const peerIcePolicySelect = document.getElementById('uv-peer-ice-policy');
+  if (peerIcePolicySelect && urlPeerIceCfg.iceTransportPolicy) {
+    peerIcePolicySelect.value = urlPeerIceCfg.iceTransportPolicy;
+  }
   peerConnectBtn?.addEventListener('click', async () => {
     const pm = physics.getPeerMeshState();
     if (pm.connected) await physics.disconnectPeerMesh();
@@ -4117,7 +4123,9 @@ export async function mountUlgUniversesDemo() {
       await physics.connectPeerMesh({
         relayUrl: peerUrlInput?.value || '',
         roomId: urlParams.get('peerRoom') || 'ulg-universes-mesh-v1',
-        role: peerRoleSelect?.value || 'requester'
+        role: peerRoleSelect?.value || 'requester',
+        rtcIceServers: urlPeerIceCfg.iceServers,
+        iceTransportPolicy: peerIcePolicySelect?.value || urlPeerIceCfg.iceTransportPolicy
       });
     }
     updatePeerStatusUi();
@@ -4127,8 +4135,10 @@ export async function mountUlgUniversesDemo() {
     const pm = physics.getPeerMeshState();
     if (peerConnectBtn) peerConnectBtn.textContent = pm.connected ? 'Leave' : 'Join Mesh';
     if (peerStatusEl) {
+      const rtcCnt = pm.webrtcDataChannelPeers?.length || 0;
+      const iceTag = pm.iceTransportPolicy === 'relay' ? 'TURN-ONLY' : 'STUN/TURN';
       peerStatusEl.textContent = pm.connected
-        ? `${pm.role} · ${pm.remotePeers} peers · ${pm.quorumReady ? '2-of-2 QUORUM READY' : 'waiting'}`
+        ? `${pm.role} · ${pm.remotePeers} peers (${rtcCnt} WebRTC · ${iceTag}) · ${pm.quorumReady ? '2-of-2 QUORUM READY' : 'waiting'}`
         : (pm.error ? `Error: ${pm.error}` : 'Local GPU · 0 remote peers');
     }
   }
@@ -8578,7 +8588,9 @@ export async function mountUlgUniversesDemo() {
     await physics.connectPeerMesh({
       relayUrl: urlPeerRelay,
       roomId: urlParams.get('peerRoom') || 'ulg-universes-mesh-v1',
-      role
+      role,
+      rtcIceServers: urlPeerIceCfg.iceServers,
+      iceTransportPolicy: peerIcePolicySelect?.value || urlPeerIceCfg.iceTransportPolicy
     });
     updatePeerStatusUi();
   }
@@ -9635,6 +9647,8 @@ export async function mountUlgUniversesDemo() {
     },
     connectPeerMesh: (opts) => physics.connectPeerMesh(opts),
     disconnectPeerMesh: () => physics.disconnectPeerMesh(),
+    getPeerMeshState: () => physics.getPeerMeshState(),
+    getPeerIceDiagnostics: () => physics.getPeerIceDiagnostics(),
     dispatchPeerDerivation: (Z) => physics.dispatchPeerDerivation(Z),
     async stepOnce() {
       let guard = 0;

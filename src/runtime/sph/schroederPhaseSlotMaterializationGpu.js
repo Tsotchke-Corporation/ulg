@@ -42,7 +42,7 @@ const PHASE_SLOT_MECHANICS_ACCESSORS_WGSL = [
 export const schroederPhaseSlotMaterializationWgsl = /* wgsl */ `
 struct Params {
   particle_count: u32, lineage_capacity: u32, first_spare: u32, spare_count: u32,
-  assignment_count: u32, segment_count: u32, admitted: u32, pad: u32,
+  assignment_count: u32, segment_count: u32, admitted: u32, group_table_mask: u32,
   box: vec4<f32>,
 };
 @group(0) @binding(0) var<storage, read> assignments: array<f32>;
@@ -57,6 +57,16 @@ struct Params {
 @group(0) @binding(9) var<storage, read_write> out_mechanics: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read_write> evidence: array<atomic<u32>>;
 @group(0) @binding(11) var<uniform> params: Params;
+// Compact O(A) atomic-claim table zero-initialized via clearBuffer:
+//   [0 .. particle_count)                         : source_claims[i]
+//   [particle_count .. particle_count+spare_count): spare_claims[lineage - first_spare]
+//   [group_base + slot*12 + 0..11]                : open-addressed merge group table
+//     +0 key_plus1 (0=empty, group+1=occupied), +1 leader_count, +2 leader_row_plus1,
+//     +3 member_count, +4..+11 up to 8 member row indices.
+@group(0) @binding(12) var<storage, read_write> claims: array<atomic<u32>>;
+
+const PREPARED_STRIDE: u32 = 10u;
+const GROUP_SLOT_WORDS: u32 = 12u;
 
 ${PHASE_SLOT_MECHANICS_ACCESSORS_WGSL}
 
@@ -64,8 +74,10 @@ fn finite(v: f32) -> bool { return (bitcast<u32>(v) & 0x7f800000u) != 0x7f800000
 fn finite4(v: vec4<f32>) -> bool { return finite(v.x) && finite(v.y) && finite(v.z) && finite(v.w); }
 fn integer(v: f32) -> bool { return finite(v) && v >= 0.0 && v == floor(v); }
 fn field(row: u32, column: u32) -> f32 { return assignments[row * 32u + column]; }
+fn admitted_enabled() -> bool { return (params.admitted & 1u) == 1u; }
+fn exact_ledger_enabled() -> bool { return (params.admitted & 2u) != 0u; }
 fn assignment_active(row: u32) -> bool {
-  return params.admitted == 1u && field(row, 3u) > 0.0 && field(row, 3u) < 32.0
+  return admitted_enabled() && field(row, 3u) > 0.0 && field(row, 3u) < 32.0
     && field(row, 6u) == 1.0;
 }
 fn source_index(row: u32) -> u32 { return u32(field(row, 0u)); }
@@ -76,6 +88,99 @@ fn determinant(i: u32) -> f32 {
     + a.z * (a.w * b.w - b.x * b.z);
 }
 fn source_fluid_lane(i: u32) -> u32 { return i / params.lineage_capacity; }
+fn group_table_base() -> u32 { return params.particle_count + params.spare_count; }
+fn group_hash(group_u: u32) -> u32 { return (group_u * 2654435761u) & params.group_table_mask; }
+
+fn group_table_insert(group_u: u32, row: u32, is_leader: bool) {
+  let key = group_u + 1u;
+  let mask = params.group_table_mask;
+  let base = group_table_base();
+  var h = group_hash(group_u);
+  for (var probe = 0u; probe <= mask; probe++) {
+    let slot_off = base + h * GROUP_SLOT_WORDS;
+    let cur = atomicLoad(&claims[slot_off]);
+    if (cur == key) {
+      if (is_leader) {
+        atomicAdd(&claims[slot_off + 1u], 1u);
+        atomicStore(&claims[slot_off + 2u], row + 1u);
+      }
+      let idx = atomicAdd(&claims[slot_off + 3u], 1u);
+      if (idx < 8u) { atomicStore(&claims[slot_off + 4u + idx], row); }
+      return;
+    }
+    if (cur == 0u) {
+      let res = atomicCompareExchangeWeak(&claims[slot_off], 0u, key);
+      if (res.exchanged || res.old_value == key) {
+        if (is_leader) {
+          atomicAdd(&claims[slot_off + 1u], 1u);
+          atomicStore(&claims[slot_off + 2u], row + 1u);
+        }
+        let idx = atomicAdd(&claims[slot_off + 3u], 1u);
+        if (idx < 8u) { atomicStore(&claims[slot_off + 4u + idx], row); }
+        return;
+      }
+    }
+    h = (h + 1u) & mask;
+  }
+}
+
+fn group_table_find(group_u: u32) -> u32 {
+  let key = group_u + 1u;
+  let mask = params.group_table_mask;
+  let base = group_table_base();
+  var h = group_hash(group_u);
+  for (var probe = 0u; probe <= mask; probe++) {
+    let slot_off = base + h * GROUP_SLOT_WORDS;
+    let cur = atomicLoad(&claims[slot_off]);
+    if (cur == key) { return slot_off; }
+    if (cur == 0u) { return 0xffffffffu; }
+    h = (h + 1u) & mask;
+  }
+  return 0xffffffffu;
+}
+
+fn merge_member(row: u32, group: f32) -> bool {
+  if (!assignment_active(row) || field(row, 20u) != group) { return false; }
+  let action = field(row, 8u);
+  return (action == 6.0 && field(row, 9u) == field(row, 0u) && field(row, 10u) == 1.0
+      && field(row, 12u) == 0.0)
+    || (action == 7.0 && field(row, 11u) == field(row, 0u) && field(row, 12u) == 1.0);
+}
+
+// O(A) atomic-claim prepass: registers every active source row, split spare
+// lineage claim, and merge group membership without quadratic/cubic scans.
+@compute @workgroup_size(64)
+fn claim(@builtin(global_invocation_id) id: vec3<u32>) {
+  let row = id.x;
+  if (row >= params.assignment_count || !assignment_active(row)) { return; }
+  let action = field(row, 8u);
+  if (action < 5.0 || action > 7.0) { return; }
+  let src_val = field(row, 0u);
+  if (integer(src_val) && src_val < f32(params.particle_count)) {
+    atomicAdd(&claims[u32(src_val)], 1u);
+  }
+  if (action == 5.0) {
+    let rank_val = field(row, 9u);
+    let count_val = field(row, 10u);
+    if (rank_val >= 0.0 && integer(rank_val) && integer(count_val) && count_val >= 1.0
+        && rank_val + count_val <= f32(params.spare_count)) {
+      let rank = u32(rank_val);
+      let count = u32(count_val);
+      for (var n = 0u; n < count; n++) {
+        let lineage = spare_lineages[rank + n];
+        if (lineage >= params.first_spare && lineage < params.first_spare + params.spare_count) {
+          atomicAdd(&claims[params.particle_count + (lineage - params.first_spare)], 1u);
+        }
+      }
+    }
+    return;
+  }
+  let group = field(row, 20u);
+  if (integer(group) && merge_member(row, group)) {
+    group_table_insert(u32(group), row, action == 6.0);
+  }
+}
+
 fn fluid_source(row: u32) -> bool {
   let value = field(row, 0u);
   if (!integer(value) || value >= f32(params.particle_count)) { return false; }
@@ -103,12 +208,8 @@ fn fluid_source(row: u32) -> bool {
   for (var r = 0u; r < 8u; r++) {
     if (!finite4(source_mechanics[i * 8u + r])) { return false; }
   }
-  // Reject every competing writer, rather than choosing an order-dependent
-  // winner. The production assignment has one row per source.
-  for (var other = 0u; other < params.assignment_count; other++) {
-    if (other != row && assignment_active(other) && field(other, 0u) == value
-        && field(other, 8u) >= 5.0 && field(other, 8u) <= 7.0) { return false; }
-  }
+  // O(1) competing-writer rejection via atomic source_claims prepass.
+  if (atomicLoad(&claims[i]) != 1u) { return false; }
   return true;
 }
 fn empty_lineage(lineage: u32) -> bool {
@@ -119,13 +220,6 @@ fn empty_lineage(lineage: u32) -> bool {
   }
   return true;
 }
-fn merge_member(row: u32, group: f32) -> bool {
-  if (!assignment_active(row) || field(row, 20u) != group) { return false; }
-  let action = field(row, 8u);
-  return (action == 6.0 && field(row, 9u) == field(row, 0u) && field(row, 10u) == 1.0
-      && field(row, 12u) == 0.0)
-    || (action == 7.0 && field(row, 11u) == field(row, 0u) && field(row, 12u) == 1.0);
-}
 ${schroederPhaseSlotCaloricWgsl}
 fn reject() { atomicAdd(&evidence[0], 1u); }
 
@@ -135,7 +229,7 @@ fn reject() { atomicAdd(&evidence[0], 1u); }
 fn prepare(@builtin(global_invocation_id) id: vec3<u32>) {
   let row = id.x;
   if (row >= params.assignment_count) { return; }
-  for (var k = 0u; k < 8u; k++) { prepared[row * 8u + k] = vec4<f32>(0.0); }
+  for (var k = 0u; k < PREPARED_STRIDE; k++) { prepared[row * PREPARED_STRIDE + k] = vec4<f32>(0.0); }
   if (!assignment_active(row)) { return; }
   let action = field(row, 8u);
   if (action != 5.0 && action != 6.0) { return; }
@@ -153,63 +247,101 @@ fn prepare(@builtin(global_invocation_id) id: vec3<u32>) {
     let divisor = count_value + 1.0;
     if (!(source_state[i * 2u].w / divisor > 0.0)
         || !(source_mechanics[i * 8u + 4u].w / divisor > 0.0)) { reject(); return; }
+    // O(count) unique-claim + empty-lineage verification via atomic spare_claims.
     for (var n = 0u; n < count; n++) {
       let lineage = spare_lineages[rank + n];
       if (!empty_lineage(lineage)) { reject(); return; }
-      for (var p = 0u; p < n; p++) {
-        if (spare_lineages[rank + p] == lineage) { reject(); return; }
-      }
-    }
-    for (var other = 0u; other < params.assignment_count; other++) {
-      if (other == row || !assignment_active(other) || field(other, 8u) != 5.0 || field(other, 9u) < 0.0) { continue; }
-      let start = field(other, 9u); let end = start + field(other, 10u);
-      if (start < rank_value + count_value && end > rank_value) { reject(); return; }
-      // Also reject a corrupted rank list that aliases disjoint rank ranges.
-      if (integer(start) && integer(end) && end <= f32(params.spare_count)) {
-        for (var a = rank; a < rank + count; a++) {
-          for (var b = u32(start); b < u32(end); b++) {
-            if (spare_lineages[a] == spare_lineages[b]) { reject(); return; }
-          }
-        }
-      }
+      if (atomicLoad(&claims[params.particle_count + (lineage - params.first_spare)]) != 1u) { reject(); return; }
     }
     let s0 = source_state[i * 2u];
     if (any(s0.xyz < vec3<f32>(0.0)) || any(s0.xyz > params.box.xyz)) { reject(); return; }
-    prepared[row * 8u] = vec4<f32>(1.0, f32(i), f32(rank), f32(count));
+    // Precompute local caloric slope dT/du for exact APIC shear KE->U conservation.
+    let u_p = source_state[i * 2u + 1u].w;
+    let t_at_u = phase_temperature(t0.x, u_p, t0.y);
+    let t_at_u1 = phase_temperature(t0.x, u_p + 1.0, t0.y);
+    let dt_du = select(0.0, t_at_u1 - t_at_u, t_at_u > 0.0 && t_at_u1 > t_at_u);
+    prepared[row * PREPARED_STRIDE] = vec4<f32>(1.0, f32(i), f32(rank), f32(count));
+    prepared[row * PREPARED_STRIDE + 1u] = vec4<f32>(dt_du, 0.0, 0.0, 0.0);
     return;
   }
   let group = field(row, 20u);
   if (!integer(group) || !merge_member(row, group)) { reject(); return; }
+  let group_u = u32(group);
+  let slot_off = group_table_find(group_u);
+  if (slot_off == 0xffffffffu) { reject(); return; }
+  let leaders = atomicLoad(&claims[slot_off + 1u]);
+  let claimed_members = atomicLoad(&claims[slot_off + 3u]);
+  if (claimed_members < 2u || leaders != 1u) { reject(); return; }
   var mass = 0.0; var moment = vec3<f32>(0.0); var momentum = vec3<f32>(0.0);
   var internal = 0.0; var rest = 0.0; var volume = 0.0; var entities = 0.0;
   var reference_mass = 0.0;
-  var members = 0u; var leaders = 0u; var min_source = i;
+  var members = 0u; var min_source = i;
   var c0 = vec3<f32>(0.0); var c1 = vec3<f32>(0.0); var c2 = vec3<f32>(0.0);
-  for (var other = 0u; other < params.assignment_count; other++) {
-    if (!merge_member(other, group)) { continue; }
-    if (!fluid_source(other)) { reject(); return; }
-    let j = source_index(other); let st = source_state[j * 2u]; let vu = source_state[j * 2u + 1u];
-    let tt = source_thermo[j * 3u]; let mm = source_mechanics[j * 8u + 4u];
-    if (source_fluid_lane(j) != leader_lane || tt.x != t0.x || tt.y != t0.y || tt.w != t0.w
-        || source_mechanics[j * 8u + 6u].z != source_mechanics[i * 8u + 6u].z) { reject(); return; }
-    mass += st.w; moment += st.w * st.xyz; momentum += st.w * vu.xyz; internal += st.w * vu.w;
-    rest += mm.w; volume += mm.z * mm.w; entities += source_thermo[j * 3u + 2u].y;
-    reference_mass += source_mechanics[j * 8u + 7u].w;
-    c0 += st.w * source_mechanics[j * 8u + 2u].yzw;
-    c1 += st.w * source_mechanics[j * 8u + 3u].xyz;
-    c2 += st.w * vec3<f32>(source_mechanics[j * 8u + 3u].w, mm.xy);
-    min_source = min(min_source, j); members++;
-    if (field(other, 8u) == 6.0) { leaders++; }
+  var sorted_rows: array<u32, 8>;
+  let fast_group = claimed_members <= 8u;
+  if (fast_group) {
+    for (var m = 0u; m < claimed_members; m++) {
+      sorted_rows[m] = atomicLoad(&claims[slot_off + 4u + m]);
+    }
+    // Sort ascending for bit-exact deterministic accumulation order.
+    for (var a = 1u; a < claimed_members; a++) {
+      let key_r = sorted_rows[a];
+      var b = a;
+      while (b > 0u && sorted_rows[b - 1u] > key_r) {
+        sorted_rows[b] = sorted_rows[b - 1u];
+        b--;
+      }
+      sorted_rows[b] = key_r;
+    }
+    for (var m = 0u; m < claimed_members; m++) {
+      let other = sorted_rows[m];
+      if (!fluid_source(other)) { reject(); return; }
+      let j = source_index(other); let st = source_state[j * 2u]; let vu = source_state[j * 2u + 1u];
+      let tt = source_thermo[j * 3u]; let mm = source_mechanics[j * 8u + 4u];
+      if (source_fluid_lane(j) != leader_lane || tt.x != t0.x || tt.y != t0.y || tt.w != t0.w
+          || source_mechanics[j * 8u + 6u].z != source_mechanics[i * 8u + 6u].z) { reject(); return; }
+      mass += st.w; moment += st.w * st.xyz; momentum += st.w * vu.xyz; internal += st.w * vu.w;
+      rest += mm.w; volume += mm.z * mm.w; entities += source_thermo[j * 3u + 2u].y;
+      reference_mass += source_mechanics[j * 8u + 7u].w;
+      c0 += st.w * source_mechanics[j * 8u + 2u].yzw;
+      c1 += st.w * source_mechanics[j * 8u + 3u].xyz;
+      c2 += st.w * vec3<f32>(source_mechanics[j * 8u + 3u].w, mm.xy);
+      min_source = min(min_source, j); members++;
+    }
+  } else {
+    for (var other = 0u; other < params.assignment_count; other++) {
+      if (!merge_member(other, group)) { continue; }
+      if (!fluid_source(other)) { reject(); return; }
+      let j = source_index(other); let st = source_state[j * 2u]; let vu = source_state[j * 2u + 1u];
+      let tt = source_thermo[j * 3u]; let mm = source_mechanics[j * 8u + 4u];
+      if (source_fluid_lane(j) != leader_lane || tt.x != t0.x || tt.y != t0.y || tt.w != t0.w
+          || source_mechanics[j * 8u + 6u].z != source_mechanics[i * 8u + 6u].z) { reject(); return; }
+      mass += st.w; moment += st.w * st.xyz; momentum += st.w * vu.xyz; internal += st.w * vu.w;
+      rest += mm.w; volume += mm.z * mm.w; entities += source_thermo[j * 3u + 2u].y;
+      reference_mass += source_mechanics[j * 8u + 7u].w;
+      c0 += st.w * source_mechanics[j * 8u + 2u].yzw;
+      c1 += st.w * source_mechanics[j * 8u + 3u].xyz;
+      c2 += st.w * vec3<f32>(source_mechanics[j * 8u + 3u].w, mm.xy);
+      min_source = min(min_source, j); members++;
+    }
   }
-  if (members < 2u || leaders != 1u || min_source != i || !finite(mass) || mass <= 0.0) { reject(); return; }
+  if (members < 2u || min_source != i || !finite(mass) || mass <= 0.0) { reject(); return; }
   let velocity = momentum / mass;
   // Sum relative kinetic energy directly; subtracting two large bulk kinetic
   // energies would lose this heat under a Galilean velocity shift.
   var heat = 0.0;
-  for (var other = 0u; other < params.assignment_count; other++) {
-    if (!merge_member(other, group)) { continue; }
-    let j = source_index(other); let dv = source_state[j * 2u + 1u].xyz - velocity;
-    heat += 0.5 * source_state[j * 2u].w * dot(dv, dv);
+  if (fast_group) {
+    for (var m = 0u; m < claimed_members; m++) {
+      let j = source_index(sorted_rows[m]);
+      let dv = source_state[j * 2u + 1u].xyz - velocity;
+      heat += 0.5 * source_state[j * 2u].w * dot(dv, dv);
+    }
+  } else {
+    for (var other = 0u; other < params.assignment_count; other++) {
+      if (!merge_member(other, group)) { continue; }
+      let j = source_index(other); let dv = source_state[j * 2u + 1u].xyz - velocity;
+      heat += 0.5 * source_state[j * 2u].w * dot(dv, dv);
+    }
   }
   let u = (internal + heat) / mass; let temperature = phase_temperature(t0.x, u, t0.y);
   let position = moment / mass; let j = volume / rest;
@@ -218,14 +350,28 @@ fn prepare(@builtin(global_invocation_id) id: vec3<u32>) {
       || !finite(reference_mass) || !finite4(vec4<f32>(c0 / mass, 0.0))
       || !finite4(vec4<f32>(c1 / mass, 0.0)) || !finite4(vec4<f32>(c2 / mass, 0.0))
       || any(position < vec3<f32>(0.0)) || any(position > params.box.xyz)) { reject(); return; }
-  prepared[row * 8u] = vec4<f32>(1.0, f32(i), f32(members), temperature);
-  prepared[row * 8u + 1u] = vec4<f32>(position, mass);
-  prepared[row * 8u + 2u] = vec4<f32>(velocity, u);
-  prepared[row * 8u + 3u] = vec4<f32>(rest, j, entities, reference_mass);
-  prepared[row * 8u + 4u] = vec4<f32>(c0 / mass, 0.0);
-  prepared[row * 8u + 5u] = vec4<f32>(c1 / mass, 0.0);
-  prepared[row * 8u + 6u] = vec4<f32>(c2 / mass, 0.0);
-  prepared[row * 8u + 7u].x = heat;
+  prepared[row * PREPARED_STRIDE] = vec4<f32>(1.0, f32(i), f32(members), temperature);
+  prepared[row * PREPARED_STRIDE + 1u] = vec4<f32>(position, mass);
+  prepared[row * PREPARED_STRIDE + 2u] = vec4<f32>(velocity, u);
+  prepared[row * PREPARED_STRIDE + 3u] = vec4<f32>(rest, j, entities, reference_mass);
+  prepared[row * PREPARED_STRIDE + 4u] = vec4<f32>(c0 / mass, 0.0);
+  prepared[row * PREPARED_STRIDE + 5u] = vec4<f32>(c1 / mass, 0.0);
+  prepared[row * PREPARED_STRIDE + 6u] = vec4<f32>(c2 / mass, 0.0);
+  prepared[row * PREPARED_STRIDE + 7u] = vec4<f32>(heat, select(1.0, 0.0, fast_group), 0.0, 0.0);
+  if (fast_group) {
+    prepared[row * PREPARED_STRIDE + 8u] = vec4<f32>(
+      select(-1.0, f32(sorted_rows[0]), claimed_members > 0u),
+      select(-1.0, f32(sorted_rows[1]), claimed_members > 1u),
+      select(-1.0, f32(sorted_rows[2]), claimed_members > 2u),
+      select(-1.0, f32(sorted_rows[3]), claimed_members > 3u)
+    );
+    prepared[row * PREPARED_STRIDE + 9u] = vec4<f32>(
+      select(-1.0, f32(sorted_rows[4]), claimed_members > 4u),
+      select(-1.0, f32(sorted_rows[5]), claimed_members > 5u),
+      select(-1.0, f32(sorted_rows[6]), claimed_members > 6u),
+      select(-1.0, f32(sorted_rows[7]), claimed_members > 7u)
+    );
+  }
 }
 
 fn copy_mechanics(source: u32, destination: u32) {
@@ -254,20 +400,26 @@ fn materialize(@builtin(global_invocation_id) id: vec3<u32>) {
   if (row >= params.assignment_count || !assignment_active(row)) { return; }
   let action = field(row, 8u);
   if (action == 7.0) {
-    if (!merge_member(row, field(row, 20u))) { return; }
-    for (var leader = 0u; leader < params.assignment_count; leader++) {
-      if (field(leader, 8u) == 6.0 && field(leader, 20u) == field(row, 20u)
-          && prepared[leader * 8u].x == 1.0) {
-        let i = source_index(row);
-        clear_slot(i, u32(round(source_thermo[i * 3u].y)), source_thermo[i * 3u].x);
-        atomicAdd(&evidence[3], 1u); return;
-      }
+    let group = field(row, 20u);
+    if (!integer(group) || !merge_member(row, group)) { return; }
+    // O(1) merge-leader lookup via atomic claim group table.
+    let slot_off = group_table_find(u32(group));
+    if (slot_off == 0xffffffffu) { return; }
+    let leader_plus1 = atomicLoad(&claims[slot_off + 2u]);
+    if (leader_plus1 == 0u) { return; }
+    let leader = leader_plus1 - 1u;
+    if (field(leader, 8u) == 6.0 && field(leader, 20u) == group
+        && prepared[leader * PREPARED_STRIDE].x == 1.0) {
+      let i = source_index(row);
+      clear_slot(i, u32(round(source_thermo[i * 3u].y)), source_thermo[i * 3u].x);
+      atomicAdd(&evidence[3], 1u);
     }
     return;
   }
-  let p = prepared[row * 8u];
+  let p = prepared[row * PREPARED_STRIDE];
   if (p.x != 1.0) { return; }
-  let i = u32(p.y); let s0 = source_state[i * 2u]; let t0 = source_thermo[i * 3u];
+  let i = u32(p.y); let s0 = source_state[i * 2u]; let s1 = source_state[i * 2u + 1u];
+  let t0 = source_thermo[i * 3u];
   if (action == 5.0) {
     let count = u32(p.w) + 1u; let divisor = f32(count);
     let rank = u32(p.z); let old4 = source_mechanics[i * 8u + 4u];
@@ -283,6 +435,14 @@ fn materialize(@builtin(global_invocation_id) id: vec3<u32>) {
     var spacing = vec3<f32>(0.5 * pow(old4.z * old4.w / divisor, 1.0 / 3.0));
     spacing = min(spacing, min(s0.xyz, params.box.xyz - s0.xyz) / max(extent, vec3<f32>(1e-20)));
     let source_lane = source_fluid_lane(i);
+    // Preserve APIC velocity shear v_child = v_p + C_p * dx_child on 1->8 split
+    // (sum(dx_child) == 0 -> exact linear momentum conservation; relative KE is
+    // accounted conservatively against internal energy in f32 mode).
+    let c0 = source_mechanics[i * 8u + 2u].yzw;
+    let c1 = source_mechanics[i * 8u + 3u].xyz;
+    let c2 = vec3<f32>(source_mechanics[i * 8u + 3u].w, old4.xy);
+    let dt_du = prepared[row * PREPARED_STRIDE + 1u].x;
+    let allow_shear_ke = !exact_ledger_enabled() && dt_du > 0.0;
     for (var n = 0u; n < count; n++) {
       var destination = i;
       if (n > 0u) {
@@ -293,9 +453,24 @@ fn materialize(@builtin(global_invocation_id) id: vec3<u32>) {
         }
       }
       copy_mechanics(i, destination);
-      out_state[destination * 2u] = vec4<f32>(s0.xyz + spacing * (corner(n, width) - center), s0.w / divisor);
-      out_state[destination * 2u + 1u] = source_state[i * 2u + 1u];
-      out_thermo[destination * 3u] = t0;
+      let dx = spacing * (corner(n, width) - center);
+      var dv = vec3<f32>(0.0);
+      var du_ke = 0.0;
+      if (allow_shear_ke) {
+        let raw_dv = vec3<f32>(dot(c0, dx), dot(c1, dx), dot(c2, dx));
+        let ke_raw = 0.5 * dot(raw_dv, raw_dv);
+        let max_ke = min(0.05 * max(abs(s1.w), 1.0), 0.1 * t0.z / max(dt_du, 1e-12));
+        if (ke_raw > 0.0 && max_ke > 0.0) {
+          let s_clamp = select(1.0, sqrt(max_ke / ke_raw), ke_raw > max_ke);
+          dv = raw_dv * s_clamp;
+          du_ke = 0.5 * dot(dv, dv);
+        }
+      }
+      out_state[destination * 2u] = vec4<f32>(s0.xyz + dx, s0.w / divisor);
+      out_state[destination * 2u + 1u] = vec4<f32>(s1.xyz + dv, s1.w - du_ke);
+      var child_t0 = t0;
+      if (du_ke > 0.0) { child_t0.z = max(1.0, t0.z - du_ke * dt_du); }
+      out_thermo[destination * 3u] = child_t0;
       out_thermo[destination * 3u + 1u] = source_thermo[i * 3u + 1u];
       let old2 = source_thermo[i * 3u + 2u];
       out_thermo[destination * 3u + 2u] = vec4<f32>(old2.x * scale, old2.y / divisor, 1.0, old2.w * scale);
@@ -305,8 +480,8 @@ fn materialize(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&evidence[1], 1u); atomicAdd(&evidence[4], count - 1u); return;
   }
   if (action != 6.0) { return; }
-  let merged = prepared[row * 8u + 1u]; let state1 = prepared[row * 8u + 2u];
-  let volumes = prepared[row * 8u + 3u];
+  let merged = prepared[row * PREPARED_STRIDE + 1u]; let state1 = prepared[row * PREPARED_STRIDE + 2u];
+  let volumes = prepared[row * PREPARED_STRIDE + 3u];
   out_state[i * 2u] = merged; out_state[i * 2u + 1u] = state1;
   out_thermo[i * 3u].z = p.w;
   let volume_scale = pow(volumes.x / source_mechanics[i * 8u + 4u].w, 1.0 / 3.0);
@@ -317,8 +492,8 @@ fn materialize(@builtin(global_invocation_id) id: vec3<u32>) {
   let fscale = pow(volumes.y / source_mechanics[i * 8u + 4u].z, 1.0 / 3.0);
   out_mechanics[i * 8u] = source_mechanics[i * 8u] * fscale;
   out_mechanics[i * 8u + 1u] = source_mechanics[i * 8u + 1u] * fscale;
-  out_mechanics[i * 8u + 2u] = vec4<f32>(source_mechanics[i * 8u + 2u].x * fscale, prepared[row * 8u + 4u].xyz);
-  let c1 = prepared[row * 8u + 5u].xyz; let c2 = prepared[row * 8u + 6u].xyz;
+  out_mechanics[i * 8u + 2u] = vec4<f32>(source_mechanics[i * 8u + 2u].x * fscale, prepared[row * PREPARED_STRIDE + 4u].xyz);
+  let c1 = prepared[row * PREPARED_STRIDE + 5u].xyz; let c2 = prepared[row * PREPARED_STRIDE + 6u].xyz;
   out_mechanics[i * 8u + 3u] = vec4<f32>(c1, c2.x);
   out_mechanics[i * 8u + 4u] = vec4<f32>(c2.yz, volumes.y, volumes.x);
   out_mechanics[i * 8u + 7u].w = volumes.w;
@@ -353,7 +528,11 @@ export function createSchroederPhaseSlotMaterializer(device, {
   if (device.limits.maxStorageBuffersPerShaderStage < 11) {
     throw new RangeError('Phase-slot materialization requires the resident device storage limits');
   }
-  const sizes = [particleCount * 32, particleCount * 48, particleCount * 128, rows * 128, segments.byteLength];
+  const groupTableSlots = Math.max(8, 1 << Math.ceil(Math.log2(Math.max(8, rows * 2))));
+  const claimWords = particleCount + spares + groupTableSlots * 12;
+  const claimBytes = claimWords * 4;
+  const preparedBytes = rows * 160;
+  const sizes = [particleCount * 32, particleCount * 48, particleCount * 128, preparedBytes, claimBytes, segments.byteLength];
   if (sizes.some(bytes => bytes > device.limits.maxBufferSize || bytes > device.limits.maxStorageBufferBindingSize)
       || Math.ceil(rows / 64) > device.limits.maxComputeWorkgroupsPerDimension) {
     throw new RangeError('Phase-slot materialization exceeds resident device buffer or dispatch limits');
@@ -400,21 +579,61 @@ export function createSchroederPhaseSlotMaterializer(device, {
     const stateBuffer = make('state', particleCount * 32);
     const thermoBuffer = make('thermo', particleCount * 48);
     const mechanicsBuffer = make('mechanics', particleCount * 128);
-    const preparationBuffer = make('preparation', rows * 128, undefined, true);
+    const preparationBuffer = make('preparation', preparedBytes, undefined, true);
+    const claimBuffer = make('claims', claimBytes, undefined, true);
     const evidenceBuffer = make('evidence', 32);
     const segmentBuffer = make('segments', segments.byteLength, undefined, true);
     device.queue.writeBuffer(segmentBuffer, 0, segments);
     const paramsBuffer = make('params', 48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, true);
     const params = new ArrayBuffer(48);
-    new Uint32Array(params).set([particleCount, capacity, first, spares, rows, segments.length / 12, admissionApproved === true ? 1 : 0, 0]);
+    const admittedFlags = (admissionApproved === true ? 1 : 0) | (exactLedger ? 2 : 0);
+    new Uint32Array(params).set([particleCount, capacity, first, spares, rows, segments.length / 12, admittedFlags, groupTableSlots - 1]);
     new Float32Array(params).set([...boxDimsM, 0], 8);
     device.queue.writeBuffer(paramsBuffer, 0, params);
-    const bindings = Array.from({ length: 12 }, (_, i) => computeBufferBinding(i,
-      i === 11 ? 'uniform' : i <= 5 ? 'read-only-storage' : 'storage'));
-    const pipelines = ['prepare', 'materialize'].map(entryPoint => createCachedExplicitComputePipeline(device, {
-      cacheKey: `ulg-phase-slot-materialization-v2-${entryPoint}`, code: schroederPhaseSlotMaterializationWgsl,
-      entryPoint, bindings, label: `ulg-phase-slot-${entryPoint}`
-    }));
+    const claimBindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(11, 'uniform'),
+      computeBufferBinding(12, 'storage')
+    ];
+    const prepareBindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(6, 'storage'),
+      computeBufferBinding(10, 'storage'),
+      computeBufferBinding(11, 'uniform'),
+      computeBufferBinding(12, 'storage')
+    ];
+    const materializeBindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(6, 'storage'),
+      computeBufferBinding(7, 'storage'),
+      computeBufferBinding(8, 'storage'),
+      computeBufferBinding(9, 'storage'),
+      computeBufferBinding(10, 'storage'),
+      computeBufferBinding(11, 'uniform'),
+      computeBufferBinding(12, 'storage')
+    ];
+    const claimPipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-phase-slot-materialization-v3-claim', code: schroederPhaseSlotMaterializationWgsl,
+      entryPoint: 'claim', bindings: claimBindings, label: 'ulg-phase-slot-claim'
+    });
+    const preparePipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-phase-slot-materialization-v3-prepare', code: schroederPhaseSlotMaterializationWgsl,
+      entryPoint: 'prepare', bindings: prepareBindings, label: 'ulg-phase-slot-prepare'
+    });
+    const materializePipeline = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-phase-slot-materialization-v3-materialize', code: schroederPhaseSlotMaterializationWgsl,
+      entryPoint: 'materialize', bindings: materializeBindings, label: 'ulg-phase-slot-materialize'
+    });
     if (exactLedger) ledgerStage = createSchroederPhaseSlotLedgerStage({ device,
       particleCount, lineageCapacity: capacity, assignmentRowCount: rows, spareCount: spares,
       massRead: exactLedger.massRead, energy: exactLedger.energy,
@@ -452,20 +671,65 @@ export function createSchroederPhaseSlotMaterializer(device, {
           if (!inputs[i] || inputs[i].size < bytes[i]) throw new RangeError('Phase-slot input buffer is missing or undersized');
         }
         encoded = true;
+        if (typeof encoder.clearBuffer === 'function') {
+          encoder.clearBuffer(claimBuffer, 0, claimBuffer.size);
+        }
         encoder.copyBufferToBuffer(sourceStateBuffer, 0, stateBuffer, 0, stateBuffer.size);
         encoder.copyBufferToBuffer(sourceThermoBuffer, 0, thermoBuffer, 0, thermoBuffer.size);
         encoder.copyBufferToBuffer(sourceMechanicsBuffer, 0, mechanicsBuffer, 0, mechanicsBuffer.size);
-        const buffers = [slotAssignmentBuffer, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer,
-          spareLineagesBuffer, segmentBuffer, preparationBuffer, stateBuffer, thermoBuffer, mechanicsBuffer, evidenceBuffer, paramsBuffer];
-        const group = createCachedExplicitBindGroup(device, { layout: pipelines[0].bindGroupLayout,
-          entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
-        for (const [index, p] of pipelines.entries()) {
-          const pass = encoder.beginComputePass({ label: p.label });
-          pass.setPipeline(p.pipeline); pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(Math.ceil(rows / 64)); pass.end();
-          if (index === 0) ledgerStage?.encodePrepare(encoder, { slotAssignmentBuffer,
-            spareLineagesBuffer, sourceThermoBuffer });
-        }
+        const groups = Math.ceil(rows / 64);
+        const claimGroup = createCachedExplicitBindGroup(device, {
+          layout: claimPipeline.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: slotAssignmentBuffer } },
+            { binding: 4, resource: { buffer: spareLineagesBuffer } },
+            { binding: 11, resource: { buffer: paramsBuffer } },
+            { binding: 12, resource: { buffer: claimBuffer } }
+          ]
+        });
+        const prepareGroup = createCachedExplicitBindGroup(device, {
+          layout: preparePipeline.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: slotAssignmentBuffer } },
+            { binding: 1, resource: { buffer: sourceStateBuffer } },
+            { binding: 2, resource: { buffer: sourceThermoBuffer } },
+            { binding: 3, resource: { buffer: sourceMechanicsBuffer } },
+            { binding: 4, resource: { buffer: spareLineagesBuffer } },
+            { binding: 5, resource: { buffer: segmentBuffer } },
+            { binding: 6, resource: { buffer: preparationBuffer } },
+            { binding: 10, resource: { buffer: evidenceBuffer } },
+            { binding: 11, resource: { buffer: paramsBuffer } },
+            { binding: 12, resource: { buffer: claimBuffer } }
+          ]
+        });
+        const materializeGroup = createCachedExplicitBindGroup(device, {
+          layout: materializePipeline.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: slotAssignmentBuffer } },
+            { binding: 1, resource: { buffer: sourceStateBuffer } },
+            { binding: 2, resource: { buffer: sourceThermoBuffer } },
+            { binding: 3, resource: { buffer: sourceMechanicsBuffer } },
+            { binding: 4, resource: { buffer: spareLineagesBuffer } },
+            { binding: 6, resource: { buffer: preparationBuffer } },
+            { binding: 7, resource: { buffer: stateBuffer } },
+            { binding: 8, resource: { buffer: thermoBuffer } },
+            { binding: 9, resource: { buffer: mechanicsBuffer } },
+            { binding: 10, resource: { buffer: evidenceBuffer } },
+            { binding: 11, resource: { buffer: paramsBuffer } },
+            { binding: 12, resource: { buffer: claimBuffer } }
+          ]
+        });
+        const claimPass = encoder.beginComputePass({ label: claimPipeline.label });
+        claimPass.setPipeline(claimPipeline.pipeline); claimPass.setBindGroup(0, claimGroup);
+        claimPass.dispatchWorkgroups(groups); claimPass.end();
+        const prepPass = encoder.beginComputePass({ label: preparePipeline.label });
+        prepPass.setPipeline(preparePipeline.pipeline); prepPass.setBindGroup(0, prepareGroup);
+        prepPass.dispatchWorkgroups(groups); prepPass.end();
+        ledgerStage?.encodePrepare(encoder, { slotAssignmentBuffer,
+          spareLineagesBuffer, sourceThermoBuffer });
+        const matPass = encoder.beginComputePass({ label: materializePipeline.label });
+        matPass.setPipeline(materializePipeline.pipeline); matPass.setBindGroup(0, materializeGroup);
+        matPass.dispatchWorkgroups(groups); matPass.end();
         ledgerStage?.encodeProject(encoder);
       }
     });

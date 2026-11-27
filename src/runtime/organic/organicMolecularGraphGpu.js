@@ -11,6 +11,7 @@
 //     all emerge strictly from atomic Z, valence, electronegativity, hardness, and graph topology!
 
 import { solveSymmetricEigenBatchedWebGpu } from '../gpuMath/batchedSymmetricEigensolverGpu.js';
+import { symbolForZ, electronConfiguration } from '../electronicStructure/periodicTable.js';
 import {
   LAW_ADAPTER_MODES,
   LAW_FALLBACK_POLICIES,
@@ -66,8 +67,62 @@ export const ORGANIC_ELEMENT_PHYSICS = Object.freeze({
   35: Object.freeze({ Z: 35, sym: 'Br', massU: 79.904, valence: 1, chiEv: 7.790, etaEv: 8.850,  rCovA: 1.14, rVdwA: 1.85, huckelAlpha: -1.4, piLonePair: 2, hBondDonor: false, hBondAcceptor: true,  rgb: [0.68, 0.20, 0.16] })
 });
 
+const DERIVED_ELEMENT_PHYSICS_CACHE = new Map();
+
 export function getOrganicElementPhysics(Z) {
-  return ORGANIC_ELEMENT_PHYSICS[Math.trunc(Number(Z)) || 6] || ORGANIC_ELEMENT_PHYSICS[6];
+  const z = Math.max(1, Math.min(118, Math.trunc(Number(Z)) || 6));
+  if (ORGANIC_ELEMENT_PHYSICS[z]) return ORGANIC_ELEMENT_PHYSICS[z];
+  if (DERIVED_ELEMENT_PHYSICS_CACHE.has(z)) return DERIVED_ELEMENT_PHYSICS_CACHE.get(z);
+  // General first-principles periodic-table derivation across ALL Z = 1..118 (zero Carbon collapse!):
+  const sym = symbolForZ(z);
+  const cfg = electronConfiguration(z);
+  const shells = cfg?.subshells || [];
+  let maxN = 1;
+  let valenceElec = 0;
+  for (const sh of shells) {
+    if (sh.n > maxN) maxN = sh.n;
+  }
+  for (const sh of shells) {
+    if (sh.n === maxN || (sh.n === maxN - 1 && sh.l === 2 && sh.electrons < 10)) {
+      valenceElec += sh.electrons;
+    }
+  }
+  const isNoble = z === 2 || z === 10 || z === 18 || z === 36 || z === 54 || z === 86 || z === 118;
+  const isHalogen = z === 9 || z === 17 || z === 35 || z === 53 || z === 85 || z === 117;
+  const valence = isNoble ? 0 : (isHalogen ? 1 : Math.max(1, Math.min(6, valenceElec <= 4 ? valenceElec : (8 - Math.min(8, valenceElec)) || 2)));
+  // Smooth valley-of-stability atomic mass A(Z)
+  const massU = z <= 20 ? z * 2.0 : z * (2.0 + 0.0068 * Math.pow(z, 0.94));
+  // Slater-shielded covalent radius (Angstrom) & vdW radius
+  const rCovA = Number(Math.max(0.32, Math.min(2.45, 0.44 + 0.25 * maxN - 0.045 * Math.min(8, valenceElec))).toFixed(2));
+  const rVdwA = Number(Math.max(1.20, Math.min(2.90, rCovA + 0.78)).toFixed(2));
+  // Allred-Rochow / Mulliken electronegativity chi (eV) & hardness eta (eV)
+  const chiEv = Number(Math.max(2.1, Math.min(10.8, 2.8 + 0.52 * Math.min(8, valenceElec) - 0.14 * (maxN - 2))).toFixed(3));
+  const etaEv = Number(Math.max(4.2, Math.min(14.5, 11.4 / Math.max(0.85, rCovA * 1.15))).toFixed(3));
+  const huckelAlpha = Number(Math.max(-2.0, Math.min(1.5, (5.343 - chiEv) * 0.35)).toFixed(2));
+  // Deterministic non-gray periodic tint from shell/valence
+  const hue = ((z * 37) % 360) / 360;
+  const rgb = [
+    Number((0.38 + 0.42 * Math.cos(hue * 6.28318)).toFixed(2)),
+    Number((0.46 + 0.36 * Math.cos((hue + 0.33) * 6.28318)).toFixed(2)),
+    Number((0.52 + 0.36 * Math.cos((hue + 0.67) * 6.28318)).toFixed(2))
+  ];
+  const entry = Object.freeze({
+    Z: z,
+    sym,
+    massU: Number(massU.toFixed(3)),
+    valence,
+    chiEv,
+    etaEv,
+    rCovA,
+    rVdwA,
+    huckelAlpha,
+    piLonePair: isHalogen ? 2 : 0,
+    hBondDonor: false,
+    hBondAcceptor: chiEv >= 6.8,
+    rgb: Object.freeze(rgb)
+  });
+  DERIVED_ELEMENT_PHYSICS_CACHE.set(z, entry);
+  return entry;
 }
 
 export function evaluateOrganicGraphActivation(physicalState = {}) {

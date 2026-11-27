@@ -2250,8 +2250,19 @@ export function createUlgUniversesPhysics(device, {
         const hostMassSolar = isCircumbinary ? (stars[0].massSolar + (stars[1]?.massSolar || 0)) : stars[0].massSolar;
         const hostLumSolar = isCircumbinary ? (stars[0].luminositySolar + (stars[1]?.luminositySolar || 0)) : stars[0].luminositySolar;
         const sqrtL = Math.sqrt(Math.max(1e-4, hostLumSolar));
-        const rMinStableAu = Math.max(0.06, 0.085 * sqrtL * 1.15, (stars[0].radiusSolar || 1.0) * 0.00465 * 6.0);
-        const rMaxStableAu = Math.min(38.0, Math.max(6.0, 26.0 * Math.pow(Math.max(0.08, hostMassSolar), 0.35)));
+        const rSilicateAu = Math.max(0.012, 0.085 * sqrtL);
+        const rSnowLineAu = Math.max(0.08, 2.70 * sqrtL);
+        let rMinStableAu = Math.max(rSilicateAu * 1.15, (stars[0].radiusSolar || 1.0) * 0.00465 * 6.0);
+        let rMaxStableAu = Math.min(38.0, Math.max(rSnowLineAu * 4.5, 24.0 * Math.pow(Math.max(0.08, hostMassSolar), 0.78)));
+        if (isCircumbinary && starSys?.binaryPair) {
+          const m0 = Math.max(0.05, stars[0].massSolar || 0.5);
+          const m1 = Math.max(0.05, stars[1]?.massSolar || 0.3);
+          const mu = Math.min(m0, m1) / (m0 + m1);
+          const eB = Math.max(0, Math.min(0.65, Number(starSys.binaryPair.e) || 0.05));
+          const rCritP = (starSys.binaryPair.aAu || 0.2) * (1.60 + 5.10 * eB - 2.22 * eB * eB + 4.12 * mu - 4.27 * eB * mu - 5.09 * mu * mu + 4.61 * eB * eB * mu * mu);
+          rMinStableAu = Math.max(rMinStableAu, Math.max((starSys.binaryPair.aAu || 0.2) * 1.85, rCritP) * 1.18);
+          rMaxStableAu = Math.max(rMaxStableAu, rMinStableAu * 6.0);
+        }
         const neb = starSys?.nebulaEnv || {};
         const w = getWorkloads();
         const pebCount = w.nebularParcels;
@@ -4376,7 +4387,10 @@ export function createUlgUniversesPhysics(device, {
         starIndex: activeStarSite.starIndex,
         seed: (universeSeed + 409) >>> 0
       });
-      activeCausalSystem = synthesizeNebularPlanetarySystem(nextStarSys, { seedOverride: (universeSeed + 409) >>> 0 });
+      activeCausalSystem = synthesizeNebularPlanetarySystem(nextStarSys, {
+        seedOverride: (universeSeed + 409) >>> 0,
+        gpuCoalescedDisk: nebularAnnuliSnapshot || null
+      });
     }
     // Dynamically align the active scale's physical regime to the chosen cosmic epoch (when requested)!
     if (alignActiveLevel === 0) {

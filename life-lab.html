@@ -307,10 +307,10 @@
         }
         .mobile-context-row::-webkit-scrollbar { display: none; }
         .mobile-ctx-btn {
-          flex: 1 0 auto; min-height: 34px; padding: 5px 8px; border-radius: 8px;
-          font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap;
+          flex: 1 1 0; min-width: 0; min-height: 34px; padding: 5px 4px; border-radius: 8px;
+          font-size: 9.5px; font-weight: 700; cursor: pointer; white-space: nowrap;
           background: rgba(52, 211, 153, 0.14); border: 1px solid rgba(52, 211, 153, 0.36); color: #e2e8f0;
-          display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+          display: inline-flex; align-items: center; justify-content: center; gap: 2px;
         }
         .mobile-ctx-btn.active { background: rgba(16, 185, 129, 0.36); border-color: var(--accent); color: #ffffff; }
         .mobile-ctx-btn.gold { background: rgba(250, 204, 21, 0.22); border-color: rgba(250, 204, 21, 0.62); color: #fef08a; }
@@ -364,6 +364,10 @@
         </button>
         <div class="help-divider"></div>
         <div class="help-section-lbl">ULG Multiscale Flagship Apps</div>
+        <a class="help-item ulg-hide-when-embedded" href="./desktop.html">
+          <span class="help-item-top"><span>▣ ExoWebTUI Multi-Lab Desktop ↗</span><small>WINDOWED</small></span>
+          <span class="help-item-desc">Run all 5 ULG labs simultaneously in draggable, tileable retro desktop windows.</span>
+        </a>
         <a class="help-item" href="./organic-lab.html">
           <span class="help-item-top"><span>Organic Chemistry Lab ↗</span><small>10⁻¹⁰ → 10⁻⁶ m</small></span>
           <span class="help-item-desc">GPU Hückel π-MOs, chirality R↔S, H-bonds, SN2, Diels–Alder &amp; Frank chiral symmetry breaking.</span>

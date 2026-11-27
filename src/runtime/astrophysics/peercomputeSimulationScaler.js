@@ -267,6 +267,11 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
   const l4TargetSteps = tier === 'cluster' ? 1560 : (tier === 'workstation' ? 1180 : (tier === 'laptop' ? 640 : 240));
   const l4SubstepsPerFrame = tier === 'cluster' ? 8 : (tier === 'workstation' ? 6 : (tier === 'laptop' ? 4 : 2));
   const l4SecularSubstepsPerFrame = 1;
+  // Canonical tier-invariant physical horizon time (T_phys = targetSteps * dt stays identical across mobile..cluster!)
+  const l1Dt = Number((28.8 / l1TargetSteps).toFixed(5));
+  const l2Dt = Number((115.2 / l2TargetSteps).toFixed(5));
+  const l4Dt = Number((19.2 / l4TargetSteps).toFixed(5));
+  const maxDpr = tier === 'mobile' ? 1.5 : (tier === 'laptop' ? 1.75 : 2.0);
   const l3SubstepsPerFrame = tier === 'cluster' ? 4 : (tier === 'workstation' ? 3 : 2);
   const sphErosionPasses = tier === 'cluster' ? 40 : (tier === 'workstation' ? 34 : (tier === 'laptop' ? 24 : 16));
   // Re-project spherical geology smoothly every 24-36 substeps during live 3D SPH formation (keeping 60 FPS!)
@@ -305,10 +310,12 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
       galaxyStars: galaxyStarsSizing.count,
       l1TargetSteps,
       l1SubstepsPerFrame,
+      l1Dt,
       nebularParcels: nebularParcelsSizing.count,
       nebularRadialBins,
       l2TargetSteps,
       l2SubstepsPerFrame,
+      l2Dt,
       l2GravityCadence,
       l2BurstSubsteps,
       stellarParcels: stellarParcelsSizing.count,
@@ -321,9 +328,11 @@ export function buildPeerComputeSimulationProfile(capabilities = {}, {
       sphErosionPasses,
       l4TargetSteps,
       l4SubstepsPerFrame,
+      l4Dt,
       l4SecularSubstepsPerFrame,
       l4MapUpdateCadence,
       l4BurstSubsteps,
+      maxDpr,
       surfaceGridN: tier === 'mobile' ? 81 : (tier === 'laptop' ? 129 : 161),
       surfaceParticles: tier === 'mobile' ? 1024 : (tier === 'laptop' ? 2048 : 4096)
     }),

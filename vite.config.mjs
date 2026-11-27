@@ -24,6 +24,7 @@ const siblingRoot = (relativePath) => {
 const peercomputeWorkspaceRoot = siblingRoot('peercompute');
 const peercomputeRoot = siblingRoot('peercompute/peercompute');
 const webGpuMarchingCubesRoot = siblingRoot('webgpu-marching-cubes');
+const exotuiRoot = siblingRoot('exotui');
 const localHttpsKeyPath = fileURLToPath(new URL('./.cache/vite-https/key.pem', import.meta.url));
 const localHttpsCertPath = fileURLToPath(new URL('./.cache/vite-https/cert.pem', import.meta.url));
 // The dev server is deliberately reachable through this machine's tailnet
@@ -518,6 +519,9 @@ function excludeRetiredProductionRoutes() {
 
 export default defineConfig({
   resolve: {
+    alias: {
+      '@exotui': exotuiRoot
+    },
     dedupe: ['three']
   },
   plugins: [
@@ -531,6 +535,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: fileURLToPath(new URL('./index.html', import.meta.url)),
+        desktop: fileURLToPath(new URL('./desktop.html', import.meta.url)),
         elementsLab: fileURLToPath(new URL('./elements-lab.html', import.meta.url)),
         organicLab: fileURLToPath(new URL('./organic-lab.html', import.meta.url)),
         lifeLab: fileURLToPath(new URL('./life-lab.html', import.meta.url)),
@@ -663,7 +668,8 @@ export default defineConfig({
         repoRoot,
         peercomputeWorkspaceRoot,
         peercomputeRoot,
-        webGpuMarchingCubesRoot
+        webGpuMarchingCubesRoot,
+        exotuiRoot
       ]
     }
   }

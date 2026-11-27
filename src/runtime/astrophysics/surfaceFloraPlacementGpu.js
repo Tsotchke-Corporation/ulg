@@ -533,6 +533,21 @@ export function buildFloraTemplateMeshFloats() {
   return new Float32Array(verts);
 }
 
+/**
+ * Build Kind-6 Indigenous Settlement Spire floats separately so GPU-baked per-planet
+ * flora atlases (`organismSdfMorphogenesisGpu.js`) can append habitation spires cleanly.
+ */
+export function buildSettlementTemplateFloats() {
+  const full = buildFloraTemplateMeshFloats();
+  const out = [];
+  for (let i = 0; i < full.length; i += 8) {
+    if (full[i + 7] >= 5.5) {
+      out.push(full[i], full[i + 1], full[i + 2], full[i + 3], full[i + 4], full[i + 5], full[i + 6], full[i + 7]);
+    }
+  }
+  return new Float32Array(out);
+}
+
 export function createSurfaceFloraPlacementGpu(device, {
   tectonicFieldBuf,
   deformFieldBuf,
@@ -543,14 +558,32 @@ export function createSurfaceFloraPlacementGpu(device, {
     size: FLORA_MAX_INSTANCES * FLORA_INSTANCE_STRIDE_BYTES,
     usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
   });
-  const templateFloats = buildFloraTemplateMeshFloats();
-  const templateVertCount = Math.floor(templateFloats.length / 8);
-  const templateVertBuf = device.createBuffer({
+  let templateFloats = buildFloraTemplateMeshFloats();
+  let templateVertCount = Math.floor(templateFloats.length / 8);
+  let templateVertBuf = device.createBuffer({
     label: `${label}-template-verts`,
     size: templateFloats.byteLength,
     usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST
   });
   device.queue.writeBuffer(templateVertBuf, 0, templateFloats);
+
+  function replaceTemplateMesh(nextFloats) {
+    if (disposed || !(nextFloats instanceof Float32Array) || nextFloats.length < 24) return false;
+    const nextCount = Math.floor(nextFloats.length / 8);
+    if (nextFloats.byteLength > templateVertBuf.size) {
+      const oldBuf = templateVertBuf;
+      templateVertBuf = device.createBuffer({
+        label: `${label}-template-verts-baked`,
+        size: nextFloats.byteLength,
+        usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST
+      });
+      try { oldBuf.destroy(); } catch {}
+    }
+    device.queue.writeBuffer(templateVertBuf, 0, nextFloats);
+    templateFloats = nextFloats;
+    templateVertCount = nextCount;
+    return true;
+  }
 
   const paramsBuf = device.createBuffer({
     label: `${label}-params`,
@@ -699,10 +732,11 @@ export function createSurfaceFloraPlacementGpu(device, {
 
   return Object.freeze({
     maxInstances: FLORA_MAX_INSTANCES,
-    templateVertCount,
+    get templateVertCount() { return templateVertCount; },
     get activeInstanceCount() { return activeCount; },
     getResidentInstancesBuffer: () => instanceBuf,
     getResidentTemplateVertBuffer: () => templateVertBuf,
+    replaceTemplateMesh,
     encodePlacementIfNeeded,
     dispose() {
       if (disposed) return;

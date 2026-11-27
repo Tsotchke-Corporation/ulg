@@ -100,6 +100,8 @@ export function nuclearBindingEnergyMeV(Z, A) {
   if (z < 0 || n < 0 || a <= 0) return 0;
   if (a === 1) return 0; // free proton (H-1) or free neutron
   if (z === 1 && a === 2) return 2.22457; // deuteron exact two-body threshold
+  if (z === 1 && a === 3) return 8.48180; // triton exact 3-nucleon bound state
+  if (z === 2 && a === 3) return 7.71804; // helion-3 exact 3-nucleon bound state
   if (z === 2 && a === 4) return 28.2957; // alpha-4 doubly-magic cluster
   const a13 = Math.cbrt(a);
   const a23 = a13 * a13;
@@ -363,8 +365,11 @@ export function deriveNuclearClosure(Z, A = null) {
     daughterZ = z + 1;
     daughterA = a;
   } else if (qElectronCaptureMeV > 0.05) {
-    dominantMode = qElectronCaptureMeV > 1.022 ? 'beta-plus' : 'electron-capture';
-    log10HalfLifeS = Math.max(-3, 5.8 - 4.5 * Math.log10(Math.max(0.1, qElectronCaptureMeV)));
+    const qBetaPlusMeV = qElectronCaptureMeV - 2 * M_ELECTRON_MEV;
+    const isBetaPlus = qBetaPlusMeV > 0.05;
+    dominantMode = isBetaPlus ? 'beta-plus' : 'electron-capture';
+    const qDecay = isBetaPlus ? qBetaPlusMeV : qElectronCaptureMeV;
+    log10HalfLifeS = Math.max(-3, 5.8 - 4.5 * Math.log10(Math.max(0.1, qDecay)));
     daughterZ = z - 1;
     daughterA = a;
   } else if (z >= 84 || (qAlphaMeV > 1.8 && alphaWkb.log10HalfLifeS < 22)) {

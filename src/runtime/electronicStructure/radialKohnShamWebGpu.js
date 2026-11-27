@@ -1458,13 +1458,31 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
       ? (4 / (3 * Math.PI)) * ((1 / 137.035999084) ** 3) * (atomicNumberZ ** 4)
         * Math.max(0.5, Math.log(1 / Math.max(1e-6, alphaZ * alphaZ)) - 2.3)
       : 0;
-    // First-principles Fermi-contact hyperfine splitting frequency (Hz) from |psi(0)|^2 ~ rho(r_min) & nuclear mu_I
+    // First-principles Fermi-contact hyperfine splitting frequency (Hz) from unpaired
+    // valence s-electron spin density at the nucleus (closed-shell paired ns^2 -> 0;
+    // open-shell ns^1 scales by valence |psi_ns(0)|^2 rather than paired 1s^2 core density!)
     const spinI = Math.max(0, Number(nuclearSpinI) || 0);
     const muN = Number(nuclearMagneticMomentMuN) || 0;
     const rhoOrigin = Math.max(0, finalRho[0] || 0);
-    // H 1s reference: rho(0) = 1/pi a0^-3, I=1/2, mu=2.793 mu_N -> 1420.4 MHz
-    const hyperfineSplittingHz = (spinI > 0 && Math.abs(muN) > 0 && rhoOrigin > 0)
-      ? 1.420405751e9 * (rhoOrigin * Math.PI) * (Math.abs(muN) / 2.792847) * ((spinI + 0.5) / 1.0)
+    let unpairedSFrac = 0;
+    let unpairedPOrDFrac = 0;
+    for (const orb of orbitals) {
+      const cap = 2 * (2 * orb.l + 1);
+      if (orb.l === 0 && orb.electrons > 0 && orb.electrons < cap) {
+        // Fractional contribution of open valence ns^1 density at r->0 relative to total core 1s^2 rho(0):
+        // |psi_ns(0)|^2 / |psi_1s(0)|^2 ~ (Z_eff / (Z * n^3))
+        unpairedSFrac = Math.max(unpairedSFrac, 1.0 / (Math.max(1, orb.n) ** 3 * Math.max(1, Math.pow(atomicNumberZ, 1.4))));
+      } else if (orb.l > 0 && orb.electrons > 0 && orb.electrons < cap) {
+        // Core-polarization hyperfine contribution (~1e-3 of direct valence s contact)
+        unpairedPOrDFrac = Math.max(unpairedPOrDFrac, 0.002 / (Math.max(1, orb.n) ** 3 * Math.max(1, Math.pow(atomicNumberZ, 1.6))));
+      }
+    }
+    const unpairedSpinDensityOrigin = atomicNumberZ === 1
+      ? rhoOrigin
+      : rhoOrigin * Math.max(unpairedSFrac, unpairedPOrDFrac);
+    // H 1s reference: rho_s(0) = 1/pi a0^-3, I=1/2, mu=2.793 mu_N -> 1420.4 MHz
+    const hyperfineSplittingHz = (spinI > 0 && Math.abs(muN) > 0 && unpairedSpinDensityOrigin > 0)
+      ? 1.420405751e9 * (unpairedSpinDensityOrigin * Math.PI) * (Math.abs(muN) / 2.792847) * ((spinI + 0.5) / 1.0)
       : 0;
     return {
       schema: RADIAL_KS_WEBGPU_SCHEMA,

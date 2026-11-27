@@ -2843,16 +2843,45 @@ fn aggregate_cells(
   var pressure_pa = mole_temperature_k
     * params.gas_constant_j_per_mol_k / free_volume_m3;
   ${usePolytopeAtlas ? `let cell_mean_t = mole_temperature_k / max(total_moles, 1.0e-30);
-  let pa_gas = eval_polytope_atlas_bank_2d(&polytope_atlas, dominant_material_id, cell_mean_t, max(pressure_pa, 1.0));
-  if (pa_gas.w >= 0.5 && pa_gas.x > 0.0 && finite_f32(pa_gas.x)) {
+  let p_eval = max(pressure_pa, 1.0);
+  let r_times_t = max(params.gas_constant_j_per_mol_k * cell_mean_t, 1.0e-30);
+  // Continuous Dalton-Amagat mole-weighted mixture compressibility Z_mix = sum_i (n_i * Z_i(T, P)) / n_tot
+  // using each species' true molar mass M_i = source_mass_kg / moles (reduces identically to rho_cell / rho_poly
+  // for pure gas, and eliminates the 3.6x dominant-species swap cliff on multi-species mixtures like H2 + H2O!).
+  var z_weighted_sum = 0.0;
+  var z_weighted_moles = 0.0;
+  var cell_hit = false;
+  for (var m_z = member_begin; m_z < member_end; m_z = m_z + 1u) {
+    let s_idx_z = directory[params.cell_members_offset_words + m_z];
+    let row_z = s_idx_z * params.compact_stride;
+    let mat_id_z = compact_rows[row_z + 3u];
+    let mass_z = compact_rows[row_z + 4u];
+    let moles_z = compact_rows[row_z + 5u];
+    let pa_z = eval_polytope_atlas_bank_2d(&polytope_atlas, mat_id_z, cell_mean_t, p_eval);
+    if (pa_z.w >= 0.5 && pa_z.x > 0.0 && finite_f32(pa_z.x)) {
+      cell_hit = true;
+      var z_i = 1.0;
+      if (pa_z.z >= 1.5) {
+        let molar_mass_i = mass_z / max(moles_z, 1.0e-30);
+        let rho_ideal_i = (pressure_pa * molar_mass_i) / r_times_t;
+        z_i = clamp(rho_ideal_i / pa_z.x, 0.5, 2.0);
+      }
+      if (finite_f32(z_i)) {
+        z_weighted_sum = z_weighted_sum + moles_z * z_i;
+        z_weighted_moles = z_weighted_moles + moles_z;
+      }
+    }
+  }
+  if (cell_hit) {
     atomicAdd(&authority[34u], 1u);
-    if (pa_gas.z >= 1.5) {
-      // Non-ideal real-gas compressibility modulation from Gate 2 Polytope Atlas density rho_poly(T, P):
-      // Z = rho_cell / rho_poly(T, P), bounded safely to [0.5, 2.0].
-      let rho_cell = total_mass_kg / max(free_volume_m3, 1.0e-30);
-      let z_poly = clamp(rho_cell / pa_gas.x, 0.5, 2.0);
-      if (finite_f32(z_poly)) {
-        pressure_pa = pressure_pa * z_poly;
+    if (z_weighted_moles > 0.0) {
+      let z_mix = clamp(
+        (z_weighted_sum + max(0.0, total_moles - z_weighted_moles)) / max(total_moles, 1.0e-30),
+        0.5,
+        2.0
+      );
+      if (finite_f32(z_mix)) {
+        pressure_pa = pressure_pa * z_mix;
       }
     }
   } else {

@@ -13,6 +13,10 @@ import {
   synthesizeWorldEcosystem
 } from './xenobiologyEcologyEngine.js';
 import { synthesizeOrganismBiochemistry } from './organismBiochemistryGenerator.js';
+import {
+  encodeDevelopmentalGenomeCompact,
+  decodeDevelopmentalGenomeCompact
+} from './developmentalGenome.js';
 
 function clamp(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
@@ -265,6 +269,7 @@ export function synthesizeAbductedSpecimenRecord({
     trophicGuild: pickedClade?.trophicGuild || (resolvedKind === 'flora' ? 'producer' : (resolvedKind === 'fungi' ? 'decomposer' : 'grazer')),
     speciesName,
     morphClass,
+    developmentalGenome: pickedClade?.developmentalGenome || null,
     worldName,
     solvent: prof.solvent || 'H2O',
     solventFormula: prof.solventFormula || prof.solvent || 'H₂O',
@@ -606,6 +611,12 @@ export function buildLifeLabXenobiologyUrl(profile, mode = 'organism-overview', 
     if (Number.isFinite(specimen.biolumIntensity)) q.set('bioStr', String(specimen.biolumIntensity));
     if (Number.isFinite(specimen.latDeg)) q.set('lat', String(specimen.latDeg));
     if (Number.isFinite(specimen.lonDeg)) q.set('lon', String(specimen.lonDeg));
+    if (specimen.developmentalGenome) {
+      try {
+        const compact = encodeDevelopmentalGenomeCompact(specimen.developmentalGenome);
+        if (compact) q.set('dg', JSON.stringify(compact));
+      } catch {}
+    }
   }
   return `./life-lab.html?${q.toString()}`;
 }
@@ -659,6 +670,13 @@ export function parseXenobiologyFromSearch(search = '') {
   const matchedClade = (baseProfile.species || []).find((s) => (bodyPlan && s.bodyPlan === bodyPlan) || (specimenKind && s.kingdom === specimenKind))
     || (baseProfile.species || [])[0]
     || null;
+  let parsedGenome = matchedClade?.developmentalGenome || null;
+  if (sp.get('dg')) {
+    try {
+      const dec = decodeDevelopmentalGenomeCompact(JSON.parse(sp.get('dg')));
+      if (dec) parsedGenome = dec;
+    } catch {}
+  }
 
   const abductedSpecimen = species
     ? Object.freeze({
@@ -669,7 +687,8 @@ export function parseXenobiologyFromSearch(search = '') {
       kingdom: specimenKind || matchedClade?.kingdom || 'fauna',
       bodyPlan: bodyPlan || matchedClade?.bodyPlan || 'quadruped-cursorial',
       speciesName: species,
-      morphClass: morph || matchedClade?.morphClass || (specimenKind === 'flora' ? 'Vascular Flora' : (specimenKind === 'fungi' ? 'Mycelial Fungi' : 'Motile Fauna')),
+      morphClass: morph || parsedGenome?.morphDescriptor || matchedClade?.morphClass || (specimenKind === 'flora' ? 'Vascular Flora' : (specimenKind === 'fungi' ? 'Mycelial Fungi' : 'Motile Fauna')),
+      developmentalGenome: parsedGenome,
       worldName,
       solvent: baseProfile.solvent,
       solventFormula: baseProfile.solventFormula,

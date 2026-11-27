@@ -6,12 +6,15 @@
 // relative scales (`R_earth / R_sun = 0.00916`, `R_jup / R_sun = 0.1005`) on live WebGPU
 // double-float symplectic N-body gravity.
 
+import { initUlgExoWebTuiBridge } from './ulgExoWebTuiBridge.js';
+initUlgExoWebTuiBridge({ labId: 'universes', title: 'ULG Universes (40-OOM)' });
 import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
   normalizeWheelDeltaY,
   requestCompatibleWebGpuDevice
 } from '../runtime/shared/webgpuCompat.js';
 import { createWebXrWebGpuBridge } from '../runtime/shared/webxrWebGpuBridge.js';
+import { derivePbrOpticsFromMaterialBundle } from '../runtime/material/materialPbrOpticsBridge.js';
 import {
   appendIconicUfoGeometry,
   appendMissileGeometry,
@@ -1235,12 +1238,15 @@ export async function mountUlgUniversesDemo() {
     void warmVisibleLevels(log10ViewSpanM);
   });
 
+  let wasNarrowViewport = typeof window !== 'undefined' && window.innerWidth <= 920;
   function syncCanvasSize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const capMaxDpr = Number(physics?.hardwareProfile?.maxDpr) || (window.innerWidth <= 920 ? 1.75 : 2.0);
+    const maxDim = Number(device?.limits?.maxTextureDimension2D) || 8192;
+    const dpr = Math.min(window.devicePixelRatio || 1, capMaxDpr);
     lastCssW = Math.max(320, window.innerWidth);
     lastCssH = Math.max(240, window.innerHeight);
-    const pw = Math.max(2, Math.floor(lastCssW * dpr));
-    const ph = Math.max(2, Math.floor(lastCssH * dpr));
+    const pw = Math.min(maxDim, Math.max(2, Math.floor(lastCssW * dpr)));
+    const ph = Math.min(maxDim, Math.max(2, Math.floor(lastCssH * dpr)));
     if (canvas.width !== pw || canvas.height !== ph) {
       canvas.width = pw;
       canvas.height = ph;
@@ -1249,6 +1255,11 @@ export async function mountUlgUniversesDemo() {
       reticleCanvas.width = lastCssW;
       reticleCanvas.height = lastCssH;
     }
+    const isNowNarrow = lastCssW <= 920;
+    if (isNowNarrow && !wasNarrowViewport && typeof setMobileDeckState === 'function') {
+      setMobileDeckState('collapsed');
+    }
+    wasNarrowViewport = isNowNarrow;
   }
   syncCanvasSize();
   window.addEventListener('resize', syncCanvasSize);
@@ -2990,6 +3001,8 @@ export async function mountUlgUniversesDemo() {
     camTarget = [0, 0, 0];
     currentLevel = 4;
     log10ViewSpanM = 2.0; // ~100 m surface horizon scale!
+    document.body.classList.add('surface-active');
+    if (isMobileViewport()) setMobileDeckState('collapsed');
     let effectiveCheckpoint = restoreCheckpoint;
     if (!effectiveCheckpoint && ufoMultiplayer.isConnected) {
       // Spread multiplayer peers around a 22 m landing ring so friends spawn clearly side-by-side instead of clipping!
@@ -3041,6 +3054,7 @@ export async function mountUlgUniversesDemo() {
   function exitSurfaceViewUi({ keepTour = false } = {}) {
     if (!keepTour && autopilot) stopTour();
     if (!physics.surfaceActive) return;
+    document.body.classList.remove('surface-active');
     pickedSurfaceOrganism = null;
     physics.exitSurfaceView();
     const spec = physics.getActiveSystemCatalog()[physics.planetaryBodyIndex] || REAL_SOLAR_SYSTEM_CATALOG[3];
@@ -6987,17 +7001,20 @@ export async function mountUlgUniversesDemo() {
           const distW = Math.hypot(wx, wy, wz);
           let trueRWorld = st.radiusAu * scaleAuToWorld;
           const bodyIsStar = Boolean(spec.isStar) || i === 0;
-          if (distW > 155 && i !== focusIdx) {
+          if (distW > 145 && i !== focusIdx) {
             if (!bodyIsStar && spec.parent > 0) continue; // Skip distant tiny moons of other planets
-            // Project host sun(s) and sibling planets onto distant sky shell (r = 165 < far = 520) along true 3D N-body bearing!
-            const invD = 165.0 / distW;
+            // Smooth continuous sky-shell clamp (zero abrupt 28x-145x radius snap at distW=155!)
+            const skyBlend = smoothstep(145.0, 210.0, distW);
+            const effDist = distW * (1 - skyBlend) + 175.0 * skyBlend;
+            const invD = effDist / distW;
             wx *= invD;
             wy *= invD;
             wz *= invD;
-            const angularR = trueRWorld * invD;
-            trueRWorld = bodyIsStar
-              ? Math.max(1.45, Math.min(4.6, angularR * 2.8))
-              : Math.max(0.28, Math.min(0.95, angularR * 5.5));
+            const angularR = trueRWorld * (175.0 / distW);
+            const clampedR = bodyIsStar
+              ? Math.max(1.35, Math.min(4.6, angularR * 2.6))
+              : Math.max(0.24, Math.min(0.95, angularR * 4.5));
+            trueRWorld = trueRWorld * (1 - skyBlend) + clampedR * skyBlend;
           }
           // Hide focused star's opaque photosphere at L3 (`span <= 9.9`) so live 3D MHD / Fusion Plasma shines unobstructed!
           if (i === focusIdx && bodyIsStar && span <= 9.9) continue;
@@ -7220,6 +7237,23 @@ export async function mountUlgUniversesDemo() {
               : 0.0;
             const rInRatio = spec.ringInnerKm / spec.radiusKm;
             const rOutRatio = spec.ringOuterKm / spec.radiusKm;
+            const ringSpanKm = Math.max(1.0, spec.ringOuterKm - spec.ringInnerKm);
+            // Derive live Lindblad 2:1 and 3:2 orbital resonance divisions directly from orbiting moons!
+            const resGaps = [];
+            for (let mIdx = 0; mIdx < cat.length; mIdx += 1) {
+              const mSpec = cat[mIdx];
+              if (!mSpec || mIdx === i) continue;
+              if (mSpec.parentId !== spec.id && mSpec.parentIndex !== i) continue;
+              const aMoonKm = (Number(mSpec.aAu) || 0) * AU_METERS * 1e-3;
+              if (!(aMoonKm > spec.ringInnerKm)) continue;
+              for (const ratio of [0.6299605249, 0.7631428284]) {
+                const uGap = (aMoonKm * ratio - spec.ringInnerKm) / ringSpanKm;
+                if (uGap > 0.14 && uGap < 0.94) resGaps.push(uGap);
+              }
+            }
+            resGaps.sort((a, b) => a - b);
+            const gap1U = resGaps.length > 0 ? resGaps[0] : 0.0;
+            const gap2U = resGaps.find((g) => Math.abs(g - gap1U) > 0.08) || 0.0;
             disks.push({
               center: [wx, wy, wz],
               rIn: rInRatio * trueRWorld,
@@ -7228,7 +7262,9 @@ export async function mountUlgUniversesDemo() {
               color: Array.isArray(spec.ringColor) ? spec.ringColor : [0.88, 0.78, 0.62],
               kind: 1,
               planetRadius: trueRWorld,
-              oblateF: oblateR
+              oblateF: oblateR,
+              gap1U,
+              gap2U
             });
             if (isFocusL4) {
               focusedRingShadow = {
@@ -7488,7 +7524,8 @@ export async function mountUlgUniversesDemo() {
       const mdZoomFactor = Math.pow(10, Math.max(-1.2, Math.min(1.4, -8.2 - span)));
       const worldScale = baseScale * mdZoomFactor;
       const b = physics.getCachedElementBundle(physics.mdElementZ, true)?.bundle;
-      const rgb = b?.electromagnetic?.opticalSrgb || [0.76, 0.80, 0.86];
+      const pbrOptics = derivePbrOpticsFromMaterialBundle(b, { surfaceFinish: 'crystal', fallbackZ: physics.mdElementZ });
+      const rgb = b?.electromagnetic?.opticalSrgb || pbrOptics.albedoSrgb || [0.76, 0.80, 0.86];
       mdCloud = {
         positionsBuffer: physics.mdSession.positionsBuffer,
         velocitiesBuffer: physics.mdSession.velocitiesBuffer,
@@ -7497,6 +7534,7 @@ export async function mountUlgUniversesDemo() {
         worldScale,
         radius: Math.max(0.045, Math.min(1.3, (physics.mdSession.rNearestNeighborA || 2.5) * 0.285 * worldScale)),
         baseRgb: rgb,
+        pbrOptics,
         alphaFade: wMd,
         idealCoord: physics.mdSession.idealCoordination || 12
       };
@@ -7608,6 +7646,18 @@ export async function mountUlgUniversesDemo() {
       lightIsPoint: Boolean(typeof solarLightIsPoint !== 'undefined' && solarLightIsPoint),
       coolingHeat: (currentLevel === 4 && physics.planetaryGenesisSphSession) ? (physics.planetaryCoolingHeat || 0.0) : 0.0,
       orbitalSeasonDecl,
+      orbitalTidallyLocked: Boolean(
+        currentLevel === 4
+        && (physics.planetaryMode === 'eyeball-locked' || physics.solarCatalog?.[physics.planetaryBodyIndex]?.tidallyLocked)
+      ),
+      orbitalBiosphereViable: (() => {
+        const bSpec = physics.solarCatalog?.[physics.planetaryBodyIndex];
+        if (!bSpec) return true;
+        if (typeof bSpec.biosphereViability === 'number') return bSpec.biosphereViability >= 0.12;
+        if (typeof bSpec.habitability === 'number') return bSpec.habitability >= 0.25;
+        const tk = Number(bSpec.tempK) || 288;
+        return tk >= 220 && tk <= 365 && (Number(bSpec.atm) || 0) >= 0.12;
+      })(),
       ringShadow: (typeof activeRingShadow !== 'undefined' && activeRingShadow) ? activeRingShadow : null,
       starLight: lastStarIllumination?.vec4 || [1.0, 0.97, 0.92, 1.0],
       mdCloud,

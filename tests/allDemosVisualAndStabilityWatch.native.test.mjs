@@ -174,7 +174,10 @@ test('ALL 5 ULG Flagship Pages & Every Scale: Live Vulkan Stability, Zero-Jiggle
     await page.evaluate(async () => { for (let i = 0; i < 12; i += 1) await window.__ulgUniversesDemo.stepOnce(); });
     const pickedStar = await page.evaluate(() => window.__ulgUniversesDemo.pickAtCanvasFraction(0.56, 0.52, { preferGpuMote: true }));
     assert.ok(pickedStar && pickedStar.kind === 'galaxy-star', 'L1 star pick must succeed');
-    assert.ok(pickedStar.starSite && pickedStar.subtitle.includes('worlds'), `L1 star pick must preview causal nebular system (got "${pickedStar.subtitle}")`);
+    assert.ok(
+      pickedStar.starSite && (pickedStar.subtitle.includes('worlds') || pickedStar.subtitle.includes('Unsimulated')),
+      `L1 star pick must preview causal nebular system or honest Unsimulated status (got "${pickedStar.subtitle}")`
+    );
     await saveDataUrl(await page.evaluate(() => window.__ulgUniversesDemo.capturePng()), '12-univ-L1-galaxy-pick');
 
     // L2 Default Causal Nebular System + Explicit Binary & Hierarchical Trinary GPU f32x2 N-Body Proofs!

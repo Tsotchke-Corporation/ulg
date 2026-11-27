@@ -12,6 +12,7 @@
 //      AND 3D displaced Turing Morphogenesis landscape with overlaid 3D chemotactic agents!)
 
 import { configureCompatibleWebGpuCanvas } from '../runtime/shared/webgpuCompat.js';
+import { ULG_MATERIAL_PBR_WGSL } from '../visualization/ulgMaterialPbrWgsl.js';
 
 const GPU_BUF = Object.freeze({
   COPY_DST: 0x0008,
@@ -115,9 +116,10 @@ fn fs_bg(in: VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
-// 1. Organic Atoms (64-byte OrgAtom) Lit Ray-Sphere Billboard Pipeline
+// 1. Organic Atoms (64-byte OrgAtom) Cook-Torrance GGX PBR Ray-Sphere Billboard Pipeline
 const ORG_ATOM_WGSL = /* wgsl */ `
 ${COMMON_UNIFORMS_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 struct OrgAtom {
   pos_m: vec4<f32>,
@@ -136,6 +138,7 @@ struct VsOut {
   @location(2) charge: f32,
   @location(3) world_pos: vec3<f32>,
   @location(4) rad_w: f32,
+  @location(5) atomic_z: f32,
 };
 
 struct FsOut {
@@ -173,6 +176,7 @@ fn vs_org_atom(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
   out.charge = a.vel_q.w;
   out.world_pos = a.pos_m.xyz;
   out.rad_w = rad;
+  out.atomic_z = a.vis_z.w;
   return out;
 }
 
@@ -182,18 +186,30 @@ fn fs_org_atom(in: VsOut) -> FsOut {
   if (r2 > 1.0) { discard; }
   let nz = sqrt(max(0.0, 1.0 - r2));
   let n_view = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
+  let v_view = vec3<f32>(0.0, 0.0, 1.0);
   let to_cam = normalize(u.cam_pos_mode.xyz - in.world_pos);
   let p_surf = in.world_pos + (u.cam_right_esp.xyz * in.local_uv.x + u.cam_up_time.xyz * in.local_uv.y + to_cam * nz) * in.rad_w;
   let clip = u.view_proj * vec4<f32>(p_surf, 1.0);
   let l1 = normalize(vec3<f32>(0.55, 0.72, 0.58));
   let l2 = normalize(vec3<f32>(-0.65, -0.35, 0.55));
-  let diff1 = max(dot(n_view, l1), 0.0);
-  let diff2 = max(dot(n_view, l2), 0.0) * 0.35;
-  let h1 = normalize(l1 + vec3<f32>(0.0, 0.0, 1.0));
-  let spec = pow(max(dot(n_view, h1), 0.0), 46.0) * 0.92;
-  let fres = pow(max(0.0, 1.0 - nz), 3.0) * 0.45;
-  let rim_tint = select(vec3<f32>(0.38, 0.76, 1.0), vec3<f32>(1.0, 0.45, 0.32), in.charge < -0.18);
-  let col = in.color * (0.24 + 0.94 * diff1 + diff2) + vec3<f32>(spec) + rim_tint * fres;
+
+  // Derive metallic cofactor vs organic covalent dielectric PBR directly from atomic number Z!
+  let z = u32(round(max(1.0, in.atomic_z)));
+  let is_metal_ion = (z == 11u || z == 12u || z == 13u || (z >= 19u && z <= 31u) || (z >= 37u && z <= 50u) || (z >= 55u && z <= 83u));
+  let metallic = select(0.0, 0.88, is_metal_ion && u.cam_right_esp.w < 0.5);
+  let roughness = select(0.26, 0.18, metallic > 0.5);
+  let albedo_lin = ulg_srgb_to_linear(in.color);
+  let ior_d = select(1.48, 1.62, z == 16u || z == 15u || z == 17u);
+  let f0_rgb = mix(vec3<f32>(ulg_dielectric_f0(ior_d)), clamp(albedo_lin * 1.08, vec3<f32>(0.08), vec3<f32>(0.98)), metallic);
+  let direct = ulg_pbr_direct(n_view, v_view, l1, albedo_lin, f0_rgb, metallic, roughness, vec3<f32>(2.40, 2.38, 2.32))
+    + ulg_pbr_direct(n_view, v_view, l2, albedo_lin, f0_rgb, metallic, roughness, vec3<f32>(0.72, 0.86, 1.08));
+  let env = ulg_pbr_env_hemi(
+    n_view, v_view, albedo_lin, f0_rgb, metallic, roughness,
+    vec3<f32>(0.24, 0.34, 0.50), vec3<f32>(0.12, 0.18, 0.28), vec3<f32>(0.04, 0.06, 0.10)
+  );
+  let fres_q = pow(max(0.0, 1.0 - nz), 3.2) * 0.22;
+  let rim_tint = select(vec3<f32>(0.18, 0.52, 0.92), vec3<f32>(0.92, 0.22, 0.14), in.charge < -0.18);
+  let col = direct + env + rim_tint * fres_q;
   var out: FsOut;
   out.color = vec4<f32>(col, 1.0);
   out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
@@ -204,6 +220,7 @@ fn fs_org_atom(in: VsOut) -> FsOut {
 // 2. Organic Dynamic Covalent Bonds + Dashed Cyan H-Bonds Pipeline
 const ORG_BOND_WGSL = /* wgsl */ `
 ${COMMON_UNIFORMS_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 struct OrgAtom {
   pos_m: vec4<f32>,
@@ -304,9 +321,14 @@ fn fs_org_bond(in: VsOut) -> @location(0) vec4<f32> {
     let groove = abs(across);
     rail = 0.72 + 0.58 * smoothstep(0.18, 0.62, groove);
   }
-  let shade = (0.34 + 0.76 * cy) * rail;
-  let spec = pow(max(0.0, cy), 14.0) * 0.42;
-  return vec4<f32>(in.color * shade + vec3<f32>(spec), 1.0);
+  let n_cyl = normalize(vec3<f32>(0.0, across, cy));
+  let v_cyl = vec3<f32>(0.0, 0.0, 1.0);
+  let l_cyl = normalize(vec3<f32>(0.45, 0.65, 0.60));
+  let alb_b = ulg_srgb_to_linear(in.color) * rail;
+  let f0_b = vec3<f32>(0.045);
+  let col_b = ulg_pbr_direct(n_cyl, v_cyl, l_cyl, alb_b, f0_b, 0.08, 0.28, vec3<f32>(2.30, 2.28, 2.22))
+    + ulg_pbr_env_hemi(n_cyl, v_cyl, alb_b, f0_b, 0.08, 0.28, vec3<f32>(0.24, 0.32, 0.44), vec3<f32>(0.12, 0.16, 0.24), vec3<f32>(0.04, 0.06, 0.09));
+  return vec4<f32>(col_b, 1.0);
 }
 `;
 
@@ -353,9 +375,10 @@ fn fs_pi_mo(in: VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
-// 4. Biology 48-byte Particle Bead Pipeline (Amphiphiles, Biopolymer Residues, Replicators, Active Agents!)
+// 4. Biology 48-byte Particle Bead Pipeline (Cook-Torrance GGX PBR for Amphiphiles, Biopolymer Residues, Agents!)
 const BIO_BEAD_WGSL = /* wgsl */ `
 ${COMMON_UNIFORMS_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 struct BioBead {
   pos_a: vec4<f32>,
@@ -422,19 +445,24 @@ fn fs_bio_bead(in: VsOut) -> FsOut {
   let clip = u.view_proj * vec4<f32>(p_surf, 1.0);
   let l1 = normalize(vec3<f32>(0.48, 0.78, 0.56));
   let l2 = normalize(vec3<f32>(-0.55, -0.30, 0.62));
-  let diff = max(dot(n_view, l1), 0.0) * 0.94 + max(dot(n_view, l2), 0.0) * 0.32;
-  let h1 = normalize(l1 + vec3<f32>(0.0, 0.0, 1.0));
-  let spec = pow(max(dot(n_view, h1), 0.0), 38.0) * 0.72;
-  let fres = pow(max(0.0, 1.0 - nz), 2.8) * 0.44;
+  let v_view = vec3<f32>(0.0, 0.0, 1.0);
   // Blend bead biochemistry smoothly with active living organism's solvent/pigment palette when present!
   let org_mix = clamp(u.org_tint_a.w, 0.0, 1.0);
   let bead_luma = dot(in.color, vec3<f32>(0.299, 0.587, 0.114));
   let role_sel = smoothstep(-0.2, 0.9, in.color.b - in.color.r);
   let org_col = mix(u.org_tint_b.rgb, u.org_tint_a.rgb, role_sel) * (0.62 + 0.58 * bead_luma);
   let base_rgb = mix(in.color, org_col, org_mix);
+  let albedo_lin = ulg_srgb_to_linear(base_rgb);
+  let f0_bio = vec3<f32>(ulg_dielectric_f0(1.42)); // Biological lipid/protein dielectric IOR ~ 1.42
+  let direct = ulg_pbr_direct(n_view, v_view, l1, albedo_lin, f0_bio, 0.0, 0.30, vec3<f32>(2.40, 2.38, 2.32))
+    + ulg_pbr_direct(n_view, v_view, l2, albedo_lin, f0_bio, 0.0, 0.30, vec3<f32>(0.76, 0.90, 1.08));
+  let env = ulg_pbr_env_hemi(
+    n_view, v_view, albedo_lin, f0_bio, 0.0, 0.30,
+    vec3<f32>(0.24, 0.38, 0.48), vec3<f32>(0.12, 0.20, 0.28), vec3<f32>(0.04, 0.07, 0.10)
+  );
   // Subtle glowing cutaway cross-section rim right near clipZ plane!
   let cut_rim = select(0.0, (1.0 - smoothstep(0.0, 0.85, abs(in.world_pos.z - u.extra_info.x))) * 0.55, u.extra_info.x < 90.0);
-  let col = base_rgb * (0.26 + diff) + vec3<f32>(spec) + base_rgb * fres * 0.88 + vec3<f32>(0.24, 0.96, 0.84) * cut_rim;
+  let col = direct + env + vec3<f32>(0.12, 0.86, 0.72) * cut_rim;
   var out: FsOut;
   out.color = vec4<f32>(col, 1.0);
   out.depth = clamp(clip.z / max(1e-5, clip.w), 0.0, 1.0);
@@ -446,6 +474,7 @@ fn fs_bio_bead(in: VsOut) -> FsOut {
 //    stride=1 for Biopolymer Backbone (i -> i+1), stride=3 for 3-bead Amphiphiles (0->1, 1->2)!
 const BIO_LINK_WGSL = /* wgsl */ `
 ${COMMON_UNIFORMS_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 struct BioBead {
   pos_a: vec4<f32>,
@@ -508,8 +537,15 @@ fn vs_bio_link(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u3
 
 @fragment
 fn fs_bio_link(in: VsOut) -> @location(0) vec4<f32> {
-  let cy = sqrt(max(0.0, 1.0 - in.along_across.y * in.along_across.y));
-  let col = in.color * (0.32 + 0.72 * cy) + vec3<f32>(pow(cy, 12.0) * 0.28);
+  let y = in.along_across.y;
+  let cy = sqrt(max(0.0, 1.0 - y * y));
+  let n_c = normalize(vec3<f32>(0.0, y, cy));
+  let v_c = vec3<f32>(0.0, 0.0, 1.0);
+  let l_c = normalize(vec3<f32>(0.42, 0.68, 0.60));
+  let alb_l = ulg_srgb_to_linear(in.color);
+  let f0_l = vec3<f32>(ulg_dielectric_f0(1.42));
+  let col = ulg_pbr_direct(n_c, v_c, l_c, alb_l, f0_l, 0.0, 0.34, vec3<f32>(2.25, 2.22, 2.18))
+    + ulg_pbr_env_hemi(n_c, v_c, alb_l, f0_l, 0.0, 0.34, vec3<f32>(0.22, 0.34, 0.44), vec3<f32>(0.12, 0.18, 0.24), vec3<f32>(0.04, 0.06, 0.09));
   return vec4<f32>(col, 1.0);
 }
 `;
@@ -517,6 +553,7 @@ fn fs_bio_link(in: VsOut) -> @location(0) vec4<f32> {
 // 6. Spatial 128x128 Field Shader (Frank Chiral / BZ Spirals / Prebiotic RAF / Hodgkin-Huxley / 3D Turing!)
 const FIELD_PLANE_WGSL = /* wgsl */ `
 ${COMMON_UNIFORMS_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 @group(0) @binding(0) var<uniform> u: RenderUniforms;
 @group(0) @binding(1) var<storage, read> field_data: array<vec4<f32>>;
@@ -674,20 +711,21 @@ fn fs_field(in: VsOut) -> @location(0) vec4<f32> {
   let n = normalize(vec3<f32>(-dhx * 16.0, 1.0, -dhy * 16.0));
   let l = normalize(vec3<f32>(0.45, 0.85, 0.35));
   let v = normalize(u.cam_pos_mode.xyz - in.world_pos);
-  let h = normalize(l + v);
-  let diff = 0.65 + 0.42 * max(dot(n, l), 0.0);
-  let spec = pow(max(dot(n, h), 0.0), 36.0) * 0.32;
+  let f0_fld = vec3<f32>(ulg_dielectric_f0(1.38));
+  let lit_fld = ulg_pbr_direct(n, v, l, col, f0_fld, 0.0, 0.32, vec3<f32>(1.85, 1.85, 1.85))
+    + ulg_pbr_env_hemi(n, v, col, f0_fld, 0.0, 0.32, vec3<f32>(0.48, 0.56, 0.68), vec3<f32>(0.34, 0.40, 0.48), vec3<f32>(0.18, 0.22, 0.28));
 
   // Subtle physical coordinate border frame
   let edge_d = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
   let rim = (1.0 - smoothstep(0.0, 0.012, edge_d)) * 0.25;
-  return vec4<f32>(col * diff + vec3<f32>(spec) + vec3<f32>(0.35, 0.72, 1.0) * rim, 1.0);
+  return vec4<f32>(lit_fld + vec3<f32>(0.35, 0.72, 1.0) * rim, 1.0);
 }
 `;
 
-// 6B. Interactive 3D Xenobiology Specimen Vivarium / Aquarium Mesh Shader (48-byte vertices: pos_part, norm_zone, col_emiss)
+// 6B. Interactive 3D Xenobiology Specimen Vivarium / Aquarium Mesh Shader (Cook-Torrance GGX PBR!)
 const SPECIMEN_MESH_WGSL = /* wgsl */ `
 ${COMMON_UNIFORMS_WGSL}
+${ULG_MATERIAL_PBR_WGSL}
 
 @group(0) @binding(0) var<uniform> u: RenderUniforms;
 
@@ -722,18 +760,26 @@ fn fs_spec_mesh(in: VsOut) -> @location(0) vec4<f32> {
   let v = normalize(u.cam_pos_mode.xyz - in.world_pos);
   let l1 = normalize(vec3<f32>(0.42, 0.86, 0.48));
   let l2 = normalize(vec3<f32>(-0.62, 0.28, -0.58));
-  let ndl1 = max(dot(n, l1), 0.0);
-  let ndl2 = max(dot(n, l2), 0.0);
-  let ndv = max(dot(n, v), 0.0);
-  let h1 = normalize(l1 + v);
-  let spec = pow(max(dot(n, h1), 0.0), 34.0) * select(0.55, 0.22, in.zone < 1.5);
-  let fres = pow(max(0.0, 1.0 - ndv), 2.8);
-  // Subtle aquatic / bio-chamber caustic shimmer on vivarium floor & organic dermis!
-  let caust = 0.5 + 0.5 * sin(in.world_pos.x * 4.2 + u.cam_up_time.w * 2.1) * cos(in.world_pos.z * 4.5 - u.cam_up_time.w * 1.7);
-  let caustic_tint = vec3<f32>(0.14, 0.42, 0.48) * caust * (0.10 + 0.16 * max(0.0, n.y));
-  let base = in.col_emiss.rgb;
+  let base_lin = ulg_srgb_to_linear(in.col_emiss.rgb);
   let emiss = max(0.0, in.col_emiss.w);
-  let col = base * (0.24 + 0.88 * ndl1 + 0.30 * ndl2) + vec3<f32>(0.92, 0.98, 1.0) * spec + base * fres * 0.42 + caustic_tint + base * emiss * 1.25;
+  // Zone-specific physical dielectric/metallic PBR: vivarium substrate rock (zone<1.5) vs wet dermis/chitin/mineralized shell!
+  let is_floor = in.zone < 1.5;
+  let is_mineral_carapace = in.zone > 3.5 && in.zone < 5.5;
+  let metallic = select(0.0, 0.22, is_mineral_carapace);
+  let roughness = select(select(0.32, 0.24, is_mineral_carapace), 0.68, is_floor);
+  let ior_bio = select(1.44, 1.54, is_floor || is_mineral_carapace);
+  let f0_bio = mix(vec3<f32>(ulg_dielectric_f0(ior_bio)), base_lin, metallic);
+  let direct = ulg_pbr_direct(n, v, l1, base_lin, f0_bio, metallic, roughness, vec3<f32>(2.45, 2.42, 2.34))
+    + ulg_pbr_direct(n, v, l2, base_lin, f0_bio, metallic, roughness, vec3<f32>(0.74, 0.92, 1.06));
+  let env = ulg_pbr_env_hemi(
+    n, v, base_lin, f0_bio, metallic, roughness,
+    vec3<f32>(0.22, 0.42, 0.52), vec3<f32>(0.12, 0.24, 0.30), vec3<f32>(0.04, 0.08, 0.10)
+  );
+  // Subtle aquatic / bio-chamber caustic shimmer + translucent dermal subsurface wrap!
+  let caust = 0.5 + 0.5 * sin(in.world_pos.x * 4.2 + u.cam_up_time.w * 2.1) * cos(in.world_pos.z * 4.5 - u.cam_up_time.w * 1.7);
+  let caustic_tint = vec3<f32>(0.08, 0.30, 0.36) * caust * (0.10 + 0.16 * max(0.0, n.y));
+  let sss_wrap = select(max(0.0, (dot(n, l1) + 0.45) / 1.45) * base_lin * 0.18, vec3<f32>(0.0), is_floor);
+  let col = direct + env + sss_wrap + caustic_tint + in.col_emiss.rgb * emiss * 1.25;
   return vec4<f32>(col, 1.0);
 }
 
@@ -1036,8 +1082,9 @@ export function createChemBioWebGpuRenderer(device, canvas, { bgStyle = 0 } = {}
   }
 
   function resize(cssW, cssH, dpr = Math.min(2, window.devicePixelRatio || 1)) {
-    const w = Math.max(64, Math.round(cssW * dpr));
-    const h = Math.max(64, Math.round(cssH * dpr));
+    const maxDim = Math.max(512, Math.min(4096, Number(device?.limits?.maxTextureDimension2D) || 4096));
+    const w = Math.max(64, Math.min(maxDim, Math.round(cssW * dpr)));
+    const h = Math.max(64, Math.min(maxDim, Math.round(cssH * dpr)));
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;

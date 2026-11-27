@@ -14,6 +14,11 @@
 //       * 3 Fungi/Chemotroph: mycelial-fruiting-tree, sporing-hypha-dome, chemotrophic-vent-spire
 //   - Supports live interactive behavioral responses to Inspect, Probe, Heat, Cool, Neuro-Stim & Biopsy!
 
+import {
+  compileDevelopmentalGenomeToPrimitives,
+  SDF_PRIM_TYPES
+} from './developmentalGenome.js';
+
 export const BODY_PLAN_IDS = Object.freeze([
   'quadruped-cursorial',
   'hexapod-armored',
@@ -226,7 +231,76 @@ export function appendProceduralOrganismGeometry(out, fxOut, org, curvFn = null,
   const swayZ = Math.cos(phase * 1.3) * 0.09 * sc + recoil[2] * 0.45;
 
   // =========================================================================
-  // A. FLORA BODY PLANS (6 genuinely distinct sculptural architectures!)
+  // 0. CONTINUOUS DEVELOPMENTAL GENOME MORPHOGENESIS (ZERO Fixed Templates!)
+  // =========================================================================
+  const genome = org.developmentalGenome || org.speciesRecord?.developmentalGenome || null;
+  if (genome && !org.forceLegacyBodyPlan) {
+    const compiled = compileDevelopmentalGenomeToPrimitives(genome, {
+      phase,
+      arousal,
+      sailFlare,
+      frondClose,
+      crouch,
+      maxPrimitives: 44
+    });
+    const gScale = (genome.kingdom === 'flora' ? 4.4 : (genome.kingdom === 'fungi' ? 3.2 : 2.55)) * sc;
+    const roleZoneMap = ['torso', 'head', 'limbs', 'sail', 'canopy', 'tail'];
+    const mapPt = (p) => pt(p[0] * gScale, p[1] * gScale, p[2] * gScale);
+
+    for (let pi = 0; pi < compiled.primitives.length; pi += 1) {
+      const pr = compiled.primitives[pi];
+      const zoneId = roleZoneMap[pr.organZone] || 'torso';
+      const baseRgb = pr.colorRole === 1
+        ? secondary
+        : (pr.colorRole === 2 ? accent : (pr.colorRole === 3 ? biolum : primary));
+      const zoneEm = pr.colorRole === 3 ? (0.45 + bioStr * 0.75) : (pr.colorRole === 2 ? 0.14 : 0.0);
+      const shaded = tintSkin(baseRgb, zoneEm, zoneId);
+      const pA = mapPt(pr.pA);
+      const pB = mapPt(pr.pB);
+      const rA = Math.max(0.03 * sc, pr.rA * gScale);
+      const rB = Math.max(0.025 * sc, pr.rB * gScale);
+
+      if (pr.type === SDF_PRIM_TYPES.SMOOTH_CAPSULE) {
+        pushSegmentTube(out, pA, pB, rA, rB, 7, shaded.rgb, shaded.em, 4.0, true);
+      } else if (pr.type === SDF_PRIM_TYPES.ELLIPSOID_BLADDER || pr.type === SDF_PRIM_TYPES.CARAPACE_PLATE) {
+        const mid = [0.5 * (pA[0] + pB[0]), 0.5 * (pA[1] + pB[1]), 0.5 * (pA[2] + pB[2])];
+        pushEllipsoid(
+          out,
+          mid,
+          rA,
+          pr.type === SDF_PRIM_TYPES.CARAPACE_PLATE ? rB * 1.15 : rB,
+          rA * (genome.eccentricityXZ || 1.0),
+          oRight,
+          oUp,
+          oFwd,
+          5,
+          8,
+          shaded.rgb,
+          shaded.em,
+          4.0
+        );
+      } else {
+        // Thin warped fin / wing / frond / radiator sail
+        const dir = sub3(pB, pA);
+        const sideRef = Math.abs(dir[1]) > 0.85 * (Math.hypot(dir[0], dir[1], dir[2]) || 1) ? oRight : oUp;
+        const perp = normalize3(cross3(dir, sideRef));
+        const mid = [0.5 * (pA[0] + pB[0]), 0.5 * (pA[1] + pB[1]), 0.5 * (pA[2] + pB[2])];
+        const wing1 = add3(mid, scale3(perp, rA));
+        const wing2 = add3(mid, scale3(perp, -rA));
+        pushFinBlade(out, pA, pB, wing1, shaded.rgb, shaded.em, 4.0);
+        pushFinBlade(out, pA, wing2, pB, shaded.rgb, shaded.em, 4.0);
+      }
+    }
+    if (outHits) {
+      for (const sock of compiled.organSockets) {
+        recordHit(sock.id, sock.center[0] * gScale, sock.center[1] * gScale, sock.center[2] * gScale, Math.max(0.45, sock.radius * gScale / Math.max(0.1, sc)));
+      }
+    }
+    return;
+  }
+
+  // =========================================================================
+  // A. LEGACY COMPATIBILITY FALLBACK (used ONLY when no developmentalGenome is passed)
   // =========================================================================
   if (bodyPlan === 'conifer-spire') {
     const hT = 5.4 * sc;
@@ -991,6 +1065,9 @@ export function createVivariumOrganismController(specimen, profile) {
       pushEllipsoid(solidVerts, [rx, yBot + 0.10, rz], 0.56, 0.24 + (ri % 2) * 0.11, 0.46, [1, 0, 0], [0, 1, 0], [0, 0, 1], 6, 10, [bedRgb[0] * 1.24, bedRgb[1] * 1.24, bedRgb[2] * 1.24], 0.0, 1.0);
     }
 
+    // Exact tank-environment vertex count (floor + containment frame + boulders, guaranteed multiple of 3!)
+    const envVertCount = Math.floor(solidVerts.length / 12);
+
     // 2. The Live Procedural Organism (identical anatomy to `universes.html`!)
     const orgScale = kingdom === 'flora' ? 0.50 : (kingdom === 'fungi' ? 0.62 : (sp.bodyPlan === 'aero-gasbag' ? 0.72 : 0.94));
     appendProceduralOrganismGeometry(solidVerts, glassVerts, {
@@ -1054,6 +1131,7 @@ export function createVivariumOrganismController(specimen, profile) {
     return {
       solidF32: new Float32Array(solidVerts),
       solidVertCount: Math.floor(solidVerts.length / 12),
+      envVertCount,
       glassF32: new Float32Array(glassVerts),
       glassVertCount: Math.floor(glassVerts.length / 12),
       beadsF32,

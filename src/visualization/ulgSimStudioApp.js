@@ -1,4 +1,5 @@
 import './ulgSimStudioStyles.css';
+import { initUlgExoWebTuiBridge } from '../demos/ulgExoWebTuiBridge.js';
 import {
   SPH_PHASE_SCENARIO_PRESETS,
   sphPhaseScenarioPresetById
@@ -199,6 +200,16 @@ export function mountUlgSimStudioApp({
 } = {}) {
   if (!container) throw new Error('ULG Studio mount requires a container element');
 
+  const urlParams = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search)
+    : new URLSearchParams();
+  const isDirectStudioEntry = Boolean(
+    (typeof document !== 'undefined' && document.body?.dataset?.ulgDirectStudio === '1')
+    || urlParams.get('studio') === '1'
+    || urlParams.get('embedded') === 'exowebtui'
+  );
+  initUlgExoWebTuiBridge({ labId: 'studio', title: 'ULG Continuum Studio' });
+
   const initialUrlParsed = typeof window !== 'undefined'
     ? parseStagedConfigFromUrlSearchParams(window.location.search)
     : null;
@@ -227,27 +238,56 @@ export function mountUlgSimStudioApp({
   const root = document.createElement('div');
   root.id = 'ulg-sim-studio';
   root.className = 'ulg-studio-root';
+  const emptyCardHtml = isDirectStudioEntry
+    ? `
+      <div class="ulg-empty-card">
+        <div class="ulg-empty-topbar">
+          <span>▣ ULG // CONTINUUM STUDIO (MLS-MPM)</span>
+          <span>WEBGPU READY</span>
+        </div>
+        <p class="ulg-empty-eyebrow">MESOSCALE CONTINUUM SOLVER · SCHROEDER SCALE ATLAS</p>
+        <h1 class="ulg-empty-title">Simulation ready</h1>
+        <p class="ulg-empty-copy">Nothing is allocated yet. Open the Mesoscale Continuum Solver (MLS-MPM) to launch a real-time preset or assemble custom physical bodies with exact 2^-149 conservation ledgers.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+          <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">[ ▶ Mesoscale Continuum Solver (MLS-MPM) ]</button>
+          <a id="ulg-launch-exowebtui-btn" class="ulg-btn ulg-btn-subtle ulg-hide-when-embedded" href="./desktop.html" style="text-decoration:none;">▣ Open in ExoWebTUI Desktop</a>
+        </div>
+      </div>
+    `
+    : `
+      <div class="ulg-empty-card">
+        <div class="ulg-empty-topbar">
+          <span>⏻ ULG // UNIVERSAL LAW GRAPH v1.0</span>
+          <span>10⁻¹⁵m → 10⁺²⁵m</span>
+        </div>
+        <p class="ulg-empty-eyebrow">FIRST-PRINCIPLES BROWSER-NATIVE WEBGPU PHYSICS ENGINE</p>
+        <h1 class="ulg-empty-title">Launch inside ExoWebTUI Desktop?</h1>
+        <p class="ulg-empty-copy">Zero GPU buffers are allocated until you choose a mode. Run every ULG lab simultaneously inside one multi-window retro workstation desktop, or boot directly into a standalone lab.</p>
+
+        <div class="ulg-exowebtui-prompt-box">
+          <p class="ulg-exowebtui-prompt-q">❯ Would you like to launch ULG within the ExoWebTUI Desktop Interface?</p>
+          <p class="ulg-exowebtui-prompt-sub">Opens ULG Universes, Continuum Studio, Elements Lab, Organic Chemistry Lab &amp; Biophysics Lab as draggable, tileable, minimizable windows inside the shared ExoWebTUI workspace.</p>
+          <div class="ulg-exowebtui-cta-row">
+            <a id="ulg-launch-exowebtui-btn" class="ulg-btn ulg-btn-primary" href="./desktop.html" style="text-decoration:none;">[ ▣ YES — LAUNCH EXOWEB TUI DESKTOP ]</a>
+            <a id="ulg-launch-exowebtui-dual-btn" class="ulg-btn ulg-btn-subtle" href="./desktop.html?open=universes,elements&amp;layout=tile" style="text-decoration:none;">[ ⊞ TILED MULTI-LAB DESKTOP ]</a>
+          </div>
+        </div>
+
+        <div class="ulg-landing-divider">OR LAUNCH A STANDALONE LAB DIRECTLY</div>
+
+        <div class="ulg-landing-lab-grid">
+          <a id="ulg-empty-universes-link" class="ulg-btn ulg-btn-subtle ulg-landing-span-2" href="./universes.html" style="text-decoration:none;">✦ Astrophysics · ULG Universes (40-OOM Cosmos) ↗</a>
+          <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-subtle ulg-landing-span-2" type="button">◈ Mesoscale Continuum Solver (MLS-MPM Studio)</button>
+          <a id="ulg-empty-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">⚛ Material Physics Lab ↗</a>
+          <a id="ulg-empty-organic-link" class="ulg-btn ulg-btn-subtle" href="./organic-lab.html" style="text-decoration:none;">⬡ Organic Chemistry Lab ↗</a>
+          <a id="ulg-empty-life-link" class="ulg-btn ulg-btn-subtle ulg-landing-span-2" href="./life-lab.html" style="text-decoration:none;">🧬 Emergent Biology &amp; Biophysics Lab ↗</a>
+        </div>
+      </div>
+    `;
   root.innerHTML = `
     <div id="ulg-stage" class="ulg-studio-stage"></div>
     <div id="ulg-empty-state" class="ulg-studio-empty">
-      <div class="ulg-empty-card">
-        <p class="ulg-empty-eyebrow">ULG · Universal Law Graph</p>
-        <h1 class="ulg-empty-title">Simulation ready</h1>
-        <p class="ulg-empty-copy">Nothing is allocated yet. Launch a first-principles WebGPU lab below or open the Mesoscale Continuum Solver (MLS-MPM) to assemble custom bodies.</p>
-        <div style="display:flex;flex-direction:column;gap:10px;align-items:center;">
-          <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
-            <a id="ulg-empty-lab-link" class="ulg-btn ulg-btn-subtle" href="./elements-lab.html" style="text-decoration:none;">Material Physics Lab ↗</a>
-            <a id="ulg-empty-universes-link" class="ulg-btn ulg-btn-subtle" href="./universes.html" style="text-decoration:none;">Astrophysics · ULG Universes ↗</a>
-          </div>
-          <div>
-            <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Mesoscale Continuum Solver (MLS-MPM)</button>
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
-            <a id="ulg-empty-organic-link" class="ulg-btn ulg-btn-subtle" href="./organic-lab.html" style="text-decoration:none;">Organic Chemistry Lab ↗</a>
-            <a id="ulg-empty-life-link" class="ulg-btn ulg-btn-subtle" href="./life-lab.html" style="text-decoration:none;">Emergent Biology Lab ↗</a>
-          </div>
-        </div>
-      </div>
+      ${emptyCardHtml}
     </div>
     <div id="ulg-loading-overlay" class="ulg-loading-overlay" role="status" aria-live="polite" hidden>
       <div class="ulg-loading-card">

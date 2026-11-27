@@ -100,12 +100,20 @@ fn count_member_with_fluid_particle(
   atomicAdd(&fluid_dv[j * 4u + 3u], 1);
 }
 
+fn quat_rotate_inverse(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+  let qi = vec4<f32>(-q.xyz, q.w);
+  let t = 2.0 * cross(qi.xyz, v);
+  return v + qi.w * t + cross(qi.xyz, t);
+}
+
 fn contact_member_with_fluid_particle(
   j: u32,
   body: u32,
   xm: vec3<f32>,
   vm: vec3<f32>,
   frame0: vec4<f32>,
+  frame1: vec4<f32>,
+  frame4: vec4<f32>,
   a: f32,
   dt: f32
 ) -> vec2<u32> {
@@ -123,12 +131,21 @@ fn contact_member_with_fluid_particle(
   let vn = dot(v - vm, n);
   let goal_speed = min(params.law.z * max(reach - d - params.law.y, 0.0) / dt, params.law.w);
   if (!(vn < goal_speed)) { return vec2<u32>(0u, 0u); }
+  let lever = (xm + n * a) - frame0.xyz;
+  // Exact rotational inertia compliance (r x n)^T I^{-1} (r x n) in principal frame
+  // (identically 0 for central impacts where r x n == 0 or immovable bodies frame0.w <= 0).
+  let rn_body = quat_rotate_inverse(frame1, cross(lever, n));
+  let inv_i = vec3<f32>(
+    select(0.0, 1.0 / frame4.x, frame4.x > 1.0e-12),
+    select(0.0, 1.0 / frame4.y, frame4.y > 1.0e-12),
+    select(0.0, 1.0 / frame4.z, frame4.z > 1.0e-12)
+  );
+  let rot_inv = dot(rn_body * rn_body, inv_i);
   // Exact Jacobi mass-splitting: when K rigid members simultaneously touch fluid
   // particle j, each contact gets 1/K of the fluid particle's mass (eff_inv_mass =
-  // K/mass_p + 1/M_body). Preserves bit-exact M1-M4 for K=1 while preventing
-  // multi-member impulse over-accumulation & spurious bounce explosion.
+  // K/mass_p + 1/M_body + (r x n)^T I^{-1} (r x n)).
   let n_contacts = max(1, atomicLoad(&fluid_dv[j * 4u + 3u]));
-  let inv_mass = f32(n_contacts) / mass_p + select(0.0, 1.0 / frame0.w, frame0.w > 0.0);
+  let inv_mass = f32(n_contacts) / mass_p + select(0.0, 1.0 / frame0.w + rot_inv, frame0.w > 0.0);
   let impulse = ((goal_speed - vn) / inv_mass) * n;
   let dv = impulse / mass_p;
   let qx = i32(clamp(round(dv.x * DV_SCALE), -DV_CLAMP, DV_CLAMP));
@@ -138,7 +155,6 @@ fn contact_member_with_fluid_particle(
   atomicAdd(&fluid_dv[j * 4u + 1u], qy);
   atomicAdd(&fluid_dv[j * 4u + 2u], qz);
   let applied_impulse = (vec3<f32>(f32(qx), f32(qy), f32(qz)) / DV_SCALE) * mass_p;
-  let lever = (xm + n * a) - frame0.xyz;
   let reaction = -applied_impulse;
   let angular = cross(lever, reaction);
   let row = body * ROWS;
@@ -240,6 +256,8 @@ fn contact_members_ss(@builtin(global_invocation_id) id: vec3<u32>) {
   let xm = member_world[i * 2u].xyz;
   let vm = member_world[i * 2u + 1u].xyz;
   let frame0 = frames[body * 8u];
+  let frame1 = frames[body * 8u + 1u];
+  let frame4 = frames[body * 8u + 4u];
   let a = params.law.x;
   let dt = params.time.x;
   let base_spacing = params.ss_geom.x;
@@ -283,7 +301,7 @@ fn contact_members_ss(@builtin(global_invocation_id) id: vec3<u32>) {
             let end = fluid_directory[offsets_off + cell_idx + 1u];
             for (var mm = begin; mm < end; mm = mm + 1u) {
               let j = fluid_directory[members_off + mm];
-              let res = contact_member_with_fluid_particle(j, body, xm, vm, frame0, a, dt);
+              let res = contact_member_with_fluid_particle(j, body, xm, vm, frame0, frame1, frame4, a, dt);
               contacts += res.x;
               error |= res.y;
             }
@@ -294,7 +312,7 @@ fn contact_members_ss(@builtin(global_invocation_id) id: vec3<u32>) {
   } else {
     // Bounded direct-pair fallback (LAW_FALLBACK_POLICIES.DIRECT_PAIR) for standalone unit tests.
     for (var j = 0u; j < params.counts.y; j = j + 1u) {
-      let res = contact_member_with_fluid_particle(j, body, xm, vm, frame0, a, dt);
+      let res = contact_member_with_fluid_particle(j, body, xm, vm, frame0, frame1, frame4, a, dt);
       contacts += res.x;
       error |= res.y;
     }
@@ -344,7 +362,7 @@ export function createSchroederSolidFluidContactStage({ device, memberCount, bod
   const ssBindings = ['uniform', 'read-only-storage', 'read-only-storage', 'storage', 'storage', 'read-only-storage',
     'storage', 'storage', 'read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
   const ssPipelines = Object.fromEntries(['reset_ledger_ss', 'count_contacts_ss', 'contact_members_ss', 'apply_fluid_dv_ss', 'apply_impulses'].map((entryPoint) =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-ss-${entryPoint}.v3`,
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-ss-${entryPoint}.v4`,
       label: `ulg-solid-fluid-contact-ss-${entryPoint}`, code: schroederSolidFluidContactSsWgsl, entryPoint, bindings: ssBindings })]));
   const counters = device.createBuffer({ label: 'ulg-solid-fluid-contact-counters',
     size: (bodyCount * 6 * COUNTER_WORDS_PER_ROW + 4) * 4, usage: GPU_BUFFER_USAGE.STORAGE });

@@ -6,6 +6,8 @@
 //     template-replication-evolution@1, chemiosmotic-bioenergetics-electrophysiology@1,
 //     and reaction-diffusion-active-matter@1 dynamically orchestrated via Universal Law Graph!
 
+import { initUlgExoWebTuiBridge } from './ulgExoWebTuiBridge.js';
+initUlgExoWebTuiBridge({ labId: 'life', title: 'ULG Biophysics & Life Lab' });
 import { createAmphiphileMembraneSessionWebGpu } from '../runtime/biology/amphiphileMembraneGpu.js';
 import {
   POLYMER_SEQUENCE_TEMPLATES,
@@ -41,6 +43,7 @@ import {
   parseXenobiologyFromSearch
 } from '../runtime/biology/xenobiologySynthesizer.js';
 import { createVivariumOrganismController } from '../runtime/biology/xenobiologyAnatomyMesh.js';
+import { bakeOrganismMeshWebGpu } from '../runtime/biology/organismSdfMorphogenesisGpu.js';
 
 function triggerLifeDownload(filename, text, mime = 'text/plain;charset=utf-8') {
   try {
@@ -419,25 +422,68 @@ export async function mountLifeLabDemo() {
     return d;
   }
 
+  const vivSdfCache = new Map(); // speciesKey -> { vertsF32, vertCount }
+  let vivActiveBakeKey = '';
+
   function ensureVivariumGpuBuffers() {
     if (!vivSolidBuf) {
-      vivSolidBuf = device.createBuffer({ label: 'ulg-life-viv-solid', size: 24576 * 48, usage: 0x0020 | 0x0008 });
+      vivSolidBuf = device.createBuffer({ label: 'ulg-life-viv-solid', size: 49152 * 48, usage: 0x0020 | 0x0008 });
       vivGlassBuf = device.createBuffer({ label: 'ulg-life-viv-glass', size: 4096 * 48, usage: 0x0020 | 0x0008 });
       vivBeadsBuf = device.createBuffer({ label: 'ulg-life-viv-beads', size: 256 * 48, usage: 0x0080 | 0x0008 });
     }
+  }
+
+  function triggerVivariumGpuSdfBake(specimen) {
+    const genome = specimen?.developmentalGenome || null;
+    if (!genome || !device) { vivActiveBakeKey = ''; return; }
+    const key = `${genome.seed}:${specimen.id || specimen.speciesName || 'sp'}`;
+    vivActiveBakeKey = key;
+    if (vivSdfCache.has(key)) return;
+    vivSdfCache.set(key, { pending: true });
+    const kScale = genome.kingdom === 'flora' ? 2.1 : (genome.kingdom === 'fungi' ? 1.85 : 2.15);
+    const yBase = (genome.medium === 'buoyant' || genome.medium === 'aerial' || genome.medium === 'aquatic') ? -0.45 : -1.86;
+    bakeOrganismMeshWebGpu(device, genome, {
+      gridDim: 44,
+      turingDim: 24,
+      turingSteps: 40,
+      maxVerts: 42000,
+      scaleOut: kScale,
+      offset: [0, yBase, 0],
+      formatMode: 0
+    }).then((baked) => {
+      if (disposed) return;
+      if (baked?.vertsF32 && baked.vertCount > 0) {
+        vivSdfCache.set(key, { vertsF32: baked.vertsF32, vertCount: baked.vertCount });
+        if (currentLayer === 'vivarium' && vivActiveBakeKey === key) {
+          uploadVivariumFrame();
+          renderCurrentScene();
+        }
+      }
+    }).catch(() => {});
   }
 
   function uploadVivariumFrame() {
     if (!activeSession || currentLayer !== 'vivarium') return;
     ensureVivariumGpuBuffers();
     const frame = activeSession.buildFrameBuffers();
-    const sCount = Math.min(24576, frame.solidVertCount);
+    const bakedEntry = vivActiveBakeKey ? vivSdfCache.get(vivActiveBakeKey) : null;
     const gCount = Math.min(4096, frame.glassVertCount);
     const bCount = Math.min(256, frame.beadCount);
-    if (sCount > 0) device.queue.writeBuffer(vivSolidBuf, 0, frame.solidF32.subarray(0, sCount * 12));
+    if (bakedEntry && !bakedEntry.pending && bakedEntry.vertsF32 && bakedEntry.vertCount > 0) {
+      // Combine exact triangle-aligned tank environment (floor + frame + boulders) with Ultra-LOD GPU SDF + 3D Turing mesh!
+      const rawEnv = Number.isFinite(frame.envVertCount) ? frame.envVertCount : 0;
+      const envVerts = Math.floor(Math.min(4092, rawEnv, frame.solidVertCount) / 3) * 3;
+      const orgVerts = Math.floor(Math.min(49152 - envVerts, bakedEntry.vertCount) / 3) * 3;
+      if (envVerts > 0) device.queue.writeBuffer(vivSolidBuf, 0, frame.solidF32.subarray(0, envVerts * 12));
+      if (orgVerts > 0) device.queue.writeBuffer(vivSolidBuf, envVerts * 48, bakedEntry.vertsF32.subarray(0, orgVerts * 12));
+      vivSolidVertCount = envVerts + orgVerts;
+    } else {
+      const sCount = Math.floor(Math.min(49152, frame.solidVertCount) / 3) * 3;
+      if (sCount > 0) device.queue.writeBuffer(vivSolidBuf, 0, frame.solidF32.subarray(0, sCount * 12));
+      vivSolidVertCount = sCount;
+    }
     if (gCount > 0) device.queue.writeBuffer(vivGlassBuf, 0, frame.glassF32.subarray(0, gCount * 12));
     if (bCount > 0) device.queue.writeBuffer(vivBeadsBuf, 0, frame.beadsF32.subarray(0, bCount * 12));
-    vivSolidVertCount = sCount;
     vivGlassVertCount = gCount;
     vivBeadCount = bCount;
   }
@@ -1007,6 +1053,7 @@ export async function mountLifeLabDemo() {
         sel.value = String(curIdx);
       }
       activeSession = createVivariumOrganismController(activeVivariumSpecimen, prof);
+      triggerVivariumGpuSdfBake(activeSession.specimen);
       const t0 = activeSession.getTelemetry();
       if (el('sl-viv-temp')) {
         el('sl-viv-temp').value = String(t0.chamberTempK);

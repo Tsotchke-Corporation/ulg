@@ -41,12 +41,18 @@ struct MolVolParams {
   pad3: f32,
 };
 
-// Per-atom compact orbital envelope: vec4(x, y, z, zeta), vec4(occ_weight, homo_coeff, lumo_coeff, Z)
+// Per-atom orbital envelopes:
+//   atoms_pos_zeta: vec4(x, y, z, zeta_s)
+//   atoms_weights:  vec4(occ_s_weight, homo_s, lumo_s, Z)
+//   atoms_p_homo:   vec4(homo_px, homo_py, homo_pz, occ_p_weight)
+//   atoms_p_lumo:   vec4(lumo_px, lumo_py, lumo_pz, zeta_p)
 @group(0) @binding(0) var<uniform> params: MolVolParams;
 @group(0) @binding(1) var<storage, read> atoms_pos_zeta: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> atoms_weights: array<vec4<f32>>;
 // Output dim^3 vec4(pos_amp, neg_amp, core_norm, density)
 @group(0) @binding(3) var<storage, read_write> volume_out: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> atoms_p_homo: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> atoms_p_lumo: array<vec4<f32>>;
 
 @compute @workgroup_size(64)
 fn sample_molecular_volume(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -68,12 +74,20 @@ fn sample_molecular_volume(@builtin(global_invocation_id) id: vec3<u32>) {
   for (var a = 0u; a < params.atom_count; a = a + 1u) {
     let az = atoms_pos_zeta[a];
     let aw = atoms_weights[a];
-    let r = length(p - az.xyz);
+    let ph = atoms_p_homo[a];
+    let pl = atoms_p_lumo[a];
+    let dvec = p - az.xyz;
+    let r = length(dvec);
     min_r = min(min_r, r);
-    let phi = exp(-az.w * r);
-    rho_tot = rho_tot + aw.x * phi * phi;
-    let c = select(aw.z, aw.y, params.mode == 1u);
-    psi_orb = psi_orb + c * phi;
+    let phi_s = exp(-az.w * r);
+    let zeta_p = max(0.45, pl.w);
+    let phi_p = exp(-zeta_p * r);
+    // Total electron density combines contracted s + Cartesian p-shell radial envelopes
+    rho_tot = rho_tot + aw.x * phi_s * phi_s + ph.w * (r * r) * phi_p * phi_p * 0.45;
+    let c_s = select(aw.z, aw.y, params.mode == 1u);
+    let c_p = select(pl.xyz, ph.xyz, params.mode == 1u);
+    // Genuine Cartesian s + p_x*dx + p_y*dy + p_z*dz signed molecular orbital (nodal planes & pi-lobes!)
+    psi_orb = psi_orb + c_s * phi_s + dot(c_p, dvec) * phi_p * 1.15;
   }
   if (params.mode == 0u) {
     let d = clamp(pow(max(0.0, rho_tot * 0.65), 0.72), 0.0, 1.0);
@@ -288,10 +302,12 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
     computeBufferBinding(0, 'uniform'),
     computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(2, 'read-only-storage'),
-    computeBufferBinding(3, 'storage')
+    computeBufferBinding(3, 'storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage')
   ];
   const volPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mol-hf-volume.v1',
+    cacheKey: 'ulg-mol-hf-volume.v2',
     label: 'ulg-mol-hf-volume',
     code: molecularVolumeWgsl,
     entryPoint: 'sample_molecular_volume',
@@ -300,27 +316,53 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
 
   const posZeta = new Float32Array(normAtoms.length * 4);
   const weights = new Float32Array(normAtoms.length * 4);
+  const pHomo = new Float32Array(normAtoms.length * 4);
+  const pLumo = new Float32Array(normAtoms.length * 4);
   let maxCoord = 1.5;
   for (let a = 0; a < normAtoms.length; a += 1) {
     const at = normAtoms[a];
     maxCoord = Math.max(maxCoord, Math.hypot(at.x, at.y, at.z) + 2.5);
+    const zetaS = Math.max(0.85, Math.min(2.6, 0.9 + 0.14 * Math.sqrt(at.Z)));
     posZeta[a * 4 + 0] = at.x;
     posZeta[a * 4 + 1] = at.y;
     posZeta[a * 4 + 2] = at.z;
-    posZeta[a * 4 + 3] = Math.max(0.85, Math.min(2.6, 0.9 + 0.14 * Math.sqrt(at.Z)));
-    // Sum MO coefficients on this atom
-    let cHomo = 0; let cLumo = 0; let pop = 0;
+    posZeta[a * 4 + 3] = zetaS;
+    // Separate spherical s and directional Cartesian p_x, p_y, p_z MO coefficients on this atom!
+    let cHomoS = 0; let cLumoS = 0; let popS = 0; let popP = 0;
+    let hx = 0; let hy = 0; let hz = 0;
+    let lx = 0; let ly = 0; let lz = 0;
     for (let u = 0; u < n; u += 1) {
-      if ((basis[u].atomIndex ?? 0) === a) {
-        cHomo += C[u * n + homoIdx];
-        cLumo += C[u * n + lumoIdx];
-        pop += P[u * n + u];
+      if ((basis[u].atomIndex ?? 0) !== a) continue;
+      const lmn = basis[u].lmn || [0, 0, 0];
+      const lTot = (lmn[0] || 0) + (lmn[1] || 0) + (lmn[2] || 0);
+      const ch = C[u * n + homoIdx];
+      const cl = C[u * n + lumoIdx];
+      const pu = Math.max(0, P[u * n + u]);
+      if (lTot === 0) {
+        cHomoS += ch;
+        cLumoS += cl;
+        popS += pu;
+      } else if (lTot === 1) {
+        popP += pu;
+        if (lmn[0] === 1) { hx += ch; lx += cl; }
+        else if (lmn[1] === 1) { hy += ch; ly += cl; }
+        else if (lmn[2] === 1) { hz += ch; lz += cl; }
+      } else {
+        popP += pu * 0.5;
       }
     }
-    weights[a * 4 + 0] = Math.max(0.5, pop);
-    weights[a * 4 + 1] = cHomo;
-    weights[a * 4 + 2] = cLumo;
+    weights[a * 4 + 0] = Math.max(0.25, popS);
+    weights[a * 4 + 1] = cHomoS;
+    weights[a * 4 + 2] = cLumoS;
     weights[a * 4 + 3] = at.Z;
+    pHomo[a * 4 + 0] = hx;
+    pHomo[a * 4 + 1] = hy;
+    pHomo[a * 4 + 2] = hz;
+    pHomo[a * 4 + 3] = popP;
+    pLumo[a * 4 + 0] = lx;
+    pLumo[a * 4 + 1] = ly;
+    pLumo[a * 4 + 2] = lz;
+    pLumo[a * 4 + 3] = Math.max(0.55, zetaS * 0.78);
   }
 
   const volCount = volDim ** 3;
@@ -334,12 +376,16 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
   device.queue.writeBuffer(azBuf, 0, posZeta);
   const wBuf = device.createBuffer({ size: Math.max(16, weights.byteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
   device.queue.writeBuffer(wBuf, 0, weights);
+  const phBuf = device.createBuffer({ size: Math.max(16, pHomo.byteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+  device.queue.writeBuffer(phBuf, 0, pHomo);
+  const plBuf = device.createBuffer({ size: Math.max(16, pLumo.byteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+  device.queue.writeBuffer(plBuf, 0, pLumo);
   const volBuf = device.createBuffer({ size: volCount * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const readVol = device.createBuffer({ size: volCount * 16, usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
 
   const bg = device.createBindGroup({
     layout: volPipe.bindGroupLayout,
-    entries: [pBuf, azBuf, wBuf, volBuf].map((buffer, binding) => ({ binding, resource: { buffer } }))
+    entries: [pBuf, azBuf, wBuf, volBuf, phBuf, plBuf].map((buffer, binding) => ({ binding, resource: { buffer } }))
   });
   const enc = device.createCommandEncoder({ label: 'ulg-mol-hf-volume' });
   const pass = enc.beginComputePass({ label: 'ulg-mol-hf-volume-pass' });
@@ -379,6 +425,8 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
       atomOrbitalParams: Object.freeze({
         posZeta: new Float32Array(posZeta),
         weights: new Float32Array(weights),
+        pHomo: new Float32Array(pHomo),
+        pLumo: new Float32Array(pLumo),
         boxHalfBohr: maxCoord,
         homoIdx,
         lumoIdx
@@ -391,7 +439,7 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
       })
     });
   } finally {
-    for (const b of [pBuf, azBuf, wBuf, volBuf, readVol]) b.destroy();
+    for (const b of [pBuf, azBuf, wBuf, phBuf, plBuf, volBuf, readVol]) b.destroy();
   }
 }
 

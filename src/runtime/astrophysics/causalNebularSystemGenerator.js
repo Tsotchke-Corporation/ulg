@@ -23,6 +23,7 @@ import {
   evaluateStellarEvolutionaryState
 } from './cosmicEpochState.js';
 import { EARTH_MASS_SOLAR } from './solarSystemNBodyGpu.js';
+import { resolvePlanetarySurfacePbrOptics } from '../material/materialPbrOpticsBridge.js';
 
 export const ULG_CAUSAL_NEBULAR_CASCADE_SCHEMA = 'ulg.astrophysics.causal-nebular-cascade.v1';
 
@@ -632,20 +633,23 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
   const planetParentIdx = isCircumbinaryHost ? -2 : 0; // `-2` = barycenter of stars[0]+stars[1]
 
   // Physical Nebular Condensation Fronts (radiative equilibrium T(r) ~ 278 K * L^0.25 / sqrt(r_AU))
+  // Scaled faithfully down to compact M-dwarf/K-dwarf systems (TRAPPIST-1 / Proxima scales: 0.015..0.5 AU)
+  // rather than clamping rMin/rSnow so high that M-dwarf disks sit 85% outside their snow line!
   const sqrtL = Math.sqrt(Math.max(1e-4, hostLumSolar));
-  const rSilicateAu = Math.max(0.05, 0.085 * sqrtL);
-  const rSnowLineAu = Math.max(0.18, 2.70 * sqrtL);
-  const rCoIceAu = Math.max(0.75, 11.2 * sqrtL);
-  const rHzInnerAu = Math.max(0.08, 0.94 * sqrtL);
-  const rHzOuterAu = Math.max(0.16, 1.68 * sqrtL);
+  const rSilicateAu = Math.max(0.012, 0.085 * sqrtL);
+  const rSnowLineAu = Math.max(0.08, 2.70 * sqrtL);
+  const rCoIceAu = Math.max(0.32, 11.2 * sqrtL);
+  const rHzInnerAu = Math.max(0.022, 0.94 * sqrtL);
+  const rHzOuterAu = Math.max(0.048, 1.68 * sqrtL);
 
   // Holman-Wiegert Dynamical Stability Window!
   let rMinStableAu = Math.max(rSilicateAu * 1.15, stars[0].radiusSolar * 0.00465 * 6.0);
-  let rMaxStableAu = Math.min(38.0, Math.max(6.0, 26.0 * Math.pow(hostMassSolar, 0.35)));
+  let rMaxStableAu = Math.min(38.0, Math.max(rSnowLineAu * 4.5, 24.0 * Math.pow(Math.max(0.08, hostMassSolar), 0.78)));
   if (isCircumbinaryHost && binaryPair) {
     const muIn = Math.min(stars[0].massSolar, stars[1].massSolar) / (stars[0].massSolar + stars[1].massSolar);
     const hwIn = evaluateHolmanWiegertLimits(binaryPair.aAu, binaryPair.e, muIn);
     rMinStableAu = Math.max(rMinStableAu, hwIn.rCritPAu * 1.18);
+    rMaxStableAu = Math.max(rMaxStableAu, rMinStableAu * 6.0);
   }
   if (architecture === 'binary-s-type' && binaryPair) {
     const muOut = stars[1].massSolar / (stars[0].massSolar + stars[1].massSolar);
@@ -713,35 +717,54 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
 
     // Classify emergent planet type purely from GPU-coalesced material fractions (Fe/Silicate/C/H2O/Gas)
     // driven by the host star's actual energy output L_*, or analytic nebular location in pure-JS mode!
+    // Retires the old 2-bucket `beyondSnow` pigeonhole (icy-dwarf / ice-giant only) in favor of the full
+    // continuous physical exoplanet taxonomy: Gas Giants, Hot Jupiters, Ice Giants, Hycean/Sub-Neptunes,
+    // Hydrocarbon-Haze Titan Worlds, Subsurface-Ocean Cryo-Worlds, Earth-like, Ocean Super-Earths,
+    // Rocky Super-Earths, Greenhouses, Carbon Worlds, Lava Worlds, Iron Cores, Arid Worlds, and Cryo Dwarfs!
     const roll = rand();
     let archetype = 'rocky-arid';
     if (gpuB) {
-      if (gpuB.gasEnvelopeFrac >= 0.34 && !isWhiteDwarfHost && !isRedGiantHost) {
-        archetype = !beyondSnow && aAu < rSnowLineAu * 0.35 ? 'hot-jupiter' : 'gas-giant';
-      } else if (gpuB.gasEnvelopeFrac >= 0.10 && (gpuB.volatileFrac >= 0.38 || beyondSnow) && !isWhiteDwarfHost) {
-        archetype = 'ice-giant';
+      const mG = gpuB.totalMassEarth;
+      if ((gpuB.gasEnvelopeFrac >= 0.30 || mG >= 55.0) && !isWhiteDwarfHost && !isRedGiantHost) {
+        archetype = !beyondSnow && aAu < rSnowLineAu * 0.38 ? 'hot-jupiter' : 'gas-giant';
+      } else if ((gpuB.gasEnvelopeFrac >= 0.14 || (beyondSnow && mG >= 10.5 && mG < 55.0)) && !isWhiteDwarfHost) {
+        archetype = (mG >= 18.0 && gpuB.gasEnvelopeFrac >= 0.20) ? 'gas-giant' : 'ice-giant';
       } else if (tEqK >= 950 || (isRedGiantHost && aAu < 1.8)) {
         archetype = gpuB.feFrac > 0.36 ? 'iron-core' : 'lava-world';
-      } else if (gpuB.carbonFrac >= 0.32 && !beyondSnow) {
+      } else if (gpuB.carbonFrac >= 0.30 && !beyondSnow) {
         archetype = 'carbon-world';
-      } else if (inHz && !hasEarthLike && !isRedGiantHost && !isWhiteDwarfHost && sys.systemAgeGyr >= 0.35 && (gpuB.volatileFrac >= 0.01 || nebulaEnv.volatileInventory >= 0.35) && gpuB.totalMassEarth <= 2.4) {
+      } else if (inHz && !hasEarthLike && !isRedGiantHost && !isWhiteDwarfHost && sys.systemAgeGyr >= 0.35 && (gpuB.volatileFrac >= 0.01 || nebulaEnv.volatileInventory >= 0.35) && mG <= 2.6) {
         archetype = 'earth-like';
         hasEarthLike = true;
-      } else if (inHz && (gpuB.volatileFrac >= 0.025 || (gpuB.totalMassEarth > 2.2 && nebulaEnv.volatileInventory >= 0.45))) {
-        archetype = 'ocean-super-earth';
+      } else if (inHz && (gpuB.volatileFrac >= 0.025 || (mG > 2.2 && nebulaEnv.volatileInventory >= 0.42))) {
+        archetype = mG > 5.5 && gpuB.gasEnvelopeFrac >= 0.04 ? 'sub-neptune' : 'ocean-super-earth';
       } else if (tEqK > 380 && tEqK < 950 && (gpuB.volatileFrac > 0.005 || nebulaEnv.metallicitySolar > 0.25)) {
-        archetype = 'greenhouse';
+        archetype = (mG >= 3.5 && gpuB.gasEnvelopeFrac >= 0.04) ? 'sub-neptune' : 'greenhouse';
       } else if (beyondSnow) {
-        archetype = gpuB.totalMassEarth > 5.0 ? 'ice-giant' : 'icy-dwarf';
-      } else if (gpuB.feFrac >= 0.34 && gpuB.totalMassEarth < 0.7) {
+        if (mG >= 2.6 && mG < 11.5 && tEqK >= 85 && !isWhiteDwarfHost) {
+          archetype = 'sub-neptune';
+        } else if (mG >= 0.35 && tEqK >= 62 && tEqK <= 155 && (gpuB.carbonFrac >= 0.07 || gpuB.superVolFrac >= 0.14 || nebulaEnv.cToO >= 0.48)) {
+          archetype = 'titan-world';
+        } else if (mG >= 0.22 && tEqK >= 70 && tEqK <= 215 && gpuB.h2oIceFrac >= 0.22) {
+          archetype = 'cryo-ocean-world';
+        } else if (mG >= 1.8 && gpuB.silicateFrac >= 0.28) {
+          archetype = 'super-earth';
+        } else if (mG >= 8.5 && !isWhiteDwarfHost) {
+          archetype = 'ice-giant';
+        } else {
+          archetype = 'icy-dwarf';
+        }
+      } else if (gpuB.feFrac >= 0.34 && mG < 0.8) {
         archetype = 'iron-core';
-      } else if (tEqK < 250 && gpuB.totalMassEarth < 0.9) {
+      } else if (mG >= 2.8 && gpuB.volatileFrac >= 0.06 && !isWhiteDwarfHost) {
+        archetype = 'sub-neptune';
+      } else if (tEqK < 250 && mG < 0.95) {
         archetype = 'arid-oxide';
       } else {
-        archetype = gpuB.totalMassEarth >= 1.5 ? 'super-earth' : 'arid-oxide';
+        archetype = mG >= 1.5 ? 'super-earth' : 'arid-oxide';
       }
     } else if (beyondSnow && roll < pGiantBase * 1.15 && !isWhiteDwarfHost) {
-      archetype = beyondCo || rand() < 0.38 ? 'ice-giant' : 'gas-giant';
+      archetype = beyondCo || rand() < 0.36 ? 'ice-giant' : 'gas-giant';
     } else if (!beyondSnow && aAu < rSnowLineAu * 0.25 && roll < pGiantBase * 0.22 && !isRedGiantHost && !isWhiteDwarfHost) {
       // Type-II disk-migrated Hot Jupiter!
       archetype = 'hot-jupiter';
@@ -749,16 +772,20 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       archetype = rand() < 0.55 ? 'lava-world' : 'iron-core';
     } else if (nebulaEnv.carbonRich && !beyondSnow) {
       archetype = 'carbon-world';
-    } else if (inHz && !hasEarthLike && !isRedGiantHost && !isWhiteDwarfHost && sys.systemAgeGyr >= 0.35 && nebulaEnv.volatileInventory >= 0.35 && roll < 0.42) {
+    } else if (inHz && !hasEarthLike && !isRedGiantHost && !isWhiteDwarfHost && sys.systemAgeGyr >= 0.35 && nebulaEnv.volatileInventory >= 0.35 && roll < 0.44) {
       // Genuine habitable temperate ocean/silicate world — called "Earth-like", NEVER guaranteed in every system!
       archetype = 'earth-like';
       hasEarthLike = true;
-    } else if (inHz && nebulaEnv.volatileInventory >= 0.55 && roll < 0.72) {
+    } else if (inHz && nebulaEnv.volatileInventory >= 0.50 && roll < 0.74) {
       archetype = 'ocean-super-earth';
     } else if (tEqK > 390 && tEqK < 950 && nebulaEnv.metallicitySolar > 0.25) {
-      archetype = 'greenhouse';
+      archetype = roll < 0.22 ? 'sub-neptune' : 'greenhouse';
     } else if (beyondSnow) {
-      archetype = roll < 0.45 ? 'ice-giant' : 'icy-dwarf';
+      if (tEqK >= 95 && roll < 0.28 && !isWhiteDwarfHost) archetype = 'sub-neptune';
+      else if (tEqK >= 62 && tEqK <= 155 && roll < 0.52) archetype = 'titan-world';
+      else if (tEqK >= 70 && roll < 0.72) archetype = 'cryo-ocean-world';
+      else if (roll < 0.86 && !isWhiteDwarfHost) archetype = 'ice-giant';
+      else archetype = 'icy-dwarf';
     } else if (tEqK < 250 && roll < 0.55) {
       archetype = 'arid-oxide';
     } else {
@@ -769,8 +796,11 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     const baseLabel = `${sys.systemName} ${pLetter}`;
     let spec = null;
 
+    const gpuMassE = (gpuB && Number.isFinite(gpuB.totalMassEarth) && gpuB.totalMassEarth > 0.01)
+      ? gpuB.totalMassEarth
+      : null;
     if (archetype === 'earth-like') {
-      const mE = 0.68 + rand() * 0.95;
+      const mE = gpuMassE ? Math.max(0.35, Math.min(3.2, gpuMassE)) : (0.68 + rand() * 0.95);
       const rKm = Math.round(6371 * Math.pow(mE, 0.27));
       const pSurf = Math.round((0.65 + rand() * 1.15) * 101325);
       const tSurf = Math.max(268, Math.min(312, Math.round(tEqK + 28 + (rand() - 0.5) * 14)));
@@ -793,7 +823,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe-Ni Core · MgSiO₃ Mantle · Liquid H₂O Ocean · N₂/O₂ ${(pSurf / 1e5).toFixed(2)} bar`
       };
     } else if (archetype === 'ocean-super-earth') {
-      const mE = 2.2 + rand() * 3.8;
+      const mE = gpuMassE ? Math.max(1.2, Math.min(12.0, gpuMassE)) : (2.2 + rand() * 3.8);
       const rKm = Math.round(6371 * Math.pow(mE, 0.29) * 1.08);
       const pSurf = Math.round((1.5 + rand() * 4.5) * 101325);
       spec = {
@@ -815,7 +845,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe Core · High-P H₂O Ice-VII Mantle · Global Liquid Ocean (${mE.toFixed(1)} M⊕)`
       };
     } else if (archetype === 'carbon-world') {
-      const mE = 0.6 + rand() * 3.2;
+      const mE = gpuMassE ? Math.max(0.25, Math.min(10.0, gpuMassE)) : (0.6 + rand() * 3.2);
       const rKm = Math.round(6371 * Math.pow(mE, 0.27) * 0.96);
       const pSurf = tEqK > 550 ? 2.4e5 : 4.2e4;
       spec = {
@@ -837,7 +867,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe-C Core · Diamond/SiC Mantle · Graphite & Hydrocarbon Crust (C/O=${nebulaEnv.cToO.toFixed(2)})`
       };
     } else if (archetype === 'lava-world') {
-      const mE = 0.4 + rand() * 3.6;
+      const mE = gpuMassE ? Math.max(0.2, Math.min(10.0, gpuMassE)) : (0.4 + rand() * 3.6);
       const rKm = Math.round(6371 * Math.pow(mE, 0.27));
       spec = {
         name: `${baseLabel} (Lava World)`,
@@ -858,7 +888,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Molten Fe-Ni Core · Magma MgSiO₃ Ocean · Vaporized SiO/Na Exosphere`
       };
     } else if (archetype === 'iron-core') {
-      const mE = 0.05 + rand() * 0.45;
+      const mE = gpuMassE ? Math.max(0.05, Math.min(6.0, gpuMassE)) : (0.05 + rand() * 0.45);
       const rKm = Math.round(2200 + Math.pow(mE, 0.30) * 3200);
       spec = {
         name: `${baseLabel} (Iron World)`,
@@ -879,14 +909,14 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `Fe-Ni Core 68% · Silicate Mantle 32% · Airless Cratered Regolith`
       };
     } else if (archetype === 'greenhouse') {
-      const mE = 0.65 + rand() * 1.8;
+      const mE = gpuMassE ? Math.max(0.4, Math.min(8.0, gpuMassE)) : (0.65 + rand() * 1.8);
       const rKm = Math.round(5600 + Math.pow(mE, 0.27) * 1600);
       const pSurf = Math.round((2.5 + rand() * 7.5) * 1e6);
       spec = {
         name: `${baseLabel} (Greenhouse)`,
         planetClass: 'greenhouse',
         subtitle: `Super-Greenhouse CO₂ World · ${aAu.toFixed(2)} AU`,
-        kind: 2,
+        kind: 1,
         massSolar: mE * EARTH_MASS_SOLAR,
         radiusKm: rKm,
         color0: [0.90, 0.78, 0.52],
@@ -902,7 +932,7 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       };
     } else if (archetype === 'arid-oxide' || archetype === 'super-earth') {
       const isSuper = archetype === 'super-earth';
-      const mE = isSuper ? (1.8 + rand() * 3.2) : (0.10 + rand() * 0.42);
+      const mE = gpuMassE ? Math.max(0.08, Math.min(10.0, gpuMassE)) : (isSuper ? (1.8 + rand() * 3.2) : (0.10 + rand() * 0.42));
       const rKm = Math.round(isSuper ? (6371 * Math.pow(mE, 0.27)) : (3000 + Math.pow(mE, 0.30) * 2100));
       const pSurf = isSuper ? Math.round((0.8 + rand() * 2.2) * 1e5) : Math.round(450 + rand() * 2400);
       spec = {
@@ -925,8 +955,8 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       };
     } else if (archetype === 'hot-jupiter' || archetype === 'gas-giant') {
       const isHot = archetype === 'hot-jupiter';
-      const mJup = isHot ? (0.35 + rand() * 2.4) : (0.22 + rand() * 3.1);
-      const rKm = Math.round((54000 + rand() * 24000) * (isHot ? 1.18 : 1.0));
+      const mJup = gpuMassE ? Math.max(0.12, Math.min(12.0, gpuMassE / 317.83)) : (isHot ? (0.35 + rand() * 2.4) : (0.22 + rand() * 3.1));
+      const rKm = Math.round((54000 + Math.pow(Math.min(4.0, mJup), 0.14) * 18000) * (isHot ? 1.16 : 1.0));
       const ringed = !isHot && rand() < 0.48;
       spec = {
         name: `${baseLabel} (${isHot ? 'Hot Jupiter' : (ringed ? 'Ringed Giant' : 'Gas Giant')})`,
@@ -950,8 +980,8 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         composition: `H₂ ${(88 + rand() * 7).toFixed(1)}% · He · Metallic H Mantle (${mJup.toFixed(2)} M_J)`
       };
     } else if (archetype === 'ice-giant') {
-      const mE = 10.0 + rand() * 14.0;
-      const rKm = Math.round(21000 + rand() * 7500);
+      const mE = gpuMassE ? Math.max(5.0, Math.min(48.0, gpuMassE)) : (10.0 + rand() * 14.0);
+      const rKm = Math.round(16500 + Math.pow(mE, 0.36) * 4200);
       const ringed = rand() < 0.28;
       const isDeepBlue = rand() < 0.52;
       spec = {
@@ -975,27 +1005,98 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         coreZ: 14, mantleZ: 8, surfZ: 6,
         composition: `H₂O/CH₄/NH₃ Superionic Mantle · H₂/He Envelope (${mE.toFixed(1)} M⊕)`
       };
-    } else {
-      // Icy dwarf planet outside snow line
-      const mE = 0.015 + rand() * 0.14;
-      const rKm = Math.round(1350 + rand() * 1650);
+    } else if (archetype === 'sub-neptune') {
+      const mE = gpuMassE ? Math.max(2.2, Math.min(14.0, gpuMassE)) : (3.2 + rand() * 7.2);
+      const rKm = Math.round(11500 + Math.pow(mE, 0.34) * 3200);
+      const ringed = rand() < 0.22;
+      const isWarmHycean = tEqK >= 180;
       spec = {
-        name: `${baseLabel} (Cryo Dwarf)`,
-        planetClass: 'icy-dwarf',
-        subtitle: `Outer-Disk Volatile Ice World · ${aAu.toFixed(2)} AU`,
+        name: `${baseLabel} (${isWarmHycean ? 'Hycean Sub-Neptune' : 'Sub-Neptune'})`,
+        planetClass: 'sub-neptune',
+        subtitle: `${isWarmHycean ? 'H₂-Rich Hycean Supercritical Ocean World' : 'Mini-Neptune Volatile Envelope World'} · ${aAu.toFixed(2)} AU`,
+        kind: 2,
+        massSolar: mE * EARTH_MASS_SOLAR,
+        radiusKm: rKm,
+        color0: isWarmHycean ? [0.22, 0.66, 0.78] : [0.38, 0.56, 0.88],
+        color1: isWarmHycean ? [0.10, 0.34, 0.54] : [0.22, 0.34, 0.62],
+        atm: 0.76,
+        surfacePressurePa: Math.round((8.0 + rand() * 18.0) * 1e5),
+        volatileMassFrac: 0.24,
+        particulateMassFrac: 0.015,
+        ringed,
+        ringInnerKm: ringed ? Math.round(rKm * 1.42) : 0,
+        ringOuterKm: ringed ? Math.round(rKm * 2.10) : 0,
+        tempK: Math.max(95, tEqK + 42),
+        centralP: Math.round((160 + mE * 22) * 1e9),
+        coreZ: 14, mantleZ: 8, surfZ: 1,
+        composition: `Silicate/H₂O High-P Core · Dense H₂/He–H₂O Envelope (${mE.toFixed(1)} M⊕)`
+      };
+    } else if (archetype === 'titan-world') {
+      const mE = gpuMassE ? Math.max(0.18, Math.min(5.0, gpuMassE)) : (0.35 + rand() * 1.8);
+      const rKm = Math.round(4200 + Math.pow(mE, 0.29) * 2600);
+      const pSurf = Math.round((1.1 + rand() * 2.8) * 101325);
+      spec = {
+        name: `${baseLabel} (Titan Haze World)`,
+        planetClass: 'titan-world',
+        subtitle: `Photochemical N₂/CH₄ Haze & Hydrocarbon Sea World · ${aAu.toFixed(2)} AU`,
+        kind: 1,
+        massSolar: mE * EARTH_MASS_SOLAR,
+        radiusKm: rKm,
+        color0: [0.86, 0.62, 0.28],
+        color1: [0.46, 0.30, 0.14],
+        atm: 0.82,
+        surfacePressurePa: pSurf,
+        volatileMassFrac: Number((0.14 + rand() * 0.12).toFixed(3)),
+        particulateMassFrac: 0.072,
+        tempK: Math.max(76, Math.min(138, Math.round(tEqK + 14))),
+        centralP: Math.round((45 + mE * 68) * 1e9),
+        coreZ: 14, mantleZ: 8, surfZ: 6,
+        composition: `Silicate Core · H₂O Ice Mantle · Liquid CH₄/C₂H₆ Seas · N₂ ${(pSurf / 1e5).toFixed(1)} bar Tholin Haze (${mE.toFixed(1)} M⊕)`
+      };
+    } else if (archetype === 'cryo-ocean-world') {
+      const mE = gpuMassE ? Math.max(0.16, Math.min(5.5, gpuMassE)) : (0.32 + rand() * 2.1);
+      const rKm = Math.round(3800 + Math.pow(mE, 0.29) * 2700);
+      const pSurf = Math.round((0.02 + rand() * 0.35) * 101325);
+      spec = {
+        name: `${baseLabel} (Cryo-Ocean World)`,
+        planetClass: 'cryo-ocean-world',
+        subtitle: `Fractured Ice Shell & Subsurface Hydrothermal Ocean · ${aAu.toFixed(2)} AU`,
         kind: 3,
         massSolar: mE * EARTH_MASS_SOLAR,
         radiusKm: rKm,
-        color0: [0.78, 0.84, 0.90],
-        color1: [0.46, 0.56, 0.68],
-        atm: 0.04,
-        surfacePressurePa: 0,
-        volatileMassFrac: 0.0,
-        particulateMassFrac: 0.0,
-        tempK: Math.max(35, tEqK),
-        centralP: 5e9,
+        color0: [0.76, 0.88, 0.96],
+        color1: [0.36, 0.56, 0.74],
+        atm: 0.16,
+        surfacePressurePa: pSurf,
+        volatileMassFrac: Number((0.28 + rand() * 0.18).toFixed(3)),
+        particulateMassFrac: 0.008,
+        tempK: Math.max(78, Math.min(205, Math.round(tEqK + 18))),
+        centralP: Math.round((50 + mE * 72) * 1e9),
+        coreZ: 26, mantleZ: 8, surfZ: 8,
+        composition: `Silicate/Fe Core · Global Subsurface Liquid H₂O Ocean · Tectonic Cryo-Ice Shell (${mE.toFixed(1)} M⊕)`
+      };
+    } else {
+      // Outer-disk Kuiper/Pluto cryo dwarf planet
+      const mE = gpuMassE ? Math.max(0.015, Math.min(1.2, gpuMassE)) : (0.015 + rand() * 0.18);
+      const rKm = Math.round(1350 + Math.pow(mE, 0.29) * 1950);
+      const tholinTint = rand() * 0.22;
+      spec = {
+        name: `${baseLabel} (Cryo Dwarf)`,
+        planetClass: 'icy-dwarf',
+        subtitle: `Outer-Disk Volatile N₂/CO/CH₄ Ice World · ${aAu.toFixed(2)} AU`,
+        kind: 3,
+        massSolar: mE * EARTH_MASS_SOLAR,
+        radiusKm: rKm,
+        color0: [Number((0.76 + tholinTint * 0.5).toFixed(3)), Number((0.78 - tholinTint * 0.25).toFixed(3)), Number((0.86 - tholinTint * 0.55).toFixed(3))],
+        color1: [Number((0.44 + tholinTint * 0.4).toFixed(3)), Number((0.48 - tholinTint * 0.20).toFixed(3)), Number((0.60 - tholinTint * 0.40).toFixed(3))],
+        atm: 0.05,
+        surfacePressurePa: Math.round(rand() * 220),
+        volatileMassFrac: 0.35,
+        particulateMassFrac: 0.01,
+        tempK: Math.max(32, tEqK),
+        centralP: Math.round((5 + mE * 42) * 1e9),
         coreZ: 14, mantleZ: 8, surfZ: 8,
-        composition: `H₂O/N₂/CH₄ Ice Shell · Silicate Core`
+        composition: `H₂O/N₂/CH₄ Ice Shell · Silicate Core (${mE.toFixed(2)} M⊕)`
       };
     }
 
@@ -1016,6 +1117,22 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       }
       if (Number.isFinite(gpuB.radiusEarth) && gpuB.radiusEarth > 0) {
         spec.radiusKm = Math.max(1200, Math.round(gpuB.radiusEarth * 6371.0));
+      }
+      // Propagate continuous GPU-coalesced mineral/volatile composition into crust/surface/albedo (anti-pigeonhole!)
+      if (spec.kind === 1) {
+        const fe = Math.max(0, Math.min(1, Number(gpuB.feFrac) || 0.2));
+        const carb = Math.max(0, Math.min(1, Number(gpuB.carbonFrac) || 0.05));
+        const vol = Math.max(0, Math.min(1, Number(gpuB.volatileFrac) || 0.02));
+        if (spec.planetClass !== 'ocean-world') {
+          spec.volatileMassFrac = Number(Math.max(spec.volatileMassFrac || 0.005, vol).toFixed(4));
+        }
+        // Subtle continuous mineral color modulation from GPU Fe-oxide / graphite-carbon / silicate-ice inventory
+        const c0 = spec.color0 || [0.5, 0.45, 0.4];
+        spec.color0 = [
+          Number(Math.max(0.08, Math.min(0.96, c0[0] * (1.0 - carb * 0.35 + fe * 0.14))).toFixed(3)),
+          Number(Math.max(0.08, Math.min(0.96, c0[1] * (1.0 - carb * 0.38 - fe * 0.06))).toFixed(3)),
+          Number(Math.max(0.08, Math.min(0.96, c0[2] * (1.0 - carb * 0.25 + vol * 0.22))).toFixed(3))
+        ];
       }
       if (spec.ringed) {
         spec.ringInnerKm = Math.round(spec.radiusKm * 1.32);
@@ -1049,6 +1166,40 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
     const coalescedM0Deg = hasGpuPhi
       ? Number((((-gpuB.phiRad * 180.0 / Math.PI) % 360.0 + 360.0) % 360.0).toFixed(2))
       : Number((rand() * 360).toFixed(1));
+    const isGiant = archetype === 'gas-giant' || archetype === 'ice-giant' || archetype === 'sub-neptune';
+    const coalescedComp = gpuB ? Object.freeze({
+      feFrac: gpuB.feFrac,
+      silicateFrac: gpuB.silicateFrac,
+      carbonFrac: gpuB.carbonFrac,
+      h2oIceFrac: Math.max(gpuB.h2oIceFrac || 0, spec.planetClass === 'ocean-world' ? (spec.volatileMassFrac || 0.085) : 0),
+      superVolFrac: gpuB.superVolFrac,
+      volatileFrac: Math.max(gpuB.volatileFrac || 0, spec.volatileMassFrac || 0),
+      gasEnvelopeFrac: gpuB.gasEnvelopeFrac,
+      tEqK: gpuB.tEqK,
+      starFluxWM2: gpuB.starFluxWM2,
+      gpuCoalesced: true
+    }) : Object.freeze({
+      feFrac: spec.coreZ === 26 ? 0.32 : 0.16,
+      silicateFrac: spec.mantleZ === 14 ? 0.54 : 0.26,
+      carbonFrac: spec.mantleZ === 6 ? 0.48 : 0.08,
+      h2oIceFrac: beyondSnow ? 0.45 : (spec.volatileMassFrac || 0.02),
+      superVolFrac: beyondCo ? 0.28 : 0.0,
+      volatileFrac: beyondSnow ? 0.62 : (spec.volatileMassFrac || 0.02),
+      gasEnvelopeFrac: (archetype === 'gas-giant' || archetype === 'hot-jupiter') ? 0.78 : (archetype === 'ice-giant' ? 0.22 : (archetype === 'sub-neptune' ? 0.14 : 0.0)),
+      tEqK,
+      starFluxWM2,
+      gpuCoalesced: false
+    });
+    const pbrOptics = resolvePlanetarySurfacePbrOptics({
+      surfZ: spec.surfZ,
+      feFrac: coalescedComp.feFrac,
+      silicateFrac: coalescedComp.silicateFrac,
+      carbonFrac: coalescedComp.carbonFrac,
+      volatileFrac: coalescedComp.volatileFrac,
+      isMetallicAsteroid: false,
+      isOceanic: spec.planetClass === 'earth-like' || spec.planetClass === 'ocean-world' || spec.planetClass === 'titan-world',
+      isIcy: spec.kind === 3 || spec.planetClass === 'cryo-ocean-world' || spec.planetClass === 'icy-dwarf'
+    });
     catalog.push({
       id: `planet-${p}`,
       parent: planetParentIdx,
@@ -1065,35 +1216,13 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
       civTechK,
       hostStarTeffK: stars[0]?.effectiveTempK || 5778,
       starFluxWM2,
-      coalescedComposition: gpuB ? Object.freeze({
-        feFrac: gpuB.feFrac,
-        silicateFrac: gpuB.silicateFrac,
-        carbonFrac: gpuB.carbonFrac,
-        h2oIceFrac: Math.max(gpuB.h2oIceFrac || 0, spec.planetClass === 'ocean-world' ? (spec.volatileMassFrac || 0.085) : 0),
-        superVolFrac: gpuB.superVolFrac,
-        volatileFrac: Math.max(gpuB.volatileFrac || 0, spec.volatileMassFrac || 0),
-        gasEnvelopeFrac: gpuB.gasEnvelopeFrac,
-        tEqK: gpuB.tEqK,
-        starFluxWM2: gpuB.starFluxWM2,
-        gpuCoalesced: true
-      }) : Object.freeze({
-        feFrac: spec.coreZ === 26 ? 0.32 : 0.16,
-        silicateFrac: spec.mantleZ === 14 ? 0.54 : 0.26,
-        carbonFrac: spec.mantleZ === 6 ? 0.48 : 0.08,
-        h2oIceFrac: beyondSnow ? 0.45 : (spec.volatileMassFrac || 0.02),
-        superVolFrac: beyondCo ? 0.28 : 0.0,
-        volatileFrac: beyondSnow ? 0.62 : (spec.volatileMassFrac || 0.02),
-        gasEnvelopeFrac: (archetype === 'gas-giant' || archetype === 'hot-jupiter') ? 0.78 : (archetype === 'ice-giant' ? 0.22 : 0.0),
-        tEqK,
-        starFluxWM2,
-        gpuCoalesced: false
-      }),
+      coalescedComposition: coalescedComp,
+      pbrOptics,
       ...spec
     });
     planetIndices.push(bodyIdx);
 
     // Dynamically generate natural satellites for Gas/Ice Giants & large habitable worlds!
-    const isGiant = archetype === 'gas-giant' || archetype === 'ice-giant';
     const nMoons = isGiant ? (1 + Math.floor(rand() * 2.4)) : ((archetype === 'earth-like' || archetype === 'ocean-super-earth') && rand() < 0.65 ? 1 : 0);
     for (let m = 0; m < nMoons; m += 1) {
       const mRadKm = isGiant ? Math.round(1450 + rand() * 1350) : Math.round(1150 + rand() * 850);
@@ -1120,7 +1249,16 @@ export function synthesizeNebularPlanetarySystem(starSystem, { seedOverride = nu
         spinAxisLonDeg,
         rotationPeriodHr: Number((8766.0 * Math.sqrt(Math.pow(aMoonAu, 3.0) / Math.max(1e-9, spec.massSolar))).toFixed(2)),
         tidallyLocked: true,
+        civTechK: 0.0,
         hostStarTeffK: stars[0]?.effectiveTempK || 5778,
+        pbrOptics: resolvePlanetarySurfacePbrOptics({
+          surfZ: isVolcanicMoon ? 16 : (isHazyMoon ? 6 : (beyondSnow ? 8 : 14)),
+          feFrac: beyondSnow ? 0.08 : 0.24,
+          silicateFrac: beyondSnow ? 0.32 : 0.72,
+          carbonFrac: isHazyMoon ? 0.25 : 0.04,
+          volatileFrac: beyondSnow ? 0.60 : 0.01,
+          isIcy: beyondSnow && !isVolcanicMoon && !isHazyMoon
+        }),
         color0: isHazyMoon ? [0.86, 0.68, 0.34] : (isVolcanicMoon ? [0.92, 0.80, 0.30] : (beyondSnow ? [0.84, 0.86, 0.90] : [0.66, 0.65, 0.63])),
         color1: isHazyMoon ? [0.62, 0.44, 0.20] : (isVolcanicMoon ? [0.68, 0.44, 0.14] : (beyondSnow ? [0.54, 0.66, 0.78] : [0.40, 0.39, 0.38])),
         atm: isHazyMoon ? 0.78 : 0.0,

@@ -147,6 +147,51 @@ export function evaluatePlanetaryGeodynamo({
 }
 
 /**
+ * First-principles Jeans thermal + XUV energy-limited atmospheric escape evaluator:
+ *   - Jeans parameter: lambda_J = G M m / (k_B T_exo R)
+ *   - Energy-limited XUV hydrodynamic mass-loss rate:
+ *       M_dot_XUV = (eps * pi * R^3 * F_XUV) / (G * M) * magneticShieldFactor
+ *   - Strictly zero magnetospheric aurora & unshielded ion pickup when bEquatorialT == 0.
+ */
+export function evaluateAtmosphericEscapeState({
+  radiusM = 6.371e6,
+  massKg = 5.972e24,
+  exobaseTempK = 1000.0,
+  meanMolarMassKgPerMol = 0.029,
+  xuvFluxEarth = 1.0,
+  bEquatorialT = 3.1e-5,
+  surfacePressurePa = 101325.0
+} = {}) {
+  const G = 6.67430e-11;
+  const kB = 1.380649e-23;
+  const N_A = 6.02214076e23;
+  const R = Math.max(1e3, Number(radiusM) || 6.371e6);
+  const M = Math.max(1e15, Number(massKg) || 5.972e24);
+  const T = Math.max(20.0, Number(exobaseTempK) || 1000.0);
+  const mMol = Math.max(0.001, Number(meanMolarMassKgPerMol) || 0.029) / N_A;
+  const jeansLambda = (G * M * mMol) / Math.max(1e-30, kB * T * R);
+  const jeansLambdaH = (G * M * (0.001008 / N_A)) / Math.max(1e-30, kB * T * R);
+  const fXuvWPerM2 = Math.max(0.0, Number(xuvFluxEarth) || 1.0) * 4.64e-3; // Solar XUV at 1 AU ~= 4.64 mW/m^2
+  const bT = Math.max(0.0, Number(bEquatorialT) || 0.0);
+  const magneticShieldFactor = bT > 1e-6 ? Math.max(0.18, 1.0 / (1.0 + (bT / 1.5e-5))) : 1.0;
+  const xuvEfficiency = 0.15;
+  const hasAtmo = Math.max(0, Number(surfacePressurePa) || 0) >= 1.0;
+  const xuvMassLossKgPerS = hasAtmo
+    ? ((xuvEfficiency * Math.PI * R * R * R * fXuvWPerM2) / Math.max(1e6, G * M)) * magneticShieldFactor
+    : 0.0;
+  const jeansBlowoff = hasAtmo && jeansLambda < 12.0;
+  return Object.freeze({
+    schema: 'ulg.astrophysics.atmospheric-escape.v1',
+    jeansLambda,
+    jeansLambdaH,
+    jeansBlowoff,
+    xuvMassLossKgPerS,
+    magneticShieldFactor,
+    escapeRegime: !hasAtmo ? 'vacuum' : (jeansBlowoff ? 'hydrodynamic-blowoff' : (xuvMassLossKgPerS > 1e4 ? 'xuv-stripping' : 'retained'))
+  });
+}
+
+/**
  * Dynamic Law-Graph activation predicate for spherical fluid atmosphere,
  * particulate triboelectricity, Paschen breakdown, and core geodynamo laws.
  * Strictly driven by physical state actually present (ZERO body/planet-type hacks!).
@@ -857,14 +902,33 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
   const wgY = Math.ceil(H / 8);
 
   let liveDynamoFieldScale = 1.0;
+  let liveSolarWindPressureNPa = phys.solarWindPressureNPa ?? 2.0;
+  let liveCmeShockBoost = 0.0;
+  let liveFlareXuvFluxMul = 1.0;
+  let liveDysonTransmittedFluxFrac = 1.0;
 
   function writeUniforms(dtSim, sunDir) {
     // Normalize Paschen breakdown threshold to simulation dimensionless electric field scale
     // Low-pressure CO2 worlds (Mars ~22 kV/m) break down at lower E_crit_norm than 1-bar Earth (~260 kV/m)!
     const eCritNorm = Math.max(0.36, Math.min(2.2, Math.pow(phys.eCritVPerM / 2.6e5, 0.45) * 1.10));
     const chargeGain = 2.15;
+    const effSolarWindNPa = Math.max(0.05, liveSolarWindPressureNPa * (1.0 + liveCmeShockBoost * 3.5));
+    // Recompute live Chapman-Ferraro magnetopause standoff & auroral oval latitude under CME/solar-wind forcing
+    const bEqLive = (phys.dynamo?.bEquatorialT ?? 0) * liveDynamoFieldScale;
+    const mu0 = 4 * Math.PI * 1e-7;
+    const pSwPa = effSolarWindNPa * 1e-9;
+    const rMpLive = bEqLive > 1e-7
+      ? Math.pow(Math.max(1.0, (bEqLive * bEqLive) / (2 * mu0 * pSwPa)), 1 / 6)
+      : 1.0;
+    const auroralLatLive = bEqLive > 1e-7
+      ? Math.acos(Math.sqrt(Math.min(0.95, 1.0 / Math.max(1.05, rMpLive))))
+      : (phys.dynamo?.auroralLatRad ?? 1.18);
     const baseAurStr = phys.dynamo?.auroralStrength ?? 0.65;
-    const effAurStr = Math.max(0.0, Math.min(2.2, baseAurStr * liveDynamoFieldScale));
+    // Preserve exact null limit: unmagnetized vacuum/dead-core worlds stay strictly 0!
+    const effAurStr = bEqLive > 1e-7
+      ? Math.max(0.0, Math.min(2.6, baseAurStr * liveDynamoFieldScale * (1.0 + liveCmeShockBoost * 1.45)))
+      : 0.0;
+    const effEqTempK = Math.max(20.0, phys.eqTempK * Math.pow(Math.max(0.008, liveDysonTransmittedFluxFrac), 0.25));
     const ab = new ArrayBuffer(80);
     new Uint32Array(ab, 0, 4).set([W, H, stepIndex, triboEnabled ? 1 : 0]);
     new Float32Array(ab, 16, 16).set([
@@ -872,18 +936,18 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
       phys.gravityMps2,
       phys.rotationOmegaRadS,
       dtSim,
-      phys.eqTempK,
+      effEqTempK,
       phys.volatileCloudFrac,
       phys.dustAvailability,
       phys.atmWeight,
       eCritNorm,
       chargeGain,
-      phys.dynamo?.auroralLatRad ?? 1.18,
+      auroralLatLive,
       effAurStr,
       sunDir[0],
       sunDir[1],
       sunDir[2],
-      phys.solarWindPressureNPa ?? 2.0
+      effSolarWindNPa
     ]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
   }
@@ -897,11 +961,27 @@ export function createPlanetaryAtmosphereElectricSessionWebGpu(device, {
     substeps = 2,
     sunDir = [0.65, 0.28, 0.70],
     dynamoScale = null,
+    solarWindPressureNPa = null,
+    cmeShockBoost = null,
+    flareXuvFluxMul = null,
+    dysonTransmittedFluxFrac = null,
     readTelemetry = true
   } = {}) {
     if (disposed) return lastTelemetry;
     if (dynamoScale != null && Number.isFinite(Number(dynamoScale))) {
       liveDynamoFieldScale = Math.max(0.0, Math.min(2.4, Number(dynamoScale)));
+    }
+    if (solarWindPressureNPa != null && Number.isFinite(Number(solarWindPressureNPa))) {
+      liveSolarWindPressureNPa = Math.max(0.02, Math.min(500.0, Number(solarWindPressureNPa)));
+    }
+    if (cmeShockBoost != null && Number.isFinite(Number(cmeShockBoost))) {
+      liveCmeShockBoost = Math.max(0.0, Math.min(8.0, Number(cmeShockBoost)));
+    }
+    if (flareXuvFluxMul != null && Number.isFinite(Number(flareXuvFluxMul))) {
+      liveFlareXuvFluxMul = Math.max(0.1, Math.min(1000.0, Number(flareXuvFluxMul)));
+    }
+    if (dysonTransmittedFluxFrac != null && Number.isFinite(Number(dysonTransmittedFluxFrac))) {
+      liveDysonTransmittedFluxFrac = Math.max(0.008, Math.min(1.0, Number(dysonTransmittedFluxFrac)));
     }
     const nSub = Math.max(1, Math.min(8, Math.trunc(substeps)));
     const dtSafe = Math.max(0.005, Math.min(0.08, Number(dtSim) || 0.045));

@@ -2035,7 +2035,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
   const telReadBuf = device.createBuffer({ label: `${label}-tel-rd`, size: 16, usage: GPU_BUF.MAP_READ | GPU_BUF.COPY_DST });
 
   // Vehicle + Procedural Xenobiology solid mesh buffer + Translucent FX buffer
-  const MAX_VEHICLE_VERTS = 65536;
+  const MAX_VEHICLE_VERTS = 131072;
   const MAX_FX_VERTS = 24576;
   const vehicleVertBuf = device.createBuffer({ label: `${label}-veh-verts`, size: MAX_VEHICLE_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
   const fxVertBuf = device.createBuffer({ label: `${label}-fx-verts`, size: MAX_FX_VERTS * 48, usage: GPU_BUF.VERTEX | GPU_BUF.COPY_DST });
@@ -2321,18 +2321,19 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       if (!sp?.developmentalGenome || !key || seenKeys.has(key)) continue;
       seenKeys.add(key);
       uniqueSpecies.push({ key, sp });
-      if (uniqueSpecies.length >= 8) break;
+      if (uniqueSpecies.length >= 16) break;
     }
     (async () => {
       for (const { key, sp } of uniqueSpecies) {
         if (disposed) break;
         try {
-          const isAerialOrSwim = sp.medium === 'aerial' || sp.medium === 'buoyant' || sp.medium === 'aquatic';
+          const isAerialOrSwim = sp.medium === 'aerial' || sp.medium === 'buoyant' || sp.medium === 'aquatic'
+            || sp.developmentalGenome?.medium === 'aerial' || sp.developmentalGenome?.medium === 'buoyant' || sp.developmentalGenome?.medium === 'aquatic';
           const baked = await bakeOrganismMeshWebGpu(device, sp.developmentalGenome, {
-            gridDim: 20,
-            turingDim: 14,
-            turingSteps: 16,
-            maxVerts: 540,
+            gridDim: 24,
+            turingDim: 20,
+            turingSteps: 28,
+            maxVerts: 4200,
             scaleOut: sp.kingdom === 'flora' ? 1.15 : 0.95,
             offset: [0, isAerialOrSwim ? 0.25 : 0.72, 0],
             formatMode: 0
@@ -2574,7 +2575,7 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
       startPos = computeUfoRimEmitPoint(ufo.pos, uRight, uFwd, UFO_RADIUS_M + 0.35, target);
     }
     const dir = normalize3([target[0] - startPos[0], target[1] - startPos[1], target[2] - startPos[2]]);
-    const spd = 115.0;
+    const spd = 215.0;
     const m = {
       pos: [...startPos],
       vel: Array.isArray(vel) ? [...vel] : [dir[0] * spd + ufo.vel[0] * 0.35, dir[1] * spd, dir[2] * spd + ufo.vel[2] * 0.35],
@@ -3264,8 +3265,8 @@ export function createPlanetarySurfaceSessionWebGpu(device, {
         const tz = m.target[2] - m.pos[2];
         const dT = Math.hypot(tx, ty, tz);
         if (dT > 1.5) {
-          const desiredSpd = 128.0;
-          const steer = Math.min(1.0, dtSafe * 7.5);
+          const desiredSpd = 235.0;
+          const steer = Math.min(1.0, dtSafe * 8.5);
           m.vel[0] += ((tx / dT) * desiredSpd - m.vel[0]) * steer;
           m.vel[1] += ((ty / dT) * desiredSpd - m.vel[1]) * steer;
           m.vel[2] += ((tz / dT) * desiredSpd - m.vel[2]) * steer;

@@ -655,6 +655,7 @@ export function buildLifeLabXenobiologyUrl(profile, mode = 'organism-overview', 
     if (specimen.fasta) q.set('fasta', String(specimen.fasta));
     if (Array.isArray(specimen.primaryRgb)) q.set('rgb1', specimen.primaryRgb.map((c) => c.toFixed(2)).join(','));
     if (Array.isArray(specimen.secondaryRgb)) q.set('rgb2', specimen.secondaryRgb.map((c) => c.toFixed(2)).join(','));
+    if (Array.isArray(specimen.accentRgb)) q.set('rgb3', specimen.accentRgb.map((c) => c.toFixed(2)).join(','));
     if (Array.isArray(specimen.biolumRgb)) q.set('biolum', specimen.biolumRgb.map((c) => c.toFixed(2)).join(','));
     if (Number.isFinite(specimen.biolumIntensity)) q.set('bioStr', String(specimen.biolumIntensity));
     if (Number.isFinite(specimen.latDeg)) q.set('lat', String(specimen.latDeg));
@@ -726,24 +727,34 @@ export function parseXenobiologyFromSearch(search = '') {
     } catch {}
   }
 
+  const primaryRgb = parsedGenome?.colors?.primaryRgb || parseRgbCsv(sp.get('rgb1')) || matchedClade?.primaryRgb || baseProfile.pigmentRgb;
+  const secondaryRgb = parsedGenome?.colors?.secondaryRgb || parseRgbCsv(sp.get('rgb2')) || matchedClade?.secondaryRgb || [0.55, 0.45, 0.34];
+  const accentRgb = parsedGenome?.colors?.accentRgb || parseRgbCsv(sp.get('rgb3')) || matchedClade?.accentRgb || [0.95, 0.82, 0.32];
+  const biolumRgb = parsedGenome?.colors?.biolumRgb || parseRgbCsv(sp.get('biolum')) || matchedClade?.biolumRgb || [0.24, 0.96, 0.76];
+  const biolumIntensity = Number.isFinite(parsedGenome?.colors?.biolumIntensity)
+    ? parsedGenome.colors.biolumIntensity
+    : (Number.isFinite(Number(sp.get('bioStr'))) ? Number(sp.get('bioStr')) : (matchedClade?.biolumIntensity ?? 0.25));
+
+  const resolvedKingdom = parsedGenome?.kingdom || specimenKind || matchedClade?.kingdom || 'fauna';
   const abductedSpecimen = species
     ? Object.freeze({
       ...(matchedClade || {}),
       id: `abducted-${seed}`,
-      seed,
-      kind: specimenKind || matchedClade?.kingdom || 'fauna',
-      kingdom: specimenKind || matchedClade?.kingdom || 'fauna',
+      seed: parsedGenome?.seed ?? seed,
+      kind: resolvedKingdom,
+      kingdom: resolvedKingdom,
       bodyPlan: bodyPlan || matchedClade?.bodyPlan || 'quadruped-cursorial',
       speciesName: species,
-      morphClass: morph || parsedGenome?.morphDescriptor || matchedClade?.morphClass || (specimenKind === 'flora' ? 'Vascular Flora' : (specimenKind === 'fungi' ? 'Mycelial Fungi' : 'Motile Fauna')),
+      morphClass: morph || parsedGenome?.morphDescriptor || matchedClade?.morphClass || (resolvedKingdom === 'flora' ? 'Vascular Flora' : (resolvedKingdom === 'fungi' ? 'Mycelial Fungi' : 'Motile Fauna')),
       developmentalGenome: parsedGenome,
       worldName,
       solvent: baseProfile.solvent,
       solventFormula: baseProfile.solventFormula,
-      primaryRgb: parseRgbCsv(sp.get('rgb1')) || matchedClade?.primaryRgb || baseProfile.pigmentRgb,
-      secondaryRgb: parseRgbCsv(sp.get('rgb2')) || matchedClade?.secondaryRgb || [0.55, 0.45, 0.34],
-      biolumRgb: parseRgbCsv(sp.get('biolum')) || matchedClade?.biolumRgb || [0.24, 0.96, 0.76],
-      biolumIntensity: Number.isFinite(Number(sp.get('bioStr'))) ? Number(sp.get('bioStr')) : (matchedClade?.biolumIntensity ?? 0.25),
+      primaryRgb,
+      secondaryRgb,
+      accentRgb,
+      biolumRgb,
+      biolumIntensity,
       fasta: fasta || matchedClade?.fasta || baseProfile.labParams.foldSeq,
       tempK: Math.round(T),
       gravityMS2: g,

@@ -96,13 +96,134 @@ const GPU_BUF = Object.freeze({
 });
 
 export const DEFORM_GRID_N = 128;
-export const DEFORM_PATCH_HALF_M = 384.0; // Covers [-384 m .. +384 m] in world XZ!
+export const DEFORM_PATCH_HALF_M = 384.0; // Covers [-384 m .. +384 m] per active chunk in world XZ!
+export const DEFORM_CHUNK_SIZE_M = DEFORM_PATCH_HALF_M * 2.0; // 768 m per planet-wide streaming chunk
+export const DEFORM_CHUNK_SLOTS = 9; // 3x3 sliding window of active chunks around craft
 const MPM_GX = 32;
 const MPM_GY = 24;
 const MPM_GZ = 32;
 const MPM_MAX_POINTS = 2048;
 const MAX_BOULDERS = 64;
 export const MAX_CRATER_STAMPS = 512;
+
+export function worldXZToDeformChunkCoord(x, z, chunkSizeM = DEFORM_CHUNK_SIZE_M) {
+  const sz = Math.max(64.0, Number(chunkSizeM) || DEFORM_CHUNK_SIZE_M);
+  return {
+    cx: Math.floor((Number(x) + sz * 0.5) / sz),
+    cz: Math.floor((Number(z) + sz * 0.5) / sz)
+  };
+}
+
+/**
+ * Sparse planet-wide 3x3 deformable terrain chunk LRU manager:
+ *   - Tracks active 768 m x 768 m chunks `(cx, cz)` around the craft/camera.
+ *   - Keeps chunk `(0, 0)` aligned to `[-384..+384] m` for 100% compatibility.
+ *   - Persists evicted dirty chunks via `onEvictChunk(chunkKey, stamps)` and loads
+ *     newly entered chunks via `onLoadChunk(chunkKey)`.
+ */
+export function createSparseDeformChunkLruManager({
+  maxSlots = DEFORM_CHUNK_SLOTS,
+  chunkSizeM = DEFORM_CHUNK_SIZE_M,
+  onEvictChunk = null,
+  onLoadChunk = null
+} = {}) {
+  const slots = new Map(); // key "cx,cz" -> { cx, cz, key, stamps, dirty, lastUsedTick }
+  let tick = 0;
+  let centerChunk = { cx: 0, cz: 0 };
+
+  const keyOf = (cx, cz) => `${cx},${cz}`;
+
+  function ensureChunk(cx, cz) {
+    const key = keyOf(cx, cz);
+    tick += 1;
+    let rec = slots.get(key);
+    if (rec) {
+      rec.lastUsedTick = tick;
+      return rec;
+    }
+    if (slots.size >= maxSlots) {
+      // Evict least-recently-used chunk furthest from centerChunk
+      let victimKey = null;
+      let victimTick = Infinity;
+      for (const [k, v] of slots.entries()) {
+        if (Math.abs(v.cx - centerChunk.cx) <= 1 && Math.abs(v.cz - centerChunk.cz) <= 1) continue;
+        if (v.lastUsedTick < victimTick) {
+          victimTick = v.lastUsedTick;
+          victimKey = k;
+        }
+      }
+      if (!victimKey) {
+        for (const [k, v] of slots.entries()) {
+          if (v.lastUsedTick < victimTick) {
+            victimTick = v.lastUsedTick;
+            victimKey = k;
+          }
+        }
+      }
+      if (victimKey) {
+        const evicted = slots.get(victimKey);
+        slots.delete(victimKey);
+        if (evicted?.dirty && typeof onEvictChunk === 'function') {
+          onEvictChunk(evicted.key, evicted.stamps.map((s) => ({ ...s })), { cx: evicted.cx, cz: evicted.cz });
+        }
+      }
+    }
+    const loaded = typeof onLoadChunk === 'function' ? onLoadChunk(key, { cx, cz }) : null;
+    rec = {
+      cx,
+      cz,
+      key,
+      stamps: Array.isArray(loaded) ? loaded.map((s) => ({ ...s })) : [],
+      dirty: false,
+      lastUsedTick: tick
+    };
+    slots.set(key, rec);
+    return rec;
+  }
+
+  function updateCenterWorldXZ(x, z) {
+    const next = worldXZToDeformChunkCoord(x, z, chunkSizeM);
+    const changed = next.cx !== centerChunk.cx || next.cz !== centerChunk.cz;
+    centerChunk = next;
+    for (let dz = -1; dz <= 1; dz += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        ensureChunk(centerChunk.cx + dx, centerChunk.cz + dz);
+      }
+    }
+    return { ...centerChunk, changed, activeChunkCount: slots.size };
+  }
+
+  function recordStamp(stamp) {
+    const coord = worldXZToDeformChunkCoord(stamp?.x ?? 0, stamp?.z ?? 0, chunkSizeM);
+    const rec = ensureChunk(coord.cx, coord.cz);
+    rec.stamps.push({ ...stamp });
+    if (rec.stamps.length > MAX_CRATER_STAMPS) rec.stamps.shift();
+    rec.dirty = true;
+    return rec.key;
+  }
+
+  function getActiveStampsInWindow() {
+    const out = [];
+    for (const rec of slots.values()) {
+      for (const s of rec.stamps) out.push(s);
+    }
+    return out;
+  }
+
+  // Seed initial origin chunk (0, 0)
+  ensureChunk(0, 0);
+
+  return Object.freeze({
+    chunkSizeM,
+    maxSlots,
+    updateCenterWorldXZ,
+    recordStamp,
+    getActiveStampsInWindow,
+    getCenterChunk: () => ({ ...centerChunk }),
+    getActiveChunkKeys: () => [...slots.keys()],
+    getActiveChunkCount: () => slots.size
+  });
+}
 
 function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 function normalize3(v) {

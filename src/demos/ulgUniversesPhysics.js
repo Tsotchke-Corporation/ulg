@@ -58,7 +58,9 @@ import {
   createRadiativePhotoionizationWindSessionWebGpu
 } from '../runtime/astrophysics/radiativePhotoionizationWindGpu.js';
 import {
-  createTidalRocheDisruptionSessionWebGpu
+  createTidalRocheDisruptionSessionWebGpu,
+  evaluatePlanetaryDisruptionBudget,
+  evaluateRocheAndTidalHeating
 } from '../runtime/astrophysics/tidalRocheDisruptionGpu.js';
 import {
   build2LptCosmologyICsWebGpu,
@@ -1476,6 +1478,16 @@ export function createUlgUniversesPhysics(device, {
     activeSchroederChartId = cid;
     schroederAtlasRuntime.setChartOccupancy(cid, Math.max(1, Math.round(Math.abs(log10SpanM) * 10)));
     return getSchroederAtlasSnapshot();
+  }
+
+  function publishScaleBoundaryFlux(levelKey, flux = {}) {
+    const cid = ensureSchroederKeyChart(levelKey);
+    return schroederAtlasRuntime.publishChartBoundaryFlux(cid, flux);
+  }
+
+  function getInheritedScaleBoundaryFlux(levelKey = activeSchroederKey) {
+    const cid = ensureSchroederKeyChart(levelKey);
+    return schroederAtlasRuntime.resolveInheritedBoundaryFlux(cid);
   }
 
   function getSchroederAtlasSnapshot() {
@@ -2967,6 +2979,35 @@ export function createUlgUniversesPhysics(device, {
     tidalRocheSession = next;
   }
 
+  async function nudgeBodyInsideRoche(bodyIndex = focusedSolarBodyIndex) {
+    const cat = getActiveSystemCatalog();
+    const spec = cat[bodyIndex];
+    if (!spec || spec.isStar || bodyIndex <= 0) return null;
+    const hostIdx = Math.max(0, Number(spec.parent) || 0);
+    const hostSpec = cat[hostIdx] || cat[0];
+    const roche = evaluateRocheAndTidalHeating({
+      hostMassKg: (Number(hostSpec?.massSolar) || 1.0) * 1.98847e30,
+      hostRadiusM: (Number(hostSpec?.radiusKm) || 696340) * 1000,
+      bodyMassKg: (Number(spec.massSolar) || 3e-6) * 1.98847e30,
+      bodyRadiusM: (Number(spec.radiusKm) || 1737) * 1000,
+      orbitalRadiusM: 0.72 * 2.44 * ((Number(hostSpec?.radiusKm) || 696340) * 1000),
+      eccentricity: Math.max(0.08, Number(spec.e) || 0.08)
+    });
+    await initTidalRocheL2('roche-rings');
+    return Object.freeze({ bodyId: spec.id, hostId: hostSpec?.id || 'star', ...roche, nudgedInsideRoche: true });
+  }
+
+  function evaluateDisruptionForBody(bodyIndex = focusedSolarBodyIndex, energyInputJ = 0) {
+    const cat = getActiveSystemCatalog();
+    const spec = cat[bodyIndex];
+    if (!spec) return null;
+    return evaluatePlanetaryDisruptionBudget({
+      bodyMassKg: (Number(spec.massSolar) || 3.003e-6) * 1.98847e30,
+      bodyRadiusM: (Number(spec.radiusKm) || 6371) * 1000,
+      energyInputJ
+    });
+  }
+
   async function triggerCatastrophicShatter(bodySpec = null, { excessRatio = 1.6 } = {}) {
     const prev = tidalRocheSession;
     tidalRocheSession = null;
@@ -4212,13 +4253,35 @@ export function createUlgUniversesPhysics(device, {
               livePlanDynamoScale = Math.max(0.25, Math.min(1.85, Math.sqrt(Math.max(0.02, planetaryDynamoTelemetry.magneticEnergy) / 0.18)));
             }
           }
-          // Dynamically step spherical baroclinic fluid + triboelectric lightning + LIVE GEODYNAMO AURORAE!
+          // Dynamically step spherical baroclinic fluid + triboelectric lightning + LIVE GEODYNAMO AURORAE
+          // driven by inherited SchroederScaleAtlas parent->child stellar wind / CME / Dyson / tidal fluxes!
           if (planetaryAtmoSession) {
+            const focSpecFlux = getActiveSystemCatalog()[planetaryBodyIndex];
+            const hostSpecFlux = getActiveSystemCatalog()[Math.max(0, Number(focSpecFlux?.parent) || 0)] || getActiveSystemCatalog()[0];
+            if (focSpecFlux && !focSpecFlux.isStar) {
+              const tidalInfo = evaluateRocheAndTidalHeating({
+                hostMassKg: (Number(hostSpecFlux?.massSolar) || 1.0) * 1.98847e30,
+                hostRadiusM: (Number(hostSpecFlux?.radiusKm) || 696340) * 1000,
+                bodyMassKg: (Number(focSpecFlux.massSolar) || 3e-6) * 1.98847e30,
+                bodyRadiusM: (Number(focSpecFlux.radiusKm) || 6371) * 1000,
+                orbitalRadiusM: Math.max(1e8, (Number(focSpecFlux.aAu) || 1.0) * 1.495978707e11),
+                eccentricity: Number(focSpecFlux.e) || 0.0167
+              });
+              publishScaleBoundaryFlux(4, {
+                tidalHeatingW: tidalInfo.tidalHeatingW,
+                tidalHeatFluxWPerM2: tidalInfo.surfaceHeatFluxWPerM2
+              });
+            }
+            const inheritedFlux = getInheritedScaleBoundaryFlux(4);
             planetaryAtmoTelemetry = await planetaryAtmoSession.step({
               dtSim: 0.038 * Math.max(0.15, Math.min(2.5, effScale)),
               substeps: 2,
               sunDir,
               dynamoScale: livePlanDynamoScale,
+              solarWindPressureNPa: inheritedFlux.stellarWindPressureNPa,
+              cmeShockBoost: inheritedFlux.cmeShockBoost,
+              flareXuvFluxMul: inheritedFlux.flareXuvFluxMul,
+              dysonTransmittedFluxFrac: inheritedFlux.dysonTransmittedFluxFrac,
               readTelemetry: true
             });
           }
@@ -5804,6 +5867,8 @@ export function createUlgUniversesPhysics(device, {
     flushSurfaceCraters,
     applyRemoteCraterStamp: (st) => surfaceSession?.applyRemoteCraterStamp?.(st) ?? false,
     triggerCatastrophicShatter,
+    nudgeBodyInsideRoche,
+    evaluateDisruptionForBody,
     getShatteredBodyIds: () => [...shatteredBodyIds],
     craterTileStore,
     setSurfaceVehicle,
@@ -5839,6 +5904,8 @@ export function createUlgUniversesPhysics(device, {
     getSolarReferenceOriginAu,
     getActiveUniversalLaws,
     syncSchroederScaleChart,
+    publishScaleBoundaryFlux,
+    getInheritedScaleBoundaryFlux,
     getSchroederAtlasSnapshot,
     get lawGraphValidation() { return lawGraphValidation; },
     getTargetsForLevel,

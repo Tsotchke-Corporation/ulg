@@ -661,11 +661,15 @@ fn cfd3d_advect_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
   u = u + du_cor * dt;
   w = w + dw_cor * dt;
 
-  // Baroclinic convective buoyancy from warm lower layers / moist latent heating!
+  // Baroclinic convective buoyancy from warm lower layers / moist latent heating
+  // + cross-scale SchroederScaleAtlas thermosphere CME storm drive (ground_sun.z) & tidal/geothermal heat (ground_sun.w)!
+  let cme_storm_drive = clamp(p.ground_sun.z, 0.0, 4.0);
+  let tidal_bottom_heat = clamp(p.ground_sun.w, 0.0, 2.5);
   let conv_wave = sin(x_norm * 12.5663706 + f32(p.flags.x) * 0.015) * cos(z_norm * 12.5663706 - f32(p.flags.x) * 0.011);
-  let lower_heat = (1.0 - smoothstep(0.06, 0.45, y_norm)) * (0.35 + 0.65 * max(0.0, conv_wave));
+  let lower_heat = (1.0 - smoothstep(0.06, 0.45, y_norm)) * (0.35 + 0.65 * max(0.0, conv_wave) + tidal_bottom_heat * 0.45);
+  let thermo_cme_heat = smoothstep(0.68, 0.98, y_norm) * cme_storm_drive * 0.42;
   let upper_cool = smoothstep(0.62, 0.96, y_norm) * 0.30;
-  theta = theta * exp(-0.32 * dt) + (lower_heat - upper_cool) * (0.85 * buoy_g * dt);
+  theta = theta * exp(-0.32 * dt) + (lower_heat + thermo_cme_heat - upper_cool) * (0.85 * buoy_g * dt);
   v = v + theta * (1.85 * buoy_g * dt);
 
   // Impermeable top/bottom boundary damping (prevents vertical blowup!)

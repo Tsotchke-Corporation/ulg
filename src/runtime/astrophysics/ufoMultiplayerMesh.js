@@ -618,12 +618,66 @@ export function advanceLogisticPopulation(N, K, ratePerSec, dtSec) {
   return Math.min(kCap, kCap / (1.0 + ratio * eTerm));
 }
 
+const SIGMA_SB_W_M2_K4 = 5.670374419e-8;
+
 export function computeDysonOpticalDepth(probeCount, collectorAreaM2 = 1.2e12, swarmRadiusM = 1.496e11) {
   const n = Math.max(0, Number(probeCount) || 0);
   const sphereArea = 4.0 * Math.PI * swarmRadiusM * swarmRadiusM;
   const fCover = clamp((n * collectorAreaM2) / Math.max(1, sphereArea), 0.0, 0.992);
   const tauDyson = -Math.log(Math.max(1e-4, 1.0 - fCover));
   return { fCover, tauDyson };
+}
+
+/**
+ * First-principles Kardashev II-III Dyson-swarm radiative energy balance:
+ *   - Intercepted stellar power P_abs = f_cover * L_*
+ *   - Outer-system transmitted optical flux fraction = (1 - f_cover)
+ *   - Waste-heat blackbody equilibrium temperature T_waste from Stefan-Boltzmann:
+ *       f_cover * L_* = 4 * pi * R_swarm^2 * f_cover * eps * sigma * T_waste^4
+ *       => T_waste = (L_* / (4 * pi * R_swarm^2 * eps * sigma))^(1/4)
+ *     (for 1 L_sun at 1 AU with eps = 0.9, T_waste ~= 286 K; at 0.35 AU, T_waste ~= 484 K!)
+ *   - Outer-world radiative equilibrium cooling factor = (1 - f_cover)^(1/4).
+ */
+export function evaluateDysonRadiativeBalance({
+  starLuminosityW = L_SOLAR_W,
+  swarmRadiusM = 1.496e11,
+  probeCount = 0,
+  collectorAreaM2 = 1.2e12,
+  fCoverOverride = null,
+  collectorEmissivity = 0.90,
+  carnotEfficiency = 0.42
+} = {}) {
+  const lumW = Math.max(1e20, Number(starLuminosityW) || L_SOLAR_W);
+  const rSwarm = Math.max(1e9, Number(swarmRadiusM) || 1.496e11);
+  const eps = clamp(Number(collectorEmissivity) || 0.90, 0.1, 1.0);
+  const eta = clamp(Number(carnotEfficiency) || 0.42, 0.05, 0.85);
+  const depth = computeDysonOpticalDepth(probeCount, collectorAreaM2, rSwarm);
+  const fCover = fCoverOverride != null && Number.isFinite(Number(fCoverOverride))
+    ? clamp(Number(fCoverOverride), 0.0, 0.992)
+    : depth.fCover;
+  const tauDyson = -Math.log(Math.max(1e-4, 1.0 - fCover));
+  const transmittedFluxFrac = clamp(1.0 - fCover, 0.008, 1.0);
+  const absorbedPowerW = lumW * fCover;
+  const harvestedWorkW = absorbedPowerW * eta;
+  const wasteHeatPowerW = absorbedPowerW; // Conservation of energy: harvested work also thermalizes as IR waste heat!
+  const fluxAtSwarm = lumW / (4.0 * Math.PI * rSwarm * rSwarm);
+  const wasteTempK = fCover > 1e-6
+    ? clamp(Math.pow(fluxAtSwarm / (eps * SIGMA_SB_W_M2_K4), 0.25), 40.0, 2600.0)
+    : 0.0;
+  const outerTempScale = Math.pow(transmittedFluxFrac, 0.25);
+  return Object.freeze({
+    schema: 'ulg.astrophysics.dyson-radiative-balance.v1',
+    fCover,
+    tauDyson,
+    transmittedFluxFrac,
+    absorbedPowerW,
+    harvestedWorkW,
+    wasteHeatPowerW,
+    wasteTempK,
+    outerTempScale,
+    swarmRadiusM: rSwarm,
+    scientificValidation: false
+  });
 }
 
 export function createKardashevProgressionState() {
@@ -640,6 +694,9 @@ export function createKardashevProgressionState() {
     activeSystemKey: 'sol',
     dysonCoveringFrac: 0.0,
     dysonTau: 0.0,
+    dysonTransmittedFluxFrac: 1.0,
+    dysonWasteTempK: 0.0,
+    dysonOuterTempScale: 1.0,
     reactorTier: 1,          // 1..5 -> dynamically lifts weapon power ceiling 1e12 -> 1e26 W!
     maxPowerW: TIER_MAX_POWER_W[0],
     shieldHp: 100,
@@ -680,11 +737,19 @@ export function createKardashevProgressionState() {
       if (sys.N_probes > 0) {
         colonized += 1;
         totalProbes += sys.N_probes;
-        const { fCover, tauDyson } = computeDysonOpticalDepth(sys.N_probes, 1.2e12, sys.swarmRadiusM);
-        sys.fCover = fCover;
-        sys.tauDyson = tauDyson;
+        const radBal = evaluateDysonRadiativeBalance({
+          starLuminosityW: sys.starLumW,
+          swarmRadiusM: sys.swarmRadiusM,
+          probeCount: sys.N_probes,
+          collectorAreaM2: 1.2e12
+        });
+        sys.fCover = radBal.fCover;
+        sys.tauDyson = radBal.tauDyson;
+        sys.transmittedFluxFrac = radBal.transmittedFluxFrac;
+        sys.wasteTempK = radBal.wasteTempK;
+        sys.outerTempScale = radBal.outerTempScale;
         // Thermodynamic Dyson capture (~42% Carnot conversion + baseline collector power per probe)
-        sys.dysonPowerW = sys.starLumW * fCover * 0.42 + sys.N_probes * 2.5e14;
+        sys.dysonPowerW = radBal.harvestedWorkW + sys.N_probes * 2.5e14;
         totalDysonPower += sys.dysonPowerW;
       }
     }
@@ -693,6 +758,9 @@ export function createKardashevProgressionState() {
     state.colonizedSystemCount = colonized;
     state.dysonCoveringFrac = activeSys ? activeSys.fCover : 0.0;
     state.dysonTau = activeSys ? activeSys.tauDyson : 0.0;
+    state.dysonTransmittedFluxFrac = activeSys ? (activeSys.transmittedFluxFrac ?? (1.0 - activeSys.fCover)) : 1.0;
+    state.dysonWasteTempK = activeSys ? (activeSys.wasteTempK ?? 0.0) : 0.0;
+    state.dysonOuterTempScale = activeSys ? (activeSys.outerTempScale ?? Math.pow(state.dysonTransmittedFluxFrac, 0.25)) : 1.0;
     const baseReactorW = 1.8e13 * Math.pow(35, state.reactorTier - 1);
     // Type III SMBH Penrose boost once >= 6 star systems have active Dyson swarms!
     const penroseW = colonized >= 6 ? Math.pow(10, 31 + Math.min(5, colonized * 0.45)) : 0;

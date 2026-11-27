@@ -102,15 +102,94 @@ export function createDynamicSchroederScaleAtlasRuntime({
     label: rootLabel
   });
 
-  // Map<chartId, { chart, occupancy, idleEpochs, createdEpoch, lastActiveEpoch }>
+  // Map<chartId, { chart, occupancy, idleEpochs, createdEpoch, lastActiveEpoch, boundaryFlux }>
   const entries = new Map();
   entries.set(0, {
     chart: rootChart,
     occupancy: 0,
     idleEpochs: 0,
     createdEpoch: 0,
-    lastActiveEpoch: 0
+    lastActiveEpoch: 0,
+    boundaryFlux: null
   });
+
+  /**
+   * Publish a physical boundary flux payload (stellar wind/CME/flare, Dyson
+   * transmission, orbital tidal heating Q_tidal, etc.) onto a chart so child
+   * charts in the Schroeder Scale Atlas inherit live parent forcing.
+   */
+  function publishChartBoundaryFlux(chartId, flux = {}) {
+    const entry = entries.get(chartId);
+    if (!entry) throw new RangeError(`Unknown chartId ${chartId}`);
+    const prev = entry.boundaryFlux || {};
+    const merged = Object.freeze({
+      ...prev,
+      ...flux,
+      chartId,
+      epoch
+    });
+    entry.boundaryFlux = merged;
+    entry.lastActiveEpoch = epoch;
+    return merged;
+  }
+
+  /**
+   * Resolve inherited parent->child boundary flux along the ancestry chain
+   * `[root, ..., parent, chart]` (child overrides only fields it explicitly sets;
+   * multiplicative transmittances like `dysonTransmittedFluxFrac` compose across scales).
+   */
+  function resolveInheritedBoundaryFlux(chartId) {
+    const chain = findAncestryChain(chartId).reverse(); // root -> ... -> chart
+    const resolved = {
+      schema: 'peercompute.ulg.schroeder-scale-boundary-flux.v1',
+      chartId,
+      epoch,
+      stellarWindPressureNPa: 2.0,
+      cmeShockBoost: 0.0,
+      flareXuvFluxMul: 1.0,
+      dysonCoveringFrac: 0.0,
+      dysonTransmittedFluxFrac: 1.0,
+      dysonWasteTempK: 0.0,
+      tidalHeatingW: 0.0,
+      tidalHeatFluxWPerM2: 0.0,
+      hostLuminositySolar: 1.0,
+      contributingCharts: []
+    };
+    for (const c of chain) {
+      const bf = entries.get(c.chartId)?.boundaryFlux;
+      if (!bf) continue;
+      resolved.contributingCharts.push(c.chartId);
+      if (Number.isFinite(Number(bf.stellarWindPressureNPa))) {
+        resolved.stellarWindPressureNPa = Math.max(0, Number(bf.stellarWindPressureNPa));
+      }
+      if (Number.isFinite(Number(bf.cmeShockBoost))) {
+        resolved.cmeShockBoost = Math.max(resolved.cmeShockBoost, Number(bf.cmeShockBoost));
+      }
+      if (Number.isFinite(Number(bf.flareXuvFluxMul))) {
+        resolved.flareXuvFluxMul = Math.max(0.01, resolved.flareXuvFluxMul * Number(bf.flareXuvFluxMul));
+      }
+      if (Number.isFinite(Number(bf.dysonCoveringFrac))) {
+        resolved.dysonCoveringFrac = Math.max(0, Math.min(0.992, Number(bf.dysonCoveringFrac)));
+      }
+      if (Number.isFinite(Number(bf.dysonTransmittedFluxFrac))) {
+        resolved.dysonTransmittedFluxFrac = Math.max(0.008, Math.min(1.0, resolved.dysonTransmittedFluxFrac * Number(bf.dysonTransmittedFluxFrac)));
+      }
+      if (Number.isFinite(Number(bf.dysonWasteTempK)) && Number(bf.dysonWasteTempK) > 0) {
+        resolved.dysonWasteTempK = Number(bf.dysonWasteTempK);
+      }
+      if (Number.isFinite(Number(bf.tidalHeatingW))) {
+        resolved.tidalHeatingW = Math.max(0, Number(bf.tidalHeatingW));
+      }
+      if (Number.isFinite(Number(bf.tidalHeatFluxWPerM2))) {
+        resolved.tidalHeatFluxWPerM2 = Math.max(0, Number(bf.tidalHeatFluxWPerM2));
+      }
+      if (Number.isFinite(Number(bf.hostLuminositySolar)) && Number(bf.hostLuminositySolar) > 0) {
+        resolved.hostLuminositySolar = Number(bf.hostLuminositySolar);
+      }
+    }
+    resolved.contributingCharts = Object.freeze(resolved.contributingCharts);
+    return Object.freeze(resolved);
+  }
 
   function snapshotAtlas() {
     const charts = [...entries.values()]
@@ -415,6 +494,8 @@ export function createDynamicSchroederScaleAtlasRuntime({
     ensureChartForScaleLevel,
     migrateParticleBetweenCharts,
     setChartOccupancy,
+    publishChartBoundaryFlux,
+    resolveInheritedBoundaryFlux,
     advanceEpochAndRetireEmptyCharts,
     snapshotAtlas,
     summary

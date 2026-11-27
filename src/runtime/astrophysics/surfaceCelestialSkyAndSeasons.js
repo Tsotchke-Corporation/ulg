@@ -721,13 +721,18 @@ export function buildLiveSurfaceCelestialSky({
   const latRad = basis.observerLatRad;
   // Seasonal insolation anomaly relative to equinox (positive in local summer, negative in local winter!)
   const seasonSignal = Math.sin(latRad) * sinDecl;
-  const baseTempK = Number(env.tempK) || 288;
+  // Physical Dyson swarm radiative energy balance: intercepting f_cover of host starlight cools
+  // outer worlds by (1 - f_cover)^(1/4) while orbital tidal heat flux warms icy shells from below!
+  const dysonTrans = Math.max(0.008, Math.min(1.0, 1.0 - Math.max(0.0, Math.min(0.992, Number(dysonCoverage) || 0.0))));
+  const dysonTempScale = Math.pow(dysonTrans, 0.25);
+  const tidalHeatK = Math.min(110.0, Math.pow(Math.max(0.0, Number(env.tidalHeatFluxWPerM2) || 0.0) / 5.6703744e-8, 0.25) * 0.32);
+  const baseTempK = Math.max(24, (Number(env.tempK) || 288) * dysonTempScale + tidalHeatK);
   // Physical latitude gradient (equator warm, mid-latitudes temperate, poles cold) + obliquity seasonal swing
   // (0 deg obliquity -> sinDecl = 0 -> strictly 0 K seasonal swing; 23.4 deg mid-lat Earth crosses 273.15 K cleanly in Winter!)
   const sinLat = Math.sin(latRad);
   const latTempOffsetK = -22.0 * (sinLat * sinLat - 0.25);
-  const thermalSwingK = env.hasLiquidOcean ? 62.0 : 88.0;
-  const seasonalTempK = Math.max(35, baseTempK + latTempOffsetK + seasonSignal * thermalSwingK * 1.15 + (primarySunDir[1] * 6.0));
+  const thermalSwingK = (env.hasLiquidOcean ? 62.0 : 88.0) * dysonTempScale;
+  const seasonalTempK = Math.max(24, baseTempK + latTempOffsetK + seasonSignal * thermalSwingK * 1.15 + (primarySunDir[1] * 6.0 * dysonTempScale));
 
   // Physical adiabatic lapse-rate snowline h_snow(t) = (T_sea(t) - T_melt) / Gamma_lapse
   const tMeltK = Number(env.solventMeltTempK) || 273.15;

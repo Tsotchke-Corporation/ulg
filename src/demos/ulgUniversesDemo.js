@@ -302,17 +302,25 @@ function buildSolarOsculatingOrbitLines(solarEngine, focusPosAu, scaleAuToWorld,
 export function resolvePrimaryLevelFromSpan(log10SpanM, {
   focusedSolarBodyIndex = 3,
   focusedBodyIsStar = null,
+  focusedBodyRadiusKm = null,
   galaxyBranch = 'solar-system'
 } = {}) {
   const isStar = focusedBodyIsStar != null ? Boolean(focusedBodyIsStar) : focusedSolarBodyIndex === 0;
   if (log10SpanM >= 22.3) return 0; // Cosmic Web
   if (log10SpanM >= 16.2) return 1; // Spiral Galaxy
+  const rM = Number.isFinite(Number(focusedBodyRadiusKm)) && Number(focusedBodyRadiusKm) > 0
+    ? Number(focusedBodyRadiusKm) * 1000
+    : (isStar ? 6.9634e8 : 6.371e6);
+  const starMaxSpan = Math.max(9.95, Math.min(11.8, Math.log10(rM * 12.0)));
+  const starMinSpan = Math.max(5.5, Math.min(7.2, Math.log10(rM * 0.08)));
+  if (galaxyBranch !== 'smbh-core' && isStar && log10SpanM <= starMaxSpan && log10SpanM >= starMinSpan) {
+    return 3; // Stellar Core!
+  }
   if (log10SpanM >= 8.75) {
-    if (galaxyBranch !== 'smbh-core' && isStar && log10SpanM <= 9.8) return 3; // Stellar Core!
     return 2; // Real-Scale Solar System (or SMBH Core)
   }
   if (log10SpanM >= -5.6) {
-    if (isStar && log10SpanM >= 7.2) return 3;
+    if (isStar && log10SpanM >= starMinSpan) return 3;
     return 4; // Planetary World & Interior
   }
   if (log10SpanM >= -9.1) return 5; // Crystal/Fluid MD
@@ -320,14 +328,42 @@ export function resolvePrimaryLevelFromSpan(log10SpanM, {
   return 7; // Atomic Nucleus
 }
 
-function idealPlanetaryFramingLog10Span(bodySpec) {
-  const rKm = Math.max(0.5, Number(bodySpec?.radiusKm) || 6371);
+/**
+ * Scale-invariant comfortable whole-body approach framing across 0.25 km asteroids -> 100 R_sun giants.
+ * Camera stands at dist=18, fovY=48 deg (visible height ≈ 16.0 world units = WORLD_VIEW_SPAN):
+ *   diameterScreenFrac ≈ 2 * rMeters / spanMeters.
+ */
+export function idealBodyFramingLog10Span(bodySpec) {
+  const isStar = Boolean(bodySpec?.isStar);
+  const rKm = Math.max(0.05, Number(bodySpec?.radiusKm) || (isStar ? 696340 : 6371));
   const rMeters = rKm * 1000;
-  // Frame diameter cleanly (~3.6x radius for bare worlds, ~5.2x when planetary rings extend outward)
-  // Allow true close-up framing down to ~18 km for tiny comets & asteroids (e.g. 5.5 km Halley)!
-  const mult = bodySpec?.ringed ? 5.2 : (rKm < 550 ? 4.4 : 3.65);
-  const floorLog = rKm < 550 ? 3.55 : 5.85;
-  return Math.min(8.68, Math.max(floorLog, Math.log10(rMeters * mult)));
+  if (isStar) {
+    // Frame entire star comfortably (~29% photosphere height, ~46% with corona & magnetic dynamo loops)
+    return Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, Math.log10(rMeters * 6.8)));
+  }
+  if (bodySpec?.ringed) {
+    // Frame the full planetary ring system cleanly (~64% viewport span, globe ~26%) without clipping
+    const outerKm = Math.max(rKm * 2.2, Number(bodySpec?.ringOuterKm) || (rKm * 2.45));
+    return Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, Math.log10(outerKm * 1000 * 3.1)));
+  }
+  // Bare worlds, moons, dwarfs, comets & asteroids: comfortable ~37% viewport height at EVERY radius!
+  return Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, Math.log10(rMeters * 5.4)));
+}
+
+export function idealPlanetaryFramingLog10Span(bodySpec) {
+  return idealBodyFramingLog10Span(bodySpec);
+}
+
+/**
+ * Physical radius-relative auto-landing threshold when wheel/pinch zooming inward on an L4 body.
+ * Triggers ONLY when camera actually skims the body's surface/atmosphere horizon (rWorld ≈ 18.8 vs dist=18),
+ * giving ~6.35x smooth close-up inspection headroom for EVERY body from 250 m asteroids to gas giants!
+ */
+export function autoLandLog10SpanForBody(bodySpec) {
+  if (bodySpec?.isStar) return -Infinity;
+  const rKm = Math.max(0.05, Number(bodySpec?.radiusKm) || 6371);
+  const rMeters = rKm * 1000;
+  return Math.max(1.8, Math.min(8.2, Math.log10(rMeters * 0.85)));
 }
 
 function mapLog10ScaleToInitialSpan(log10Val) {
@@ -1073,13 +1109,19 @@ export async function mountUlgUniversesDemo() {
   }
 
   // App State
-  const isFocusedSolarBodyStar = () => {
+  const getFocusedSolarBodySpec = () => {
     const cat = physics.getActiveSystemCatalog();
-    return Boolean(cat[physics.focusedSolarBodyIndex]?.isStar) || physics.focusedSolarBodyIndex === 0;
+    const idx = Math.max(0, Math.min(cat.length - 1, physics.focusedSolarBodyIndex || 0));
+    return cat[idx] || null;
+  };
+  const isFocusedSolarBodyStar = () => {
+    const spec = getFocusedSolarBodySpec();
+    return Boolean(spec?.isStar) || physics.focusedSolarBodyIndex === 0;
   };
   let currentLevel = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
     focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
     focusedBodyIsStar: isFocusedSolarBodyStar(),
+    focusedBodyRadiusKm: getFocusedSolarBodySpec()?.radiusKm,
     galaxyBranch: physics.galaxyBranch
   });
   let savedSurfaceCheckpoint = null; // Preserves Rover/Drone/UFO world + pose when sampling down to L5/L6/L7!
@@ -1751,6 +1793,7 @@ export async function mountUlgUniversesDemo() {
     const lvl = resolvePrimaryLevelFromSpan(spanLog10, {
       focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
       focusedBodyIsStar: isStar,
+      focusedBodyRadiusKm: getFocusedSolarBodySpec()?.radiusKm,
       galaxyBranch: physics.galaxyBranch
     });
     const toWarm = new Set([lvl]);
@@ -1807,7 +1850,10 @@ export async function mountUlgUniversesDemo() {
     else if (idx === 4 && (cat[physics.focusedSolarBodyIndex]?.isStar || physics.focusedSolarBodyIndex === 0)) {
       physics.setFocusedSolarBody(physics.getDefaultPlanetIndex(cat));
     }
-    const targetSpan = UNIVERSES_SCALES[idx].log10SpanM;
+    const focusedSpec = getFocusedSolarBodySpec();
+    const targetSpan = (idx === 3 || idx === 4) && focusedSpec
+      ? idealBodyFramingLog10Span(focusedSpec)
+      : UNIVERSES_SCALES[idx].log10SpanM;
     if (!instant) {
       flyToLog10Span(targetSpan);
       return;
@@ -1818,6 +1864,7 @@ export async function mountUlgUniversesDemo() {
     currentLevel = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
       focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
       focusedBodyIsStar: isFocusedSolarBodyStar(),
+      focusedBodyRadiusKm: focusedSpec?.radiusKm,
       galaxyBranch: physics.galaxyBranch
     });
     if (currentLevel !== prevL) {
@@ -2760,7 +2807,9 @@ export async function mountUlgUniversesDemo() {
     }
     syncGenesisHud();
     if (t || pickedGpuMote) targetFocusActive = true;
-    flyToLog10Span(UNIVERSES_SCALES[nextLvl].log10SpanM);
+    const approachSpec = (nextLvl === 3 || nextLvl === 4) ? getFocusedSolarBodySpec() : null;
+    const approachSpan = approachSpec ? idealBodyFramingLog10Span(approachSpec) : UNIVERSES_SCALES[nextLvl].log10SpanM;
+    flyToLog10Span(approachSpan);
   }
 
   async function returnToOrbit() {
@@ -3535,6 +3584,7 @@ export async function mountUlgUniversesDemo() {
       const nextLvl = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
         focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
         focusedBodyIsStar: isFocusedSolarBodyStar(),
+        focusedBodyRadiusKm: getFocusedSolarBodySpec()?.radiusKm,
         galaxyBranch: physics.galaxyBranch
       });
       if (!physics.surfaceActive && nextLvl !== currentLevel) {
@@ -5055,6 +5105,13 @@ export async function mountUlgUniversesDemo() {
       deltaGKjMol: sp.deltaGKjMol ?? xeno?.redox?.deltaGKjMol ?? null,
       heightM: Number((Math.max(0.6, Number(org.scale) || 1.0) * (kingdom === 'flora' ? 4.4 : 1.7)).toFixed(1)),
       primaryRgb: org.primaryRgb || sp.primaryRgb || [0.32, 0.82, 0.56],
+      secondaryRgb: org.secondaryRgb || sp.secondaryRgb || [0.52, 0.42, 0.30],
+      accentRgb: org.accentRgb || sp.accentRgb || [0.96, 0.84, 0.32],
+      biolumRgb: org.biolumRgb || sp.biolumRgb || [0.24, 0.96, 0.76],
+      biolumIntensity: org.biolumIntensity ?? sp.biolumIntensity ?? 0.22,
+      developmentalGenome: org.developmentalGenome || sp.developmentalGenome || null,
+      seed: sp.seed ?? org.seed,
+      speciesRecord: sp,
       fasta: sp.fasta || xeno?.labParams?.foldSeq || 'HPPHH+PHHPPHH-P',
       worldName,
       latDeg: Number(latDeg.toFixed(1)),
@@ -5167,7 +5224,9 @@ export async function mountUlgUniversesDemo() {
             pullTargetFocusOnZoomIn(deltaLog);
           }
           const nextSpan = Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, log10ViewSpanM + deltaLog));
-          if (currentLevel === 4 && deltaLog < 0 && nextSpan < 5.75 && !surfaceAutoEntryPending) {
+          const focusedL4Spec = getFocusedSolarBodySpec();
+          const autoLandSpan = autoLandLog10SpanForBody(focusedL4Spec);
+          if (currentLevel === 4 && deltaLog < 0 && !focusedL4Spec?.isStar && nextSpan < autoLandSpan && !surfaceAutoEntryPending) {
             surfaceAutoEntryPending = true;
             void enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex }).finally(() => {
               surfaceAutoEntryPending = false;
@@ -5288,7 +5347,9 @@ export async function mountUlgUniversesDemo() {
       pullTargetFocusOnZoomIn(deltaLog);
     }
     const nextSpan = Math.max(LOG10_SPAN_MIN, Math.min(LOG10_SPAN_MAX, log10ViewSpanM + deltaLog));
-    if (currentLevel === 4 && deltaLog < 0 && nextSpan < 5.75 && !surfaceAutoEntryPending) {
+    const focusedL4Spec = getFocusedSolarBodySpec();
+    const autoLandSpan = autoLandLog10SpanForBody(focusedL4Spec);
+    if (currentLevel === 4 && deltaLog < 0 && !focusedL4Spec?.isStar && nextSpan < autoLandSpan && !surfaceAutoEntryPending) {
       surfaceAutoEntryPending = true;
       void enterSurfaceViewUi({ bodyIndex: physics.planetaryBodyIndex }).finally(() => {
         surfaceAutoEntryPending = false;
@@ -5954,10 +6015,12 @@ export async function mountUlgUniversesDemo() {
       const bioRecord = org.abductedRecord || {
         kind: org.kingdom,
         kingdom: org.kingdom,
+        seed: org.seed,
         speciesName: org.speciesName,
         morphClass: org.morphClass,
         bodyPlan: org.bodyPlan,
         trophicGuild: org.trophicGuild,
+        developmentalGenome: org.developmentalGenome || org.speciesRecord?.developmentalGenome || null,
         solventFormula: org.solventFormula,
         xnaBackbone: org.xnaBackbone,
         xnaAlphabetSize: org.xnaAlphabetSize,
@@ -5968,7 +6031,11 @@ export async function mountUlgUniversesDemo() {
         lonDeg: org.lonDeg,
         tempK: org.tempK,
         gravityMS2: org.gravityMS2,
-        primaryRgb: org.primaryRgb
+        primaryRgb: org.primaryRgb,
+        secondaryRgb: org.secondaryRgb,
+        accentRgb: org.accentRgb,
+        biolumRgb: org.biolumRgb,
+        biolumIntensity: org.biolumIntensity
       };
       const bioHref = buildLifeLabXenobiologyUrl(org.profile || physics.surfaceSession?.xenobiology || null, 'organism-overview', bioRecord);
       if (org.abducted) {
@@ -6879,8 +6946,8 @@ export async function mountUlgUniversesDemo() {
         });
       }
     } else if (currentLevel >= 2) {
-      // REAL-SCALE SOLAR SYSTEM CONTINUOUSLY SPANNING 10^15.95 m -> 10^3.0 m (Stars/Planets/Moons/Asteroids/5.5 km Comets!)
-      const wSolar = bandWeight(span, 2.2, 3.0, 15.0, 15.95);
+      // REAL-SCALE SOLAR SYSTEM CONTINUOUSLY SPANNING 10^15.95 m -> 10^1.4 m (Stars/Planets/Moons/Asteroids/250 m Bennu & 5.5 km Comets!)
+      const wSolar = bandWeight(span, 1.4, 2.0, 15.0, 15.95);
       const spanAu = spanMeters / AU_METERS;
       const scaleAuToWorld = WORLD_VIEW_SPAN / Math.max(1e-9, spanAu);
       lastWorldScaleInfo.solarScaleAuToWorld = scaleAuToWorld;
@@ -6941,13 +7008,16 @@ export async function mountUlgUniversesDemo() {
 
         // Primary host-star light direction, physical spectrum & inverse-square distance irradiance!
         const star0Spec = cat[0] || REAL_SOLAR_SYSTEM_CATALOG[0];
+        const liveDysonCov = Math.min(0.992, Math.max(0, Number(kardashev.state.dysonCoveringFrac) || 0));
+        const liveDysonWasteK = Number(kardashev.state.dysonWasteTempK) || 0;
         let activeStarLight = computeHostStarIllumination({
           starSpec: star0Spec,
           bodySpec: focusSpec,
           distanceAu: 1.0,
           timeSec: nowSec,
           isRogue: false,
-          stellarModeHint: physics.stellarMode
+          stellarModeHint: physics.stellarMode,
+          dysonCoveringFrac: liveDysonCov
         });
         let orbitalSeasonState = null;
         if (!isFocusStar) {
@@ -6984,7 +7054,8 @@ export async function mountUlgUniversesDemo() {
             distanceAu: effDistAu,
             timeSec: nowSec,
             isRogue: currentLevel === 4 && physics.planetaryMode === 'rogue',
-            stellarModeHint: physics.stellarMode
+            stellarModeHint: physics.stellarMode,
+            dysonCoveringFrac: liveDysonCov
           });
         }
         lastStarIllumination = activeStarLight;
@@ -6998,9 +7069,11 @@ export async function mountUlgUniversesDemo() {
         // smoothly transitioning to the selected object only when entering orbit around it (`L4`/`L3`) or landing.
         let star0WorldPos = [0, 0, 0];
         let focusedRingShadow = null;
+        const shatteredSet = new Set(physics.getShatteredBodyIds ? physics.getShatteredBodyIds() : []);
         const mLim = Math.min(physics.solarEngine.massiveCount, cat.length);
         for (let i = 0; i < mLim; i += 1) {
           const spec = cat[i];
+          if (spec?.id && shatteredSet.has(spec.id)) continue; // Shattered world replaced by live GPU stratified debris cloud!
           const st = physics.solarEngine.getMassiveBodyState64(i);
           let wx = (st.posAu[0] - originAu[0]) * scaleAuToWorld;
           let wy = (st.posAu[1] - originAu[1]) * scaleAuToWorld;
@@ -7024,8 +7097,9 @@ export async function mountUlgUniversesDemo() {
               : Math.max(0.24, Math.min(0.95, angularR * 4.5));
             trueRWorld = trueRWorld * (1 - skyBlend) + clampedR * skyBlend;
           }
-          // Hide focused star's opaque photosphere at L3 (`span <= 9.9`) so live 3D MHD / Fusion Plasma shines unobstructed!
-          if (i === focusIdx && bodyIsStar && span <= 9.9) continue;
+          // Hide focused star's opaque photosphere at L3 so live 3D MHD / Fusion Plasma shines unobstructed!
+          const starHandoffSpan = bodyIsStar ? (idealBodyFramingLog10Span(spec) + 0.35) : 9.9;
+          if (i === focusIdx && bodyIsStar && span <= starHandoffSpan) continue;
 
           const isFocusL4 = (!bodyIsStar && span < 10.4 && (i === physics.planetaryBodyIndex || i === focusIdx));
           const l4DispBlend = smoothstep(10.4, 9.1, span);
@@ -7044,7 +7118,7 @@ export async function mountUlgUniversesDemo() {
           const isCryoMoon = (isFocusL4 && !isCutPlanet && physics.planetaryMode === 'cryo-plumes');
           const isRogue = (isFocusL4 && !isCutPlanet && physics.planetaryMode === 'rogue');
           const sphereIdx = spheres.length;
-          const dysonCov = bodyIsStar ? Math.min(0.95, Math.max(0, kardashev.state.dysonTau || 0)) : 0;
+          const dysonCov = bodyIsStar ? liveDysonCov : 0;
           if (bodyIsStar) {
             // Render exotic host/companion stars (Pulsars with spinning lighthouse beams & dipole loops,
             // Black Holes with EHT photon ring + Novikov-Thorne disk + jets, White Dwarfs with ionized shells!)
@@ -7055,6 +7129,7 @@ export async function mountUlgUniversesDemo() {
               radius: trueRWorld,
               timeSec: nowSec,
               dysonCoverage: dysonCov,
+              dysonWasteTempK: bodyIsStar ? liveDysonWasteK : 0,
               seed: i * 2.17 + 1.3,
               spheres,
               disks,
@@ -7335,11 +7410,13 @@ export async function mountUlgUniversesDemo() {
     }
 
     // 4. L3: MHD Nebular Collapse & Bipolar Jets OR Stellar Core Fusion Plasma (`self-gravitating-hydro@1`)
+    const focusedStarSpecL3 = isFocusedSolarBodyStar() ? getFocusedSolarBodySpec() : null;
+    const idealStarSpanL3 = focusedStarSpecL3 ? idealBodyFramingLog10Span(focusedStarSpecL3) : 9.675;
     const wStarCore = (isFocusedSolarBodyStar() && physics.galaxyBranch !== 'smbh-core')
-      ? bandWeight(span, 7.0, 7.8, 9.7, 10.4)
+      ? bandWeight(span, idealStarSpanL3 - 2.4, idealStarSpanL3 - 1.6, idealStarSpanL3 + 0.35, idealStarSpanL3 + 0.85)
       : 0;
     if (wStarCore > 0.01) {
-      const stScale = 0.92 * Math.pow(10, Math.max(-1.0, Math.min(1.0, 9.2 - span)));
+      const stScale = 0.62 * Math.pow(10, Math.max(-1.0, Math.min(1.0, idealStarSpanL3 - span)));
       if (physics.stellarMode === 'nebular-mhd' && physics.nebulaMhdSession) {
         particleClouds.push({
           buffer: physics.nebulaMhdSession.getResidentTracersBuffer(),
@@ -7466,7 +7543,7 @@ export async function mountUlgUniversesDemo() {
         const stEng = physics.stellarEngine;
         const teffLog = Math.log10(Math.max(900, Number(stEng.surfaceTempK) || 5778));
         const rStarNorm = Math.max(0.45, Math.min(0.92, (stEng.rStar || 5.3) / (stEng.boxHalf || 7.5)));
-        const defaultBoxR = (stEng.boxHalf || 7.5) * stScale * 0.95;
+        const defaultBoxR = (stEng.boxHalf || 7.5) * stScale * 0.72;
         let astroBoxR = defaultBoxR;
         if (physics.solarEngine) {
           const catL3 = physics.getActiveSystemCatalog();
@@ -7475,10 +7552,10 @@ export async function mountUlgUniversesDemo() {
           const scaleAuL3 = WORLD_VIEW_SPAN / Math.max(1e-9, spanMeters / AU_METERS);
           const trueStarRWorld = (Number(fStL3?.radiusAu) || 0.00465) * scaleAuL3;
           const exactBoxR = trueStarRWorld / (rStarNorm * 0.935);
-          // Match L2 photosphere radius 1:1 at the span=9.9 handoff (0% jump across all spectral classes),
-          // then smoothly frame even tiny M-dwarfs or giant supergiants as the camera zooms deep into L3!
-          const l3FrameBlend = smoothstep(9.75, 8.65, span);
-          astroBoxR = exactBoxR * (1 - l3FrameBlend) + Math.max(0.45, Math.min(18.0, defaultBoxR)) * l3FrameBlend;
+          // Match L2 photosphere radius 1:1 at handoff (0% jump across all spectral classes),
+          // then smoothly frame even tiny M-dwarfs or giant supergiants at a comfortable distance!
+          const l3FrameBlend = smoothstep(idealStarSpanL3 + 0.20, idealStarSpanL3 - 0.85, span);
+          astroBoxR = exactBoxR * (1 - l3FrameBlend) + Math.max(0.45, Math.min(14.0, defaultBoxR)) * l3FrameBlend;
         }
         const stDynamoScale = astroBoxR / (stEng.boxHalf || 7.5);
         if (stEng.solver === 'webgpu-3d-mls-mpm-nuclear-fusion' && typeof stEng.getResidentGridBuffer === 'function') {
@@ -7854,7 +7931,7 @@ export async function mountUlgUniversesDemo() {
         observerLatDeg: 42.0,
         landingSite: physics.surfaceLandingSite,
         altitudeKm: physics.surfaceTelemetry?.ufoAltitudeKm,
-        dysonCoverage: Math.min(0.95, Math.max(0, kardashev.state.dysonTau || 0))
+        dysonCoverage: Math.min(0.992, Math.max(0, Number(kardashev.state.dysonCoveringFrac) || 0))
       });
       physics.setSurfaceClimate(skyData.climate);
       const surfLightDir = skyData.lightDir;
@@ -7923,7 +8000,8 @@ export async function mountUlgUniversesDemo() {
         distanceAu: skyData.primaryStarDistAu || (catSurf[physics.planetaryBodyIndex]?.aAu || 1.0),
         timeSec: nowMs * 0.001,
         isRogue: Boolean(s.env?.isRogue),
-        stellarModeHint: physics.stellarMode
+        stellarModeHint: physics.stellarMode,
+        dysonCoveringFrac: Math.min(0.992, Math.max(0, Number(kardashev.state.dysonCoveringFrac) || 0))
       });
       lastStarIllumination = surfStarLight;
       // Live Geodynamo Surface Sky Aurora strength: strictly driven by live 3D GPU Geodynamo + dipole field
@@ -8235,6 +8313,7 @@ export async function mountUlgUniversesDemo() {
     const nextLvl = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
       focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
       focusedBodyIsStar: isFocusedSolarBodyStar(),
+      focusedBodyRadiusKm: getFocusedSolarBodySpec()?.radiusKm,
       galaxyBranch: physics.galaxyBranch
     });
     if (nextLvl !== currentLevel) {
@@ -8467,6 +8546,7 @@ export async function mountUlgUniversesDemo() {
     currentLevel = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
       focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
       focusedBodyIsStar: isFocusedSolarBodyStar(),
+      focusedBodyRadiusKm: getFocusedSolarBodySpec()?.radiusKm,
       galaxyBranch: physics.galaxyBranch
     });
     await warmVisibleLevels(log10ViewSpanM);
@@ -8768,6 +8848,7 @@ export async function mountUlgUniversesDemo() {
       currentLevel = resolvePrimaryLevelFromSpan(log10ViewSpanM, {
         focusedSolarBodyIndex: physics.focusedSolarBodyIndex,
         focusedBodyIsStar: isFocusedSolarBodyStar(),
+        focusedBodyRadiusKm: getFocusedSolarBodySpec()?.radiusKm,
         galaxyBranch: physics.galaxyBranch
       });
       if (currentLevel !== prevL) {
@@ -8800,15 +8881,19 @@ export async function mountUlgUniversesDemo() {
       } else if (idx === 4 && (cat[physics.focusedSolarBodyIndex]?.isStar || physics.focusedSolarBodyIndex === 0)) {
         physics.setFocusedSolarBody(physics.getDefaultPlanetIndex(cat));
       }
+      const focusedSpec = getFocusedSolarBodySpec();
+      const targetSpan = (idx === 3 || idx === 4) && focusedSpec
+        ? idealBodyFramingLog10Span(focusedSpec)
+        : UNIVERSES_SCALES[idx].log10SpanM;
       if (instant) {
-        const res = await this.setLog10Span(UNIVERSES_SCALES[idx].log10SpanM);
+        const res = await this.setLog10Span(targetSpan);
         if (idx === 4) {
           orientCameraToSunlitPhase(physics.focusedSolarBodyIndex);
           renderNow(performance.now());
         }
         return res;
       }
-      flyToLog10Span(UNIVERSES_SCALES[idx].log10SpanM);
+      flyToLog10Span(targetSpan);
       return this.getState();
     },
     async sampleNewGalacticSector(opts = {}) {
@@ -8870,8 +8955,10 @@ export async function mountUlgUniversesDemo() {
         await physics.initPlanetaryInterior({ bodyIndex: safeIdx });
       }
       if (currentLevel === 4 && !cat[safeIdx]?.isStar && safeIdx > 0) {
-        log10ViewSpanM = idealPlanetaryFramingLog10Span(cat[safeIdx]);
+        log10ViewSpanM = idealBodyFramingLog10Span(cat[safeIdx]);
         orientCameraToSunlitPhase(safeIdx);
+      } else if (currentLevel === 3 && (cat[safeIdx]?.isStar || safeIdx === 0)) {
+        log10ViewSpanM = idealBodyFramingLog10Span(cat[safeIdx]);
       }
       selectDefaultTarget();
       syncScaleChrome();

@@ -357,8 +357,8 @@ export function encodeDevelopmentalGenomeCompact(g) {
   return {
     v: 2,
     s: g.seed >>> 0,
-    k: g.kingdom[0], // 'f'(flora), 'm'(fungi), 'a'(fauna)
-    m: g.medium[0],  // 't','a','b','q'
+    k: g.kingdom === 'flora' ? 'f' : (g.kingdom === 'fungi' ? 'm' : 'a'),
+    m: g.medium === 'aquatic' ? 'q' : (g.medium === 'aerial' ? 'a' : (g.medium === 'buoyant' ? 'b' : 't')),
     g: g.trophicGuild.slice(0, 12),
     b: bytesToB64(bytes)
   };

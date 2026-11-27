@@ -112,6 +112,43 @@ export function evaluateRocheAndTidalHeating({
   });
 }
 
+/**
+ * Exact gravitational binding energy & catastrophic planetary disruption budget:
+ *   U_bind = (3 / 5) * G * M^2 / R
+ *   - ratio = E_in / U_bind
+ *   - 0.2 <= ratio < 1.0: progressive seismic/magma fracture glow (intact sphere cracked)
+ *   - ratio >= 1.0: catastrophic disruption into stratified Fe-core / silicate-mantle / crust ejecta!
+ */
+export function evaluatePlanetaryDisruptionBudget({
+  bodyMassKg = 5.972e24,
+  bodyRadiusM = 6.371e6,
+  energyInputJ = 0.0,
+  coreMassFrac = 0.32,
+  mantleMassFrac = 0.58
+} = {}) {
+  const G = 6.67430e-11;
+  const M = Math.max(1e12, Number(bodyMassKg) || 5.972e24);
+  const R = Math.max(50.0, Number(bodyRadiusM) || 6.371e6);
+  const bindingEnergyJ = (0.6 * G * M * M) / R;
+  const eIn = Math.max(0.0, Number(energyInputJ) || 0.0);
+  const disruptionRatio = eIn / Math.max(1e-30, bindingEnergyJ);
+  const disrupted = disruptionRatio >= 1.0;
+  const fractureGlow = Math.max(0.0, Math.min(1.0, (disruptionRatio - 0.2) / 0.8));
+  const core = Math.max(0.05, Math.min(0.75, Number(coreMassFrac) || 0.32));
+  const mantle = Math.max(0.10, Math.min(0.90 - core, Number(mantleMassFrac) || 0.58));
+  const crust = Math.max(0.05, 1.0 - core - mantle);
+  return Object.freeze({
+    schema: 'ulg.astrophysics.planetary-disruption-budget.v1',
+    bindingEnergyJ,
+    energyInputJ: eIn,
+    disruptionRatio,
+    disrupted,
+    fractureGlow,
+    stratifiedShellFracs: Object.freeze({ core, mantle, crust }),
+    scientificValidation: false
+  });
+}
+
 export const tidalRocheWgsl = /* wgsl */ `
 struct TidalParams {
   particle_count: u32,
@@ -207,18 +244,21 @@ fn step_tidal_roche(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   if (mode == 4u) {
-    // Catastrophic Antimatter / Kinetic Shatter: incandescent rocky/molten/icy fragments
-    // expanding ballistically under residual self-gravity + weak orbital shear into a glowing debris cloud!
+    // Catastrophic Antimatter / Tidal Shatter: stratified Fe-core (role 0), molten mantle (role 1),
+    // and fractured crust/ice (role 2) fragments expanding ballistically under residual self-gravity!
     let r_frag = max(0.25, length(loc));
     let n_r = loc / r_frag;
-    // Residual core self-gravity decelerates slow inner fragments while fast ejecta escapes!
-    let acc_sg = -n_r * (params.gm_host * 0.14 / (r_frag * r_frag + 0.35));
+    let shell_role = clamp(round(p.therm_id.z), 0.0, 2.0);
+    // Dense iron core fragments feel stronger self-gravity fallback; outer crust ejecta escapes faster!
+    let sg_mul = select(select(0.24, 0.14, shell_role > 0.5), 0.07, shell_role > 1.5);
+    let acc_sg = -n_r * (params.gm_host * sg_mul / (r_frag * r_frag + 0.35));
     vel = vel + acc_sg * dt;
     loc = loc + vel * dt;
-    let t_cool = clamp(p.therm_id.x * exp(-0.14 * dt), 0.16, 2.2);
+    let cool_rate = select(select(0.08, 0.14, shell_role > 0.5), 0.22, shell_role > 1.5);
+    let t_cool = clamp(p.therm_id.x * exp(-cool_rate * dt), 0.14, 2.2);
     p.pos_m = vec4<f32>(loc + params.center_offset.xyz, p.pos_m.w);
     p.vel_bond = vec4<f32>(vel, 0.0);
-    p.therm_id = vec4<f32>(t_cool, 2.5, 1.0, p.therm_id.w + dt);
+    p.therm_id = vec4<f32>(t_cool, 2.5, shell_role, p.therm_id.w + dt);
     p.meta0.w = 1.0;
     parts[i] = p;
     return;

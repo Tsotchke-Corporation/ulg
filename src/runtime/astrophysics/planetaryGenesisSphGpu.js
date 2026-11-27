@@ -38,7 +38,12 @@ import {
   LAW_SPATIAL_AUTHORITIES
 } from '../sph/lawAdapterContract.js';
 import { createSchroederScaleAtlasGravitySolverWebGpu } from '../sph/schroederScaleAtlasMultipoleGpu.js';
-import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
+import {
+  ULG_ACCURACY_TIERS,
+  evaluatePolytopeAtlasWgsl,
+  packPolytopeAtlasBankForGpu
+} from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
+import { getCompoundPolytopeAtlas } from '../material/canonicalMaterialLookup.js';
 
 export const ULG_PLANETARY_GENESIS_SPH_SCHEMA = 'ulg.astrophysics.planetary-genesis-sph-webgpu.v1';
 
@@ -564,7 +569,8 @@ struct ImpactorDesc {
 @group(0) @binding(3) var<storage, read_write> grid_val: array<vec4<f32>>;
 // 32 radial enclosed mass bins + 16 telemetry atomic slots
 @group(0) @binding(4) var<storage, read_write> radial_bins: array<atomic<i32>>;
-@group(0) @binding(5) var<storage, read> impactors: array<ImpactorDesc>;
+// Gate 2 Canonical Convex Polytope Atlas GPU Bank (5 planetary species: Fe/core, MgO/mantle, SiO2/crust, FeO/impactor, H2O/volatile)
+@group(0) @binding(5) var<storage, read> polytope_atlas_bank: array<f32>;
 // Compact telemetry output (2 vec4):
 //   [0] = (coreMeanR, mantleMeanR, felsicMeanR, meanTemp)
 //   [1] = (maxCrustThick, minCrustThick, activeImpactors, differentiationIndex)
@@ -573,12 +579,19 @@ struct ImpactorDesc {
 //   [0..parcel_count-1] = vec4(ax, ay, az, phi), [parcel_count] = vec4(com_xyz, m_tot)
 @group(0) @binding(7) var<storage, read> ss_grav_acc: array<vec4<f32>>;
 
+${evaluatePolytopeAtlasWgsl}
+
 const Q_M: f32 = 256.0;
 const Q_V: f32 = 128.0;
 
-fn cell_coords(p: vec3<f32>) -> vec3<i32> {
+fn active_body_com() -> vec3<f32> {
+  let c = ss_grav_acc[params.parcel_count];
+  return select(vec3<f32>(0.0), c.xyz, c.w > 1e-4);
+}
+
+fn cell_coords(p_rel: vec3<f32>) -> vec3<i32> {
   let nf = f32(params.grid_n);
-  let u = (p + vec3<f32>(params.box_half)) / (2.0 * params.box_half);
+  let u = (p_rel + vec3<f32>(params.box_half)) / (2.0 * params.box_half);
   let c = vec3<i32>(floor(u * nf));
   return clamp(c, vec3<i32>(0), vec3<i32>(i32(params.grid_n) - 1));
 }
@@ -603,9 +616,9 @@ fn clear_sph_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }
 
-fn cell_frac(p: vec3<f32>) -> vec3<f32> {
+fn cell_frac(p_rel: vec3<f32>) -> vec3<f32> {
   let nf = f32(params.grid_n);
-  let u = (p + vec3<f32>(params.box_half)) / (2.0 * params.box_half);
+  let u = (p_rel + vec3<f32>(params.box_half)) / (2.0 * params.box_half);
   return clamp(u * nf - vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(nf - 1.001));
 }
 
@@ -657,12 +670,13 @@ fn splat_sph_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (i >= params.parcel_count) { return; }
   let pr = parcels[i];
   if (pr.aux.w < 0.5) { return; }
-  let pos = pr.pos_mass.xyz;
+  let com = active_body_com();
+  let pos_rel = pr.pos_mass.xyz - com;
   let m = max(0.05, pr.pos_mass.w);
   let is_felsic = select(0.0, 1.0, abs(pr.mat_state.x - 2.0) < 0.3);
 
-  // Smooth 2x2x2 trilinear CIC deposition (ZERO Cartesian voxel-box artifacts on continents!)
-  let gf = cell_frac(pos);
+  // Smooth 2x2x2 trilinear CIC deposition in translation-invariant COM frame!
+  let gf = cell_frac(pos_rel);
   let c0 = vec3<i32>(floor(gf));
   let f = gf - vec3<f32>(c0);
   let n_i = i32(params.grid_n) - 1;
@@ -691,7 +705,7 @@ fn splat_sph_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  let r = length(pos);
+  let r = length(pos_rel);
   let rbin = min(31u, u32(floor(clamp(r / 1.45, 0.0, 0.999) * 32.0)));
   atomicAdd(&radial_bins[rbin], i32(round(m * Q_M)));
 }
@@ -737,42 +751,53 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   var shock = pr.mat_state.w;
   var conv_flux = pr.aux.x;
 
-  let r = max(0.035, length(pos));
-  let n_rad = pos / r;
+  let ss_g = ss_grav_acc[i].xyz;
+  let ss_com = active_body_com();
+  let rel_pos = pos - ss_com;
+  let r = max(0.035, length(rel_pos));
+  let n_rad = rel_pos / r;
 
   // 1. Canonical 3D Hierarchical Schroeder Simulation (SS) Scale-Atlas Multipole Self-Gravity!
-  //    True asymmetric 3D self-gravity across 4,096 L2 + 64 L1 charts (handles both hydrostatic spheres
-  //    AND irregular triaxial/bilobed asteroids/comets + off-center sinking Fe-Ni cores!)
-  let ss_g = ss_grav_acc[i].xyz;
-  let ss_com = ss_grav_acc[params.parcel_count].xyz;
+  //    Strictly translation-invariant (ZERO origin-anchored restoring spring!)
   let g_ss_mag = length(ss_g);
   let g_mag = clamp(g_ss_mag, 0.12, 8.5);
-  var acc = clamp(ss_g, vec3<f32>(-12.0), vec3<f32>(12.0)) - ss_com * 0.35;
+  var acc = clamp(ss_g, vec3<f32>(-12.0), vec3<f32>(12.0));
 
   // 2. Smooth Trilinear CIC 32^3 SPH Grid Pressure Gradient (-grad P / rho), Viscosity, & Velocity Divergence!
+  //    Sampled strictly in the COM-rebased frame for exact translation invariance!
   let dx = (2.0 * params.box_half) / f32(params.grid_n);
-  let g_c0 = sample_grid_trilin0(pos);
-  let g_c1 = sample_grid_trilin1(pos);
+  let g_c0 = sample_grid_trilin0(rel_pos);
+  let g_c1 = sample_grid_trilin1(rel_pos);
 
-  let gx_p = sample_grid_trilin0(pos + vec3<f32>(dx, 0.0, 0.0));
-  let gx_m = sample_grid_trilin0(pos - vec3<f32>(dx, 0.0, 0.0));
-  let gy_p = sample_grid_trilin0(pos + vec3<f32>(0.0, dx, 0.0));
-  let gy_m = sample_grid_trilin0(pos - vec3<f32>(0.0, dx, 0.0));
-  let gz_p = sample_grid_trilin0(pos + vec3<f32>(0.0, 0.0, dx));
-  let gz_m = sample_grid_trilin0(pos - vec3<f32>(0.0, 0.0, dx));
+  let gx_p = sample_grid_trilin0(rel_pos + vec3<f32>(dx, 0.0, 0.0));
+  let gx_m = sample_grid_trilin0(rel_pos - vec3<f32>(dx, 0.0, 0.0));
+  let gy_p = sample_grid_trilin0(rel_pos + vec3<f32>(0.0, dx, 0.0));
+  let gy_m = sample_grid_trilin0(rel_pos - vec3<f32>(0.0, dx, 0.0));
+  let gz_p = sample_grid_trilin0(rel_pos + vec3<f32>(0.0, 0.0, dx));
+  let gz_m = sample_grid_trilin0(rel_pos - vec3<f32>(0.0, 0.0, dx));
 
   let grad_rho = vec3<f32>(gx_p.x - gx_m.x, gy_p.x - gy_m.x, gz_p.x - gz_m.x) / (2.0 * dx);
   let div_v = ((gx_p.y - gx_m.y) + (gy_p.z - gy_m.z) + (gz_p.w - gz_m.w)) / (2.0 * dx);
 
+  // 2B. Inline Gate 2 Convex Polytope Atlas EOS evaluation (fail-closed):
+  //     Query packed (T_K, P_Pa) Chebyshev density surface per species to derive real compressibility & buoyancy!
+  let t_phys_k = clamp(180.0 + temp * 3800.0, 50.0, 6000.0);
+  let depth_frac = clamp(1.0 - r * r, 0.0, 1.0);
+  let p_phys_pa = max(1.0e5, 1.0e5 + depth_frac * 2.4e11 * max(0.3, rho0 / 3.4));
+  let poly_eval = eval_polytope_atlas_bank_2d(&polytope_atlas_bank, round(species), t_phys_k, p_phys_pa);
+  let eos_rho_gcc = select(rho0, clamp(poly_eval.x * 1e-3, 0.5, 18.0), poly_eval.w > 0.5 && poly_eval.x > 50.0);
+  let eos_phase = select(1.0, poly_eval.z, poly_eval.w > 0.5);
+  let eos_stiff_fac = select(1.0, clamp(eos_rho_gcc / max(0.5, rho0), 0.72, 1.55), poly_eval.w > 0.5);
+
   // Compressible EOS hydrostatic pressure support balancing self-gravity (scale-invariant across 5K..65K parcels & 32^3..64^3 grids!)
-  let k_eos = select(1.45, 2.35, species < 0.5);
+  let k_eos = select(1.45, 2.35, species < 0.5) * eos_stiff_fac;
   let rho_local = g_c0.x * params.rho_norm;
   acc = acc - (grad_rho * params.rho_norm) * (k_eos / max(0.35, rho_local + 0.45));
 
-  // 3. True Archimedes Compositional + Thermal Rayleigh-Benard Buoyancy!
+  // 3. True Archimedes Compositional + Thermal Rayleigh-Benard Buoyancy (using Gate 2 Polytope EOS density when in-domain)!
   let cell_temp = g_c1.x;
   let cell_rho0 = max(1.0, g_c1.y);
-  let rho_eff = rho0 * (1.0 - 0.34 * (temp - cell_temp));
+  let rho_eff = eos_rho_gcc * (1.0 - 0.34 * (temp - cell_temp));
   let buoy_ratio = clamp((cell_rho0 - rho_eff) / max(1.2, rho_eff), -1.35, 1.35);
   acc = acc + n_rad * (g_mag * buoy_ratio * 0.95);
 
@@ -784,9 +809,9 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Smooth trilinear tangent mantle convection traction driving organic continental rafting & rifting!
   let grad_t = vec3<f32>(
-    sample_grid_trilin1(pos + vec3<f32>(dx, 0.0, 0.0)).x - sample_grid_trilin1(pos - vec3<f32>(dx, 0.0, 0.0)).x,
-    sample_grid_trilin1(pos + vec3<f32>(0.0, dx, 0.0)).x - sample_grid_trilin1(pos - vec3<f32>(0.0, dx, 0.0)).x,
-    sample_grid_trilin1(pos + vec3<f32>(0.0, 0.0, dx)).x - sample_grid_trilin1(pos - vec3<f32>(0.0, 0.0, dx)).x
+    sample_grid_trilin1(rel_pos + vec3<f32>(dx, 0.0, 0.0)).x - sample_grid_trilin1(rel_pos - vec3<f32>(dx, 0.0, 0.0)).x,
+    sample_grid_trilin1(rel_pos + vec3<f32>(0.0, dx, 0.0)).x - sample_grid_trilin1(rel_pos - vec3<f32>(0.0, dx, 0.0)).x,
+    sample_grid_trilin1(rel_pos + vec3<f32>(0.0, 0.0, dx)).x - sample_grid_trilin1(rel_pos - vec3<f32>(0.0, 0.0, dx)).x
   ) / (2.0 * dx);
   let grad_t_tang = grad_t - n_rad * dot(grad_t, n_rad);
   if (species > 0.5 && species < 2.5 && r > 0.65) {
@@ -817,7 +842,8 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   // 5. Solidus/Liquidus Lithosphere Freezing + Convergent Orogenic Crust Thickening & Thermal Evolution!
   let v_cell = g_c0.yzw;
   let cool_age = clamp(f32(params.step_index) / max(44.0, f32(params.target_steps)), 0.0, 1.0);
-  let solidus_stiff = smoothstep(0.56, 0.24, temp) * (0.25 + 0.75 * cool_age);
+  let solidus_phase_boost = select(0.0, 0.20, eos_phase < 0.5 && poly_eval.w > 0.5);
+  let solidus_stiff = clamp((1.0 - smoothstep(0.24, 0.56, temp)) + solidus_phase_boost, 0.0, 1.0) * (0.25 + 0.75 * cool_age);
   let base_drag = mix(6.5, 1.8, clamp(temp * 0.75 + params.tectonic_mobility * 0.45, 0.0, 1.0));
   let arrhenius_drag = mix(base_drag, 10.2, solidus_stiff * 0.45);
   let is_minor = (params.flags & 16u) != 0u;
@@ -847,31 +873,32 @@ fn advect_sph_parcels(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (spd > 3.2) { vel = vel * (3.2 / spd); }
   pos = pos + vel * dt;
 
-  // Soft radial confinement to planetary volume (prevents numerical escape while preserving buoyancy stratification!)
+  // Soft COM-relative radial confinement to planetary volume (strictly translation-invariant!)
   // Sub-hydrostatic minor bodies (bit 16u: asteroids/comets < 550 km) retain irregular non-spherical 3D lobes!
-  let r_new = length(pos);
+  var rel_new = pos - ss_com;
+  let r_new = length(rel_new);
   if (is_minor && species < 2.5) {
     // High cohesive rock yield strength preserves triaxial bilobed rubble-pile lobes under weak self-gravity!
     vel = vel * exp(-dt * 5.2);
     if (r_new > 1.48) {
-      let nr = pos / max(1e-5, r_new);
-      pos = nr * 1.48;
+      let nr = rel_new / max(1e-5, r_new);
+      pos = ss_com + nr * 1.48;
       vel = vel * 0.20;
     }
   } else if (species < 2.5 || abs(species - 4.0) < 0.3) {
     let r_max = select(select(1.06, 1.12, abs(species - 2.0) < 0.3), 0.72, species < 0.5);
     if (r_new > r_max) {
-      let nr = pos / max(1e-5, r_new);
-      pos = nr * r_max;
+      let nr = rel_new / max(1e-5, r_new);
+      pos = ss_com + nr * r_max;
       let vr_out = dot(vel, nr);
       if (vr_out > 0.0) { vel = vel - nr * (vr_out * 1.15); }
     }
     // Keep surface crust & ocean parcels right on the lithospheric shell
     if (abs(species - 2.0) < 0.3 && r_new < 0.86) {
-      pos = (pos / max(1e-5, r_new)) * 0.86;
+      pos = ss_com + (rel_new / max(1e-5, r_new)) * 0.86;
     }
     if (abs(species - 4.0) < 0.3 && r_new < 0.94) {
-      pos = (pos / max(1e-5, r_new)) * 0.94;
+      pos = ss_com + (rel_new / max(1e-5, r_new)) * 0.94;
     }
   }
 
@@ -968,6 +995,7 @@ struct ImpactorDesc {
 @group(0) @binding(3) var<storage, read_write> map_acc: array<atomic<i32>>;
 @group(0) @binding(4) var<storage, read_write> geo_in: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> geo_out: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> ss_grav_acc: array<vec4<f32>>;
 
 const Q_G: f32 = 512.0;
 
@@ -988,7 +1016,9 @@ fn splat_parcels_to_sphere(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (i >= params.parcel_count) { return; }
   let pr = parcels[i];
   if (pr.aux.w < 0.5) { return; }
-  let pos = pr.pos_mass.xyz;
+  let com_v = ss_grav_acc[params.parcel_count];
+  let com = select(vec3<f32>(0.0), com_v.xyz, com_v.w > 1e-4);
+  let pos = pr.pos_mass.xyz - com;
   let r = length(pos);
   let is_minor = (params.flags & 16u) != 0u;
   // Only lithospheric crust, upper mantle upwelling, and surface volatiles project onto the surface crust!
@@ -1550,6 +1580,34 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     impData[o + 7] = 0.65 + t.radiusNorm * 1.8; // ejecta strength
   }
 
+  // Pack Gate 2 Canonical Convex Polytope Atlas GPU Bank for all 5 planetary species
+  const speciesFormulas = [
+    genesisParams.isCryoWorld ? 'SiO2' : 'Fe2O3',
+    genesisParams.isCryoWorld ? 'H2O' : 'MgO',
+    genesisParams.isCarbonRich ? 'SiC' : (genesisParams.isCryoWorld ? 'H2O' : 'SiO2'),
+    'FeO',
+    genesisParams.isCryoWorld ? 'CH4' : 'H2O'
+  ];
+  const atlasBankEntries = [];
+  for (let sIdx = 0; sIdx < speciesFormulas.length; sIdx += 1) {
+    const hydrated = getCompoundPolytopeAtlas(speciesFormulas[sIdx], { materialIndex: sIdx })
+      || getCompoundPolytopeAtlas('H2O', { materialIndex: sIdx });
+    if (hydrated?.packedGpuAtlas) {
+      atlasBankEntries.push({
+        materialId: sIdx,
+        packedGpuAtlas: hydrated.packedGpuAtlas,
+        accuracyTier: hydrated.accuracyTier
+      });
+    }
+  }
+  const polytopeAtlasBank = packPolytopeAtlasBankForGpu(atlasBankEntries);
+  const polytopeAtlasBankBuf = device.createBuffer({
+    label: `${label}-polytope-atlas-bank`,
+    size: Math.max(16, polytopeAtlasBank.data.byteLength),
+    usage: GPU_BUF.STORAGE | GPU_BUF.COPY_DST
+  });
+  device.queue.writeBuffer(polytopeAtlasBankBuf, 0, polytopeAtlasBank.data);
+
   // GPU Buffers (strictly bounded by PeerCompute capability sizing & device.limits)
   const sphParamsBuf = device.createBuffer({ label: `${label}-sph-params`, size: 80, usage: GPU_BUF.UNIFORM | GPU_BUF.COPY_DST });
   const parcelsBuf = device.createBuffer({ label: `${label}-parcels`, size: nParcels * PARCEL_STRIDE_FLOATS * 4, usage: GPU_BUF.STORAGE | GPU_BUF.VERTEX | GPU_BUF.COPY_DST | GPU_BUF.COPY_SRC });
@@ -1602,11 +1660,11 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     computeBufferBinding(6, 'storage'),
     computeBufferBinding(7, 'read-only-storage')
   ];
-  const clearGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-clear.v3-ss', label: `${label}-clear-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'clear_sph_grid', bindings: sphBgl });
-  const splatGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-splat.v3-ss', label: `${label}-splat-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'splat_sph_grid', bindings: sphBgl });
-  const finGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-fin.v3-ss', label: `${label}-fin-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'finalize_sph_grid', bindings: sphBgl });
-  const advectPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-advect.v4-ss', label: `${label}-advect`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'advect_sph_parcels', bindings: sphBgl });
-  const telPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-tel.v3-ss', label: `${label}-tel`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'write_sph_telemetry', bindings: sphBgl });
+  const clearGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-clear.v4-polytope', label: `${label}-clear-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'clear_sph_grid', bindings: sphBgl });
+  const splatGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-splat.v4-polytope', label: `${label}-splat-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'splat_sph_grid', bindings: sphBgl });
+  const finGridPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-fin.v4-polytope', label: `${label}-fin-grid`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'finalize_sph_grid', bindings: sphBgl });
+  const advectPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-advect.v5-polytope', label: `${label}-advect`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'advect_sph_parcels', bindings: sphBgl });
+  const telPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-sph-tel.v4-polytope', label: `${label}-tel`, code: PLANETARY_SPH_GENESIS_WGSL, entryPoint: 'write_sph_telemetry', bindings: sphBgl });
 
   const sphBg = createCachedExplicitBindGroup(device, {
     layout: clearGridPipe.bindGroupLayout,
@@ -1617,7 +1675,7 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
       { binding: 2, resource: { buffer: gridAccBuf } },
       { binding: 3, resource: { buffer: gridValBuf } },
       { binding: 4, resource: { buffer: radialBinsBuf } },
-      { binding: 5, resource: { buffer: impactorsBuf } },
+      { binding: 5, resource: { buffer: polytopeAtlasBankBuf } },
       { binding: 6, resource: { buffer: telBuf } },
       { binding: 7, resource: { buffer: ssGravity.accPhiBuffer } }
     ]
@@ -1629,12 +1687,13 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     computeBufferBinding(2, 'read-only-storage'),
     computeBufferBinding(3, 'storage'),
     computeBufferBinding(4, 'storage'),
-    computeBufferBinding(5, 'storage')
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'read-only-storage')
   ];
-  const clearGeoPipe = createCachedExplicitComputePipeline(device, { label: `${label}-clear-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'clear_geo_acc', bindings: geoBgl });
-  const splatGeoPipe = createCachedExplicitComputePipeline(device, { label: `${label}-splat-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'splat_parcels_to_sphere', bindings: geoBgl });
-  const resolveGeoPipe = createCachedExplicitComputePipeline(device, { label: `${label}-resolve-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'resolve_spherical_geology', bindings: geoBgl });
-  const erodeGeoPipe = createCachedExplicitComputePipeline(device, { label: `${label}-erode-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'erode_spherical_geology', bindings: geoBgl });
+  const clearGeoPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-geo-clear.v2-com', label: `${label}-clear-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'clear_geo_acc', bindings: geoBgl });
+  const splatGeoPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-geo-splat.v2-com', label: `${label}-splat-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'splat_parcels_to_sphere', bindings: geoBgl });
+  const resolveGeoPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-geo-resolve.v2-com', label: `${label}-resolve-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'resolve_spherical_geology', bindings: geoBgl });
+  const erodeGeoPipe = createCachedExplicitComputePipeline(device, { cacheKey: 'ulg-planet-geo-erode.v2-com', label: `${label}-erode-geo`, code: SPHERICAL_GEOLOGY_SPLAT_WGSL, entryPoint: 'erode_spherical_geology', bindings: geoBgl });
 
   const geoBgAB = createCachedExplicitBindGroup(device, {
     layout: clearGeoPipe.bindGroupLayout,
@@ -1645,7 +1704,8 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
       { binding: 2, resource: { buffer: impactorsBuf } },
       { binding: 3, resource: { buffer: mapAccBuf } },
       { binding: 4, resource: { buffer: geoBufA } },
-      { binding: 5, resource: { buffer: geoBufB } }
+      { binding: 5, resource: { buffer: geoBufB } },
+      { binding: 6, resource: { buffer: ssGravity.accPhiBuffer } }
     ]
   });
   const geoBgBA = createCachedExplicitBindGroup(device, {
@@ -1657,7 +1717,8 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
       { binding: 2, resource: { buffer: impactorsBuf } },
       { binding: 3, resource: { buffer: mapAccBuf } },
       { binding: 4, resource: { buffer: geoBufB } },
-      { binding: 5, resource: { buffer: geoBufA } }
+      { binding: 5, resource: { buffer: geoBufA } },
+      { binding: 6, resource: { buffer: ssGravity.accPhiBuffer } }
     ]
   });
 
@@ -2049,7 +2110,7 @@ export function createPlanetaryGenesisSphSessionWebGpu(device, bodySpec = {}, {
     if (disposed) return;
     disposed = true;
     try { ssGravity.destroy(); } catch {}
-    for (const b of [sphParamsBuf, parcelsBuf, gridAccBuf, gridValBuf, radialBinsBuf, impactorsBuf, telBuf, telReadBuf, geoParamsBuf, mapAccBuf, geoBufA, geoBufB]) {
+    for (const b of [sphParamsBuf, parcelsBuf, gridAccBuf, gridValBuf, radialBinsBuf, impactorsBuf, polytopeAtlasBankBuf, telBuf, telReadBuf, geoParamsBuf, mapAccBuf, geoBufA, geoBufB]) {
       try { b.destroy(); } catch {}
     }
   }

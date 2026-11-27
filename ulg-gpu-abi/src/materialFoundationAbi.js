@@ -177,8 +177,14 @@ export function packPolytopeAtlasForGpu(polytopes, { materialIndex = 0 } = {}) {
     const p = list[i];
     const r = recordsStart + i * POLYTOPE_ATLAS_GPU_RECORD_FLOATS;
     const facets = Array.isArray(p?.inequalities) ? p.inequalities : [];
-    const tAxis = p?.axes?.[0] ?? { min: 1, max: 6000 };
-    const pAxis = p?.axes?.[1] ?? { min: 1, max: 1e9 };
+    const tAxis = p?.axes?.[0]
+      ?? (Array.isArray(p?.tRangeK) && p.tRangeK.length >= 2
+        ? { min: Number(p.tRangeK[0]), max: Number(p.tRangeK[1]) }
+        : { min: 1, max: 6000 });
+    const pAxis = p?.axes?.[1]
+      ?? (Array.isArray(p?.pRangePa) && p.pRangePa.length >= 2
+        ? { min: Number(p.pRangePa[0]), max: Number(p.pRangePa[1]) }
+        : { min: 1, max: 1e9 });
     const logPMin = Math.log10(Math.max(1e-12, Number(pAxis.min)));
     const logPMax = Math.log10(Math.max(1e-12, Number(pAxis.max)));
     const fit = p?.fit ?? null;

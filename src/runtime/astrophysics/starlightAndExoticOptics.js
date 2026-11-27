@@ -86,7 +86,9 @@ export function computeHostStarIllumination({
   distanceAu = 1.0,
   timeSec = 0.0,
   isRogue = false,
-  stellarModeHint = null
+  stellarModeHint = null,
+  dysonCoveringFrac = 0.0,
+  dysonTransmittedFluxFrac = null
 } = {}) {
   if (isRogue) {
     return Object.freeze({
@@ -122,8 +124,12 @@ export function computeHostStarIllumination({
       : (Number(bodySpec?.aAu) || 1.0)
   );
 
-  // Exact inverse-square irradiance relative to Earth at 1 AU around 1 L_sun (1361 W/m^2)
-  const fluxEarth = lumSolar / (dAu * dAu);
+  // Exact inverse-square irradiance relative to Earth at 1 AU around 1 L_sun (1361 W/m^2),
+  // physically attenuated by Kardashev II-III Dyson swarm covering fraction (1 - f_cover)!
+  const dysonTrans = dysonTransmittedFluxFrac != null && Number.isFinite(Number(dysonTransmittedFluxFrac))
+    ? clamp(Number(dysonTransmittedFluxFrac), 0.008, 1.0)
+    : clamp(1.0 - clamp(Number(dysonCoveringFrac) || 0.0, 0.0, 0.992), 0.008, 1.0);
+  const fluxEarth = (lumSolar / (dAu * dAu)) * dysonTrans;
   const irradianceWm2 = 1361.0 * fluxEarth;
   const apparentMagV = -26.74 - 2.5 * Math.log10(Math.max(1e-12, fluxEarth));
 
@@ -239,6 +245,7 @@ export function appendStarVisuals({
   radius,
   timeSec = 0.0,
   dysonCoverage = 0.0,
+  dysonWasteTempK = 0.0,
   seed = 1.37,
   spheres,
   disks,
@@ -424,6 +431,8 @@ export function appendStarVisuals({
 
   // Standard Main-Sequence / Red Giant / Blue Supergiant / Brown Dwarf star
   const isRedGiant = stage === 'red-giant' || stage === 'agb-superwind';
+  const fCover = clamp(Number(dysonCoverage) || 0.0, 0.0, 0.992);
+  const tWasteK = Number(dysonWasteTempK) > 20 ? Number(dysonWasteTempK) : (fCover > 0.01 ? 310.0 : 0.0);
   spheres.push({
     pos: [cx, cy, cz],
     radius: r,
@@ -432,8 +441,31 @@ export function appendStarVisuals({
     kind: 0,
     atm: 0.0,
     tempK: Number(spec?.tempK) || 5778,
-    dysonCoverage,
+    dysonCoverage: fCover,
+    dysonWasteTempK: tWasteK,
     seed
   });
+  // Emit real 3D orbiting Dyson Swarm Collector Rings (`DISK_WGSL` kind == 2u) whenever f_cover > 1%!
+  if (disks && fCover > 0.01) {
+    const ringCount = fCover > 0.45 ? 3 : (fCover > 0.15 ? 2 : 1);
+    const tilts = [
+      [0.14, 0.96, 0.24],
+      [-0.62, 0.58, 0.52],
+      [0.54, 0.46, -0.70]
+    ];
+    for (let k = 0; k < ringCount; k += 1) {
+      const rIn = r * (1.65 + k * 0.48);
+      const rOut = rIn + r * (0.28 + 0.34 * fCover);
+      disks.push({
+        center: [cx, cy, cz],
+        rIn,
+        normal: norm3(tilts[k]),
+        rOut,
+        color: [0.28, 0.62, 0.88],
+        kind: 2,
+        shadowInfo: [r, fCover, tWasteK, k]
+      });
+    }
+  }
   return { exoticRendered: null };
 }

@@ -2370,14 +2370,16 @@ fn fs_main(in: VsOut) -> FsOut {
     col = mix(in.color1.rgb, in.color0.rgb, 0.35 + 0.65 * gran) * (0.58 + 0.85 * limb);
     col = mix(col, in.color1.rgb * 0.22, sunspot * 0.82) + vec3<f32>(1.0, 0.95, 0.78) * faculae * 0.38;
     if (dyson_tau > 0.01) {
-      // Orbiting geometric Dyson swarm rings/collectors dim visible photosphere by exp(-tau_Dyson) and radiate 420 K IR waste heat!
+      // Orbiting geometric Dyson swarm rings/collectors dim visible photosphere by (1 - f_cover) and radiate physical T_waste IR heat!
       let d_lat = abs(sin(n_hit.y * 18.0 + cam.cam_pos.w * 0.35));
       let d_lon = abs(sin(atan2(n_hit.z, n_hit.x) * 22.0 - cam.cam_pos.w * 0.5));
       let swarm_mesh = smoothstep(0.75 - dyson_tau * 0.65, 0.95, max(d_lat, d_lon));
-      let occ = clamp(dyson_tau * (0.55 + 0.55 * swarm_mesh), 0.0, 0.92);
-      col = col * (1.0 - occ) + vec3<f32>(0.18, 0.11, 0.08) * occ * (0.4 + 0.6 * fresnel);
-      em_temp_k = mix(em_temp_k, 420.0, occ);
-      em_rad = dyson_tau * 0.9;
+      let occ = clamp(dyson_tau * (0.55 + 0.55 * swarm_mesh), 0.0, 0.95);
+      let t_waste = select(295.0 + 180.0 * dyson_tau, in.sp_info.w, in.sp_info.w > 25.0);
+      let ir_tint = mix(vec3<f32>(0.14, 0.09, 0.06), vec3<f32>(0.36, 0.16, 0.07), clamp((t_waste - 220.0) / 500.0, 0.0, 1.0));
+      col = col * (1.0 - occ) + ir_tint * occ * (0.4 + 0.6 * fresnel);
+      em_temp_k = mix(em_temp_k, t_waste, occ);
+      em_rad = dyson_tau * 0.95;
     }
     col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(2.2));
     em_uv = smoothstep(4500.0, 12000.0, em_temp_k) * 1.1;
@@ -3168,6 +3170,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
       out_c = em_sensor_map_rgb(out_c, disk_t, (1.0 - u) * 1.1, (1.0 - u) * 2.2 * beam, 0.55 * beam, 0.0);
     }
     return vec4<f32>(pow(max(out_c, vec3<f32>(0.0)), vec3<f32>(2.2)) * alpha, alpha);
+  } else if (kind == 2u) {
+    // Kardashev II-III 3D Dyson Swarm Collector Rings (segmented metallic photovoltaic arcs + IR T_waste glow!)
+    let u = clamp((r - in.r_in) / max(1e-4, in.r_out - in.r_in), 0.0, 1.0);
+    let ang = atan2(in.local_xy.y, in.local_xy.x);
+    let f_cov = clamp(in.shadow_info.y, 0.02, 0.992);
+    let t_waste = max(120.0, in.shadow_info.z);
+    let ring_id = in.shadow_info.w;
+    let rot_ang = ang + cam.cam_pos.w * (0.28 + 0.09 * ring_id) * select(1.0, -1.0, ring_id > 0.5 && ring_id < 1.5);
+    let seg_wave = 0.5 + 0.5 * sin(rot_ang * 24.0 + ring_id * 1.7);
+    let rad_ribs = 0.5 + 0.5 * cos(u * 18.849556);
+    let seg_mask = smoothstep(0.58 - f_cov * 0.46, 0.84 - f_cov * 0.32, seg_wave * 0.72 + rad_ribs * 0.28);
+    let edge_fade = smoothstep(0.0, 0.09, u) * (1.0 - smoothstep(0.91, 1.0, u));
+    let alpha = clamp(edge_fade * (0.24 + 0.76 * seg_mask) * (0.35 + 0.62 * f_cov), 0.0, 0.94);
+    let view_d = normalize(cam.cam_pos.xyz - in.world_pos);
+    let n_d = normalize(in.ring_n);
+    let rim_glint = pow(max(0.0, 1.0 - abs(dot(n_d, view_d))), 2.2);
+    let pv_col = mix(vec3<f32>(0.12, 0.28, 0.52), vec3<f32>(0.88, 0.68, 0.34), rim_glint * 0.65 + (1.0 - u) * 0.35);
+    let ir_warm = vec3<f32>(0.95, 0.38, 0.12) * clamp((t_waste - 240.0) / 700.0, 0.05, 0.85) * 0.45;
+    var dyson_c = pow(max(pv_col + ir_warm, vec3<f32>(0.0)), vec3<f32>(2.2));
+    if (cam.em_sensor.z > 0.5) {
+      dyson_c = em_sensor_map_rgb(dyson_c, t_waste, 0.0, 0.0, 0.75 * f_cov, 0.0);
+    }
+    return vec4<f32>(dyson_c * alpha, alpha);
   } else {
     // Planetary ring system with live moon-derived Lindblad resonance divisions (shadow_info.zw)!
     let u = clamp((r - in.r_in) / max(1e-4, in.r_out - in.r_in), 0.0, 1.0);
@@ -4603,7 +4628,7 @@ export function createUlgUniversesRenderer(device, canvas) {
         sphereStaging[o + 16] = Number(s.tempK) || (s.kind === 0 ? 5778.0 : 288.0);
         sphereStaging[o + 17] = Number(s.civTechK) || 0.0;
         sphereStaging[o + 18] = Number(s.dysonCoverage) || 0.0;
-        sphereStaging[o + 19] = Number(s.flags) || 0.0;
+        sphereStaging[o + 19] = Number(s.dysonWasteTempK || s.flags) || 0.0;
         const pbr = s.pbrOptics || null;
         if (pbr && Array.isArray(pbr.f0Rgb)) {
           sphereStaging[o + 20] = Number(pbr.f0Rgb[0]) || 0.04;
@@ -4646,10 +4671,17 @@ export function createUlgUniversesRenderer(device, canvas) {
         diskStaging[o + 9] = d.color?.[1] ?? 0.85;
         diskStaging[o + 10] = d.color?.[2] ?? 0.72;
         diskStaging[o + 11] = d.kind ?? 0;
-        diskStaging[o + 12] = Number(d.planetRadius) || 0;
-        diskStaging[o + 13] = Number(d.oblateF) || 0;
-        diskStaging[o + 14] = Number(d.gap1U) || 0;
-        diskStaging[o + 15] = Number(d.gap2U) || 0;
+        if (Array.isArray(d.shadowInfo) && d.shadowInfo.length >= 4) {
+          diskStaging[o + 12] = Number(d.shadowInfo[0]) || 0;
+          diskStaging[o + 13] = Number(d.shadowInfo[1]) || 0;
+          diskStaging[o + 14] = Number(d.shadowInfo[2]) || 0;
+          diskStaging[o + 15] = Number(d.shadowInfo[3]) || 0;
+        } else {
+          diskStaging[o + 12] = Number(d.planetRadius) || 0;
+          diskStaging[o + 13] = Number(d.oblateF) || 0;
+          diskStaging[o + 14] = Number(d.gap1U) || 0;
+          diskStaging[o + 15] = Number(d.gap2U) || 0;
+        }
       }
       device.queue.writeBuffer(diskBuf, 0, diskStaging.subarray(0, diskCount * 16));
     }

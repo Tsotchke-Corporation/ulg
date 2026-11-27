@@ -437,7 +437,7 @@ export async function mountLifeLabDemo() {
   function triggerVivariumGpuSdfBake(specimen) {
     const genome = specimen?.developmentalGenome || null;
     if (!genome || !device) { vivActiveBakeKey = ''; return; }
-    const key = `${genome.seed}:${specimen.id || specimen.speciesName || 'sp'}`;
+    const key = `${genome.seed}:${genome.kingdom}:${genome.medium}:${specimen.id || specimen.speciesName || 'sp'}`;
     vivActiveBakeKey = key;
     if (vivSdfCache.has(key)) return;
     vivSdfCache.set(key, { pending: true });
@@ -445,8 +445,8 @@ export async function mountLifeLabDemo() {
     const yBase = (genome.medium === 'buoyant' || genome.medium === 'aerial' || genome.medium === 'aquatic') ? -0.45 : -1.86;
     bakeOrganismMeshWebGpu(device, genome, {
       gridDim: 44,
-      turingDim: 24,
-      turingSteps: 40,
+      turingDim: 20,
+      turingSteps: 28,
       maxVerts: 42000,
       scaleOut: kScale,
       offset: [0, yBase, 0],
